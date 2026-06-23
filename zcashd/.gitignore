@@ -79,6 +79,8 @@ src/univalue/gen
 
 # Compilation
 Makefile
+compile_commands.json
+.cache/
 
 # Rust
 .cargo/.configured-for-*
@@ -132,3 +134,7 @@ src/fuzz.cpp
 .updatecheck-token
 .env
 poetry.lock
+
+
+#personal
+judah-*
