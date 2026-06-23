@@ -60,8 +60,15 @@ The following categories of problems are explicitly not considered vulnerabiliti
 
 ## Receiving Disclosures
 
-For the Zero distribution of zcashd, maintained by Shielded Labs, please report
-security issues by email to security@shieldedlabs.net.
+For the Zero distribution of zcashd, maintained by Shielded Labs, report security
+vulnerabilities through the Shielded Labs security disclosure group on Signal:
+
+https://signal.group/#CjQKICZtmwnx-qJlNzqu9ACZno_s9hMZhELfjod-KBGXVXxUEhA-p8Ai5BgwAVVllZvDV6tb
+
+This group is a triage waiting room staffed by the Shielded Labs security team.
+After you are admitted, say only that you have a report; do not post details
+there. We will move you into a private group with the relevant people, where you
+disclose the vulnerability, and then remove you from the waiting room.
 
 WARNING: The Zcash maintainers are currently experiencing a large number of
 spurious or low-severity issues being incorrectly reported as critical

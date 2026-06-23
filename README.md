@@ -75,10 +75,15 @@ Refer to each component directory for configuration and operational guidance.
 
 ## Security
 
-To report a security vulnerability in any Zero component, email
-**security@shieldedlabs.net**. Each component also carries its own reporting
-contact in its `SECURITY.md` (zcashd, Zebra) or README (Zaino, Zallet), all
-routed to Shielded Labs.
+To report a security vulnerability in any Zero component, join the Shielded Labs
+security disclosure group on Signal:
+
+https://signal.group/#CjQKICZtmwnx-qJlNzqu9ACZno_s9hMZhELfjod-KBGXVXxUEhA-p8Ai5BgwAVVllZvDV6tb
+
+This is a triage waiting room. Once admitted, say only that you have a report; the
+team moves you into a private group with the relevant people to disclose the
+details, then removes you from the waiting room. Each component repeats this
+contact in its own `SECURITY.md` (zcashd, Zebra) or README (Zaino, Zallet).
 
 Please do not open public issues for security-sensitive reports.
 

@@ -20,35 +20,15 @@ Specifically, we will:
 
 The Zcash Foundation is committed to working with researchers who submit security vulnerability notifications to us to resolve those issues on an appropriate timeline and perform a coordinated release, giving credit to the reporter if they would like.
 
-For the Zero distribution of Zebra, maintained by Shielded Labs, please submit issues to <security@shieldedlabs.net>. The PGP key below belongs to the Zcash Foundation and does not cover Zero reports; a Zero key will be published separately.
+For the Zero distribution of Zebra, maintained by Shielded Labs, report security
+vulnerabilities through the Shielded Labs security disclosure group on Signal:
 
-```
------BEGIN PGP PUBLIC KEY BLOCK-----
+https://signal.group/#CjQKICZtmwnx-qJlNzqu9ACZno_s9hMZhELfjod-KBGXVXxUEhA-p8Ai5BgwAVVllZvDV6tb
 
-mDMEaXswoxYJKwYBBAHaRw8BAQdA/CQqZ79S7A9OWZeYhY3AbMuTx2d41/pcehNc
-Z1ZF7r6IeAQgFgoAIBYhBOezJEDaeE6/uKooRf1tVVkb+SvKBQJpezIJAh0AAAoJ
-EP1tVVkb+SvKmqQBAMzp/pOZ/ifM0Tjuqzy4nTo8HT5xZwTfL84A40VURuElAP91
-/9wi+5ZKW09pdjHjag6tz0FhheinX1BEDbgww2u3CbQkWmNhc2ggRm91bmRhdGlv
-biA8c2VjdXJpdHlAemZuZC5vcmc+iJYEExYKAD4WIQTnsyRA2nhOv7iqKEX9bVVZ
-G/krygUCaXswowIbAwUJACeNAAULCQgHAwUVCgkICwUWAgMBAAIeAQIXgAAKCRD9
-bVVZG/kryrS4AQCiyknTREsLCICWdbaJUARuZifhDxXIKH0oest8y8HQQwD9HuRd
-936Cg5FbXHpBuF71fGU213OSgulG4+hr7rXdfgy4OARpezCjEgorBgEEAZdVAQUB
-AQdAw5WBljp9hoqi8lu2KU5QzNuv/1lpeGWoESdWg/GZKUIDAQgHiH4EGBYKACYW
-IQTnsyRA2nhOv7iqKEX9bVVZG/krygUCaXswowIbDAUJACeNAAAKCRD9bVVZG/kr
-yjsWAQCiRiecQ9P3DPyQ/E/N0Dl3z4jE2fM2NjhROnX4jB/lDgD8Cru6rg2sdxTc
-RHrjNOriwH3PxwALJorvERC1gl47jQ2YMwRpqByGFgkrBgEEAdpHDwEBB0DV0fxs
-U5skejT0UERNZbec7GGe7Vs7s1h0moC4vkuY87QyWmNhc2ggRm91bmRhdGlvbiBT
-ZWN1cml0eSBUZWFtIDxzZWN1cml0eUB6Zm5kLm9yZz6IlgQTFgoAPhYhBHVQw2w9
-9hamnx7+AGBG3e+Uz5m1BQJpqByGAhsDBQkDwmcABQsJCAcDBRUKCQgLBRYCAwEA
-Ah4BAheAAAoJEGBG3e+Uz5m18MoBAOulghTZ717buHwBKBZupdXMdYPZcNSxlFC1
-+ROt3iYAAP0RfQPw/UYLQlsnc5JEov2pExVpdXJH4waJjh+r26ZQCbg4BGmoHIYS
-CisGAQQBl1UBBQEBB0BXtdSydYIV586tkyNwAefvnQM0pJapklUbVD9f9AmQHAMB
-CAeIfgQYFgoAJhYhBHVQw2w99hamnx7+AGBG3e+Uz5m1BQJpqByGAhsMBQkDwmcA
-AAoJEGBG3e+Uz5m14rEA/0x/2XNwKd4buCm1tOGpTMaLQRoWhos6L/0wV9LExEKG
-AQC1Wmyb9ul/2QNi//8sKNDfaYbn3h6OU45BTAWggp+ACQ==
-=RIK0
------END PGP PUBLIC KEY BLOCK-----
-```
+This group is a triage waiting room staffed by the Shielded Labs security team.
+After you are admitted, say only that you have a report; do not post details
+there. We will move you into a private group with the relevant people, where you
+disclose the vulnerability, and then remove you from the waiting room.
 
 ## Sending Disclosures
 
