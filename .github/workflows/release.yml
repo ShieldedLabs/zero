@@ -1,0 +1,80 @@
+name: Release
+
+# Manually-dispatched product release. Versions are monotonically increasing
+# integers (v1, v2, v3, ...), not semver. Each release contains exactly four
+# assets: a ZIP of each vendored component at the released commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override (positive integer). Leave blank to auto-increment."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OVERRIDE" ]; then
+            if ! [[ "$OVERRIDE" =~ ^[0-9]+$ ]]; then
+              echo "::error::Version override must be a positive integer, got '$OVERRIDE'"
+              exit 1
+            fi
+            next="$OVERRIDE"
+          else
+            latest=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' \
+              | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -1 || true)
+            next=$(( ${latest:-0} + 1 ))
+          fi
+          tag="v${next}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists"
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Next release: $tag (commit $GITHUB_SHA)"
+
+      - name: Build component archives
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for c in zcashd zebra zaino zallet; do
+            git archive --format=zip --prefix="${c}/" \
+              -o "${c}-${TAG}.zip" "HEAD:${c}"
+          done
+          ls -lh ./*.zip
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Zero $TAG" \
+            --notes "Zero release ${VERSION}. Contains the four vendored components as ZIP archives (zcashd, zebra, zaino, zallet), each built from commit ${GITHUB_SHA}." \
+            "zcashd-${TAG}.zip" \
+            "zebra-${TAG}.zip" \
+            "zaino-${TAG}.zip" \
+            "zallet-${TAG}.zip"
