@@ -70,10 +70,28 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
+          {
+            echo "Zero release ${VERSION}, built from commit ${GITHUB_SHA}."
+            echo
+            echo "## Official assets"
+            echo
+            echo "The four component archives below are the Zero release. Each holds the"
+            echo "vendored source of one component at the released commit:"
+            echo
+            echo "- \`zcashd-${TAG}.zip\`"
+            echo "- \`zebra-${TAG}.zip\`"
+            echo "- \`zaino-${TAG}.zip\`"
+            echo "- \`zallet-${TAG}.zip\`"
+            echo
+            echo "> [!NOTE]"
+            echo "> The \"Source code (zip)\" and \"Source code (tar.gz)\" entries are"
+            echo "> generated automatically by GitHub from the tag. They are not part of"
+            echo "> the Zero release; use the four component archives above."
+          } > release-notes.md
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
             --title "Zero $TAG" \
-            --notes "Zero release ${VERSION}. Contains the four vendored components as ZIP archives (zcashd, zebra, zaino, zallet), each built from commit ${GITHUB_SHA}." \
+            --notes-file release-notes.md \
             "zcashd-${TAG}.zip" \
             "zebra-${TAG}.zip" \
             "zaino-${TAG}.zip" \
