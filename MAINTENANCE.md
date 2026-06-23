@@ -52,14 +52,34 @@ The rule is not uniform. Bias differs by how alive the upstream is.
 
 ## Commit-message convention
 
-Our delta is greppable from the log. Prefix every commit that touches a subtree:
+A subject has two independent parts: an optional **divergence marker** then a
+**conventional-commit type**.
 
-- `[zero] ...`              - intentional, permanent Zero-only divergence.
-- `[upstream-pending #N] ...` - temporary carry of an unmerged upstream PR.
-- (no prefix)              - subtree import/merge commits, written by git.
+The one question that decides the marker: **does the commit touch a vendored
+subtree dir (`zcashd/`, `zebra/`, `zaino/`, `zallet/`)?**
 
-`git log --grep='^\[zero\]'` is the canonical list of our permanent delta.
-`DELTA.md` is its human-readable, PR-linked mirror.
+- **Yes** -> lead with a marker, then the type:
+  - `[zero] <type>: ...`            - permanent Zero-only divergence.
+  - `[upstream-pending #N] <type>: ...` - temporary carry of an unmerged upstream
+    PR; dropped on the next subtree pull after #N merges.
+- **No** (our own files: README, SUBTREES.md, MAINTENANCE.md, DELTA.md,
+  `.claude/`) -> just the type, no marker.
+
+The type is the usual `feat` / `fix` / `doc` / `skill` / `chore` / etc.
+
+Examples:
+
+| Commit | Touches vendored dir? | Subject |
+|--------|-----------------------|---------|
+| Security contact in `zebra/SECURITY.md` | yes, permanent | `[zero] fix: route security reporting to Shielded Labs` |
+| Stopgap fix awaiting upstream PR        | yes, temporary | `[upstream-pending #42] fix: ...` |
+| New maintenance doc                     | no             | `doc: ...` |
+| New skill                               | no             | `skill: ...` |
+| Subtree import/merge                    | yes, auto      | (git's own message, left untouched) |
+
+`git log --grep='^\[zero\]'` is the canonical list of our permanent delta;
+`git log --grep='upstream-pending'` is our outstanding carries. `DELTA.md` is the
+human-readable, PR-linked mirror of both.
 
 ## Pulling upstream (downstream flow)
 
