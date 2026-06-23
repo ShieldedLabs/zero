@@ -120,10 +120,14 @@ In short:
   upstream clone, open the PR there, and let it arrive via `subtree pull`. The
   `upstream-change` skill helps prepare those PRs.
 
-This makes our delta greppable in both directions, with no ledger to maintain:
-`git log --grep='^\[zero\]'` is our permanent divergence and
-`git log --grep='upstream-pending'` is our outstanding carries. The commit body
-carries the rationale.
+This makes our delta greppable in both directions, with no ledger to maintain.
+Scope the query to the vendored dirs so it stays accurate even if a marker is
+ever misapplied to a root-file commit:
+
+- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet` - permanent divergence
+- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet` - outstanding carries
+
+The commit body carries the rationale.
 
 ### AI assistance disclosure
 

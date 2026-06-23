@@ -81,9 +81,16 @@ Examples:
 
 The git log **is** the ledger, queryable in both directions:
 
-- `git log --grep='^\[zero\]'` - our permanent delta. Add `--stat` for files,
-  ` -- <path>` to see what diverged on a specific file.
-- `git log --grep='upstream-pending'` - our outstanding carries.
+- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet` - our permanent
+  delta. Add `--stat` for files, or narrow the pathspec to one dir/file.
+- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet` - our
+  outstanding carries.
+
+The vendored pathspec (`-- zcashd zebra zaino zallet`) is what makes this
+authoritative, not the prefix alone. The real delta is "commits that both carry
+the marker **and** touch a vendored dir," so a stray marker on a root-file commit
+(e.g. a mislabeled `.gitignore` change) drops out automatically. The query stays
+pristine without anyone having to police prefixes or rewrite history.
 
 There is no separate file to maintain. Write a clear commit body and the delta
 documents itself.
