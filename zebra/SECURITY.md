@@ -20,7 +20,7 @@ Specifically, we will:
 
 The Zcash Foundation is committed to working with researchers who submit security vulnerability notifications to us to resolve those issues on an appropriate timeline and perform a coordinated release, giving credit to the reporter if they would like.
 
-Please submit issues to <security@zfnd.org>, using the following PGP Key:
+For the Zero distribution of Zebra, maintained by Shielded Labs, please submit issues to <security@shieldedlabs.net>. The PGP key below belongs to the Zcash Foundation and does not cover Zero reports; a Zero key will be published separately.
 
 ```
 -----BEGIN PGP PUBLIC KEY BLOCK-----

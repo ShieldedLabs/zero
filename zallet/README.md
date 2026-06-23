@@ -10,6 +10,12 @@ These crates are under development and have not been fully reviewed.
 Zallet is not designed to be used as a Rust library; we give no guarantees about
 any such usage.
 
+## Security Vulnerability Disclosure
+
+For the Zero distribution of Zallet, maintained by Shielded Labs, please report
+security issues by email to:
+security@shieldedlabs.net
+
 ## Current phase: Alpha release
 
 Zallet is currently in alpha. What this means is:

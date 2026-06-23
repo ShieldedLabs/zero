@@ -19,21 +19,48 @@ Pristine subtree imports (no delta yet). Recorded upstream SHAs:
 | zaino     | `zaino/`  | zingolabs/zaino@dev          | `4befbbb2f`  |
 | zallet    | `zallet/` | zcash/wallet@main            | `d457b5515`  |
 
+**Standing conflict rule for all security-contact entries below:** the Zero
+security contact (`security@shieldedlabs.net`) always wins. On `subtree pull`,
+if upstream edits the same lines, resolve in favor of the Zero contact and keep
+the surrounding upstream text.
+
 ## zcashd
 
-_No divergence yet._
+### Security reporting contact -> security@shieldedlabs.net
+- **Status:** permanent
+- **Files:** `zcashd/SECURITY.md` (§Receiving Disclosures)
+- **Why:** route Zero-fork vulnerability reports to Shielded Labs. Replaced the
+  upstream Signal-group + GitHub-advisories mechanism (ECC-internal, N/A to the
+  fork) with our email.
+- **Upstream PR:** n/a (Zero-only)
 
 ## zebra
 
-_No divergence yet._
+### Security reporting contact -> security@shieldedlabs.net
+- **Status:** permanent
+- **Files:** `zebra/SECURITY.md` (§Receiving Disclosures)
+- **Why:** route Zero-fork reports to Shielded Labs. **Follow-up:** the ZF PGP
+  key remains in the file and does not cover Zero; publish a Zero PGP key and
+  replace it.
+- **Upstream PR:** n/a (Zero-only)
 
 ## zaino
 
-_No divergence yet._
+### Security reporting contact -> security@shieldedlabs.net
+- **Status:** permanent
+- **Files:** `zaino/README.md` (§Security Vulnerability Disclosure)
+- **Why:** route Zero-fork reports to Shielded Labs. Replaced the Zingo
+  Matrix/CONTRIBUTING pointer and `zingodisclosure@proton.me` with our email.
+- **Upstream PR:** n/a (Zero-only)
 
 ## zallet
 
-_No divergence yet._
+### Security reporting contact -> security@shieldedlabs.net
+- **Status:** permanent
+- **Files:** `zallet/README.md` (new §Security Vulnerability Disclosure)
+- **Why:** upstream README had no security contact; added a Zero disclosure
+  section pointing to our email.
+- **Upstream PR:** n/a (Zero-only)
 
 ---
 

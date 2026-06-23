@@ -60,22 +60,8 @@ The following categories of problems are explicitly not considered vulnerabiliti
 
 ## Receiving Disclosures
 
-We have no email address to report security issues; email is not suitable for
-this purpose for both reliability and security reasons (even if encryption is
-used).
-
-For critical vulnerabilities, please create a Signal group with the following
-users to report a security issue. Do not reuse a previous group for a new
-issue.
-
-```
-dairaemma.31
-pilizcash.01
-nuttycom.01
-```
-
-For all other vulnerabilities, please use the GitHub "Report a Vulnerability"
-feature, available at https://github.com/zcash/zcash/security/advisories.
+For the Zero distribution of zcashd, maintained by Shielded Labs, please report
+security issues by email to security@shieldedlabs.net.
 
 WARNING: The Zcash maintainers are currently experiencing a large number of
 spurious or low-severity issues being incorrectly reported as critical

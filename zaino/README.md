@@ -114,9 +114,9 @@ connection.
 
 
 ## Security Vulnerability Disclosure
-If you believe you have discovered a security issue, and it is time sensitive, please contact us online on Matrix. See our [CONTRIBUTING.md document](./CONTRIBUTING.md) for contact points.
-Otherwise you can send an email to:
-zingodisclosure@proton.me
+For the Zero distribution of Zaino, maintained by Shielded Labs, please report
+security issues by email to:
+security@shieldedlabs.net
 
 
 ## License
