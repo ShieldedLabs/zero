@@ -104,7 +104,7 @@ flowchart TD
     D -->|"Yes, upstream-first"| G["Author in an upstream clone,<br/>open the PR there"]
     G --> H["Lands in Zero via subtree pull<br/>(no marker)"]
     F -->|"PR #N merges"| I["Drop the carry on the<br/>next subtree pull"]
-    E --> J[("git log --grep + DELTA.md<br/>= our delta, both directions")]
+    E --> J[("git log --grep<br/>= our delta, both directions")]
     F --> J
 ```
 
@@ -120,10 +120,10 @@ In short:
   upstream clone, open the PR there, and let it arrive via `subtree pull`. The
   `upstream-change` skill helps prepare those PRs.
 
-This makes our delta greppable in both directions:
+This makes our delta greppable in both directions, with no ledger to maintain:
 `git log --grep='^\[zero\]'` is our permanent divergence and
-`git log --grep='upstream-pending'` is our outstanding carries, both mirrored in
-[DELTA.md](DELTA.md).
+`git log --grep='upstream-pending'` is our outstanding carries. The commit body
+carries the rationale.
 
 ### AI assistance disclosure
 

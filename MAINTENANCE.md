@@ -37,7 +37,9 @@ Commit directly in-tree, prefixed `[zero]`. Examples:
 - Z3 integration wiring across components.
 - Branding / Shielded Labs specifics.
 
-Record every Zero-only divergence in [DELTA.md](DELTA.md).
+The commit is the record. Put the rationale (and any non-default conflict
+guidance) in the commit body. There is no separate ledger to keep in sync: the
+delta is whatever `git log --grep` returns (see below).
 
 ## Per-component policy
 
@@ -62,8 +64,8 @@ subtree dir (`zcashd/`, `zebra/`, `zaino/`, `zallet/`)?**
   - `[zero] <type>: ...`            - permanent Zero-only divergence.
   - `[upstream-pending #N] <type>: ...` - temporary carry of an unmerged upstream
     PR; dropped on the next subtree pull after #N merges.
-- **No** (our own files: README, SUBTREES.md, MAINTENANCE.md, DELTA.md,
-  `.claude/`) -> just the type, no marker.
+- **No** (our own files: README, SUBTREES.md, MAINTENANCE.md, `.claude/`) ->
+  just the type, no marker.
 
 The type is the usual `feat` / `fix` / `doc` / `skill` / `chore` / etc.
 
@@ -77,9 +79,22 @@ Examples:
 | New skill                               | no             | `skill: ...` |
 | Subtree import/merge                    | yes, auto      | (git's own message, left untouched) |
 
-`git log --grep='^\[zero\]'` is the canonical list of our permanent delta;
-`git log --grep='upstream-pending'` is our outstanding carries. `DELTA.md` is the
-human-readable, PR-linked mirror of both.
+The git log **is** the ledger, queryable in both directions:
+
+- `git log --grep='^\[zero\]'` - our permanent delta. Add `--stat` for files,
+  ` -- <path>` to see what diverged on a specific file.
+- `git log --grep='upstream-pending'` - our outstanding carries.
+
+There is no separate file to maintain. Write a clear commit body and the delta
+documents itself.
+
+### Conflict resolution default
+
+When a `subtree pull` conflicts on a line we changed in a `[zero]` commit, **ours
+wins by default**: keep the Zero change, keep the rest of the upstream update.
+A commit may override this in its body if a particular change should yield to
+upstream. To recover the rationale during a conflict, grep the change:
+`git log --grep='^\[zero\]' -- <conflicted-path>`.
 
 ## Pulling upstream (downstream flow)
 
@@ -106,7 +121,7 @@ human-readable, PR-linked mirror of both.
 ## Why this is tractable now
 
 The historically miserable parts of fork maintenance are exactly the mechanical
-ones agents handle well: 3-way conflict resolution informed by our recorded
-rationale, splitting/rebasing/reformatting commits into clean upstream PRs,
-triaging large batches of incoming upstream commits, and keeping DELTA.md
-current. Humans review; agents do the surgery.
+ones agents handle well: 3-way conflict resolution informed by the `[zero]`
+commit that introduced the change, splitting/rebasing/reformatting commits into
+clean upstream PRs, and triaging large batches of incoming upstream commits.
+Humans review; agents do the surgery.

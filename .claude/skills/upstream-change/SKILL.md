@@ -76,16 +76,19 @@ their AGENTS/CONTRIBUTING each time, since upstream policy changes.
    checkout. Fix until green or report blockers.
 
 7. **Draft the PR.** Write a description in their style: problem, change, testing,
-   any follow-ups. Reference the corresponding DELTA.md entry context but keep the
-   PR self-contained (a maintainer should not need Zero context).
+   any follow-ups. Keep it self-contained (a maintainer should not need Zero
+   context).
 
 8. **Stage the push (outward-facing: confirm first).** Pushing to a fork and
    opening a PR is an external action. Prepare the branch and PR body, then ask
    the user before pushing. If `gh` is unavailable, push the branch to the user's
    fork and provide the compare URL for them to open the PR.
 
-9. **Track it.** Update DELTA.md: mark the in-tree change `pending #N` once the PR
-   exists; note it should be dropped on the next subtree pull after it merges.
+9. **Track it.** If the change is also carried in-tree as a stopgap, ensure its
+   commit is tagged `[upstream-pending #N]` with the PR number (amend the subject
+   if it was committed before the PR existed). That tag is the record:
+   `git log --grep='upstream-pending'` lists outstanding carries, and the carry
+   is dropped on the next subtree pull after #N merges. No ledger to update.
 
 ## Notes
 

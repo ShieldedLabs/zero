@@ -35,32 +35,31 @@ MAINTENANCE.md tag-pinning policy).
 
 5. **Summarize incoming.** Show what we are about to take:
    `git log --oneline <oldsha>..<remote>/<branch>` (or `..<tag>`). Write a short
-   digest: count, notable changes, anything touching files we have `[zero]`
-   divergence on (cross-check DELTA.md).
+   digest: count, notable changes, and anything touching files we have diverged
+   on. Our divergence for this component is
+   `git log --grep='^\[zero\]' --name-only -- <prefix>`.
 
-6. **Conflict pre-check.** For each file listed in DELTA.md for this component,
-   note whether the incoming range touches it. Flag high-risk files before the
-   pull.
+6. **Conflict pre-check.** Compute our diverged files
+   (`git log --grep='^\[zero\]' --name-only -- <prefix>`), intersect with the
+   incoming changed files (`git diff --name-only <oldsha>..<remote>/<branch>`),
+   and flag the overlap as high-risk before the pull.
 
 7. **Pull.** `git subtree pull --prefix=<prefix> <remote> <branch|tag> --squash`.
 
 8. **Resolve conflicts (if any).** For each conflict, read both sides and the
-   relevant DELTA.md entry / `[zero]` commit rationale, propose a resolution that
-   preserves our intent, and present it for human review. Do not invent behavior
-   changes; preserve our delta unless the user says otherwise. After resolving:
-   `git add` + complete the merge.
+   `[zero]` commit that introduced our change
+   (`git log --grep='^\[zero\]' -- <conflicted-path>`). Default to **ours wins**
+   (keep the Zero change, keep the rest of the upstream update) unless that
+   commit body says to yield. Present the resolution for human review; do not
+   invent behavior changes. After resolving: `git add` + complete the merge.
 
 9. **Test.** Run the component's test command. Report pass/fail with output. For
    zcashd, a full build is heavy; do a build smoke unless asked for the full
    suite.
 
-10. **Update bookkeeping.** If any `[zero]` delta was affected, update DELTA.md
-    (new SHAs, changed line refs, dropped `[upstream-pending]` carries that have
-    now merged upstream). Commit doc changes with a plain message.
-
-11. **Report.** Summarize: commits taken, conflicts and how resolved, test
-    result, delta changes. Leave the branch for the user to review and merge to
-    `main`. Do not push or merge without confirmation.
+10. **Report.** Summarize: commits taken, conflicts and how resolved, test
+    result. Leave the branch for the user to review and merge to `main`. Do not
+    push or merge without confirmation.
 
 ## Notes
 
@@ -68,4 +67,4 @@ MAINTENANCE.md tag-pinning policy).
 - If the pull is clean and tests pass, still stop for human review before merge.
 - A carry marked `[upstream-pending #N]` whose PR has merged upstream should be
   dropped here: confirm the upstream commit is in the incoming range, then revert
-  the carry commit and note it in DELTA.md.
+  the carry commit. The revert is the record; no ledger to update.
