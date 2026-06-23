@@ -41,7 +41,7 @@ the surrounding upstream text.
 - **Files:** `zebra/SECURITY.md` (§Receiving Disclosures)
 - **Why:** route Zero-fork reports to Shielded Labs. **Follow-up:** the ZF PGP
   key remains in the file and does not cover Zero; publish a Zero PGP key and
-  replace it.
+  replace it. Tracked in ShieldedLabs/zero#1.
 - **Upstream PR:** n/a (Zero-only)
 
 ## zaino
