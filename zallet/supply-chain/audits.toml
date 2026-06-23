@@ -1,0 +1,958 @@
+
+# cargo-vet audits file
+
+[criteria.crypto-reviewed]
+description = "The cryptographic code in this crate has been reviewed for correctness by a member of a designated set of cryptography experts within the project."
+
+[criteria.license-reviewed]
+description = "The license of this crate has been reviewed for compatibility with its usage in this repository."
+
+[[audits.abscissa_core]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.1 -> 0.8.2"
+
+[[audits.abscissa_derive]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.8.2"
+
+[[audits.abscissa_tokio]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+version = "0.9.0"
+notes = """
+This crate uses `#![forbid(unsafe_code)]`, so there are no `unsafe` blocks. The code is a
+straightforward combination of `abscissa_core` and `tokio`, with very little of its own
+logic. No ambient capabilities are used directly, and the `tokio` runtime APIs appear to
+be correctly used.
+"""
+
+[[audits.aho-corasick]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.1.3 -> 1.1.4"
+
+[[audits.anstyle]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.9 -> 1.0.10"
+
+[[audits.anstyle]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.10 -> 1.0.13"
+
+[[audits.anstyle-query]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.1.2 -> 1.1.4"
+notes = "Change to `unsafe` code is to adapt to the changed `HANDLE` type in `windows-sys`."
+
+[[audits.anstyle-wincon]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "3.0.6 -> 3.0.7"
+notes = """
+Changes to `unsafe` blocks are removing `std::mem::transmute` calls that are now
+unnecessary after `windows-sys` changed its `HANDLE` type from `isize` to
+`*mut c_void` (matching what `std::os::windows::io::RawHandle` uses).
+"""
+
+[[audits.anstyle-wincon]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "3.0.7 -> 3.0.10"
+
+[[audits.anyhow]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.95 -> 1.0.97"
+
+[[audits.async-trait]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.88 -> 0.1.89"
+notes = """
+Changes to generated code are to make use of `syn::Block` quoting in several places
+instead of directly quoting its statements.
+"""
+
+[[audits.axum-core]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.5.2 -> 0.5.5"
+
+[[audits.base64ct]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.7.3 -> 1.8.0"
+
+[[audits.basic-toml]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.9 -> 0.1.10"
+
+[[audits.bindgen]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.72.0 -> 0.72.1"
+notes = """
+Change to `unsafe` code is to narrow the scope of an `unsafe` block; no changes
+to the `unsafe` function being called.
+"""
+
+[[audits.bitflags]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "2.9.4 -> 2.10.0"
+
+[[audits.blake2b_simd]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = ["safe-to-deploy", "crypto-reviewed"]
+delta = "1.0.2 -> 1.0.3"
+notes = "No cryptographic changes."
+
+[[audits.blake2s_simd]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = ["safe-to-deploy", "crypto-reviewed"]
+delta = "1.0.2 -> 1.0.3"
+notes = "No cryptographic changes."
+
+[[audits.clap_derive]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "4.5.32 -> 4.5.49"
+notes = "Changes to generated code are adjustments to error strings."
+
+[[audits.clap_lex]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.7.2 -> 0.7.4"
+
+[[audits.clap_lex]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.7.4 -> 0.7.6"
+
+[[audits.clap_mangen]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.2.26 -> 0.2.31"
+notes = "Does not generate Rust code. Changes to generated roff output look plausible."
+
+[[audits.colorchoice]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.3 -> 1.0.4"
+
+[[audits.console-api]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.1 -> 0.9.0"
+notes = "Only changes are to generated code as a result of dependency and protobuf updates."
+
+[[audits.console-subscriber]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.4.1 -> 0.5.0"
+notes = "Adds support for Vsock addresses. Usages of `tokio-vsock` for I/O look correct."
+
+[[audits.const_format]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.2.34 -> 0.2.35"
+
+[[audits.darling_macro]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.20.11 -> 0.21.3"
+
+[[audits.deadpool-sqlite]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.9.0 -> 0.12.1"
+
+[[audits.document-features]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.2.11 -> 0.2.12"
+
+[[audits.documented]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.9.1"
+
+[[audits.documented]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.9.1 -> 0.9.2"
+
+[[audits.documented-macros]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.9.1 -> 0.9.2"
+
+[[audits.dyn-clone]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.19 -> 1.0.20"
+notes = """
+Changes to `unsafe` code:
+- Migrating to `core::ptr::addr_of_mut!()` with MSRV bump.
+- Gating a function that uses `unsafe` behind `target_has_atomic = "ptr"`.
+"""
+
+[[audits.errno]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.3.10 -> 0.3.11"
+notes = "The `__errno` location for vxworks and cygwin looks correct from a quick search."
+
+[[audits.filetime]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-run"
+delta = "0.2.25 -> 0.2.26"
+
+[[audits.flate2]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.1.4 -> 1.1.5"
+
+[[audits.fluent-langneg]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.0 -> 0.13.1"
+
+[[audits.generic-array]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.14.7 -> 0.14.9"
+notes = "Change to build script is to add a deprecation warning behind a Rust version check."
+
+[[audits.getset]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.5"
+
+[[audits.h2]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.4.7 -> 0.4.8"
+notes = """
+Panic safety comment is locally correct, but I didn't confirm that the method
+`stream.send_flow.available()` is immutable, which it relies upon.
+"""
+
+[[audits.http]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.2.0 -> 1.3.1"
+notes = """
+No direct changes to `unsafe` code, but a `ByteStr::from_utf8_unchecked` call is
+wrapped in additional safety checks (now calling `std::from_utf8` in some cases).
+"""
+
+[[audits.hyper-rustls]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.27.5 -> 0.27.7"
+
+[[audits.i18n-config]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.4.7 -> 0.4.8"
+
+[[audits.i18n-embed]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.15.2 -> 0.15.3"
+
+[[audits.i18n-embed-fl]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.9.2 -> 0.9.3"
+
+[[audits.indexmap]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "2.8.0 -> 2.9.0"
+notes = """
+New `unsafe` code inside the `get_disjoint_mut` implementation is for obtaining
+mutable references to `Bucket`s inside a mutable `Slice`. The implementation
+takes `&mut self` and correctly enforces that the requested indices are unique,
+which makes the mutable pointer indexing sound because we are guaranteed that no
+other mutable borrows exist outside this method, and the indexing won't produce
+two mutable pointers to the same slice entry.
+"""
+
+[[audits.inout]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.1.4"
+
+[[audits.is-terminal]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.4.16 -> 0.4.17"
+
+[[audits.is_terminal_polyfill]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.70.1 -> 1.70.2"
+
+[[audits.jsonrpsee]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.7 -> 0.24.9"
+
+[[audits.jsonrpsee]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.jsonrpsee-core]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.7 -> 0.24.9"
+
+[[audits.jsonrpsee-core]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.jsonrpsee-http-client]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.jsonrpsee-proc-macros]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.7 -> 0.24.9"
+
+[[audits.jsonrpsee-proc-macros]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.jsonrpsee-server]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.7 -> 0.24.9"
+
+[[audits.jsonrpsee-server]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.jsonrpsee-types]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.7 -> 0.24.9"
+
+[[audits.jsonrpsee-types]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.24.9 -> 0.24.10"
+
+[[audits.known-folders]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.2.0"
+notes = "Change to `unsafe` block is adapting to the `windows-sys` crate's API change."
+
+[[audits.known-folders]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.2.0 -> 1.4.0"
+
+[[audits.litemap]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.8.1"
+
+[[audits.metrics]]
+who = "Kris Nuttycombe <kris@nutty.land>"
+criteria = "safe-to-deploy"
+delta = "0.24.1 -> 0.24.3"
+notes = "Mostly test and minor type signature changes; no use of powerful imports or unsafe functionality."
+
+[[audits.multimap]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.10.0 -> 0.10.1"
+
+[[audits.os_pipe]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-run"
+delta = "1.2.2 -> 1.2.3"
+notes = """
+Changes to `unsafe` code are to replace individual `target_os` cfg flags for
+Apple targets that gate functions containing `unsafe` blocks, with a
+`target_vendor = "apple"`.
+"""
+
+[[audits.pkg-config]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.32"
+
+[[audits.potential_utf]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.2 -> 0.1.4"
+notes = """
+- Changes to `unsafe` code are to remove some (by removing an override of a provided trait
+  method).
+- `Cargo.toml` has a `build.rs` entry in `[package.include]` but no build script; likely
+  an accident of using `include.workspace = true` and some other crate in the workspace
+  gaining one.
+"""
+
+[[audits.proc-macro-crate]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "3.3.0 -> 3.4.0"
+
+[[audits.prost]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.4 -> 0.13.5"
+
+[[audits.prost-derive]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.4 -> 0.13.5"
+
+[[audits.prost-types]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.4 -> 0.13.5"
+
+[[audits.quinn-udp]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.5.13 -> 0.5.14"
+
+[[audits.r-efi]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "5.2.0 -> 5.3.0"
+
+[[audits.redox_users]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.5.0 -> 0.5.2"
+
+[[audits.regex-automata]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.4.8 -> 0.4.9"
+
+[[audits.rpassword]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "7.3.1 -> 7.4.0"
+
+[[audits.rust-embed-impl]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "8.5.0 -> 8.6.0"
+notes = """
+If the folder path does not exist post-canonicalization, the non-canonicalized
+path is used instead to generate the `#ident::get` implementation. The path is
+checked as a prefix on requested paths to avoid escapes; not having this be a
+known-canonical path could be a problem in some scenarios. This is a limitation
+of how `Path::canonicalize` relies on filesystem resolution, and cannot
+canonicalize a path that does not exist.
+
+This change was made as part of adding a default-disabled `allow_missing`
+attribute, and the generator is gated on a check that the non-canonicalized path
+exists (if the new attribute is off), so there should not be any changes to
+existing usage.
+"""
+
+[[audits.rust-embed-impl]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "8.6.0 -> 8.8.0"
+notes = "Change to generated code is to support deterministic timestamps with a feature flag."
+
+[[audits.rust-embed-utils]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "8.5.0 -> 8.6.0"
+
+[[audits.rust-embed-utils]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "8.6.0 -> 8.8.0"
+
+[[audits.rust_decimal]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.37.0 -> 1.37.2"
+
+[[audits.rustc-demangle]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.25 -> 0.1.26"
+notes = "Parser changes use existing parsing machinery in an obvious way."
+
+[[audits.rustversion]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.21 -> 1.0.22"
+notes = "Changes to generated code are to prepend a clippy annotation."
+
+[[audits.ryu]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.18 -> 1.0.20"
+
+[[audits.semver]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.25 -> 1.0.26"
+
+[[audits.serde_json]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.0.137 -> 1.0.140"
+
+[[audits.serde_spanned]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.6.8 -> 0.6.9"
+
+[[audits.tokio-macros]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "2.4.0 -> 2.5.0"
+
+[[audits.toml]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.19 -> 0.8.20"
+
+[[audits.tonic]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.0 -> 0.13.1"
+
+[[audits.tonic-build]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.13.0 -> 0.13.1"
+
+[[audits.trycmd]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-run"
+delta = "0.15.9 -> 0.15.10"
+
+[[audits.type-map]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.5.0 -> 0.4.0"
+notes = """
+Yay reverse diffs! The removed code did not result in any changes to `unsafe`
+code or usages of powerful imports.
+"""
+
+[[audits.tz-rs]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.7.0 -> 0.7.1"
+
+[[audits.wasi]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.11.0+wasi-snapshot-preview1 -> 0.11.1+wasi-snapshot-preview1"
+
+[[audits.wasm-bindgen-macro]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.2.100 -> 0.2.105"
+notes = """
+Change to generated code is to replace a feature flag with a cfg flag for controlling
+debug output.
+"""
+
+[[audits.webpki-roots]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+version = "0.26.8"
+notes = """
+This crate contains a single constant `TLS_SERVER_ROOTS` and no runtime logic.
+It uses `#![forbid(unsafe_code, unstable_features)]`, and does not have any
+powerful imports.
+"""
+
+[[audits.whoami]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.6.0 -> 1.6.1"
+notes = """
+Switched dependencies from `redox_syscall` to `libredox`, which didn't involve
+any changes to `unsafe` code.
+"""
+
+[[audits.winapi-util]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.9 -> 0.1.11"
+
+[[audits.yoke-derive]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.8.1"
+notes = """
+Changes to generated `unsafe` code are to silence the `clippy::mem_forget` lint;
+no actual code changes.
+"""
+
+[[audits.zeroize]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "1.8.1 -> 1.8.2"
+notes = """
+Changes to `unsafe` code are to alter how `core::mem::size_of` is named; no actual changes
+to the `unsafe` logic.
+"""
+
+[[audits.zerovec-derive]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.11.1 -> 0.11.2"
+notes = "Only changes to generated code are clippy lints."
+
+[[trusted.equihash]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2020-06-26"
+end = "2026-03-22"
+
+[[trusted.equihash]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2025-02-21"
+end = "2026-03-04"
+
+[[trusted.f4jumble]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2021-09-22"
+end = "2026-03-04"
+
+[[trusted.halo2_gadgets]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2022-02-15"
+end = "2027-03-17"
+
+[[trusted.halo2_proofs]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2022-01-20"
+end = "2026-12-04"
+
+[[trusted.incrementalmerkletree]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2023-02-28"
+end = "2026-03-04"
+
+[[trusted.incrementalmerkletree-testing]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-09-25"
+end = "2026-04-09"
+
+[[trusted.orchard]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2021-01-07"
+end = "2027-03-17"
+
+[[trusted.orchard]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-12"
+end = "2026-03-04"
+
+[[trusted.redjubjub]]
+criteria = "safe-to-deploy"
+user-id = 199950 # Daira-Emma Hopwood (daira)
+start = "2023-03-30"
+end = "2026-03-04"
+
+[[trusted.sapling-crypto]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-01-26"
+end = "2027-03-17"
+
+[[trusted.sapling-crypto]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-12"
+end = "2026-03-04"
+
+[[trusted.schemerz-rusqlite]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-10-15"
+end = "2026-11-05"
+
+[[trusted.shardtree]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2022-12-15"
+end = "2026-03-04"
+
+[[trusted.windows-core]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2026-04-08"
+
+[[trusted.windows-implement]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-01-27"
+end = "2026-04-08"
+
+[[trusted.windows-interface]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-02-18"
+end = "2026-10-29"
+
+[[trusted.windows-link]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-07-17"
+end = "2026-04-08"
+
+[[trusted.windows-registry]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-02-15"
+end = "2026-04-08"
+
+[[trusted.windows-result]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-02-02"
+end = "2026-10-29"
+
+[[trusted.windows-strings]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-02-02"
+end = "2026-04-08"
+
+[[trusted.windows-sys]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2026-03-31"
+
+[[trusted.windows-targets]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-09"
+end = "2026-03-31"
+
+[[trusted.windows_aarch64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2026-03-31"
+
+[[trusted.windows_aarch64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-05"
+end = "2026-03-31"
+
+[[trusted.windows_i686_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2026-03-31"
+
+[[trusted.windows_i686_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2024-04-02"
+end = "2026-03-31"
+
+[[trusted.windows_i686_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2026-03-31"
+
+[[trusted.windows_x86_64_gnu]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-28"
+end = "2026-03-31"
+
+[[trusted.windows_x86_64_gnullvm]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2022-09-01"
+end = "2026-03-31"
+
+[[trusted.windows_x86_64_msvc]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-10-27"
+end = "2026-03-31"
+
+[[trusted.zcash_address]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-20"
+end = "2026-03-04"
+
+[[trusted.zcash_client_backend]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2021-03-26"
+end = "2026-09-26"
+
+[[trusted.zcash_client_backend]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-03-25"
+end = "2026-03-04"
+
+[[trusted.zcash_client_sqlite]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2020-06-25"
+end = "2027-02-19"
+
+[[trusted.zcash_client_sqlite]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-03-25"
+end = "2026-03-04"
+
+[[trusted.zcash_encoding]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-19"
+end = "2026-03-04"
+
+[[trusted.zcash_history]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-03-01"
+end = "2026-04-08"
+
+[[trusted.zcash_keys]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-03-01"
+end = "2026-09-26"
+
+[[trusted.zcash_keys]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-01-15"
+end = "2026-03-04"
+
+[[trusted.zcash_primitives]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2021-03-26"
+end = "2026-09-26"
+
+[[trusted.zcash_primitives]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-20"
+end = "2026-03-04"
+
+[[trusted.zcash_proofs]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2021-03-26"
+end = "2026-09-26"
+
+[[trusted.zcash_proofs]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-08-20"
+end = "2026-04-08"
+
+[[trusted.zcash_protocol]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-12-13"
+end = "2026-09-26"
+
+[[trusted.zcash_protocol]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-01-27"
+end = "2026-03-04"
+
+[[trusted.zcash_script]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2025-09-25"
+end = "2026-09-26"
+
+[[trusted.zcash_script]]
+criteria = "safe-to-deploy"
+user-id = 159631
+start = "2022-08-31"
+end = "2026-04-08"
+
+[[trusted.zcash_script]]
+criteria = "safe-to-deploy"
+user-id = 228785
+start = "2023-10-18"
+end = "2027-03-09"
+
+[[trusted.zcash_spec]]
+criteria = "safe-to-deploy"
+user-id = 199950 # Daira-Emma Hopwood (daira)
+start = "2025-02-20"
+end = "2026-03-04"
+
+[[trusted.zcash_transparent]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2024-12-14"
+end = "2026-09-26"
+
+[[trusted.zcash_transparent]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-12-17"
+end = "2026-03-04"
+
+[[trusted.zip32]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2023-12-06"
+end = "2026-09-17"
+
+[[trusted.zip32]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2025-02-20"
+end = "2026-03-04"
+
+[[trusted.zip321]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-01-15"
+end = "2026-03-04"
