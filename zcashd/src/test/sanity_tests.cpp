@@ -1,0 +1,20 @@
+// Copyright (c) 2012-2013 The Bitcoin Core developers
+// Copyright (c) 2019-2023 The Zcash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+#include "key.h"
+#include "test/test_bitcoin.h"
+#include "util/time.h"
+
+#include <boost/test/unit_test.hpp>
+
+BOOST_FIXTURE_TEST_SUITE(sanity_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(basic_sanity)
+{
+  BOOST_CHECK_MESSAGE(CKey::ECC_InitSanityCheck() == true, "ECC sanity test");
+  BOOST_CHECK_MESSAGE(ChronoSanityCheck() == true, "chrono epoch test");
+}
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -1,0 +1,795 @@
+#include <gtest/gtest.h>
+#include <gmock/gmock.h>
+
+#include "consensus/merkle.h"
+#include "consensus/upgrades.h"
+#include "consensus/validation.h"
+#include "main.h"
+#include "transaction_builder.h"
+#include "util/test.h"
+
+#include <optional>
+
+extern bool SetChainPoolValues(
+    const CChainParams& chainparams,
+    const CBlock &block,
+    CBlockIndex *pindex);
+
+extern bool ReceivedBlockTransactions(
+    const CBlock &block,
+    CValidationState& state,
+    const CChainParams& chainparams,
+    CBlockIndex *pindexNew,
+    const CDiskBlockPos& pos);
+
+extern void EnsureUnreferencedAsKeyOfMapBlocksUnlinked(
+    const CBlockIndex *pindex);
+
+void ExpectAmount(CAmount expected, std::optional<CAmount> actual) {
+    EXPECT_EQ(std::make_optional(expected), actual);
+}
+
+// Fake a view that optionally contains a single coin.
+class ValidationFakeCoinsViewDB : public CCoinsView {
+public:
+    std::optional<std::pair<std::pair<uint256, uint256>, std::pair<CTxOut, int>>> coin;
+
+    ValidationFakeCoinsViewDB() {}
+    ValidationFakeCoinsViewDB(uint256 blockHash, uint256 txid, CTxOut txOut, int nHeight) :
+        coin(std::make_pair(std::make_pair(blockHash, txid), std::make_pair(txOut, nHeight))) {}
+    ~ValidationFakeCoinsViewDB() {}
+
+    bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const {
+        return false;
+    }
+
+    bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const {
+        return false;
+    }
+
+    bool GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
+        return false;
+    }
+
+    bool GetNullifier(const uint256 &nf, ShieldedType type) const {
+        return false;
+    }
+
+    bool GetCoins(const uint256 &txid, CCoins &coins) const {
+        if (coin && txid == coin.value().first.second) {
+            CCoins newCoins;
+            newCoins.vout.resize(2);
+            newCoins.vout[0] = coin.value().second.first;
+            newCoins.nHeight = coin.value().second.second;
+            coins.swap(newCoins);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    bool HaveCoins(const uint256 &txid) const {
+        if (coin && txid == coin.value().first.second) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    uint256 GetBestBlock() const {
+        if (coin) {
+            return coin.value().first.first;
+        } else {
+            uint256 a;
+            return a;
+        }
+    }
+
+    uint256 GetBestAnchor(ShieldedType type) const {
+        uint256 a;
+        return a;
+    }
+
+    HistoryIndex GetHistoryLength(uint32_t branchId) const {
+        return 0;
+    }
+
+    HistoryNode GetHistoryAt(uint32_t branchId, HistoryIndex index) const {
+        return HistoryNode();
+    }
+
+    uint256 GetHistoryRoot(uint32_t epochId) const {
+        return uint256();
+    }
+
+    std::optional<libzcash::LatestSubtree> GetLatestSubtree(ShieldedType type) const {
+        return std::nullopt;
+    };
+    std::optional<libzcash::SubtreeData> GetSubtreeData(
+            ShieldedType type,
+            libzcash::SubtreeIndex index) const
+    {
+        return std::nullopt;
+    };
+
+    bool BatchWrite(CCoinsMap &mapCoins,
+                    const uint256 &hashBlock,
+                    const uint256 &hashSproutAnchor,
+                    const uint256 &hashSaplingAnchor,
+                    const uint256 &hashOrchardAnchor,
+                    CAnchorsSproutMap &mapSproutAnchors,
+                    CAnchorsSaplingMap &mapSaplingAnchors,
+                    CAnchorsOrchardMap &mapOrchardAnchors,
+                    CNullifiersMap &mapSproutNullifiers,
+                    CNullifiersMap &mapSaplingNullifiers,
+                    CNullifiersMap &mapOrchardNullifiers,
+                    CHistoryCacheMap &historyCacheMap,
+                    SubtreeCache &cacheSaplingSubtrees,
+                    SubtreeCache &cacheOrchardSubtrees) {
+        return false;
+    }
+
+    bool GetStats(CCoinsStats &stats) const {
+        return false;
+    }
+};
+
+class MockCValidationState : public CValidationState {
+public:
+    MOCK_METHOD6(DoS, bool(int level, bool ret,
+             unsigned int chRejectCodeIn, const std::string strRejectReasonIn,
+             BodyCorruption bodyCorruption,
+             const std::string &strDebugMessageIn));
+    MOCK_METHOD4(Invalid, bool(bool ret,
+                 unsigned int _chRejectCode, const std::string _strRejectReason,
+                 const std::string &_strDebugMessage));
+    MOCK_METHOD1(Error, bool(std::string strRejectReasonIn));
+    MOCK_CONST_METHOD0(IsValid, bool());
+    MOCK_CONST_METHOD0(IsInvalid, bool());
+    MOCK_CONST_METHOD0(IsError, bool());
+    MOCK_CONST_METHOD1(IsInvalid, bool(int &nDoSOut));
+    MOCK_CONST_METHOD0(CorruptionPossible, bool());
+    MOCK_CONST_METHOD0(GetRejectCode, unsigned int());
+    MOCK_CONST_METHOD0(GetRejectReason, std::string());
+    MOCK_CONST_METHOD0(GetDebugMessage, std::string());
+};
+
+// Directly exercises the `CValidationState::DoS` classification logic that the
+// `MockCValidationState` in this and the other gtest files necessarily bypasses:
+// the mock overrides `DoS`, so the `BodyCorruption` switch and the
+// `Default` -> `!(hashMerkleRootChecked && hashBlockCommitmentsChecked)` rule that
+// underpin the GHSA-rpcw-q5mr-gq35 / GHSA-qvwc-hc2r-82qv / GHSA-wmwc-773c-qcvv /
+// GHSA-382w-958v-m5jr body-poisoning fixes are never run there.
+TEST(Validation, BodyCorruptionClassification) {
+    // `Possible`: always corruption-possible, regardless of commitment flags.
+    {
+        CValidationState s;
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Possible);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+    {
+        // Even when the body is fully pinned, `Possible` forces corruption-possible.
+        CValidationState s;
+        s.SetMerkleRootChecked();
+        s.SetBlockCommitmentsChecked();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Possible);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+
+    // `HeaderOnly`: never corruption-possible, regardless of commitment flags.
+    {
+        CValidationState s;
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::HeaderOnly);
+        EXPECT_FALSE(s.CorruptionPossible());
+    }
+    {
+        CValidationState s;
+        s.SetMerkleRootChecked();
+        s.SetBlockCommitmentsChecked();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::HeaderOnly);
+        EXPECT_FALSE(s.CorruptionPossible());
+    }
+
+    // `Default`: corruption-possible iff NOT (merkle && commitments) both checked.
+    {
+        CValidationState s; // (merkle=F, commitments=F)
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Default);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+    {
+        CValidationState s; // (merkle=T, commitments=F)
+        s.SetMerkleRootChecked();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Default);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+    {
+        CValidationState s; // (merkle=F, commitments=T)
+        s.SetBlockCommitmentsChecked();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Default);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+    {
+        CValidationState s; // (merkle=T, commitments=T) -> fully pinned
+        s.SetMerkleRootChecked();
+        s.SetBlockCommitmentsChecked();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Default);
+        EXPECT_FALSE(s.CorruptionPossible());
+    }
+
+    // `ResetBodyCommitmentChecks` clears both flags, so a subsequent `Default`
+    // rejection is classified corruption-possible again. (This reset runs at the
+    // start of each block-validation pass because a single `CValidationState` is
+    // reused across successive block connections.)
+    {
+        CValidationState s;
+        s.SetMerkleRootChecked();
+        s.SetBlockCommitmentsChecked();
+        s.ResetBodyCommitmentChecks();
+        s.DoS(100, false, REJECT_INVALID, "x", BodyCorruption::Default);
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+
+    // `Invalid()` defaults to `Default` classification.
+    {
+        CValidationState s;
+        s.Invalid(false, REJECT_INVALID, "x");
+        EXPECT_TRUE(s.CorruptionPossible());
+    }
+}
+
+TEST(Validation, ContextualCheckInputsPassesWithCoinbase) {
+    // Create fake coinbase transaction
+    CMutableTransaction mtx;
+    mtx.vin.resize(1);
+    CTransaction tx(mtx);
+    ASSERT_TRUE(tx.IsCoinBase());
+
+    // Fake an empty view
+    ValidationFakeCoinsViewDB fakeDB;
+    CCoinsViewCache view(&fakeDB);
+
+    for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
+        auto consensusBranchId = NetworkUpgradeInfo[idx].nBranchId;
+        CValidationState state;
+        // Coinbase transactions have one synthetic input with no prevout.
+        PrecomputedTransactionData txdata(tx, {});
+        EXPECT_TRUE(ContextualCheckInputs(tx, state, view, false, 0, false, txdata, Params(CBaseChainParams::MAIN).GetConsensus(), consensusBranchId));
+    }
+}
+
+TEST(Validation, ContextualCheckInputsDetectsOldBranchId) {
+    SelectParams(CBaseChainParams::REGTEST);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 10);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, 20);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_BLOSSOM, 30);
+
+    // Also test with the last three upgrades.
+    // If this changes, remember to update RegtestDeactivate* at the end of the test.
+    const Consensus::UpgradeIndex lastUpgrade = Consensus::UPGRADE_NU6;
+    static_assert(lastUpgrade > Consensus::UPGRADE_OVERWINTER + 2); // in-range and not redundant
+    UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex(lastUpgrade - 2), 40);
+    UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex(lastUpgrade - 1), 50);
+    UpdateNetworkUpgradeParameters(lastUpgrade, 60);
+
+    const CChainParams& params = Params(CBaseChainParams::REGTEST);
+    const Consensus::Params& consensusParams = params.GetConsensus();
+
+    auto overwinterBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId;
+    auto saplingBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    auto blossomBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_BLOSSOM].nBranchId;
+
+    auto antepenultimateBranchId = NetworkUpgradeInfo[lastUpgrade - 2].nBranchId;
+    auto penultimateBranchId = NetworkUpgradeInfo[lastUpgrade - 1].nBranchId;
+    auto lastBranchId = NetworkUpgradeInfo[lastUpgrade].nBranchId;
+
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    auto destination = tsk.GetPubKey().GetID();
+    auto scriptPubKey = GetScriptForDestination(destination);
+
+    // Create a fake block. It doesn't need to contain any transactions; we just
+    // need it to be in the global state when our fake view is used.
+    CBlock block;
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+
+    // Fake a view containing a single coin.
+    CAmount coinValue(5000);
+    COutPoint utxo;
+    utxo.hash = uint256S("4242424242424242424242424242424242424242424242424242424242424242");
+    utxo.n = 0;
+    CTxOut txOut;
+    txOut.scriptPubKey = scriptPubKey;
+    txOut.nValue = coinValue;
+
+    {
+        ValidationFakeCoinsViewDB fakeDB(blockHash, utxo.hash, txOut, 12);
+        CCoinsViewCache view(&fakeDB);
+
+        // Create a transparent transaction that spends the coin, targeting
+        // a height during the Overwinter epoch.
+        auto builder = TransactionBuilder(params, 15, std::nullopt, SaplingMerkleTree::empty_root(), &keystore);
+        builder.AddTransparentInput(utxo, scriptPubKey, coinValue);
+        builder.AddTransparentOutput(destination, 4000);
+        auto tx = builder.Build().GetTxOrThrow();
+        ASSERT_FALSE(tx.IsCoinBase());
+
+        // Ensure that the inputs validate against Overwinter.
+        CValidationState state;
+        PrecomputedTransactionData txdata(tx, {CTxOut(coinValue, scriptPubKey)});
+        EXPECT_TRUE(ContextualCheckInputs(
+            tx, state, view, true, 0, false, txdata,
+            consensusParams, overwinterBranchId));
+
+        // Attempt to validate the inputs against Sapling. We should be notified
+        // that an old consensus branch ID was used for an input.
+        MockCValidationState mockState;
+        EXPECT_CALL(mockState, DoS(
+            10, false, REJECT_INVALID,
+            strprintf("old-consensus-branch-id (Expected %s, found %s)",
+                HexInt(saplingBranchId),
+                HexInt(overwinterBranchId)),
+            BodyCorruption::Default, "")).Times(1);
+        EXPECT_FALSE(ContextualCheckInputs(
+            tx, mockState, view, true, 0, false, txdata,
+            consensusParams, saplingBranchId));
+
+        // Attempt to validate the inputs against Blossom. All we should learn is
+        // that the signature is invalid, because we don't check more than one
+        // network upgrade back.
+        EXPECT_CALL(mockState, DoS(
+            100, false, REJECT_INVALID,
+            "mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
+            BodyCorruption::Default, "")).Times(1);
+        EXPECT_FALSE(ContextualCheckInputs(
+            tx, mockState, view, true, 0, false, txdata,
+            consensusParams, blossomBranchId));
+    }
+
+    // Check that we didn't break this by repeating for the last three upgrades.
+    {
+        ValidationFakeCoinsViewDB fakeDB(blockHash, utxo.hash, txOut, 42);
+        CCoinsViewCache view(&fakeDB);
+
+        // Create a transparent transaction that spends the coin, targeting
+        // a height during the antepenultimate epoch.
+        auto builder = TransactionBuilder(params, 45, std::nullopt, SaplingMerkleTree::empty_root(), &keystore);
+        builder.AddTransparentInput(utxo, scriptPubKey, coinValue);
+        builder.AddTransparentOutput(destination, 4000);
+        auto tx = builder.Build().GetTxOrThrow();
+        ASSERT_FALSE(tx.IsCoinBase());
+
+        // Ensure that the inputs validate against the antepenultimate epoch.
+        CValidationState state;
+        PrecomputedTransactionData txdata(tx, {CTxOut(coinValue, scriptPubKey)});
+        EXPECT_TRUE(ContextualCheckInputs(
+            tx, state, view, true, 0, false, txdata,
+            consensusParams, antepenultimateBranchId));
+
+        // Attempt to validate the inputs against the penultimate epoch.
+        // We should be notified that an old consensus branch ID was used for an input.
+        MockCValidationState mockState;
+        EXPECT_CALL(mockState, DoS(
+            10, false, REJECT_INVALID,
+            strprintf("old-consensus-branch-id (Expected %s, found %s)",
+                HexInt(penultimateBranchId),
+                HexInt(antepenultimateBranchId)),
+            BodyCorruption::Default, "")).Times(1);
+        EXPECT_FALSE(ContextualCheckInputs(
+            tx, mockState, view, true, 0, false, txdata,
+            consensusParams, penultimateBranchId));
+
+        // Attempt to validate the inputs against the last epoch. All we should learn
+        // is that the signature is invalid, because we don't check more than one
+        // network upgrade back.
+        EXPECT_CALL(mockState, DoS(
+            100, false, REJECT_INVALID,
+            "mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
+            BodyCorruption::Default, "")).Times(1);
+        EXPECT_FALSE(ContextualCheckInputs(
+            tx, mockState, view, true, 0, false, txdata,
+            consensusParams, lastBranchId));
+    }
+
+    // Tear down
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+
+    // Revert to default
+    RegtestDeactivateNU6();
+    RegtestDeactivateNU5();
+    RegtestDeactivateCanopy();
+    RegtestDeactivateBlossom();
+}
+
+TEST(Validation, SetChainPoolValuesAccumulatesWhenParentIsPopulated) {
+    SelectParams(CBaseChainParams::REGTEST);
+    const auto chainParams = Params();
+    const auto sk = libzcash::SproutSpendingKey::random();
+
+    // Create a fake genesis block
+    CBlock block1;
+    block1.vtx.push_back(GetValidSproutReceive(sk, 5, true));
+    block1.hashMerkleRoot = BlockMerkleRoot(block1);
+    CBlockIndex fakeIndex1 {block1};
+
+    // Create a fake child block
+    CBlock block2;
+    block2.hashPrevBlock = block1.GetHash();
+    block2.vtx.push_back(GetValidSproutReceive(sk, 10, true));
+    block2.hashMerkleRoot = BlockMerkleRoot(block2);
+    CBlockIndex fakeIndex2 {block2};
+    fakeIndex2.pprev = &fakeIndex1;
+
+    CDiskBlockPos pos1;
+    ASSERT_TRUE(fakeIndex1.RaiseValidity(BLOCK_VALID_TREE));
+    ASSERT_TRUE(fakeIndex2.RaiseValidity(BLOCK_VALID_TREE));
+
+    // Fully process the genesis block so it has populated chain values.
+    CValidationState state;
+    {
+        LOCK(cs_main);
+        EXPECT_TRUE(SetChainPoolValues(chainParams, block1, &fakeIndex1));
+        EXPECT_TRUE(ReceivedBlockTransactions(block1, state, chainParams, &fakeIndex1, pos1));
+    }
+
+    // Sanity-check that genesis now has chain values populated.
+    { SCOPED_TRACE("genesis sprout"); ExpectAmount(10, fakeIndex1.nChainSproutValue); }
+    { SCOPED_TRACE("genesis sapling"); ExpectAmount(0, fakeIndex1.nChainSaplingValue); }
+    { SCOPED_TRACE("genesis orchard"); ExpectAmount(0, fakeIndex1.nChainOrchardValue); }
+    { SCOPED_TRACE("genesis lockbox"); ExpectAmount(0, fakeIndex1.nChainLockboxValue); }
+
+    // Call SetChainPoolValues on the child. With the eager accumulation,
+    // the child's chain pool values should be populated immediately, without
+    // needing a subsequent call to ReceivedBlockTransactions.
+    {
+        LOCK(cs_main);
+        EXPECT_TRUE(SetChainPoolValues(chainParams, block2, &fakeIndex2));
+    }
+
+    { SCOPED_TRACE("child sprout"); ExpectAmount(30, fakeIndex2.nChainSproutValue); }
+    { SCOPED_TRACE("child sapling"); ExpectAmount(0, fakeIndex2.nChainSaplingValue); }
+    { SCOPED_TRACE("child orchard"); ExpectAmount(0, fakeIndex2.nChainOrchardValue); }
+    { SCOPED_TRACE("child lockbox"); ExpectAmount(0, fakeIndex2.nChainLockboxValue); }
+
+    // Clean up: ensure that the fake CBlockIndex objects aren't still
+    // referenced by mapBlocksUnlinked (fakeIndex2 was never inserted, but
+    // fakeIndex1 may have been during its own ReceivedBlockTransactions call).
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex1);
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex2);
+}
+
+TEST(Validation, ReceivedBlockTransactions) {
+    SelectParams(CBaseChainParams::REGTEST);
+    const auto chainParams = Params();
+    const auto sk = libzcash::SproutSpendingKey::random();
+
+    // Create a fake genesis block
+    CBlock block1;
+    block1.vtx.push_back(GetValidSproutReceive(sk, 5, true));
+    block1.hashMerkleRoot = BlockMerkleRoot(block1);
+    CBlockIndex fakeIndex1 {block1};
+
+    // Create a fake child block
+    CBlock block2;
+    block2.hashPrevBlock = block1.GetHash();
+    block2.vtx.push_back(GetValidSproutReceive(sk, 10, true));
+    block2.hashMerkleRoot = BlockMerkleRoot(block2);
+    CBlockIndex fakeIndex2 {block2};
+    fakeIndex2.pprev = &fakeIndex1;
+
+    CDiskBlockPos pos1;
+    CDiskBlockPos pos2;
+
+    // Set initial state of indices
+    ASSERT_TRUE(fakeIndex1.RaiseValidity(BLOCK_VALID_TREE));
+    ASSERT_TRUE(fakeIndex2.RaiseValidity(BLOCK_VALID_TREE));
+    EXPECT_TRUE(fakeIndex1.IsValid(BLOCK_VALID_TREE));
+    EXPECT_TRUE(fakeIndex2.IsValid(BLOCK_VALID_TREE));
+    EXPECT_FALSE(fakeIndex1.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+    EXPECT_FALSE(fakeIndex2.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+
+    // Sprout pool values should not be set
+    EXPECT_FALSE(fakeIndex1.nSproutValue.has_value());
+    EXPECT_FALSE(fakeIndex1.nChainSproutValue.has_value());
+    EXPECT_FALSE(fakeIndex2.nSproutValue.has_value());
+    EXPECT_FALSE(fakeIndex2.nChainSproutValue.has_value());
+
+    // Sapling pool values should not be set
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nSaplingValue); }
+    EXPECT_FALSE(fakeIndex1.nChainSaplingValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nSaplingValue); }
+    EXPECT_FALSE(fakeIndex2.nChainSaplingValue.has_value());
+
+    // Orchard pool values should not be set
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nOrchardValue); }
+    EXPECT_FALSE(fakeIndex1.nChainOrchardValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nOrchardValue); }
+    EXPECT_FALSE(fakeIndex2.nChainOrchardValue.has_value());
+
+    // Lockbox pool values should not be set
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nLockboxValue); }
+    EXPECT_FALSE(fakeIndex1.nChainLockboxValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nLockboxValue); }
+    EXPECT_FALSE(fakeIndex2.nChainLockboxValue.has_value());
+
+    // Mark the second block's transactions as received first
+    CValidationState state;
+    {
+        // Taking cs_main is required even when working on a fake index.
+        LOCK(cs_main);
+        EXPECT_TRUE(SetChainPoolValues(chainParams, block2, &fakeIndex2));
+        EXPECT_TRUE(ReceivedBlockTransactions(block2, state, chainParams, &fakeIndex2, pos2));
+    }
+
+    EXPECT_FALSE(fakeIndex1.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+    EXPECT_TRUE(fakeIndex2.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+
+    // Sprout pool value delta should now be set for the second block,
+    // but not any chain totals
+    EXPECT_FALSE(fakeIndex1.nSproutValue.has_value());
+    EXPECT_FALSE(fakeIndex1.nChainSproutValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(20, fakeIndex2.nSproutValue); }
+    EXPECT_FALSE(fakeIndex2.nChainSproutValue.has_value());
+
+    // Same for Sapling (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nSaplingValue); }
+    EXPECT_FALSE(fakeIndex1.nChainSaplingValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nSaplingValue); }
+    EXPECT_FALSE(fakeIndex2.nChainSaplingValue.has_value());
+
+    // Same for Orchard (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nOrchardValue); }
+    EXPECT_FALSE(fakeIndex1.nChainOrchardValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nOrchardValue); }
+    EXPECT_FALSE(fakeIndex2.nChainOrchardValue.has_value());
+
+    // Same for the lockbox (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nLockboxValue); }
+    EXPECT_FALSE(fakeIndex1.nChainLockboxValue.has_value());
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nLockboxValue); }
+    EXPECT_FALSE(fakeIndex2.nChainLockboxValue.has_value());
+
+    // Now mark the first block's transactions as received
+    {
+        // Taking cs_main is required even when working on a fake index.
+        LOCK(cs_main);
+        EXPECT_TRUE(SetChainPoolValues(chainParams, block1, &fakeIndex1));
+        EXPECT_TRUE(ReceivedBlockTransactions(block1, state, chainParams, &fakeIndex1, pos1));
+    }
+    EXPECT_TRUE(fakeIndex1.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+    EXPECT_TRUE(fakeIndex2.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+
+    // Sprout pool values should now be set for both blocks
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(10, fakeIndex1.nSproutValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(10, fakeIndex1.nChainSproutValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(20, fakeIndex2.nSproutValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(30, fakeIndex2.nChainSproutValue); }
+
+    // Sapling pool values should now be set for both blocks (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nSaplingValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nChainSaplingValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nSaplingValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nChainSaplingValue); }
+
+    // Orchard pool values should now be set for both blocks (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nOrchardValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nChainOrchardValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nOrchardValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nChainOrchardValue); }
+
+    // Lockbox pool values should now be set for both blocks (TODO: make these nonzero)
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nLockboxValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex1.nChainLockboxValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nLockboxValue); }
+    { SCOPED_TRACE("ExpectAmount"); ExpectAmount(0, fakeIndex2.nChainLockboxValue); }
+
+    // Ensure that the fake CBlockIndex objects aren't still referenced by mapBlocksUnlinked.
+    // (In practice, we only have &fakeIndex1 as a key pointing to &fakeIndex2 after the
+    // first call to ReceivedBlockTransactions, which is removed by the second call.)
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex1);
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex2);
+}
+
+extern bool FallbackChainSupplyCheckpoint(CBlockIndex *pindex, const CChainParams& chainparams);
+
+TEST(Validation, FallbackChainSupplyCheckpoint) {
+    // Use mainnet params which have a real checkpoint at NU6.1 activation.
+    const CChainParams& chainparams = Params(CBaseChainParams::MAIN);
+    const int cpHeight = chainparams.ChainSupplyCheckpointHeight();
+    const uint256 cpHash = chainparams.ChainSupplyCheckpointBlockHash();
+    const CAmount cpTotalSupply = chainparams.ChainSupplyCheckpointTotalSupply();
+    const CAmount cpTransparentValue = chainparams.ChainSupplyCheckpointTransparentValue();
+    const CAmount cpSproutValue = chainparams.ChainSupplyCheckpointSproutValue();
+    const CAmount cpSaplingValue = chainparams.ChainSupplyCheckpointSaplingValue();
+    const CAmount cpOrchardValue = chainparams.ChainSupplyCheckpointOrchardValue();
+    const CAmount cpLockboxValue = chainparams.ChainSupplyCheckpointLockboxValue();
+
+    CBlockHeader header;
+
+    // Before the checkpoint, chain values remain nullopt.
+    const uint256 someHash = uint256S("0123456789abcdef");
+    CBlockIndex beforeCheckpoint(header);
+    beforeCheckpoint.nHeight = cpHeight - 1;
+    beforeCheckpoint.phashBlock = &someHash;
+    FallbackChainSupplyCheckpoint(&beforeCheckpoint, chainparams);
+    EXPECT_FALSE(beforeCheckpoint.nChainTotalSupply.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainTransparentValue.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainSproutValue.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainSaplingValue.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainLockboxValue.has_value());
+
+    // At the checkpoint height with the correct hash, values are injected.
+    CBlockIndex atCheckpoint(header);
+    atCheckpoint.nHeight = cpHeight;
+    atCheckpoint.phashBlock = &cpHash;
+
+    // Initially nullopt.
+    EXPECT_FALSE(atCheckpoint.nChainTotalSupply.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainTransparentValue.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainSproutValue.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainSaplingValue.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainLockboxValue.has_value());
+
+    FallbackChainSupplyCheckpoint(&atCheckpoint, chainparams);
+
+    ASSERT_TRUE(atCheckpoint.nChainTotalSupply.has_value());
+    EXPECT_EQ(atCheckpoint.nChainTotalSupply.value(), cpTotalSupply);
+    ASSERT_TRUE(atCheckpoint.nChainTransparentValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainTransparentValue.value(), cpTransparentValue);
+    ASSERT_TRUE(atCheckpoint.nChainSproutValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainSproutValue.value(), cpSproutValue);
+    ASSERT_TRUE(atCheckpoint.nChainSaplingValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainSaplingValue.value(), cpSaplingValue);
+    ASSERT_TRUE(atCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainOrchardValue.value(), cpOrchardValue);
+    ASSERT_TRUE(atCheckpoint.nChainLockboxValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainLockboxValue.value(), cpLockboxValue);
+
+    // If values are already set correctly, the fallback should succeed
+    // and not overwrite them.
+    EXPECT_TRUE(FallbackChainSupplyCheckpoint(&atCheckpoint, chainparams));
+    EXPECT_EQ(atCheckpoint.nChainTotalSupply.value(), cpTotalSupply);
+    EXPECT_EQ(atCheckpoint.nChainTransparentValue.value(), cpTransparentValue);
+    EXPECT_EQ(atCheckpoint.nChainSproutValue.value(), cpSproutValue);
+    EXPECT_EQ(atCheckpoint.nChainSaplingValue.value(), cpSaplingValue);
+    EXPECT_EQ(atCheckpoint.nChainOrchardValue.value(), cpOrchardValue);
+    EXPECT_EQ(atCheckpoint.nChainLockboxValue.value(), cpLockboxValue);
+
+    // If values are set but WRONG, the fallback should return false
+    // (indicating corruption).
+    CBlockIndex wrongTotalSupply(header);
+    wrongTotalSupply.nHeight = cpHeight;
+    wrongTotalSupply.phashBlock = &cpHash;
+    wrongTotalSupply.nChainTotalSupply = 12345;
+    EXPECT_FALSE(FallbackChainSupplyCheckpoint(&wrongTotalSupply, chainparams));
+    EXPECT_EQ(wrongTotalSupply.nChainTotalSupply.value(), 12345);
+
+    CBlockIndex wrongTransparentValue(header);
+    wrongTransparentValue.nHeight = cpHeight;
+    wrongTransparentValue.phashBlock = &cpHash;
+    wrongTransparentValue.nChainTotalSupply = cpTotalSupply;
+    wrongTransparentValue.nChainTransparentValue = 67890;
+    EXPECT_FALSE(FallbackChainSupplyCheckpoint(&wrongTransparentValue, chainparams));
+    EXPECT_EQ(wrongTransparentValue.nChainTransparentValue.value(), 67890);
+
+    CBlockIndex wrongSaplingValue(header);
+    wrongSaplingValue.nHeight = cpHeight;
+    wrongSaplingValue.phashBlock = &cpHash;
+    wrongSaplingValue.nChainTotalSupply = cpTotalSupply;
+    wrongSaplingValue.nChainTransparentValue = cpTransparentValue;
+    wrongSaplingValue.nChainSproutValue = cpSproutValue;
+    wrongSaplingValue.nChainSaplingValue = 99999;
+    EXPECT_FALSE(FallbackChainSupplyCheckpoint(&wrongSaplingValue, chainparams));
+    EXPECT_EQ(wrongSaplingValue.nChainSaplingValue.value(), 99999);
+
+    // After the checkpoint, values accumulate from the injected base.
+
+    // Create a child block one height after the checkpoint, with known deltas.
+    CBlockIndex afterCheckpoint(header);
+    afterCheckpoint.nHeight = cpHeight + 1;
+    afterCheckpoint.phashBlock = &someHash;
+    afterCheckpoint.pprev = &atCheckpoint;
+    afterCheckpoint.nChainSupplyDelta = 312500000; // 3.125 ZEC subsidy
+    afterCheckpoint.nTransparentValue = 200000000; // 2 ZEC transparent delta
+
+    // Simulate the accumulation that LoadBlockIndexDB performs:
+    //   nChainTotalSupply = pprev->nChainTotalSupply + nChainSupplyDelta
+    //   nChainTransparentValue = pprev->nChainTransparentValue + nTransparentValue
+    ASSERT_TRUE(afterCheckpoint.pprev->nChainTotalSupply.has_value());
+    ASSERT_TRUE(afterCheckpoint.nChainSupplyDelta.has_value());
+    afterCheckpoint.nChainTotalSupply =
+        afterCheckpoint.pprev->nChainTotalSupply.value() +
+        afterCheckpoint.nChainSupplyDelta.value();
+
+    ASSERT_TRUE(afterCheckpoint.pprev->nChainTransparentValue.has_value());
+    ASSERT_TRUE(afterCheckpoint.nTransparentValue.has_value());
+    afterCheckpoint.nChainTransparentValue =
+        afterCheckpoint.pprev->nChainTransparentValue.value() +
+        afterCheckpoint.nTransparentValue.value();
+
+    ASSERT_TRUE(afterCheckpoint.nChainTotalSupply.has_value());
+    EXPECT_EQ(afterCheckpoint.nChainTotalSupply.value(), cpTotalSupply + 312500000);
+    ASSERT_TRUE(afterCheckpoint.nChainTransparentValue.has_value());
+    EXPECT_EQ(afterCheckpoint.nChainTransparentValue.value(), cpTransparentValue + 200000000);
+
+    // The fallback should NOT inject at this height (it's past the checkpoint).
+    afterCheckpoint.nChainTotalSupply = std::nullopt;
+    afterCheckpoint.nChainTransparentValue = std::nullopt;
+    afterCheckpoint.nChainSproutValue = std::nullopt;
+    afterCheckpoint.nChainSaplingValue = std::nullopt;
+    afterCheckpoint.nChainOrchardValue = std::nullopt;
+    afterCheckpoint.nChainLockboxValue = std::nullopt;
+    FallbackChainSupplyCheckpoint(&afterCheckpoint, chainparams);
+    EXPECT_FALSE(afterCheckpoint.nChainTotalSupply.has_value());
+    EXPECT_FALSE(afterCheckpoint.nChainTransparentValue.has_value());
+    EXPECT_FALSE(afterCheckpoint.nChainSproutValue.has_value());
+    EXPECT_FALSE(afterCheckpoint.nChainSaplingValue.has_value());
+    EXPECT_FALSE(afterCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_FALSE(afterCheckpoint.nChainLockboxValue.has_value());
+}
+
+// Unit test for GHSA-78pp-mc9g-g4mw: a block whose aggregate per-pool value
+// delta is out of range must be rejected through `state.DoS(100, ...)` so that
+// the sending peer is banned, rather than via a bare `error()` that leaves the
+// state MODE_VALID. This drives ReceivedBlockTransactions on a fake index and
+// asserts the DoS score and reject reason directly. The black-box regression
+// test in `p2p_ban_pool_value_out_of_range.py` exercises the same path over
+// P2P but can only observe the resulting disconnection.
+TEST(Validation, BanOnPoolValueOutOfRange) {
+    SelectParams(CBaseChainParams::REGTEST);
+    const auto chainParams = Params();
+    const auto sk = libzcash::SproutSpendingKey::random();
+
+    // Parent block + index, just so the child is not treated as genesis.
+    CBlock block1;
+    block1.vtx.push_back(GetValidSproutReceive(sk, 5, true));
+    block1.hashMerkleRoot = BlockMerkleRoot(block1);
+    CBlockIndex fakeIndex1 {block1};
+
+    // Child block whose aggregate Sprout pool delta is out of range.
+    // GetValidSproutReceiveTransaction sets `vpub_old = 2 * value`, so
+    // `value = MAX_MONEY / 2` gives `vpub_old = MAX_MONEY` per transaction.
+    // Each is in range individually, but ComputePoolDeltas sums them to
+    // `2 * MAX_MONEY`, overflowing MoneyDeltaRange.
+    CBlock block2;
+    block2.hashPrevBlock = block1.GetHash();
+    block2.vtx.push_back(GetValidSproutReceive(sk, MAX_MONEY / 2, true));
+    block2.vtx.push_back(GetValidSproutReceive(sk, MAX_MONEY / 2, true));
+    block2.hashMerkleRoot = BlockMerkleRoot(block2);
+    CBlockIndex fakeIndex2 {block2};
+    fakeIndex2.pprev = &fakeIndex1;
+
+    ASSERT_TRUE(fakeIndex1.RaiseValidity(BLOCK_VALID_TREE));
+    ASSERT_TRUE(fakeIndex2.RaiseValidity(BLOCK_VALID_TREE));
+
+    CDiskBlockPos pos2;
+    CValidationState state;
+    {
+        // Taking cs_main is required even when working on a fake index.
+        LOCK(cs_main);
+        // The overflow is detected in ComputePoolDeltas, so SetChainPoolValues
+        // fails, and ReceivedBlockTransactions routes that failure through DoS.
+        EXPECT_FALSE(SetChainPoolValues(chainParams, block2, &fakeIndex2));
+        EXPECT_FALSE(ReceivedBlockTransactions(block2, state, chainParams, &fakeIndex2, pos2));
+    }
+
+    int nDoS = 0;
+    EXPECT_TRUE(state.IsInvalid(nDoS));
+    EXPECT_EQ(100, nDoS);
+    EXPECT_EQ("bad-blk-pool-value-out-of-range", state.GetRejectReason());
+
+    // The block must not have been recorded as having data; leaving it
+    // header-only is what, absent the ban, enables the replay re-write.
+    EXPECT_FALSE(fakeIndex2.IsValid(BLOCK_PARTIALLY_VALID_TRANSACTIONS));
+    EXPECT_FALSE(fakeIndex2.nStatus & BLOCK_HAVE_DATA);
+
+    // No fake CBlockIndex should be referenced by mapBlocksUnlinked.
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex1);
+    EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex2);
+}
