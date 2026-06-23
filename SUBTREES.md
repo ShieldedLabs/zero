@@ -52,8 +52,7 @@ git subtree pull --prefix=zebra up-zebra main --squash
 
 ## Push our changes back upstream (optional)
 
-```sh
-git subtree push --prefix=<dir> up-<name> <our-branch>
-```
-
-This splits the prefix's history into a branch you can open a PR from.
+Do **not** use `git subtree push` for this. We upstream changes through a proper
+fork and a focused PR, not by splitting our squashed in-tree history. See the
+upstreaming flow in [MAINTENANCE.md](MAINTENANCE.md) (and the `upstream-change`
+skill it references).
