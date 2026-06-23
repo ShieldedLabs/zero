@@ -1,7 +1,7 @@
 name: Release
 
 # Manually-dispatched product release. Versions are monotonically increasing
-# integers (v1, v2, v3, ...), not semver. Each release contains exactly four
+# integers (v1, v2, v3, ...), not semver. Each release contains exactly five
 # assets: a ZIP of each vendored component at the released commit.
 
 on:
@@ -57,7 +57,7 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          for c in zcashd zebra zaino zallet; do
+          for c in zcashd zebra zaino zallet orchard; do
             git archive --format=zip --prefix="${c}/" \
               -o "${c}-${TAG}.zip" "HEAD:${c}"
           done
@@ -75,18 +75,19 @@ jobs:
             echo
             echo "## Official assets"
             echo
-            echo "The four component archives below are the Zero release. Each holds the"
+            echo "The five component archives below are the Zero release. Each holds the"
             echo "vendored source of one component at the released commit:"
             echo
             echo "- \`zcashd-${TAG}.zip\`"
             echo "- \`zebra-${TAG}.zip\`"
             echo "- \`zaino-${TAG}.zip\`"
             echo "- \`zallet-${TAG}.zip\`"
+            echo "- \`orchard-${TAG}.zip\`"
             echo
             echo "> [!NOTE]"
             echo "> The \"Source code (zip)\" and \"Source code (tar.gz)\" entries are"
             echo "> generated automatically by GitHub from the tag. They are not part of"
-            echo "> the Zero release; use the four component archives above."
+            echo "> the Zero release; use the five component archives above."
           } > release-notes.md
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
@@ -95,4 +96,5 @@ jobs:
             "zcashd-${TAG}.zip" \
             "zebra-${TAG}.zip" \
             "zaino-${TAG}.zip" \
-            "zallet-${TAG}.zip"
+            "zallet-${TAG}.zip" \
+            "orchard-${TAG}.zip"
