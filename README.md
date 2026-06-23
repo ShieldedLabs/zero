@@ -9,10 +9,6 @@ by Shielded Labs for enterprise use. It helps exchanges, mining pools, wallet
 providers, and other ecosystem partners deploy and operate Zcash infrastructure
 successfully as the network prepares for Ironwood and future upgrades.
 
-The repository is a subtree-based monorepo: our versions of `zcashd`, Zebra,
-Zaino, and Zallet are vendored side by side so our changes live in one place
-while we continue to track and exchange changes with each upstream.
-
 ## Table of Contents
 
 - [Background](#background)
@@ -25,9 +21,10 @@ while we continue to track and exchange changes with each upstream.
 
 ## Background
 
-Operators preparing for Ironwood need practical support: documentation, migration
-assistance, and reliable software options. Zero provides that support across four
-vendored components, each a git subtree from its canonical upstream:
+Operators preparing for Ironwood, and for support beyond it, need practical
+options: documentation, migration assistance, and reliable software. Zero
+provides that support across four vendored components, each a git subtree from
+its canonical upstream:
 
 | Component | Directory | Upstream                     | Role |
 |-----------|-----------|------------------------------|------|
@@ -36,11 +33,14 @@ vendored components, each a git subtree from its canonical upstream:
 | Zaino     | `zaino/`  | zingolabs/zaino              | Indexer |
 | Zallet    | `zallet/` | zcash/wallet                 | Wallet |
 
-We are not advocating long-term reliance on `zcashd`. Many exchanges, mining
-pools, and wallet providers depend on `zcashd`-based infrastructure today, and the
-Ironwood timeline is aggressive, so we provide a supported `zcashd` fork as a
-practical transition path with a hardcoded end-of-life date. The long-term
-direction is the Zebra, Zaino, and Zallet (Z3) stack.
+Many exchanges, mining pools, and wallet providers depend on `zcashd`-based
+infrastructure today, and the Ironwood timeline is aggressive, so we provide a
+supported `zcashd` fork as a practical transition path with a hardcoded
+end-of-life date.
+
+> [!NOTE]
+> We are not advocating long-term reliance on `zcashd`. The long-term direction
+> is the Zebra, Zaino, and Zallet (Z3) stack.
 
 See [SUBTREES.md](SUBTREES.md) for the vendoring mechanics and
 [MAINTENANCE.md](MAINTENANCE.md) for how we make and track changes.
