@@ -30,3 +30,15 @@ timeline, some partners may not be able to migrate immediately.
 For those operators, we intend to provide a supported zcashd fork
 with Ironwood support as a practical transition path that includes
 a hardcoded end of life date.
+
+## Repository Structure
+This is a subtree-based monorepo. Each component (`zcashd/`, `zebra/`,
+`zaino/`, `zallet/`) is vendored from its upstream as a git subtree. See
+[SUBTREES.md](SUBTREES.md) for the layout and update commands, and
+[MAINTENANCE.md](MAINTENANCE.md) for our fork-maintenance policy.
+
+## AI Assistance Disclosure
+The Zero monorepo scaffolding, maintenance tooling, and documentation were
+developed with the assistance of Claude Code (Anthropic), under human review by
+Shielded Labs. Changes vendored from upstream remain the work of their
+respective projects.
