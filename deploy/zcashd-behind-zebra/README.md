@@ -61,15 +61,27 @@ For production, install the binaries to `/usr/local/bin`, put the configs under
 `/etc/zebra` and `/etc/zcash`, set `cache_dir`/`-datadir` to `/var/lib/...`, and
 use the units in `systemd/` (`zcashd.service` starts after `zebrad.service`).
 
-### Already running zcashd?
+### Migrating an existing zcashd
 
-You do not need this whole bundle. Point your existing zcashd at a Zebra node by
-adding two lines to its `zcash.conf` and restarting:
+This setup requires the **Zero** builds. If you currently run `zcash/zcash`, the
+migration is two steps:
 
-```
-connect=<zebra-host>:8233
-listen=0
-```
+1. **Switch to the Zero builds.** Replace your zcashd with Zero's zcashd
+   (`ghcr.io/shieldedlabs/zero-zcashd`, or a binary from a
+   [Zero release](https://github.com/ShieldedLabs/zero/releases)), and run Zero's
+   Zebra in front (`ghcr.io/shieldedlabs/zero-zebra`). These are the builds
+   Shielded Labs supports; `connect=`/`listen=0` alone on a `zcash/zcash` node
+   does not put you on the supported path.
+
+2. **Shield it.** Add two lines to your `zcash.conf` and restart, so zcashd peers
+   only with your Zebra node:
+
+   ```
+   connect=<zebra-host>:8233
+   listen=0
+   ```
+
+If you wire these up yourself, you do not need the rest of this bundle.
 
 ## Verify the shield
 
