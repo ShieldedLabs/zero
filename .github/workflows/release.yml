@@ -1,8 +1,8 @@
 name: Release
 
 # Manually-dispatched product release. Versions are monotonically increasing
-# integers (v1, v2, v3, ...), not semver. Each release contains exactly five
-# assets: a ZIP of each vendored component at the released commit.
+# integers (v1, v2, v3, ...), not semver. Each release contains the five vendored
+# component source ZIPs plus prebuilt binaries (currently zebrad, linux/x86_64).
 
 on:
   workflow_dispatch:
@@ -16,19 +16,18 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # 1. Compute the version once, so nothing double-increments.
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
       - name: Determine version
         id: ver
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           OVERRIDE: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -52,49 +51,136 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Next release: $tag (commit $GITHUB_SHA)"
 
+  # 2. Source archives: one ZIP per vendored component (only tracked files).
+  source:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Build component archives
         env:
-          TAG: ${{ steps.ver.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          mkdir -p dist
           for c in zcashd zebra zaino zallet orchard; do
             git archive --format=zip --prefix="${c}/" \
-              -o "${c}-${TAG}.zip" "HEAD:${c}"
+              -o "dist/${c}-${TAG}.zip" "HEAD:${c}"
           done
-          ls -lh ./*.zip
+          ls -lh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-zips
+          path: dist/*.zip
+          if-no-files-found: error
 
+  # 3. Prebuilt binaries. Matrix is one entry today; add rows for zainod/zallet
+  #    or arm64 without touching the rest of the pipeline.
+  binaries:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: zebra
+            package: zebrad
+            bin: zebrad
+            # Drop ZF telemetry (sentry, opentelemetry); keep the useful release
+            # features. getblocktemplate is not feature-gated, so mining RPCs are
+            # always present.
+            features: "release_max_level_info,progress-bar,prometheus"
+            apt: "protobuf-compiler libclang-dev clang cmake"
+            target_label: linux-x86_64
+            runner: ubuntu-22.04   # older glibc floor for broad compatibility
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.component }}
+      - name: Build ${{ matrix.bin }}
+        working-directory: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            -p ${{ matrix.package }} --bin ${{ matrix.bin }} \
+            --no-default-features --features "${{ matrix.features }}"
+      - name: Package ${{ matrix.bin }}
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          out="${{ matrix.bin }}-${TAG}-${{ matrix.target_label }}"
+          cp "${{ matrix.component }}/target/release/${{ matrix.bin }}" "dist/${out}"
+          strip "dist/${out}"
+          ( cd dist && sha256sum "${out}" > "${out}.sha256" )
+          ls -lh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.bin }}-${{ matrix.target_label }}
+          path: dist/*
+          if-no-files-found: error
+
+  # 4. Create the release once, with everything attached.
+  release:
+    needs: [version, source, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.ver.outputs.tag }}
-          VERSION: ${{ steps.ver.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
+          ls -lh dist
           {
             echo "Zero release ${VERSION}, built from commit ${GITHUB_SHA}."
             echo
-            echo "## Official assets"
+            echo "## Source archives"
             echo
-            echo "The five component archives below are the Zero release. Each holds the"
-            echo "vendored source of one component at the released commit:"
+            echo "One ZIP per vendored component (tracked source at the released commit):"
             echo
-            echo "- \`zcashd-${TAG}.zip\`"
-            echo "- \`zebra-${TAG}.zip\`"
-            echo "- \`zaino-${TAG}.zip\`"
-            echo "- \`zallet-${TAG}.zip\`"
-            echo "- \`orchard-${TAG}.zip\`"
+            for c in zcashd zebra zaino zallet orchard; do
+              echo "- \`${c}-${TAG}.zip\`"
+            done
+            echo
+            echo "## Binaries"
+            echo
+            echo "Prebuilt for linux/x86_64 (built on ubuntu-22.04, glibc 2.35+; stripped)."
+            echo "Telemetry disabled (no sentry/opentelemetry); getblocktemplate and"
+            echo "prometheus metrics included."
+            echo
+            echo "- \`zebrad-${TAG}-linux-x86_64\` (with \`.sha256\`)"
             echo
             echo "> [!NOTE]"
             echo "> The \"Source code (zip)\" and \"Source code (tar.gz)\" entries are"
             echo "> generated automatically by GitHub from the tag. They are not part of"
-            echo "> the Zero release; use the five component archives above."
+            echo "> the Zero release; use the assets above."
           } > release-notes.md
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
             --title "Zero $TAG" \
             --notes-file release-notes.md \
-            "zcashd-${TAG}.zip" \
-            "zebra-${TAG}.zip" \
-            "zaino-${TAG}.zip" \
-            "zallet-${TAG}.zip" \
-            "orchard-${TAG}.zip"
+            dist/*
