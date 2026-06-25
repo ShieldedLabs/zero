@@ -1,0 +1,52 @@
+# Shield zcashd behind Zebra.
+#
+# Zebra faces the public Zcash P2P network on 8233. zcashd makes a single
+# outbound P2P connection to Zebra (see zcash.conf: connect=zebra:8233) and
+# listens for nothing, so its network-facing parser and peer management are no
+# longer exposed. zcashd's RPC (8232) stays on the internal compose network for
+# your wallet / mining pool; it is not published to the host.
+#
+# Quick start:   docker compose up -d
+# See README.md for configuration, the non-Docker path, and verification.
+
+services:
+  zebra:
+    image: ghcr.io/shieldedlabs/zero-zebra:${ZERO_IMAGE_TAG:-latest}
+    # To build from this repo's vendored source instead of pulling, comment the
+    # image: line above and uncomment:
+    # build:
+    #   context: ../../zebra
+    #   dockerfile: docker/Dockerfile
+    #   target: runtime
+    #   args:
+    #     FEATURES: "release_max_level_info,progress-bar,prometheus"
+    container_name: zebra
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE_PATH: /etc/zebra/zebrad.toml
+    volumes:
+      - ./zebrad.toml:/etc/zebra/zebrad.toml:ro
+      - zebra-cache:/home/zebra/.cache/zebra
+    ports:
+      - "8233:8233"   # public P2P (use 18233 for Testnet)
+
+  zcashd:
+    image: ghcr.io/shieldedlabs/zero-zcashd:${ZERO_IMAGE_TAG:-latest}
+    # To build from this repo's vendored source instead of pulling:
+    # build:
+    #   context: ../../zcashd
+    #   dockerfile: ../docker/zcashd/Dockerfile
+    #   target: runtime
+    container_name: zcashd
+    restart: unless-stopped
+    depends_on:
+      - zebra
+    command: ["-conf=/etc/zcash/zcash.conf", "-printtoconsole"]
+    volumes:
+      - ./zcash.conf:/etc/zcash/zcash.conf:ro
+      - zcashd-data:/srv/zcash/.zcash
+    # No published ports: P2P is outbound-only to zebra, and RPC stays internal.
+
+volumes:
+  zebra-cache:
+  zcashd-data:

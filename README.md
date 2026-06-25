@@ -74,6 +74,12 @@ For most operators, we generally recommend:
 
 Refer to each component directory for configuration and operational guidance.
 
+### Deployments
+
+- [Shield zcashd behind Zebra](deploy/zcashd-behind-zebra/) - put Zebra in front
+  of zcashd to remove zcashd's network-facing attack surface. Docker Compose,
+  config files, systemd units, and a verification cheat-sheet.
+
 ## Security
 
 To report a security vulnerability in any Zero component, join the Shielded Labs

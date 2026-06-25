@@ -1,0 +1,27 @@
+[Unit]
+Description=zcashd (Zero) shielded behind Zebra
+Documentation=https://github.com/ShieldedLabs/zero
+# Start after Zebra so the upstream peer is available.
+After=network-online.target zebrad.service
+Wants=network-online.target zebrad.service
+
+[Service]
+Type=simple
+User=zcash
+Group=zcash
+# Install the Zero zcashd binary to /usr/local/bin/zcashd. On a single host,
+# zcash.conf should use connect=127.0.0.1:8233 (not the Docker service name).
+ExecStart=/usr/local/bin/zcashd -conf=/etc/zcash/zcash.conf -datadir=/var/lib/zcash -printtoconsole
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=zcash
+ReadWritePaths=/var/lib/zcash
+
+[Install]
+WantedBy=multi-user.target

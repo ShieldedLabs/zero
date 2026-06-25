@@ -1,0 +1,20 @@
+# Zebra config for the public-facing node in the "shield zcashd behind Zebra"
+# topology. Zebra needs no special configuration here: it simply listens on the
+# Zcash P2P port so zcashd can connect to it.
+#
+# Full config reference:
+# https://docs.rs/zebrad/latest/zebrad/config/struct.ZebradConfig.html
+
+[network]
+network = "Mainnet"
+listen_addr = "[::]:8233"
+
+# Set this to your public IP:port if Zebra is behind a NAT or load balancer.
+# external_addr = "203.0.113.42:8233"
+
+# Docker path. For a non-Docker host, change both cache_dir values to a
+# host-writable directory, e.g. "/var/lib/zebra".
+cache_dir = "/home/zebra/.cache/zebra"
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra"

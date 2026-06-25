@@ -1,0 +1,27 @@
+[Unit]
+Description=Zebra (Zero) full node, public-facing
+Documentation=https://github.com/ShieldedLabs/zero
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zebra
+Group=zebra
+# Install the Zero zebrad binary (e.g. zebrad-v3-linux-x86_64 from a Zero
+# release) to /usr/local/bin/zebrad. Set cache_dir in this config to
+# /var/lib/zebra (StateDirectory below).
+ExecStart=/usr/local/bin/zebrad --config /etc/zebra/zebrad.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=zebra
+ReadWritePaths=/var/lib/zebra
+
+[Install]
+WantedBy=multi-user.target
