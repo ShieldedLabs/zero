@@ -12,7 +12,7 @@
 #include "librustzcash.h"
 
 #define NODE_V1_SERIALIZED_LENGTH 171
-#define NODE_SERIALIZED_LENGTH 244
+#define NODE_SERIALIZED_LENGTH 317
 #define ENTRY_SERIALIZED_LENGTH (NODE_SERIALIZED_LENGTH + 9)
 
 typedef std::array<unsigned char, NODE_SERIALIZED_LENGTH> HistoryNode;

@@ -61,6 +61,18 @@ static_assert(ZIP225_TX_VERSION >= ZIP225_MIN_TX_VERSION,
 static_assert(ZIP225_TX_VERSION <= ZIP225_MAX_TX_VERSION,
     "ZIP225 tx version must not be higher than maximum");
 
+// ZIP248 transaction version group id
+// (defined in section _ of the protocol spec) // @nomerge doc reference
+static constexpr uint32_t ZIP248_VERSION_GROUP_ID = 0xDDDDDDDD; // @nomerge: real group id
+static_assert(ZIP248_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
+
+// ZIP248 transaction version
+static const int32_t ZIP248_TX_VERSION = 6;
+static_assert(ZIP248_TX_VERSION >= ZIP248_MIN_TX_VERSION,
+    "ZIP248 tx version must not be lower than minimum");
+static_assert(ZIP248_TX_VERSION <= ZIP248_MAX_TX_VERSION,
+    "ZIP248 tx version must not be higher than maximum");
+
 // Future transaction version group id
 static constexpr uint32_t ZFUTURE_VERSION_GROUP_ID = 0xFFFFFFFF;
 static_assert(ZFUTURE_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
