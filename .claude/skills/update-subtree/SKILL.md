@@ -1,6 +1,6 @@
 ---
 name: update-subtree
-description: Pull upstream updates into one Zero subtree (zcashd|zebra|zaino|zallet|orchard) on a review branch, summarize incoming commits, surface conflicts against our [zero] delta, and run that component's tests. Use when asked to update/sync/pull a component from upstream.
+description: Pull upstream updates into one Zero subtree (zcashd|zebra|zaino|zallet|orchard|librustzcash) on a review branch, summarize incoming commits, surface conflicts against our [zero] delta, and run that component's tests. Use when asked to update/sync/pull a component from upstream.
 ---
 
 # update-subtree
@@ -17,6 +17,7 @@ Never run on `main`; never auto-merge a dirty result.
 | zaino     | `zaino/`  | `up-zaino`  | `dev`    | `cd zaino && cargo test --workspace` |
 | zallet    | `zallet/` | `up-zallet` | `main`   | `cd zallet && cargo test --workspace` |
 | orchard   | `orchard/`| `up-orchard`| `feat/ironwood` | `cd orchard && cargo test` |
+| librustzcash | `librustzcash/` | `up-librustzcash` | `main` | `cd librustzcash && cargo test --workspace` |
 
 If the user named a release tag, use it in place of the branch (preferred per
 MAINTENANCE.md tag-pinning policy).

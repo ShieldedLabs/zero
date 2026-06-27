@@ -1,6 +1,6 @@
 # Subtrees
 
-Zero vendors its five upstream components as **git subtrees**, one per top-level
+Zero vendors its six upstream components as **git subtrees**, one per top-level
 directory. Our changes ("our versions") live directly in this repo, and we can
 still pull upstream updates or split changes back out when useful.
 
@@ -13,6 +13,7 @@ still pull upstream updates or split changes back out when useful.
 | `zaino/`  | https://github.com/zingolabs/zaino.git        | `dev`    | `up-zaino`  |
 | `zallet/` | https://github.com/zcash/wallet.git           | `main`   | `up-zallet` |
 | `orchard/`| https://github.com/zcash/orchard.git          | `feat/ironwood` | `up-orchard` |
+| `librustzcash/` | https://github.com/zcash/librustzcash.git | `main` | `up-librustzcash` |
 
 Notes:
 - **zaino** tracks `dev` (its active default), not `stable`.
@@ -22,6 +23,10 @@ Notes:
   routinely; switch to a tag once upstream cuts an Ironwood release.
 - **zcashd** is a supported fork on a transition path with a hardcoded end-of-life
   date; it is not intended for long-term reliance.
+- **librustzcash** is the shared Rust crate workspace (`zcash_primitives`,
+  `zcash_client_backend`, `zcash_keys`, `zip32`, and friends) that the Z3 stack
+  (zaino, zallet) builds on. Tracks `main`; pin to a release tag once one covers
+  what we need.
 
 ## Why subtrees (not submodules)
 
@@ -39,6 +44,7 @@ git remote add up-zebra  https://github.com/ZcashFoundation/zebra.git
 git remote add up-zaino  https://github.com/zingolabs/zaino.git
 git remote add up-zallet https://github.com/zcash/wallet.git
 git remote add up-orchard https://github.com/zcash/orchard.git
+git remote add up-librustzcash https://github.com/zcash/librustzcash.git
 ```
 
 ## Pull upstream updates

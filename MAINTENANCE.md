@@ -1,10 +1,10 @@
 # Maintaining Zero
 
-Zero vendors five upstreams as git subtrees (see [SUBTREES.md](SUBTREES.md) for
+Zero vendors six upstreams as git subtrees (see [SUBTREES.md](SUBTREES.md) for
 the mechanics). This file is the **policy**: how we make changes so that two
 flows stay cheap forever.
 
-1. **Upstream useful fixes** back to zcash/zebra/zaino/zallet.
+1. **Upstream useful fixes** back to zcash/zebra/zaino/zallet/librustzcash.
 2. **Pull useful updates** down from those upstreams.
 
 Both costs scale with **how far our tree diverges from upstream**. So the entire
@@ -51,6 +51,7 @@ The rule is not uniform. Bias differs by how alive the upstream is.
 | `zaino`   | Active (Zingo)                            | Upstream-first, strongly                       |
 | `zallet`  | Active (ECC)                              | Upstream-first, strongly                       |
 | `orchard` | Active (ECC); Ironwood on `feat/ironwood` | Upstream-first, strongly                       |
+| `librustzcash` | Active (ECC)                         | Upstream-first, strongly                       |
 | `zcashd`  | Winding down; we hardcode EOL             | Mostly Zero-only; upstream only clear bugfixes |
 
 ## Commit-message convention
@@ -59,7 +60,8 @@ A subject has two independent parts: an optional **divergence marker** then a
 **conventional-commit type**.
 
 The one question that decides the marker: **does the commit touch a vendored
-subtree dir (`zcashd/`, `zebra/`, `zaino/`, `zallet/`, `orchard/`)?**
+subtree dir (`zcashd/`, `zebra/`, `zaino/`, `zallet/`, `orchard/`,
+`librustzcash/`)?**
 
 - **Yes** -> lead with a marker, then the type:
   - `[zero] <type>: ...` - permanent Zero-only divergence.
@@ -82,12 +84,12 @@ Examples:
 
 The git log **is** the ledger, queryable in both directions:
 
-- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet orchard` - our permanent
+- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet orchard librustzcash` - our permanent
   delta. Add `--stat` for files, or narrow the pathspec to one dir/file.
-- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet orchard` - our
+- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet orchard librustzcash` - our
   outstanding carries.
 
-The vendored pathspec (`-- zcashd zebra zaino zallet orchard`) is what makes this
+The vendored pathspec (`-- zcashd zebra zaino zallet orchard librustzcash`) is what makes this
 authoritative, not the prefix alone. The real delta is "commits that both carry
 the marker **and** touch a vendored dir," so a stray marker on a root-file commit
 (e.g. a mislabeled `.gitignore` change) drops out automatically. The query stays
