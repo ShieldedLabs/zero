@@ -1,0 +1,231 @@
+name: Z3 stack smoke test
+
+# Build the Z3 stack images (zebra, zaino, zallet) from vendored source and
+# prove the deploy/z3-stack/ bundle works end to end: zebra healthy, zaino
+# serving lightwalletd gRPC, zallet answering wallet RPC with a node tip, no
+# crash-loops, nothing exposed that shouldn't be. None of the checks need a
+# synced chain, so the smoke phase takes minutes; the builds dominate and are
+# GHA-cached (same cache scopes as images.yml, so the two workflows keep each
+# other warm).
+#
+# Build definitions mirror deploy/z3-stack/docker-compose.build.yml; keep them
+# in sync if you change contexts, Dockerfiles, or build args.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/z3-stack/**"
+      - "zebra/docker/Dockerfile"
+      - "zebra/docker/entrypoint.sh"
+      - "zaino/Dockerfile"
+      - "zaino/entrypoint.sh"
+      - "zallet/Dockerfile"
+      - ".github/workflows/z3-smoke.yml"
+  workflow_dispatch:
+  schedule:
+    # Weekly: catches interop breakage from subtree updates that don't touch
+    # the paths above.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # Populate the build cache for the three images in parallel, so the smoke
+  # job's rebuilds are cache hits and its wall-clock is max(build) + smoke.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: zero-zebra
+            context: zebra
+            dockerfile: zebra/docker/Dockerfile
+            build_args: |
+              FEATURES=release_max_level_info,progress-bar,prometheus
+          - name: zero-zaino
+            context: zaino
+            dockerfile: zaino/Dockerfile
+            build_args: |
+              NO_TLS=true
+            rust_toolchain_file: zaino/rust-toolchain.toml
+          - name: zero-zallet
+            context: zallet
+            dockerfile: zallet/Dockerfile
+            build_args: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve build args
+        id: args
+        run: |
+          set -euo pipefail
+          {
+            echo "build_args<<BUILD_ARGS_EOF"
+            printf '%s\n' "${{ matrix.build_args }}"
+            if [ -n "${{ matrix.rust_toolchain_file }}" ]; then
+              rv=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+                   "${{ matrix.rust_toolchain_file }}" | head -n1)
+              if ! [[ "$rv" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "::error::unexpected channel '${rv}' in ${{ matrix.rust_toolchain_file }}"
+                exit 1
+              fi
+              echo "RUST_VERSION=${rv}"
+            fi
+            echo "BUILD_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build (cache only)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          build-args: ${{ steps.args.outputs.build_args }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ZERO_IMAGE_TAG: smoke
+    defaults:
+      run:
+        working-directory: deploy/z3-stack
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve zaino RUST_VERSION
+        id: zaino_args
+        working-directory: .
+        run: |
+          set -euo pipefail
+          rv=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+               zaino/rust-toolchain.toml | head -n1)
+          echo "rust_version=${rv}" >> "$GITHUB_OUTPUT"
+
+      # Rebuilds are cache hits from the build job; load the images locally
+      # under the :smoke tag that ZERO_IMAGE_TAG points the compose file at.
+      - name: Load zebra image
+        uses: docker/build-push-action@v6
+        with:
+          context: zebra
+          file: zebra/docker/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/shieldedlabs/zero-zebra:smoke
+          build-args: |
+            FEATURES=release_max_level_info,progress-bar,prometheus
+          cache-from: type=gha,scope=zero-zebra
+
+      - name: Load zaino image
+        uses: docker/build-push-action@v6
+        with:
+          context: zaino
+          file: zaino/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/shieldedlabs/zero-zaino:smoke
+          build-args: |
+            NO_TLS=true
+            RUST_VERSION=${{ steps.zaino_args.outputs.rust_version }}
+          cache-from: type=gha,scope=zero-zaino
+
+      - name: Load zallet image
+        uses: docker/build-push-action@v6
+        with:
+          context: zallet
+          file: zallet/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/shieldedlabs/zero-zallet:smoke
+          cache-from: type=gha,scope=zero-zallet
+
+      # From here on this is the bundle's README walkthrough, scripted.
+      - name: One-time wallet init (offline)
+        run: |
+          set -euxo pipefail
+          docker run --rm -v "$PWD:/out" alpine:3.20 \
+            sh -c 'apk add --no-cache age >/dev/null && age-keygen -o /out/encryption-identity.txt'
+          sudo chown 1000:1000 encryption-identity.txt
+          sudo chmod 400 encryption-identity.txt
+          # Deliberately before zebra exists: init must work offline.
+          docker compose run --rm --no-deps zallet \
+            --datadir /var/lib/zallet --config /etc/zallet/zallet.toml init-wallet-encryption
+          docker compose run --rm --no-deps zallet \
+            --datadir /var/lib/zallet --config /etc/zallet/zallet.toml generate-mnemonic
+
+      - name: Start the stack
+        run: |
+          set -euxo pipefail
+          docker compose up -d
+          # zebra healthcheck gates zaino/zallet; it passes when RPC answers,
+          # long before the chain is synced.
+          deadline=$((SECONDS + 300))
+          until [ "$(docker inspect --format '{{.State.Health.Status}}' zebra)" = healthy ]; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::zebra never became healthy"; exit 1; }
+            sleep 5
+          done
+
+      - name: Zaino serves lightwalletd gRPC
+        run: |
+          set -euxo pipefail
+          # Plain grep (not -q): -q closes the pipe on match, and under
+          # pipefail the resulting SIGPIPE would read as failure.
+          deadline=$((SECONDS + 180))
+          until docker run --rm --network z3-stack_default \
+              -v "$GITHUB_WORKSPACE/zaino/packages/zaino-proto/lightwallet-protocol/walletrpc:/protos:ro" \
+              fullstorydev/grpcurl -plaintext -import-path /protos -proto service.proto \
+              zaino:8137 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo \
+              | grep chainName; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::zaino gRPC never answered"; exit 1; }
+            sleep 5
+          done
+
+      - name: Zallet answers wallet RPC with a node tip
+        run: |
+          set -euxo pipefail
+          deadline=$((SECONDS + 180))
+          until docker compose exec -T zallet zallet \
+              --datadir /var/lib/zallet --config /etc/zallet/zallet.toml \
+              rpc getwalletstatus | grep node_tip; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::zallet RPC never reported node_tip"; exit 1; }
+            sleep 5
+          done
+
+      - name: No crash-loops, no accidental exposure
+        run: |
+          set -euxo pipefail
+          [ "$(docker inspect --format '{{.RestartCount}}' zaino)" = "0" ]
+          [ "$(docker inspect --format '{{.RestartCount}}' zallet)" = "0" ]
+          # Only zebra publishes anything, and only its P2P port.
+          docker port zebra | grep 8233
+          [ -z "$(docker port zaino)" ]
+          [ -z "$(docker port zallet)" ]
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --tail 200 || true
