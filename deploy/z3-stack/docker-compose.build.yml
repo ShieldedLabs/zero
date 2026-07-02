@@ -1,0 +1,35 @@
+# Build the images from this repo's vendored source instead of pulling from
+# GHCR:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+#
+# The z3 smoke-test workflow (.github/workflows/z3-smoke.yml) builds from the
+# same contexts/Dockerfiles/args; keep them in sync if you change these.
+
+services:
+  zebra:
+    build:
+      context: ../../zebra
+      dockerfile: docker/Dockerfile
+      target: runtime
+      args:
+        FEATURES: "release_max_level_info,progress-bar,prometheus"
+
+  zaino:
+    build:
+      context: ../../zaino
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        RUST_VERSION: "1.95.0"  # keep in sync with ../../zaino/rust-toolchain.toml `channel`
+        NO_TLS: "true"          # gRPC is plaintext on the compose network (see README)
+
+  zallet:
+    # stagex base images are amd64-only: building or running on an ARM64 host
+    # (e.g. Apple Silicon) needs emulation. Uncomment:
+    # platform: linux/amd64
+    build:
+      context: ../../zallet
+      dockerfile: Dockerfile
+      target: runtime

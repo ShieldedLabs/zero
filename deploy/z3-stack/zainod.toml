@@ -1,0 +1,27 @@
+# Zaino indexer config for the Z3 stack. This is a partial file: anything not
+# set here uses zainod's built-in defaults. Values can also be overridden with
+# ZAINO_-prefixed environment variables (double underscore for nesting), but
+# passwords/secrets are refused via env and must live in this file.
+#
+# Reference: zaino/docs/example_configs/zainod.toml in this repo.
+
+# 'fetch' sources everything from the validator's JSON-RPC; it needs no access
+# to Zebra's on-disk state.
+backend = 'fetch'
+network = 'Mainnet'          # Testnet: 'Testnet'
+
+[grpc_settings]
+# 0.0.0.0 so other containers (or a fronting TLS proxy) can reach it. The
+# zero-zaino image is built with the no-TLS feature, so this traffic is
+# PLAINTEXT: keep it on the compose network, or terminate TLS in front of it
+# before exposing it beyond this host.
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+# Zebra's JSON-RPC on the compose network ('zebra' resolves to the container).
+validator_jsonrpc_listen_address = 'zebra:8232'
+# Zebra runs with cookie auth disabled on the private compose network, so no
+# validator_user / validator_password / validator_cookie_path is needed.
+
+[storage.database]
+path = '/app/data'           # the zaino-data volume

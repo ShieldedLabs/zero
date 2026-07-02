@@ -1,0 +1,35 @@
+# Zebra config for the Z3 stack. Zebra faces the public P2P network and
+# serves JSON-RPC to zaino and zallet on the private compose network.
+#
+# Full config reference:
+# https://docs.rs/zebrad/latest/zebrad/config/struct.ZebradConfig.html
+
+[network]
+network = "Mainnet"          # Testnet: "Testnet", and P2P moves to 18233
+listen_addr = "[::]:8233"
+
+# Set this to your public IP:port if Zebra is behind a NAT or load balancer.
+# external_addr = "203.0.113.42:8233"
+
+# Docker path. For a non-Docker host, change both cache_dir values to a
+# host-writable directory, e.g. "/var/lib/zebra".
+cache_dir = "/home/zebra/.cache/zebra"
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra"
+
+# JSON-RPC for zaino and zallet. Compose-internal only: the compose file does
+# not publish 8232 to the host, and it must stay that way (no auth). Cookie
+# auth is disabled because Zebra's cookie is an on-disk file that would have
+# to be shared across three containers (the upstream z3 repo ran a chmod
+# sidecar for this); on a private compose network, network isolation is the
+# auth boundary.
+[rpc]
+listen_addr = "0.0.0.0:8232"
+enable_cookie_auth = false
+
+# Optional Kubernetes/LB-style health endpoints (/healthy and /ready on
+# :8080). Not needed by this bundle: the compose healthcheck probes the RPC
+# port instead, because /ready only returns true near tip.
+# [health]
+# listen_addr = "0.0.0.0:8080"

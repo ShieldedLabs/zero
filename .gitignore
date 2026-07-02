@@ -1,2 +1,6 @@
 # Auto-generated upstream-watch reports (zero-upstream-watch scheduled task)
 /reports/
+
+# Deployment bundle local files (never commit wallet secrets)
+/deploy/*/.env
+/deploy/z3-stack/encryption-identity.txt

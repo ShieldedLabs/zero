@@ -1,0 +1,55 @@
+# Zallet wallet config for the Z3 stack.
+#
+# Zallet is alpha software: this file follows the documented minimal skeleton
+# (zallet/book/src/guide/setup.md in this repo), which currently requires the
+# empty sections below to be present.
+
+[builder.limits]
+
+[consensus]
+network = "main"             # Testnet: "test"
+
+[database]
+
+[external]
+
+[features]
+as_of_version = "0.0.0"
+
+[features.deprecated]
+
+[features.experimental]
+
+[indexer]
+# Zallet embeds Zaino's indexer libraries and talks DIRECTLY to Zebra's
+# JSON-RPC. It does not use the zaino container. Zebra runs with cookie auth
+# disabled on the private compose network, so no credentials are needed.
+validator_address = "zebra:8232"
+
+[keystore]
+# Age identity mounted read-only by docker-compose.yml. Generated once by you;
+# see "One-time wallet init" in README.md.
+encryption_identity = "/etc/zallet/encryption-identity.txt"
+# Zallet's backup confirmation flow needs zcashd-wallet-tool, which is not in
+# this image, so the "confirm backup before handing out new addresses" gate is
+# disabled. YOU MUST BACK UP THE WALLET YOURSELF: the mnemonic (run
+# `export-mnemonic` after `generate-mnemonic`, see README.md), the age
+# identity file, and the zallet-data volume belong together.
+require_backup = false
+
+[note_management]
+
+[rpc]
+# zcashd-compatible wallet JSON-RPC. Compose-internal by default (28232 keeps
+# it distinct from Zebra's node RPC on 8232 in these docs; your clients can
+# still reach it on 8232 via the host mapping, see docker-compose.yml).
+bind = ["0.0.0.0:28232"]
+
+# CHANGE the password. Every request must authenticate (HTTP basic); with no
+# entry here, nothing can connect at all. To use a hashed password instead of
+# a bare one, run `zallet add-rpc-user <user>` and paste the [[rpc.auth]]
+# block it prints. Note the `zallet rpc` CLI used in the README verification
+# steps only authenticates with a bare `password` entry.
+[[rpc.auth]]
+user = "zallet"
+password = "CHANGE_ME"

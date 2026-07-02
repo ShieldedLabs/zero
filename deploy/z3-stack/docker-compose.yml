@@ -1,0 +1,90 @@
+# The Z3 stack: Zebra + Zaino + Zallet, no zcashd.
+#
+# Zebra faces the public Zcash P2P network on 8233 and serves JSON-RPC (8232)
+# on the internal compose network only. Zaino and Zallet BOTH talk directly to
+# Zebra's JSON-RPC: Zaino serves the lightwalletd-compatible gRPC interface
+# (8137) for light clients, and Zallet is the zcashd-compatible wallet (RPC
+# 28232). Nothing but Zebra's P2P port is published to the host.
+#
+# Quick start:   docker compose up -d   (after the one-time wallet init;
+#                see README.md)
+#
+# Startup ordering: zaino and zallet crash if Zebra's RPC is not answering
+# yet, so both wait for the zebra healthcheck. The check gates on "RPC
+# answers", not "synced": both tolerate a syncing Zebra and simply trail it.
+
+services:
+  zebra:
+    # To build from this repo's vendored source instead of pulling, add the
+    # docker-compose.build.yml overlay (see that file).
+    image: ghcr.io/shieldedlabs/zero-zebra:${ZERO_IMAGE_TAG:-latest}
+    container_name: zebra
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE_PATH: /etc/zebra/zebrad.toml
+    volumes:
+      - ./zebrad.toml:/etc/zebra/zebrad.toml:ro
+      - zebra-cache:/home/zebra/.cache/zebra
+    ports:
+      - "8233:8233"   # public P2P (use 18233 for Testnet)
+      # Zebra's JSON-RPC (8232) is unauthenticated; it stays on the compose
+      # network. Do not publish it.
+    healthcheck:
+      # Gate is "RPC answers", NOT sync progress: zebra's optional /ready
+      # endpoint is only true near tip, which takes days on a first mainnet
+      # sync and would block zaino/zallet for no reason.
+      test:
+        - CMD-SHELL
+        - >
+          curl -sf -H 'content-type: application/json'
+          -d '{"jsonrpc":"2.0","id":"hc","method":"getblockchaininfo","params":[]}'
+          http://127.0.0.1:8232 >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 120s
+
+  zaino:
+    image: ghcr.io/shieldedlabs/zero-zaino:${ZERO_IMAGE_TAG:-latest}
+    container_name: zaino
+    restart: unless-stopped
+    depends_on:
+      zebra:
+        condition: service_healthy
+    volumes:
+      # /app/config is the image's default config dir (~/.config/zaino).
+      - ./zainod.toml:/app/config/zainod.toml:ro
+      - zaino-data:/app/data
+    # ports:
+    #   - "8137:8137" # lightwalletd-compatible gRPC. PLAINTEXT (no-TLS
+    #                 # build): put a TLS-terminating proxy in front before
+    #                 # exposing it beyond this host.
+
+  zallet:
+    image: ghcr.io/shieldedlabs/zero-zallet:${ZERO_IMAGE_TAG:-latest}
+    container_name: zallet
+    restart: unless-stopped
+    # Zallet embeds Zaino's indexer libraries and talks DIRECTLY to Zebra's
+    # JSON-RPC (see zallet.toml), not to the zaino container.
+    depends_on:
+      zebra:
+        condition: service_healthy
+    environment:
+      HOME: /var/lib/zallet   # image is FROM scratch; make the datadir explicit
+    command: ["--datadir", "/var/lib/zallet", "--config", "/etc/zallet/zallet.toml", "start"]
+    volumes:
+      - ./zallet.toml:/etc/zallet/zallet.toml:ro
+      # Age identity for the wallet's key encryption. Generated once by you
+      # (README "One-time wallet init"); back it up together with the
+      # zallet-data volume: one without the other cannot be restored.
+      - ./encryption-identity.txt:/etc/zallet/encryption-identity.txt:ro
+      - zallet-data:/var/lib/zallet
+    # ports:
+    #   - "28232:28232" # zcashd-compatible wallet JSON-RPC (HTTP basic auth;
+    #                   # see [[rpc.auth]] in zallet.toml). Map to
+    #                   # "8232:28232" for drop-in zcashd client behavior.
+
+volumes:
+  zebra-cache:
+  zaino-data:
+  zallet-data:

@@ -1,10 +1,14 @@
 name: Images
 
-# Build the Zero zebra and zcashd container images from vendored source and push
-# them to GitHub Container Registry (GHCR). Runs when a release is published, or
-# on demand. Images:
+# Build the Zero container images from vendored source and push them to GitHub
+# Container Registry (GHCR). Runs when a release is published, or on demand.
+# Images:
 #   ghcr.io/<owner>/zero-zebra
 #   ghcr.io/<owner>/zero-zcashd
+#   ghcr.io/<owner>/zero-zaino   (built with NO_TLS=true: its gRPC serves
+#                                 plaintext so it can bind non-loopback on a
+#                                 private network; see deploy/z3-stack/README.md)
+#   ghcr.io/<owner>/zero-zallet
 #
 # First publish: the GHCR packages are created private. Set them to Public once
 # (Org -> Packages -> each package -> Package settings) so users can pull without
@@ -40,6 +44,22 @@ jobs:
             context: zcashd
             dockerfile: docker/zcashd/Dockerfile
             build_args: ""
+          - name: zero-zaino
+            context: zaino
+            dockerfile: zaino/Dockerfile
+            # gRPC binds non-loopback inside the compose network; without TLS
+            # config zainod only allows that when built with the no-TLS
+            # feature (zaino/packages/zainod/src/config.rs). Same trade-off as
+            # upstream's "-no-tls" image tags.
+            build_args: |
+              NO_TLS=true
+            # RUST_VERSION is appended by "Resolve build args" from this
+            # file's `channel` (the Dockerfile deliberately has no default).
+            rust_toolchain_file: zaino/rust-toolchain.toml
+          - name: zero-zallet
+            context: zallet
+            dockerfile: zallet/Dockerfile
+            build_args: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,6 +76,28 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve build args
+        id: args
+        run: |
+          set -euo pipefail
+          {
+            echo "build_args<<BUILD_ARGS_EOF"
+            printf '%s\n' "${{ matrix.build_args }}"
+            if [ -n "${{ matrix.rust_toolchain_file }}" ]; then
+              # zaino's tools/scripts/get-rust-version.sh resolves the git
+              # root, which in this monorepo has no rust-toolchain.toml, so
+              # read the channel from the vendored file directly.
+              rv=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+                   "${{ matrix.rust_toolchain_file }}" | head -n1)
+              if ! [[ "$rv" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+                echo "::error::unexpected channel '${rv}' in ${{ matrix.rust_toolchain_file }}"
+                exit 1
+              fi
+              echo "RUST_VERSION=${rv}"
+            fi
+            echo "BUILD_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Image metadata
         id: meta
@@ -77,6 +119,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
+          build-args: ${{ steps.args.outputs.build_args }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}

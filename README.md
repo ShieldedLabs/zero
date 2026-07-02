@@ -77,6 +77,10 @@ Refer to each component directory for configuration and operational guidance.
 
 ### Deployments
 
+- [Z3 stack: Zebra + Zaino + Zallet](deploy/z3-stack/) - the zcashd-free
+  stack: Zebra validates, Zaino serves light clients, Zallet is the
+  zcashd-compatible wallet. Docker Compose, config files, a wallet-init
+  walkthrough, and a verification cheat-sheet.
 - [Shield zcashd behind Zebra](deploy/zcashd-behind-zebra/) - put Zebra in front
   of zcashd to remove zcashd's network-facing attack surface. Docker Compose,
   config files, systemd units, and a verification cheat-sheet.
