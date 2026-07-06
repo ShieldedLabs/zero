@@ -1371,12 +1371,12 @@ impl Service<ReadRequest> for ReadStateService {
         let timed_span = TimedSpan::new(timer, span);
         let state = self.clone();
 
-        if req == ReadRequest::NonFinalizedBlocksListener {
+        if let ReadRequest::NonFinalizedBlocksListener { known_chain_tips } = req {
             // The non-finalized blocks listener is used to notify the state service
             // about new blocks that have been added to the non-finalized state.
             let non_finalized_blocks_listener = NonFinalizedBlocksListener::spawn(
-                self.network.clone(),
                 self.non_finalized_state_receiver.clone(),
+                known_chain_tips,
             );
 
             return async move {
@@ -1556,12 +1556,38 @@ impl Service<ReadRequest> for ReadStateService {
                 .collect(),
             )),
 
+            ReadRequest::FindForkPoint { known_blocks } => {
+                // Reject over-long locators before doing any work, so an untrusted
+                // caller can't force unbounded lookups.
+                let locator_len: u64 = known_blocks
+                    .len()
+                    .try_into()
+                    .expect("usize always fits in u64 on supported (<=64-bit) platforms");
+                if locator_len > block::MAX_BLOCK_LOCATOR_LENGTH {
+                    return Err(BoxError::from(format!(
+                        "FindForkPoint locator length {locator_len} exceeds \
+                         MAX_BLOCK_LOCATOR_LENGTH ({})",
+                        block::MAX_BLOCK_LOCATOR_LENGTH,
+                    )));
+                }
+
+                Ok(ReadResponse::ForkPoint(read::find_fork_point(
+                    state.latest_best_chain(),
+                    &state.db,
+                    known_blocks,
+                )))
+            }
+
             ReadRequest::SaplingTree(hash_or_height) => Ok(ReadResponse::SaplingTree(
                 read::sapling_tree(state.latest_best_chain(), &state.db, hash_or_height),
             )),
 
             ReadRequest::OrchardTree(hash_or_height) => Ok(ReadResponse::OrchardTree(
                 read::orchard_tree(state.latest_best_chain(), &state.db, hash_or_height),
+            )),
+
+            ReadRequest::IronwoodTree(hash_or_height) => Ok(ReadResponse::IronwoodTree(
+                read::ironwood_tree(state.latest_best_chain(), &state.db, hash_or_height),
             )),
 
             ReadRequest::SaplingSubtrees { start_index, limit } => {
@@ -1600,6 +1626,25 @@ impl Service<ReadRequest> for ReadStateService {
                 };
 
                 Ok(ReadResponse::OrchardSubtrees(orchard_subtrees))
+            }
+
+            ReadRequest::IronwoodSubtrees { start_index, limit } => {
+                let end_index = limit
+                    .and_then(|limit| start_index.0.checked_add(limit.0))
+                    .map(NoteCommitmentSubtreeIndex);
+
+                let best_chain = state.latest_best_chain();
+                let ironwood_subtrees = if let Some(end_index) = end_index {
+                    read::ironwood_subtrees(best_chain, &state.db, start_index..end_index)
+                } else {
+                    // If there is no end bound, just return all the trees.
+                    // If the end bound would overflow, just returns all the trees, because that's what
+                    // `zcashd` does. (It never calculates an end bound, so it just keeps iterating until
+                    // the trees run out.)
+                    read::ironwood_subtrees(best_chain, &state.db, start_index..)
+                };
+
+                Ok(ReadResponse::IronwoodSubtrees(ironwood_subtrees))
             }
 
             // For the get_address_balance RPC.
@@ -1771,7 +1816,7 @@ impl Service<ReadRequest> for ReadStateService {
                 ))
             }
 
-            ReadRequest::NonFinalizedBlocksListener => {
+            ReadRequest::NonFinalizedBlocksListener { .. } => {
                 unreachable!("should return early");
             }
 
