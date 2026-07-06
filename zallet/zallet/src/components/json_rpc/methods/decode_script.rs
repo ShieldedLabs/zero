@@ -107,7 +107,7 @@ fn calculate_p2sh_address(script_bytes: &[u8], params: &Network) -> String {
 //       See https://github.com/ZcashFoundation/zcash_script/pull/291
 // TODO: zcashd relied on initialization behaviour for the default value
 //       for null-data or non-standard outputs. Figure out what it is.
-//       https://github.com/zcash/wallet/issues/236
+//       https://github.com/zcash/zallet/issues/236
 fn detect_script_info(
     script_code: &Code,
     params: &Network,
@@ -226,11 +226,10 @@ mod tests {
         // Uses the same pubkey repeated 3 times (valid for testing)
         let script_hex = format!(
             "52\
-             21{pk}\
-             21{pk}\
-             21{pk}\
-             53ae",
-            pk = ZCASHD_PUBLIC_KEY
+             21{ZCASHD_PUBLIC_KEY}\
+             21{ZCASHD_PUBLIC_KEY}\
+             21{ZCASHD_PUBLIC_KEY}\
+             53ae"
         );
         let result = call(&mainnet(), &script_hex).unwrap().inner;
 

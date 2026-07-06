@@ -2,7 +2,7 @@ use std::fmt;
 
 use jsonrpsee::{
     core::{JsonValue, RpcResult},
-    types::ErrorCode as RpcErrorCode,
+    types::{ErrorCode as RpcErrorCode, ErrorObjectOwned},
 };
 use rust_decimal::Decimal;
 use schemars::{JsonSchema, json_schema};
@@ -20,9 +20,14 @@ use super::server::LegacyCode;
 
 #[cfg(zallet_build = "wallet")]
 use {
-    crate::components::{database::DbConnection, keystore::KeyStore},
+    crate::components::{
+        chain::{Chain, ChainView},
+        database::DbConnection,
+        keystore::KeyStore,
+    },
     std::collections::HashSet,
-    zcash_client_backend::data_api::{Account, WalletRead},
+    zcash_client_backend::data_api::{Account, AccountBirthday, WalletRead, chain::ChainState},
+    zcash_primitives::block::BlockHash,
     zcash_protocol::value::BalanceError,
     zip32::fingerprint::SeedFingerprint,
 };
@@ -113,6 +118,61 @@ pub(super) async fn collect_standalone_transparent_keys<NoteRef>(
         }
     }
     Ok(keys)
+}
+
+/// Builds an [`AccountBirthday`] by fetching the treestate at the given height.
+///
+/// For height 0 (genesis), returns a birthday with an empty chain state since the
+/// commitment trees are empty. For non-zero heights, fetches the real treestate from
+/// the chain indexer so the sync engine can validate note commitment tree continuity.
+#[cfg(zallet_build = "wallet")]
+pub(super) async fn fetch_account_birthday<C: Chain>(
+    chain: &C,
+    height: BlockHeight,
+) -> RpcResult<AccountBirthday> {
+    if height == BlockHeight::from_u32(0) {
+        // The chain state is the state of the note commitment trees *as of the block
+        // preceding* the birthday. There is no block before genesis, and the conventional
+        // hash of genesis's (nonexistent) parent is all-zeros, so an empty chain state with
+        // a zero block hash is the correct anchor here. (Using the real genesis block hash
+        // would be wrong: that is the hash of block 0 itself, not of the block before it.)
+        return Ok(AccountBirthday::from_parts(
+            ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+            None,
+        ));
+    }
+
+    // The chain state anchoring the birthday is the note commitment tree state as of the
+    // block *preceding* the birthday height.
+    let treestate_height = height.saturating_sub(1);
+    let chain_view = chain.snapshot().await.map_err(|e| {
+        ErrorObjectOwned::owned(
+            RpcErrorCode::InternalError.code(),
+            format!("Failed to obtain a chain snapshot: {e}"),
+            None::<()>,
+        )
+    })?;
+    let chain_state = chain_view
+        .tree_state_as_of(treestate_height)
+        .await
+        .map_err(|e| {
+            // A failure to fetch the treestate from the chain indexer is an internal
+            // error, not a problem with the caller's parameters.
+            ErrorObjectOwned::owned(
+                RpcErrorCode::InternalError.code(),
+                format!("Failed to get treestate at height {treestate_height}: {e}"),
+                None::<()>,
+            )
+        })?
+        .ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                RpcErrorCode::InternalError.code(),
+                format!("No treestate available at height {treestate_height}"),
+                None::<()>,
+            )
+        })?;
+
+    Ok(AccountBirthday::from_parts(chain_state, None))
 }
 
 pub(crate) fn parse_txid(txid_str: &str) -> RpcResult<TxId> {
@@ -516,6 +576,15 @@ fn parse_fixed_point(mut val: &str, decimals: i64) -> Option<i64> {
     }
 
     Some(mantissa)
+}
+
+/// Formats an integer number of zatoshis as a decimal ZEC string (8 fractional digits).
+///
+/// The formatting inverse of [`zatoshis_from_value`], for constructing amount fixtures in
+/// tests.
+#[cfg(test)]
+pub(crate) fn zec_str(zatoshis: u64) -> String {
+    format!("{}.{:08}", zatoshis / 100_000_000, zatoshis % 100_000_000)
 }
 
 #[cfg(test)]

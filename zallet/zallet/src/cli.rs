@@ -34,6 +34,8 @@ pub struct EntryPoint {
     /// Specify the data directory for the Zallet wallet.
     ///
     /// This must be an absolute path.
+    ///
+    /// [default: $HOME/.zallet]
     #[arg(short, long)]
     pub(crate) datadir: Option<PathBuf>,
 
@@ -60,6 +62,10 @@ pub(crate) enum ZalletCmd {
     /// Add the keys and transactions of a zcashd wallet.dat file to the wallet database.
     #[cfg(all(zallet_build = "wallet", feature = "zcashd-import"))]
     MigrateZcashdWallet(MigrateZcashdWalletCmd),
+
+    /// Generate the wallet's age encryption identity.
+    #[cfg(zallet_build = "wallet")]
+    GenerateEncryptionIdentity(GenerateEncryptionIdentityCmd),
 
     /// Initialize wallet encryption.
     #[cfg(zallet_build = "wallet")]
@@ -205,6 +211,27 @@ pub(crate) struct MigrateZcashdWalletCmd {
     /// Temporary flag ensuring any alpha users are aware the migration is not stable.
     #[arg(long)]
     pub(crate) this_is_alpha_code_and_you_will_need_to_redo_the_migration_later: bool,
+}
+
+/// `generate-encryption-identity` subcommand
+#[cfg(zallet_build = "wallet")]
+#[derive(Debug, Parser)]
+#[cfg_attr(outside_buildscript, derive(Command))]
+pub(crate) struct GenerateEncryptionIdentityCmd {
+    /// Where to write the age encryption identity file.
+    ///
+    /// - By default, the configured `keystore.encryption_identity` path is used.
+    /// - The value `-` will write the identity to stdout.
+    #[arg(short, long)]
+    pub(crate) output: Option<String>,
+
+    /// Encrypt the identity with a passphrase (ASCII-armored).
+    ///
+    /// In non-interactive contexts, the passphrase is read from the
+    /// `ZALLET_IDENTITY_PASSPHRASE` environment variable; otherwise
+    /// you will be prompted for it.
+    #[arg(short, long)]
+    pub(crate) passphrase: bool,
 }
 
 /// `init-wallet-encryption` subcommand
