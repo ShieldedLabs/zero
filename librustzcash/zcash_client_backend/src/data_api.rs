@@ -83,7 +83,7 @@ use zcash_keys::{
 };
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{
-    PoolType, ShieldedProtocol, TxId,
+    PoolType, ShieldedPool, TxId,
     consensus::{self, BlockHeight, TxIndex},
     memo::{Memo, MemoBytes},
     value::{BalanceError, Zatoshis},
@@ -106,6 +106,7 @@ use crate::{
 
 #[cfg(feature = "transparent-inputs")]
 use {
+    crate::fees::StandardFeeRule,
     crate::wallet::TransparentAddressMetadata,
     getset::{CopyGetters, Getters},
     std::time::SystemTime,
@@ -163,6 +164,13 @@ pub const SAPLING_SHARD_HEIGHT: u8 = sapling::NOTE_COMMITMENT_TREE_DEPTH / 2;
 /// `lightwalletd` when using the `GetSubtreeRoots` GRPC call.
 #[cfg(feature = "orchard")]
 pub const ORCHARD_SHARD_HEIGHT: u8 = { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 } / 2;
+
+/// The height of subtree roots in the Ironwood note commitment tree.
+///
+/// This conforms to the structure of subtree data returned by
+/// `lightwalletd` when using the `GetSubtreeRoots` GRPC call.
+#[cfg(feature = "orchard")]
+pub const IRONWOOD_SHARD_HEIGHT: u8 = { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 } / 2;
 
 /// An enumeration of constraints that can be applied when querying for nullifiers for notes
 /// belonging to the wallet.
@@ -1283,10 +1291,11 @@ impl AccountMeta {
     }
 
     /// Returns the number of unspent notes in the wallet for the given shielded protocol.
-    pub fn note_count(&self, protocol: ShieldedProtocol) -> Option<usize> {
+    pub fn note_count(&self, protocol: ShieldedPool) -> Option<usize> {
         match protocol {
-            ShieldedProtocol::Sapling => self.sapling_note_count(),
-            ShieldedProtocol::Orchard => self.orchard_note_count(),
+            ShieldedPool::Sapling => self.sapling_note_count(),
+            ShieldedPool::Orchard => self.orchard_note_count(),
+            ShieldedPool::Ironwood => todo!("Ironwood note counts are not yet tracked"),
         }
     }
 
@@ -1420,13 +1429,14 @@ impl NoteFilter {
     }
 }
 
-/// Controls which transparent outputs are eligible for selection.
+/// Controls which transparent outputs are eligible for selection. This is an
+/// input-selection control only; it does not encode any consensus rule.
 #[cfg(feature = "transparent-inputs")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransparentOutputFilter {
+pub enum CoinbaseFilter {
     /// Select all spendable transparent outputs.
     #[default]
-    All,
+    AllTransparentOutputs,
     /// Select only coinbase transparent outputs.
     ///
     /// Coinbase transactions are identified by having `tx_index == 0` within
@@ -1434,6 +1444,14 @@ pub enum TransparentOutputFilter {
     /// unknown are conservatively treated as non-coinbase and will be excluded
     /// when this filter is active.
     CoinbaseOnly,
+    /// Select only non-coinbase transparent outputs.
+    ///
+    /// Used for general (non-shielding) transfers, which may produce transparent
+    /// change; coinbase funds must instead be shielded via
+    /// [`propose_shielding_coinbase`](crate::data_api::wallet::propose_shielding_coinbase).
+    /// Outputs whose transaction index is unknown are treated as non-coinbase
+    /// and are included.
+    NonCoinbaseOnly,
 }
 
 /// A trait representing the capability to query a data store for unspent transaction outputs
@@ -1464,7 +1482,7 @@ pub trait InputSource {
     fn get_spendable_note(
         &self,
         txid: &TxId,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
         index: u32,
         target_height: TargetHeight,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error>;
@@ -1476,7 +1494,7 @@ pub trait InputSource {
         &self,
         account: Self::AccountId,
         target_value: TargetValue,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
         exclude: &[Self::NoteRef],
@@ -1487,7 +1505,7 @@ pub trait InputSource {
     fn select_unspent_notes(
         &self,
         account: Self::AccountId,
-        sources: &[ShieldedProtocol],
+        sources: &[ShieldedPool],
         target_height: TargetHeight,
         exclude: &[Self::NoteRef],
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error>;
@@ -1533,7 +1551,7 @@ pub trait InputSource {
     ///   `target_height` (also taking into consideration the coinbase maturity rule).
     ///
     /// The `output_filter` parameter controls which transparent outputs are eligible. When set
-    /// to [`TransparentOutputFilter::CoinbaseOnly`], only outputs from coinbase transactions
+    /// to [`CoinbaseFilter::CoinbaseOnly`], only outputs from coinbase transactions
     /// should be returned.
     ///
     /// Any output that is potentially spent by an unmined transaction in the mempool should be
@@ -1544,10 +1562,114 @@ pub trait InputSource {
         _address: &TransparentAddress,
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
-        _output_filter: TransparentOutputFilter,
+        _output_filter: CoinbaseFilter,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
         unimplemented!(
             "InputSource::get_spendable_transparent_outputs must be overridden for wallets to use the `transparent-inputs` feature"
+        )
+    }
+
+    /// Returns the list of spendable transparent outputs received by this wallet at any of the
+    /// given `addresses`, subject to the same spendability conditions as
+    /// [`InputSource::get_spendable_transparent_outputs`].
+    ///
+    /// This is the batched equivalent of calling
+    /// [`InputSource::get_spendable_transparent_outputs`] once per address. It exists so that data
+    /// stores can satisfy a multi-address request with a single query rather than one query per
+    /// address, which is prohibitively expensive for wallets that hold large numbers of transparent
+    /// addresses (as occurs when shielding). The default implementation simply iterates over
+    /// `addresses`; data stores should override it with a batched query where possible.
+    ///
+    /// Each returned output identifies its receiving address via
+    /// [`WalletTransparentOutput::recipient_address`].
+    #[cfg(feature = "transparent-inputs")]
+    fn get_spendable_transparent_outputs_for_addresses(
+        &self,
+        addresses: &[TransparentAddress],
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        let mut outputs = Vec::new();
+        for address in addresses {
+            outputs.extend(self.get_spendable_transparent_outputs(
+                address,
+                target_height,
+                confirmations_policy,
+                output_filter,
+            )?);
+        }
+        Ok(outputs)
+    }
+
+    /// Returns the spendable transparent outputs received by `account` whose total post-fee
+    /// value (sum of values minus the cumulative marginal fee cost of the gathered inputs
+    /// themselves, per `fee_rule`) is at least `target_value`, or `max_inputs` outputs
+    /// (whichever is reached first).
+    ///
+    /// The gather is intended to scale to wallets with large numbers of transparent addresses and
+    /// UTXOs: it returns a value-bounded subset rather than every spendable output, so the
+    /// selector does not need to materialize the wallet's full UTXO set. Data stores should
+    /// implement this with a single query that orders eligible UTXOs by descending value and
+    /// accumulates them, recomputing the cumulative fee via `fee_rule` at each step, stopping
+    /// once the post-fee cumulative value meets the bound. This produces a tighter result than a
+    /// static value bound, without requiring a separate round trip to correct an under-estimated
+    /// headroom.
+    ///
+    /// `max_inputs` bounds the number of transparent inputs a single transaction may consume,
+    /// independent of `target_value`: even a small requested value could otherwise require an
+    /// unbounded number of inputs for a wallet holding a very large number of small (e.g. dust)
+    /// UTXOs. When the cap is reached before the value target, the returned set's post-fee value
+    /// may be less than `target_value`; the caller's input-selection loop is expected to surface
+    /// this as an `InsufficientFunds` error, the same as for any other value shortfall.
+    ///
+    /// `fee_rule` is fixed to [`StandardFeeRule`] (rather than being generic over the caller's
+    /// actual [`ChangeStrategy`]) so that implementations of this method do not need to be
+    /// generic over an arbitrary fee rule type. This is a heuristic bound only: the transaction's
+    /// real fee is still computed by the caller's actual change strategy, and if this gather's
+    /// estimate turns out to be insufficient, the caller's input-selection loop will surface an
+    /// `InsufficientFunds` error and can re-invoke this method with a corrected `target_value`.
+    ///
+    /// For `TargetValue::AllFunds`, no value bound is applied and the gather returns every
+    /// eligible output up to `max_inputs`.
+    ///
+    /// When `address_allow_list` is `Some`, only outputs received at one of the listed
+    /// transparent addresses are eligible; when `None`, outputs received at any of the
+    /// account's transparent addresses are eligible. The restriction must be applied
+    /// *within* the gather (not to its results), so that outputs excluded by the allow list
+    /// do not consume the value bound.
+    ///
+    /// This is the value-bounded counterpart to [`InputSource::get_spendable_transparent_outputs`]
+    /// and [`InputSource::get_spendable_transparent_outputs_for_addresses`], intended for use by
+    /// general (non-shielding) input selection in `propose_transaction`.
+    ///
+    /// [`ChangeStrategy`]: crate::fees::ChangeStrategy
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::too_many_arguments)]
+    fn select_spendable_transparent_outputs(
+        &self,
+        account: Self::AccountId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        output_filter: CoinbaseFilter,
+        address_allow_list: Option<&[TransparentAddress]>,
+        target_value: TargetValue,
+        max_inputs: usize,
+        fee_rule: &StandardFeeRule,
+    ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        let _ = (
+            account,
+            target_height,
+            confirmations_policy,
+            output_filter,
+            address_allow_list,
+            target_value,
+            max_inputs,
+            fee_rule,
+        );
+        unimplemented!(
+            "InputSource::select_spendable_transparent_outputs must be overridden for \
+             wallets to use the value-bounded transparent input gather in propose_transaction"
         )
     }
 }
@@ -1983,7 +2105,7 @@ pub trait WalletTest: InputSource + WalletRead {
     fn get_sent_note_ids(
         &self,
         _txid: &TxId,
-        _protocol: ShieldedProtocol,
+        _protocol: ShieldedPool,
     ) -> Result<Vec<NoteId>, <Self as WalletRead>::Error>;
 
     /// Returns the outputs for a transaction sent by the wallet.
@@ -1996,7 +2118,7 @@ pub trait WalletTest: InputSource + WalletRead {
     #[allow(clippy::type_complexity)]
     fn get_checkpoint_history(
         &self,
-        protocol: &ShieldedProtocol,
+        protocol: &ShieldedPool,
     ) -> Result<
         Vec<(BlockHeight, Option<incrementalmerkletree::Position>)>,
         <Self as WalletRead>::Error,
@@ -2030,7 +2152,7 @@ pub trait WalletTest: InputSource + WalletRead {
     /// Returns all the notes that have been received by the wallet.
     fn get_notes(
         &self,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
     ) -> Result<Vec<ReceivedNote<Self::NoteRef, Note>>, <Self as InputSource>::Error>;
 
     /// Returns a vector of ephemeral transparent addresses associated with the given
@@ -2594,11 +2716,25 @@ impl ReceivedTransactionOutput {
     }
 }
 
+/// Identifies one of the wallet-maintained note commitment trees.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NoteCommitmentTree {
+    /// The Sapling note commitment tree.
+    Sapling,
+    /// The Orchard note commitment tree.
+    #[cfg(feature = "orchard")]
+    Orchard,
+    /// The Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    Ironwood,
+}
+
 /// An output of a transaction generated by the wallet.
 ///
 /// This type is capable of representing both shielded and transparent outputs.
 pub struct SentTransactionOutput<AccountId> {
     output_index: usize,
+    note_commitment_tree: Option<NoteCommitmentTree>,
     recipient: Recipient<AccountId>,
     value: Zatoshis,
     memo: Option<MemoBytes>,
@@ -2622,6 +2758,24 @@ impl<AccountId> SentTransactionOutput<AccountId> {
     ) -> Self {
         Self {
             output_index,
+            note_commitment_tree: None,
+            recipient,
+            value,
+            memo,
+        }
+    }
+
+    /// Constructs a new [`SentTransactionOutput`] with explicit note commitment tree metadata.
+    pub(crate) fn from_parts_in_tree(
+        note_commitment_tree: Option<NoteCommitmentTree>,
+        output_index: usize,
+        recipient: Recipient<AccountId>,
+        value: Zatoshis,
+        memo: Option<MemoBytes>,
+    ) -> Self {
+        Self {
+            output_index,
+            note_commitment_tree,
             recipient,
             value,
             memo,
@@ -2636,6 +2790,10 @@ impl<AccountId> SentTransactionOutput<AccountId> {
     ///   transparent outputs of the transaction.
     pub fn output_index(&self) -> usize {
         self.output_index
+    }
+    /// Returns the note commitment tree for this output, if known.
+    pub fn note_commitment_tree(&self) -> Option<NoteCommitmentTree> {
+        self.note_commitment_tree
     }
     /// Returns the recipient address of the transaction, or the account id and
     /// resulting note/outpoint for wallet-internal outputs.
@@ -3417,6 +3575,68 @@ pub trait WalletCommitmentTrees {
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>>;
+
+    /// Evaluates the given callback with the Ironwood note commitment tree
+    /// maintained by the wallet, if this backend has one.
+    ///
+    /// The default implementation reports that no Ironwood tree is available.
+    /// Backends that track Ironwood note commitments should override this and
+    /// provide their separate Ironwood tree.
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, _callback: F) -> Result<Option<A>, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::OrchardShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        Ok(None)
+    }
+
+    /// Releases all retained ("anchor") checkpoints with height strictly less than `max_height`
+    /// from the wallet's note commitment trees, allowing them to be pruned normally.
+    ///
+    /// Anchor checkpoints are established during scanning (and may be created directly via
+    /// [`ShardTree::ensure_retained`]); they are otherwise exempt from automatic pruning of excess
+    /// checkpoints. This releases the retention of those that have aged below `max_height` in both
+    /// the Sapling and (when the `orchard` feature is enabled) Orchard trees.
+    fn remove_retained_checkpoints_below(
+        &mut self,
+        max_height: BlockHeight,
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|tree| {
+            for height in tree
+                .store()
+                .retained_checkpoints()
+                .map_err(ShardTreeError::Storage)?
+            {
+                if height < max_height {
+                    tree.remove_retained_checkpoint(&height)?;
+                }
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        #[cfg(feature = "orchard")]
+        self.with_orchard_tree_mut(|tree| {
+            for height in tree
+                .store()
+                .retained_checkpoints()
+                .map_err(ShardTreeError::Storage)?
+            {
+                if height < max_height {
+                    tree.remove_retained_checkpoint(&height)?;
+                }
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

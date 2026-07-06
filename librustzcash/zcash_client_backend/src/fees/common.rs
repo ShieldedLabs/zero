@@ -5,7 +5,7 @@ use zcash_primitives::transaction::fees::{
     FeeRule, transparent, zip317::MINIMUM_FEE, zip317::P2PKH_STANDARD_OUTPUT_SIZE,
 };
 use zcash_protocol::{
-    ShieldedProtocol,
+    ShieldedPool,
     consensus::{self, BlockHeight},
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
@@ -28,21 +28,32 @@ pub(crate) struct NetFlows {
     sapling_out: Zatoshis,
     orchard_in: Zatoshis,
     orchard_out: Zatoshis,
+    // Value flowing through the Ironwood bundle, accounted separately from
+    // Orchard because V6 transactions carry distinct Orchard and Ironwood
+    // bundles. Splitting output value between the Orchard and Ironwood views
+    // leaves `total_in`/`total_out` unchanged; the separate fields exist so each
+    // bundle's action count can be derived from its own inputs and outputs.
+    ironwood_in: Zatoshis,
+    ironwood_out: Zatoshis,
 }
 
 impl NetFlows {
     fn total_in(&self) -> Result<Zatoshis, BalanceError> {
-        (self.t_in + self.sapling_in + self.orchard_in).ok_or(BalanceError::Overflow)
+        (self.t_in + self.sapling_in + self.orchard_in + self.ironwood_in)
+            .ok_or(BalanceError::Overflow)
     }
     fn total_out(&self) -> Result<Zatoshis, BalanceError> {
-        (self.t_out + self.sapling_out + self.orchard_out).ok_or(BalanceError::Overflow)
+        (self.t_out + self.sapling_out + self.orchard_out + self.ironwood_out)
+            .ok_or(BalanceError::Overflow)
     }
     /// Returns true iff the flows excluding change are fully transparent.
     fn is_transparent(&self) -> bool {
         !(self.sapling_in.is_positive()
             || self.sapling_out.is_positive()
             || self.orchard_in.is_positive()
-            || self.orchard_out.is_positive())
+            || self.orchard_out.is_positive()
+            || self.ironwood_in.is_positive()
+            || self.ironwood_out.is_positive())
     }
 }
 
@@ -52,6 +63,7 @@ pub(crate) fn calculate_net_flows<NoteRefT: Clone, F: FeeRule, E>(
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    #[cfg(feature = "orchard")] ironwood: &impl orchard_fees::BundleView<NoteRefT>,
     ephemeral_balance: Option<EphemeralBalance>,
 ) -> Result<NetFlows, ChangeError<E, NoteRefT>>
 where
@@ -104,6 +116,26 @@ where
     #[cfg(not(feature = "orchard"))]
     let orchard_out = Zatoshis::ZERO;
 
+    #[cfg(feature = "orchard")]
+    let ironwood_in = ironwood
+        .inputs()
+        .iter()
+        .map(orchard_fees::InputView::<NoteRefT>::value)
+        .sum::<Option<_>>()
+        .ok_or_else(overflow)?;
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_in = Zatoshis::ZERO;
+
+    #[cfg(feature = "orchard")]
+    let ironwood_out = ironwood
+        .outputs()
+        .iter()
+        .map(orchard_fees::OutputView::value)
+        .sum::<Option<_>>()
+        .ok_or_else(overflow)?;
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_out = Zatoshis::ZERO;
+
     Ok(NetFlows {
         t_in,
         t_out,
@@ -111,30 +143,32 @@ where
         sapling_out,
         orchard_in,
         orchard_out,
+        ironwood_in,
+        ironwood_out,
     })
 }
 
 /// Decide which shielded pool change should go to if there is any.
 pub(crate) fn select_change_pool(
     _net_flows: &NetFlows,
-    _fallback_change_pool: ShieldedProtocol,
-) -> ShieldedProtocol {
+    _fallback_change_pool: ShieldedPool,
+) -> ShieldedPool {
     // TODO: implement a less naive strategy for selecting the pool to which change will be sent.
     #[cfg(feature = "orchard")]
     if _net_flows.orchard_in.is_positive() || _net_flows.orchard_out.is_positive() {
         // Send change to Orchard if we're spending any Orchard inputs or creating any Orchard outputs.
-        ShieldedProtocol::Orchard
+        ShieldedPool::Orchard
     } else if _net_flows.sapling_in.is_positive() || _net_flows.sapling_out.is_positive() {
         // Otherwise, send change to Sapling if we're spending any Sapling inputs or creating any
         // Sapling outputs, so that we avoid pool-crossing.
-        ShieldedProtocol::Sapling
+        ShieldedPool::Sapling
     } else {
         // The flows are transparent, so there may not be change. If there is, the caller
         // gets to decide where to shield it.
         _fallback_change_pool
     }
     #[cfg(not(feature = "orchard"))]
-    ShieldedProtocol::Sapling
+    ShieldedPool::Sapling
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,7 +204,7 @@ pub(crate) struct SinglePoolBalanceConfig<'a, P, F> {
     dust_output_policy: &'a DustOutputPolicy,
     default_dust_threshold: Zatoshis,
     split_policy: &'a SplitPolicy,
-    fallback_change_pool: ShieldedProtocol,
+    fallback_change_pool: ShieldedPool,
     marginal_fee: Zatoshis,
     grace_actions: usize,
 }
@@ -183,7 +217,7 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
         dust_output_policy: &'a DustOutputPolicy,
         default_dust_threshold: Zatoshis,
         split_policy: &'a SplitPolicy,
-        fallback_change_pool: ShieldedProtocol,
+        fallback_change_pool: ShieldedPool,
         marginal_fee: Zatoshis,
         grace_actions: usize,
     ) -> Self {
@@ -209,6 +243,12 @@ pub(crate) fn single_pool_output_balance<P: consensus::Parameters, NoteRefT: Clo
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    #[cfg(feature = "orchard")] ironwood: &impl orchard_fees::BundleView<NoteRefT>,
+    // Whether Orchard-pool change is routed into the Ironwood bundle (the builder
+    // does this when Ironwood is active). Orchard-pool payment outputs are already
+    // routed into the `ironwood` view by the caller; this carries the same decision
+    // for the change output, which is computed here.
+    #[cfg(feature = "orchard")] orchard_change_to_ironwood: bool,
     change_memo: Option<&MemoBytes>,
     ephemeral_balance: Option<EphemeralBalance>,
 ) -> Result<TransactionBalance, ChangeError<E, NoteRefT>>
@@ -229,6 +269,8 @@ where
         sapling,
         #[cfg(feature = "orchard")]
         orchard,
+        #[cfg(feature = "orchard")]
+        ironwood,
         ephemeral_balance,
     )?;
 
@@ -241,12 +283,12 @@ where
     });
     let target_change_counts = OutputManifest {
         transparent: 0,
-        sapling: if change_pool == ShieldedProtocol::Sapling {
+        sapling: if change_pool == ShieldedPool::Sapling {
             target_change_count
         } else {
             0
         },
-        orchard: if change_pool == ShieldedProtocol::Orchard {
+        orchard: if change_pool == ShieldedPool::Orchard {
             target_change_count
         } else {
             0
@@ -312,13 +354,12 @@ where
 
     #[cfg(feature = "orchard")]
     let orchard_action_count = |change_count| {
-        orchard
-            .bundle_type()
-            .num_actions(
-                orchard.inputs().len(),
-                orchard.outputs().len() + change_count,
-            )
-            .map_err(ChangeError::BundleError)
+        orchard_fees::transactional_action_count(
+            orchard.bundle_version(),
+            orchard.inputs().len(),
+            orchard.outputs().len() + change_count,
+        )
+        .map_err(ChangeError::BundleError)
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count = |change_count: usize| -> Result<usize, ChangeError<E, NoteRefT>> {
@@ -330,6 +371,40 @@ where
             Ok(0)
         }
     };
+
+    // The Ironwood bundle is accounted separately from Orchard: a V6 transaction
+    // carries distinct Orchard and Ironwood bundles, each padded to its own
+    // action floor. Callers route Ironwood inputs/outputs into the `ironwood`
+    // view; it is empty (contributing no actions) when nothing targets the
+    // Ironwood pool.
+    #[cfg(feature = "orchard")]
+    let ironwood_action_count = |change_count| {
+        orchard_fees::transactional_action_count(
+            ironwood.bundle_version(),
+            ironwood.inputs().len(),
+            ironwood.outputs().len() + change_count,
+        )
+        .map_err(ChangeError::BundleError)
+    };
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_action_count = |change_count: usize| -> Result<usize, ChangeError<E, NoteRefT>> {
+        if change_count != 0 {
+            Err(ChangeError::BundleError(
+                "Nonzero Ironwood change requested but the `orchard` feature is not enabled.",
+            ))
+        } else {
+            Ok(0)
+        }
+    };
+
+    // When Ironwood is active, the builder routes Orchard-pool change into the
+    // Ironwood bundle (Orchard-pool payment outputs are already routed into the
+    // `ironwood` view by the caller). Mirror that here so the change output is
+    // counted in the same bundle the builder will place it in.
+    #[cfg(feature = "orchard")]
+    let route_change_to_ironwood = orchard_change_to_ironwood;
+    #[cfg(not(feature = "orchard"))]
+    let route_change_to_ironwood = false;
 
     let transparent_input_sizes = transparent_inputs
         .iter()
@@ -378,6 +453,7 @@ where
             sapling_input_count,
             sapling_output_count(0)?,
             orchard_action_count(0)?,
+            ironwood_action_count(0)?,
         )
         .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?;
 
@@ -409,7 +485,16 @@ where
                         transparent_output_sizes.clone(),
                         sapling_input_count,
                         sapling_output_count(target_change_counts.sapling())?,
-                        orchard_action_count(target_change_counts.orchard())?,
+                        orchard_action_count(if route_change_to_ironwood {
+                            0
+                        } else {
+                            target_change_counts.orchard()
+                        })?,
+                        ironwood_action_count(if route_change_to_ironwood {
+                            target_change_counts.orchard()
+                        } else {
+                            0
+                        })?,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?,
             );
@@ -439,16 +524,25 @@ where
                         transparent_input_sizes,
                         transparent_output_sizes,
                         sapling_input_count,
-                        sapling_output_count(if change_pool == ShieldedProtocol::Sapling {
+                        sapling_output_count(if change_pool == ShieldedPool::Sapling {
                             split_count
                         } else {
                             0
                         })?,
-                        orchard_action_count(if change_pool == ShieldedProtocol::Orchard {
-                            split_count
-                        } else {
-                            0
-                        })?,
+                        orchard_action_count(
+                            if change_pool == ShieldedPool::Orchard && !route_change_to_ironwood {
+                                split_count
+                            } else {
+                                0
+                            },
+                        )?,
+                        ironwood_action_count(
+                            if change_pool == ShieldedPool::Orchard && route_change_to_ironwood {
+                                split_count
+                            } else {
+                                0
+                            },
+                        )?,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?
             } else {
@@ -692,10 +786,12 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
                 .map_err(ChangeError::BundleError)?;
 
             #[cfg(feature = "orchard")]
-            let o_action_count = orchard
-                .bundle_type()
-                .num_actions(o_req_inputs + _o_extra, o_outputs_len + change.orchard)
-                .map_err(ChangeError::BundleError)?;
+            let o_action_count = orchard_fees::transactional_action_count(
+                orchard.bundle_version(),
+                o_req_inputs + _o_extra,
+                o_outputs_len + change.orchard,
+            )
+            .map_err(ChangeError::BundleError)?;
             #[cfg(not(feature = "orchard"))]
             let o_action_count = 0;
 

@@ -38,6 +38,8 @@ pub struct Signer {
     transparent: transparent::pczt::Bundle,
     sapling: sapling::pczt::Bundle,
     orchard: orchard::pczt::Bundle,
+    ironwood: orchard::pczt::Bundle,
+    empty_ironwood: Option<crate::orchard::Bundle>,
     /// Cached across multiple signatures.
     tx_data: TransactionData<EffectsOnly>,
     txid_parts: TxDigests<Blake2bHash>,
@@ -48,11 +50,18 @@ pub struct Signer {
 impl Signer {
     /// Instantiates the Signer role with the given PCZT.
     pub fn new(pczt: Pczt) -> Result<Self, Error> {
+        let empty_ironwood = pczt
+            .ironwood
+            .actions
+            .is_empty()
+            .then(|| pczt.ironwood.clone());
+
         let ParsedPczt {
             global,
             transparent,
             sapling,
             orchard,
+            ironwood,
             tx_data,
         } = pczt.extract_tx_data(
             |t| {
@@ -61,6 +70,7 @@ impl Signer {
             },
             |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
             |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
+            |i| i.extract_effects().map_err(ExtractError::IronwoodExtract),
         )?;
         let txid_parts = tx_data.digest(TxIdDigester);
         let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
@@ -70,6 +80,8 @@ impl Signer {
             transparent,
             sapling,
             orchard,
+            ironwood,
+            empty_ironwood,
             tx_data,
             txid_parts,
             shielded_sighash,
@@ -330,13 +342,94 @@ impl Signer {
         Ok(())
     }
 
+    /// Signs the Ironwood spend at the given index with the given spend authorizing key.
+    ///
+    /// Requires the spend's `fvk` field to be set (because the API does not take an FVK).
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT (for example, comfirming that the change amounts are correct) before calling
+    /// this method.
+    pub fn sign_ironwood(
+        &mut self,
+        index: usize,
+        ask: &orchard::keys::SpendAuthorizingKey,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_ironwood_signature(index, |spend, shielded_sighash| {
+            spend.sign(shielded_sighash, ask, OsRng)
+        })
+    }
+
+    /// Applies the given signature to the Ironwood spend.
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT (for example, comfirming that the change amounts are correct) before calling
+    /// this method.
+    pub fn apply_ironwood_signature(
+        &mut self,
+        index: usize,
+        signature: redpallas::Signature<redpallas::SpendAuth>,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_ironwood_signature(index, |action, shielded_sighash| {
+            action.apply_signature(shielded_sighash, signature)
+        })
+    }
+
+    fn generate_or_apply_ironwood_signature<F>(&mut self, index: usize, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut orchard::pczt::Action, [u8; 32]) -> Result<(), orchard::pczt::SignerError>,
+    {
+        let action = self
+            .ironwood
+            .actions_mut()
+            .get_mut(index)
+            .ok_or(Error::InvalidIndex)?;
+
+        // Check consistency of the input being signed if we have its note components.
+        match action.spend().verify_nullifier(None) {
+            Err(
+                orchard::pczt::VerifyError::MissingRecipient
+                | orchard::pczt::VerifyError::MissingValue
+                | orchard::pczt::VerifyError::MissingRho
+                | orchard::pczt::VerifyError::MissingRandomSeed,
+            ) => Ok(()),
+            r => r,
+        }
+        .map_err(Error::IronwoodVerify)?;
+
+        // Generate or apply the signature.
+        f(action, self.shielded_sighash).map_err(Error::IronwoodSign)?;
+
+        // Update transaction modifiability: all transaction effects have been committed
+        // to by the signature.
+        self.global.tx_modifiable &= !(FLAG_TRANSPARENT_INPUTS_MODIFIABLE
+            | FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE
+            | FLAG_SHIELDED_MODIFIABLE);
+
+        Ok(())
+    }
+
     /// Finishes the Signer role, returning the updated PCZT.
     pub fn finish(self) -> Pczt {
+        let Self {
+            global,
+            transparent,
+            sapling,
+            orchard,
+            ironwood,
+            empty_ironwood,
+            tx_data: _,
+            txid_parts: _,
+            shielded_sighash: _,
+            secp: _,
+        } = self;
+
         Pczt {
-            global: self.global,
-            transparent: crate::transparent::Bundle::serialize_from(self.transparent),
-            sapling: crate::sapling::Bundle::serialize_from(self.sapling),
-            orchard: crate::orchard::Bundle::serialize_from(self.orchard),
+            global,
+            transparent: crate::transparent::Bundle::serialize_from(transparent),
+            sapling: crate::sapling::Bundle::serialize_from(sapling),
+            orchard: crate::orchard::Bundle::serialize_from(orchard),
+            ironwood: empty_ironwood
+                .unwrap_or_else(|| crate::orchard::Bundle::serialize_from(ironwood)),
         }
     }
 }
@@ -346,6 +439,8 @@ impl Signer {
 pub enum Error {
     Extract(crate::ExtractError),
     InvalidIndex,
+    IronwoodSign(orchard::pczt::SignerError),
+    IronwoodVerify(orchard::pczt::VerifyError),
     OrchardSign(orchard::pczt::SignerError),
     OrchardVerify(orchard::pczt::VerifyError),
     SaplingSign(sapling::pczt::SignerError),

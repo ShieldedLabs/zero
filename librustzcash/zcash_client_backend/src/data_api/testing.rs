@@ -35,7 +35,7 @@ use zcash_primitives::{
 };
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    ShieldedProtocol,
+    ShieldedPool,
     consensus::{self, BlockHeight, Network, NetworkUpgrade, Parameters as _},
     local_consensus::LocalNetwork,
     memo::{Memo, MemoBytes},
@@ -77,8 +77,8 @@ use crate::{
 #[cfg(feature = "transparent-inputs")]
 use {
     super::{
-        TransactionsInvolvingAddress, TransparentBalances, TransparentOutputFilter,
-        wallet::input_selection::ShieldingSelector,
+        CoinbaseFilter, TransactionsInvolvingAddress, TransparentBalances,
+        wallet::input_selection::{ShieldingSelector, TransparentSpendPolicy},
     },
     crate::wallet::TransparentAddressMetadata,
     ::transparent::address::TransparentAddress,
@@ -621,6 +621,8 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
+            // The test framework does not generate Ironwood notes.
+            ironwood_commitment_tree_size: 0,
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -943,9 +945,9 @@ where
         let input_selector = GreedyInputSelector::new();
 
         #[cfg(not(feature = "orchard"))]
-        let fallback_change_pool = ShieldedProtocol::Sapling;
+        let fallback_change_pool = ShieldedPool::Sapling;
         #[cfg(feature = "orchard")]
-        let fallback_change_pool = ShieldedProtocol::Orchard;
+        let fallback_change_pool = ShieldedPool::Orchard;
 
         let change_strategy = standard::SingleOutputChangeStrategy::new(
             StandardFeeRule::Zip317,
@@ -999,6 +1001,8 @@ where
             change_strategy,
             request,
             confirmations_policy,
+            #[cfg(feature = "transparent-inputs")]
+            &TransparentSpendPolicy::default(),
             #[cfg(feature = "unstable")]
             None,
         )?;
@@ -1042,6 +1046,47 @@ where
             change_strategy,
             request,
             confirmations_policy,
+            #[cfg(feature = "transparent-inputs")]
+            &TransparentSpendPolicy::default(),
+            #[cfg(feature = "unstable")]
+            None,
+        )
+    }
+
+    /// Invokes [`propose_transfer`] with the given arguments and an explicit
+    /// [`TransparentSpendPolicy`].
+    ///
+    /// Unlike [`Self::propose_transfer`], which always uses the default
+    /// (shielded-only) spend policy, this allows tests to opt in to spending the
+    /// account's transparent UTXOs.
+    #[cfg(feature = "transparent-inputs")]
+    #[allow(clippy::type_complexity)]
+    pub fn propose_transfer_with_policy<InputsT, ChangeT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        input_selector: &InputsT,
+        change_strategy: &ChangeT,
+        request: zip321::TransactionRequest,
+        confirmations_policy: ConfirmationsPolicy,
+        spend_policy: &TransparentSpendPolicy,
+    ) -> Result<
+        Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeTransferErrT<DbT, Infallible, InputsT, ChangeT>,
+    >
+    where
+        InputsT: InputSelector<InputSource = DbT>,
+        ChangeT: ChangeStrategy<MetaSource = DbT>,
+    {
+        let network = self.network().clone();
+        propose_transfer::<_, _, _, _, Infallible>(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            input_selector,
+            change_strategy,
+            request,
+            confirmations_policy,
+            spend_policy,
             #[cfg(feature = "unstable")]
             None,
         )
@@ -1069,7 +1114,7 @@ where
             self.wallet_mut(),
             &network,
             spend_from_account,
-            &[ShieldedProtocol::Sapling, ShieldedProtocol::Orchard],
+            &[ShieldedPool::Sapling, ShieldedPool::Orchard],
             fee_rule,
             to,
             memo,
@@ -1090,7 +1135,7 @@ where
         amount: Zatoshis,
         memo: Option<MemoBytes>,
         change_memo: Option<MemoBytes>,
-        fallback_change_pool: ShieldedProtocol,
+        fallback_change_pool: ShieldedPool,
     ) -> Result<
         Proposal<StandardFeeRule, <DbT as InputSource>::NoteRef>,
         super::wallet::ProposeTransferErrT<
@@ -1138,7 +1183,7 @@ where
         from_addrs: &[TransparentAddress],
         to_account: <InputsT::InputSource as InputSource>::AccountId,
         confirmations_policy: ConfirmationsPolicy,
-        output_filter: TransparentOutputFilter,
+        output_filter: CoinbaseFilter,
     ) -> Result<
         Proposal<ChangeT::FeeRule, Infallible>,
         super::wallet::ProposeShieldingErrT<DbT, Infallible, InputsT, ChangeT>,
@@ -1449,7 +1494,7 @@ impl<Cache, DbT: WalletRead + Reset> TestState<Cache, DbT, LocalNetwork> {
 pub fn single_output_change_strategy<DbT: InputSource>(
     fee_rule: StandardFeeRule,
     change_memo: Option<&str>,
-    fallback_change_pool: ShieldedProtocol,
+    fallback_change_pool: ShieldedPool,
 ) -> standard::SingleOutputChangeStrategy<DbT> {
     let change_memo = change_memo.map(|m| MemoBytes::from(m.parse::<Memo>().unwrap()));
     standard::SingleOutputChangeStrategy::new(
@@ -1541,6 +1586,7 @@ impl TestBuilder<(), ()> {
         nu6: None,
         nu6_1: None,
         nu6_2: None,
+        nu6_3: None,
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
     };
@@ -2289,8 +2335,17 @@ fn compact_orchard_action<R: RngCore + CryptoRng>(
         CompactOrchardAction {
             nullifier: compact_action.nullifier().to_bytes().to_vec(),
             cmx: compact_action.cmx().to_bytes().to_vec(),
-            ephemeral_key: compact_action.ephemeral_key().0.to_vec(),
-            ciphertext: compact_action.enc_ciphertext()[..52].to_vec(),
+            ephemeral_key:
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::ephemeral_key(
+                    &compact_action,
+                )
+                .0
+                .to_vec(),
+            ciphertext:
+                ShieldedOutput::<::orchard::note_encryption::OrchardDomain, 52>::enc_ciphertext(
+                    &compact_action,
+                )[..52]
+                    .to_vec(),
         },
         note,
     )
@@ -2555,6 +2610,8 @@ fn fake_compact_block_from_compact_tx(
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+        // The test framework does not generate Ironwood notes.
+        ironwood_commitment_tree_size: 0,
     });
     cb
 }
@@ -2700,7 +2757,7 @@ impl InputSource for MockWalletDb {
     fn get_spendable_note(
         &self,
         _txid: &TxId,
-        _protocol: ShieldedProtocol,
+        _protocol: ShieldedPool,
         _index: u32,
         _target_height: TargetHeight,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error> {
@@ -2711,7 +2768,7 @@ impl InputSource for MockWalletDb {
         &self,
         _account: Self::AccountId,
         _target_value: TargetValue,
-        _sources: &[ShieldedProtocol],
+        _sources: &[ShieldedPool],
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
         _exclude: &[Self::NoteRef],
@@ -2722,7 +2779,7 @@ impl InputSource for MockWalletDb {
     fn select_unspent_notes(
         &self,
         _account: Self::AccountId,
-        _sources: &[ShieldedProtocol],
+        _sources: &[ShieldedPool],
         _target_height: TargetHeight,
         _exclude: &[Self::NoteRef],
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {

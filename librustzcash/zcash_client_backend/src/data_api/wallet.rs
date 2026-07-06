@@ -43,13 +43,14 @@ use std::{
 
 use shardtree::error::{QueryError, ShardTreeError};
 
-use super::InputSource;
 #[cfg(feature = "transparent-inputs")]
-use super::TransparentOutputFilter;
+use super::CoinbaseFilter;
+use super::InputSource;
 use crate::{
     data_api::{
-        Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
-        WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
+        Account, MaxSpendMode, NoteCommitmentTree, SentTransaction, SentTransactionOutput,
+        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
+        wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
     fees::{
@@ -75,7 +76,7 @@ use zcash_primitives::transaction::{
     fees::FeeRule,
 };
 use zcash_protocol::{
-    PoolType, ShieldedProtocol,
+    PoolType, ShieldedPool,
     consensus::{self, BlockHeight},
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
@@ -125,6 +126,76 @@ use input_selection::{GreedyInputSelector, InputSelector, InputSelectorError};
 const PROPRIETARY_PROPOSAL_INFO: &str = "zcash_client_backend:proposal_info";
 #[cfg(feature = "pczt")]
 const PROPRIETARY_OUTPUT_INFO: &str = "zcash_client_backend:output_info";
+
+#[cfg(feature = "orchard")]
+fn legacy_orchard_bundle_requested(
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+) -> bool {
+    #[cfg(feature = "unstable")]
+    {
+        matches!(proposed_version, Some(TxVersion::V5))
+    }
+    #[cfg(not(feature = "unstable"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "orchard")]
+fn ironwood_active_at<ParamsT: consensus::Parameters>(
+    params: &ParamsT,
+    target_height: BlockHeight,
+) -> bool {
+    params.is_nu_active(consensus::NetworkUpgrade::Nu6_3, target_height)
+}
+
+#[cfg(feature = "orchard")]
+fn orchard_outputs_to_ironwood<ParamsT: consensus::Parameters>(
+    params: &ParamsT,
+    target_height: TargetHeight,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+) -> bool {
+    ironwood_active_at(params, BlockHeight::from(target_height))
+        && !legacy_orchard_bundle_requested(
+            #[cfg(feature = "unstable")]
+            proposed_version,
+        )
+}
+
+/// Maps an Ironwood bundle output index to its index in the wallet's combined
+/// Orchard-family output space.
+///
+/// A V6 transaction's Orchard and Ironwood outputs share a single stored index
+/// space, with the Orchard bundle's actions placed first, so the Ironwood output
+/// at raw index `i` is stored at `orchard_actions + i`. When the transaction has
+/// no Orchard bundle, the raw index is used unchanged.
+#[cfg(feature = "orchard")]
+fn stored_ironwood_output_index(tx: &Transaction, raw_ironwood_output_index: usize) -> usize {
+    tx.orchard_bundle()
+        .map_or(raw_ironwood_output_index, |bundle| {
+            bundle.actions().len() + raw_ironwood_output_index
+        })
+}
+
+/// How a proposal step's Orchard-recipient spends and outputs are routed between
+/// the Orchard and Ironwood bundles.
+///
+/// This is derived once from the proposal and the activation state so the
+/// spend-anchor, input, and output-routing decisions cannot drift apart.
+#[cfg(feature = "orchard")]
+enum OrchardBuildMode {
+    /// A legacy V5 transaction was explicitly requested: use the Orchard bundle
+    /// only. Spending Ironwood notes in this mode is unsupported.
+    LegacyV5,
+    /// Spend Ironwood (`NoteVersion::V3`) notes; Orchard-pool outputs are routed
+    /// to the Ironwood bundle.
+    IronwoodSpends,
+    /// No Ironwood spends, but Orchard-pool outputs are routed to a fresh Ironwood
+    /// bundle.
+    IronwoodOutputs,
+    /// Plain Orchard: spends and outputs both use the Orchard bundle.
+    Orchard,
+}
 
 #[cfg(feature = "pczt")]
 fn serialize_target_height<S>(
@@ -633,6 +704,7 @@ pub fn propose_transfer<DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     change_strategy: &ChangeT,
     request: zip321::TransactionRequest,
     confirmations_policy: ConfirmationsPolicy,
+    #[cfg(feature = "transparent-inputs")] spend_policy: &input_selection::TransparentSpendPolicy,
     #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>,
@@ -664,6 +736,8 @@ where
         spend_from_account,
         request,
         change_strategy,
+        #[cfg(feature = "transparent-inputs")]
+        spend_policy,
         #[cfg(feature = "unstable")]
         proposed_version,
     )?;
@@ -707,7 +781,7 @@ pub fn propose_standard_transfer_to_address<DbT, ParamsT, CommitmentTreeErrT>(
     amount: Zatoshis,
     memo: Option<MemoBytes>,
     change_memo: Option<MemoBytes>,
-    fallback_change_pool: ShieldedProtocol,
+    fallback_change_pool: ShieldedPool,
     #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<StandardFeeRule, DbT::NoteRef>,
@@ -755,6 +829,8 @@ where
         &change_strategy,
         request,
         confirmations_policy,
+        #[cfg(feature = "transparent-inputs")]
+        &input_selection::TransparentSpendPolicy::default(),
         #[cfg(feature = "unstable")]
         proposed_version,
     )
@@ -769,7 +845,7 @@ pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
     wallet_db: &mut DbT,
     params: &ParamsT,
     spend_from_account: <DbT as InputSource>::AccountId,
-    spend_pools: &[ShieldedProtocol],
+    spend_pools: &[ShieldedPool],
     fee_rule: &FeeRuleT,
     recipient: ZcashAddress,
     memo: Option<MemoBytes>,
@@ -815,7 +891,7 @@ where
 /// addresses.
 ///
 /// The `output_filter` parameter controls which transparent outputs are eligible for
-/// inclusion in the proposal. See [`TransparentOutputFilter`] for details.
+/// inclusion in the proposal. See [`CoinbaseFilter`] for details.
 #[cfg(feature = "transparent-inputs")]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
@@ -828,7 +904,7 @@ pub fn propose_shielding<DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     from_addrs: &[TransparentAddress],
     to_account: <DbT as InputSource>::AccountId,
     confirmations_policy: ConfirmationsPolicy,
-    output_filter: TransparentOutputFilter,
+    output_filter: CoinbaseFilter,
 ) -> Result<
     Proposal<ChangeT::FeeRule, Infallible>,
     ProposeShieldingErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT>,
@@ -1167,6 +1243,8 @@ struct BuildState<P, AccountId> {
     transparent_input_addresses: HashMap<TransparentAddress, TransparentAddressMetadata>,
     #[cfg(feature = "orchard")]
     orchard_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
+    #[cfg(feature = "orchard")]
+    ironwood_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     sapling_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     transparent_output_meta: Vec<(
         BuildRecipient<AccountId>,
@@ -1205,6 +1283,46 @@ where
 {
     #[cfg(feature = "transparent-inputs")]
     let step_index = prior_step_results.len();
+    // The shielded inputs of this step, if any of them are Ironwood (`V3`) notes.
+    #[cfg(feature = "orchard")]
+    let ironwood_spend_inputs = proposal_step.shielded_inputs().filter(|inputs| {
+        inputs.notes().iter().any(|selected| {
+            matches!(
+                selected.note(),
+                Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3
+            )
+        })
+    });
+    #[cfg(feature = "orchard")]
+    let orchard_build_mode = if legacy_orchard_bundle_requested(
+        #[cfg(feature = "unstable")]
+        proposed_version,
+    ) {
+        // A legacy V5 transaction cannot carry an Ironwood bundle, so spending
+        // Ironwood notes is unsupported in that mode.
+        if ironwood_spend_inputs.is_some() {
+            return Err(Error::ProposalNotSupported);
+        }
+        OrchardBuildMode::LegacyV5
+    } else if ironwood_spend_inputs.is_some() {
+        OrchardBuildMode::IronwoodSpends
+    } else if orchard_outputs_to_ironwood(
+        params,
+        min_target_height,
+        #[cfg(feature = "unstable")]
+        proposed_version,
+    ) {
+        OrchardBuildMode::IronwoodOutputs
+    } else {
+        OrchardBuildMode::Orchard
+    };
+    // Orchard-pool payment and change outputs are routed to the Ironwood bundle
+    // in exactly the Ironwood spend and Ironwood output modes.
+    #[cfg(feature = "orchard")]
+    let orchard_outputs_are_ironwood = matches!(
+        orchard_build_mode,
+        OrchardBuildMode::IronwoodSpends | OrchardBuildMode::IronwoodOutputs
+    );
 
     // We only support spending transparent payments or transparent ephemeral outputs from a
     // prior step (when "transparent-inputs" is enabled).
@@ -1236,7 +1354,7 @@ where
     }
 
     let (sapling_anchor, sapling_inputs) = if proposal_step
-        .involves(PoolType::Shielded(ShieldedProtocol::Sapling))
+        .involves(PoolType::Shielded(ShieldedPool::Sapling))
     {
         proposal_step.shielded_inputs().map_or_else(
             || Ok((Some(sapling::Anchor::empty_tree()), vec![])),
@@ -1280,7 +1398,7 @@ where
 
     #[cfg(feature = "orchard")]
     let (orchard_anchor, orchard_inputs) = if proposal_step
-        .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
+        .involves(PoolType::Shielded(ShieldedPool::Orchard))
     {
         proposal_step.shielded_inputs().map_or_else(
             || Ok((Some(orchard::Anchor::empty_tree()), vec![])),
@@ -1296,18 +1414,25 @@ where
                         .iter()
                         .filter_map(|selected| match selected.note() {
                             #[cfg(feature = "orchard")]
-                            Note::Orchard(note) => orchard_tree
-                                .witness_at_checkpoint_id_caching(
-                                    selected.note_commitment_tree_position(),
-                                    &inputs.anchor_height(),
-                                )
-                                .and_then(|witness| {
-                                    witness
-                                        .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
-                                })
-                                .map(|merkle_path| Some((note, merkle_path)))
-                                .map_err(Error::from)
-                                .transpose(),
+                            Note::Orchard(note)
+                                if note.version() != orchard::note::NoteVersion::V3 =>
+                            {
+                                orchard_tree
+                                    .witness_at_checkpoint_id_caching(
+                                        selected.note_commitment_tree_position(),
+                                        &inputs.anchor_height(),
+                                    )
+                                    .and_then(|witness| {
+                                        witness.ok_or(ShardTreeError::Query(
+                                            QueryError::CheckpointPruned,
+                                        ))
+                                    })
+                                    .map(|merkle_path| Some((note, merkle_path.into())))
+                                    .map_err(Error::from)
+                                    .transpose()
+                            }
+                            #[cfg(feature = "orchard")]
+                            Note::Orchard(_) => None,
                             Note::Sapling(_) => None,
                         })
                         .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()?;
@@ -1322,6 +1447,69 @@ where
     #[cfg(not(feature = "orchard"))]
     let orchard_anchor = None;
 
+    #[cfg(feature = "orchard")]
+    let (ironwood_anchor, ironwood_inputs) = match orchard_build_mode {
+        OrchardBuildMode::IronwoodSpends => {
+            // `IronwoodSpends` is constructed only when `ironwood_spend_inputs` is
+            // `Some`, so the inputs are always present here.
+            let Some(inputs) = ironwood_spend_inputs else {
+                return Err(Error::ProposalNotSupported);
+            };
+
+            wallet_db
+                .with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
+                    let anchor = ironwood_tree
+                        .root_at_checkpoint_id(&inputs.anchor_height())?
+                        .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
+                        .into();
+
+                    let mut ironwood_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+
+                    for ironwood_input in
+                        inputs
+                            .notes()
+                            .iter()
+                            .filter_map(|selected| match selected.note() {
+                                Note::Orchard(note)
+                                    if note.version() == orchard::note::NoteVersion::V3 =>
+                                {
+                                    ironwood_tree
+                                        .witness_at_checkpoint_id_caching(
+                                            selected.note_commitment_tree_position(),
+                                            &inputs.anchor_height(),
+                                        )
+                                        .and_then(|witness| {
+                                            witness.ok_or(ShardTreeError::Query(
+                                                QueryError::CheckpointPruned,
+                                            ))
+                                        })
+                                        .map(|merkle_path| Some((note, merkle_path.into())))
+                                        .map_err(Error::from)
+                                        .transpose()
+                                }
+                                _ => None,
+                            })
+                    {
+                        ironwood_inputs.push(ironwood_input?);
+                    }
+
+                    Ok((Some(anchor), ironwood_inputs))
+                })?
+                .ok_or(Error::ProposalNotSupported)?
+        }
+        OrchardBuildMode::IronwoodOutputs => (
+            Some(orchard::Anchor::empty_tree()),
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        ),
+        OrchardBuildMode::LegacyV5 | OrchardBuildMode::Orchard => (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        ),
+    };
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_anchor = None;
+
     // Create the transaction. The type of the proposal ensures that there
     // are no possible transparent inputs, so we ignore those here.
     let mut builder = Builder::new(
@@ -1330,6 +1518,7 @@ where
         BuildConfig::Standard {
             sapling_anchor,
             orchard_anchor,
+            ironwood_anchor,
         },
     );
 
@@ -1341,7 +1530,8 @@ where
     #[cfg(all(feature = "transparent-inputs", not(feature = "orchard")))]
     let has_shielded_inputs = !sapling_inputs.is_empty();
     #[cfg(all(feature = "transparent-inputs", feature = "orchard"))]
-    let has_shielded_inputs = !(sapling_inputs.is_empty() && orchard_inputs.is_empty());
+    let has_shielded_inputs =
+        !(sapling_inputs.is_empty() && orchard_inputs.is_empty() && ironwood_inputs.is_empty());
 
     let input_sources = NonEmpty::from_vec({
         let mut sources = vec![];
@@ -1349,7 +1539,7 @@ where
             sources.push(PoolType::SAPLING);
         }
         #[cfg(feature = "orchard")]
-        if !orchard_inputs.is_empty() {
+        if !orchard_inputs.is_empty() || !ironwood_inputs.is_empty() {
             sources.push(PoolType::ORCHARD);
         }
         // We assume here that prior step outputs cannot be shielded, due to checks above (and the
@@ -1384,7 +1574,18 @@ where
                 .cloned()
                 .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
             *orchard_note,
-            merkle_path.into(),
+            merkle_path,
+        )?;
+    }
+
+    #[cfg(feature = "orchard")]
+    for (ironwood_note, merkle_path) in ironwood_inputs.into_iter() {
+        builder.add_ironwood_spend(
+            ufvk.orchard()
+                .cloned()
+                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
+            *ironwood_note,
+            merkle_path,
         )?;
     }
 
@@ -1513,6 +1714,8 @@ where
 
     #[cfg(feature = "orchard")]
     let mut orchard_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
+    #[cfg(feature = "orchard")]
+    let mut ironwood_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut sapling_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut transparent_output_meta: Vec<(
         BuildRecipient<_>,
@@ -1581,6 +1784,30 @@ where
                 Ok(())
             };
 
+        #[cfg(feature = "orchard")]
+        let add_ironwood_output =
+            |builder: &mut Builder<_, _>,
+             ironwood_output_meta: &mut Vec<_>,
+             to: orchard::Address|
+             -> Result<(), CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>> {
+                let memo = payment.memo().map_or_else(MemoBytes::empty, |m| m.clone());
+                builder.add_ironwood_output(
+                    external_ovk.map(|k| k.into()),
+                    to,
+                    payment_amount,
+                    memo.clone(),
+                )?;
+                ironwood_output_meta.push((
+                    BuildRecipient::External {
+                        recipient_address: recipient_address.clone(),
+                        output_pool: PoolType::ORCHARD,
+                    },
+                    payment_amount,
+                    Some(memo),
+                ));
+                Ok(())
+            };
+
         let add_transparent_output =
             |builder: &mut Builder<_, _>,
              transparent_output_meta: &mut Vec<_>,
@@ -1608,21 +1835,28 @@ where
         {
             Address::Unified(ua) => match output_pool {
                 #[cfg(not(feature = "orchard"))]
-                PoolType::Shielded(ShieldedProtocol::Orchard) => {
+                PoolType::Shielded(ShieldedPool::Orchard) => {
                     return Err(Error::ProposalNotSupported);
                 }
                 #[cfg(feature = "orchard")]
-                PoolType::Shielded(ShieldedProtocol::Orchard) => {
+                PoolType::Shielded(ShieldedPool::Orchard) => {
                     let to = *ua.orchard().expect("The mapping between payment pool and receiver is checked in step construction");
-                    add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
+                    if orchard_outputs_are_ironwood {
+                        add_ironwood_output(&mut builder, &mut ironwood_output_meta, to)?;
+                    } else {
+                        add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
+                    }
                 }
-                PoolType::Shielded(ShieldedProtocol::Sapling) => {
+                PoolType::Shielded(ShieldedPool::Sapling) => {
                     let to = *ua.sapling().expect("The mapping between payment pool and receiver is checked in step construction");
                     add_sapling_output(&mut builder, &mut sapling_output_meta, to)?;
                 }
                 PoolType::Transparent => {
                     let to = *ua.transparent().expect("The mapping between payment pool and receiver is checked in step construction");
                     add_transparent_output(&mut builder, &mut transparent_output_meta, to)?;
+                }
+                PoolType::Shielded(ShieldedPool::Ironwood) => {
+                    todo!("Ironwood pool support is not yet implemented")
                 }
             },
             Address::Sapling(to) => {
@@ -1652,7 +1886,7 @@ where
             .map_or_else(MemoBytes::empty, |m| m.clone());
         let output_pool = change_value.output_pool();
         match output_pool {
-            PoolType::Shielded(ShieldedProtocol::Sapling) => {
+            PoolType::Shielded(ShieldedPool::Sapling) => {
                 builder.add_sapling_output(
                     internal_ovk.map(|k| k.into()),
                     ufvk.sapling()
@@ -1671,33 +1905,61 @@ where
                     Some(memo),
                 ))
             }
-            PoolType::Shielded(ShieldedProtocol::Orchard) => {
+            PoolType::Shielded(ShieldedPool::Orchard) => {
                 #[cfg(not(feature = "orchard"))]
                 return Err(Error::UnsupportedChangeType(output_pool));
 
                 #[cfg(feature = "orchard")]
                 {
-                    builder.add_orchard_output(
-                        internal_ovk.map(|k| k.into()),
-                        ufvk.orchard()
-                            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
-                            .address_at(0u32, orchard::keys::Scope::Internal),
-                        change_value.value(),
-                        memo.clone(),
-                    )?;
-                    orchard_output_meta.push((
-                        BuildRecipient::InternalAccount {
-                            receiving_account: account_id,
-                            external_address: None,
-                        },
-                        change_value.value(),
-                        Some(memo),
-                    ))
+                    let orchard_fvk = ufvk
+                        .orchard()
+                        .cloned()
+                        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+                    let change_address =
+                        orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
+
+                    if orchard_outputs_are_ironwood {
+                        // The Ironwood builder enables cross-address transfers, so
+                        // change is an ordinary owned output; `add_ironwood_output`
+                        // covers it (the dedicated change entry point was dropped).
+                        builder.add_ironwood_output(
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        ironwood_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    } else {
+                        builder.add_orchard_output(
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        orchard_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    }
                 }
             }
             PoolType::Transparent => {
                 #[cfg(not(feature = "transparent-inputs"))]
                 return Err(Error::UnsupportedChangeType(output_pool));
+            }
+            PoolType::Shielded(ShieldedPool::Ironwood) => {
+                todo!("Ironwood pool support is not yet implemented")
             }
         }
     }
@@ -1749,6 +2011,8 @@ where
         transparent_input_addresses,
         #[cfg(feature = "orchard")]
         orchard_output_meta,
+        #[cfg(feature = "orchard")]
+        ironwood_output_meta,
         sapling_output_meta,
         transparent_output_meta,
         #[cfg(feature = "transparent-inputs")]
@@ -1875,9 +2139,51 @@ where
                     .expect("Wallet-internal outputs must be decryptable with the wallet's IVK")
             });
 
-            SentTransactionOutput::from_parts(output_index, recipient, value, memo)
+            SentTransactionOutput::from_parts_in_tree(
+                Some(NoteCommitmentTree::Orchard),
+                output_index,
+                recipient,
+                value,
+                memo,
+            )
         },
     );
+
+    #[cfg(feature = "orchard")]
+    let ironwood_outputs = build_state
+        .ironwood_output_meta
+        .into_iter()
+        .enumerate()
+        .map(|(i, (recipient, value, memo))| {
+            let raw_output_index = build_result
+                .ironwood_meta()
+                .output_action_index(i)
+                .expect("An action should exist in the transaction for each Ironwood output.");
+            let output_index =
+                stored_ironwood_output_index(build_result.transaction(), raw_output_index);
+
+            let recipient = recipient.into_recipient_with_note(|| {
+                build_result
+                    .transaction()
+                    .ironwood_bundle()
+                    .and_then(|bundle| {
+                        bundle
+                            .decrypt_output_with_key(raw_output_index, &orchard_internal_ivk)
+                            .map(|(note, _, _)| Note::Orchard(note))
+                    })
+                    .expect(
+                        "Wallet-internal Ironwood outputs must be decryptable with the wallet's IVK",
+                    )
+            });
+
+            SentTransactionOutput::from_parts_in_tree(
+                Some(NoteCommitmentTree::Ironwood),
+                output_index,
+                recipient,
+                value,
+                memo,
+            )
+        });
 
     let sapling_dfvk = spending_keys
         .usk
@@ -1907,7 +2213,13 @@ where
                     .expect("Wallet-internal outputs must be decryptable with the wallet's IVK")
             });
 
-            SentTransactionOutput::from_parts(output_index, recipient, value, memo)
+            SentTransactionOutput::from_parts_in_tree(
+                Some(NoteCommitmentTree::Sapling),
+                output_index,
+                recipient,
+                value,
+                memo,
+            )
         },
     );
 
@@ -1948,6 +2260,8 @@ where
     let mut outputs: Vec<SentTransactionOutput<_>> = vec![];
     #[cfg(feature = "orchard")]
     outputs.extend(orchard_outputs);
+    #[cfg(feature = "orchard")]
+    outputs.extend(ironwood_outputs);
     outputs.extend(sapling_outputs);
     outputs.extend(transparent_outputs);
 
@@ -2008,6 +2322,8 @@ where
     let prior_step_results = &[];
     let proposal_step = proposal.steps().first();
     let unused_transparent_outputs = &mut HashMap::new();
+    #[cfg(feature = "unstable")]
+    let proposed_version = Some(TxVersion::V5);
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
         wallet_db,
@@ -2021,11 +2337,15 @@ where
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
         #[cfg(feature = "unstable")]
-        None,
+        proposed_version,
     )?;
 
     // Build the transaction with the specified fee rule
     let build_result = build_state.builder.build_for_pczt(OsRng, fee_rule)?;
+
+    if build_result.pczt_parts.ironwood.is_some() {
+        return Err(Error::ProposalNotSupported);
+    }
 
     let created = Creator::build_from_parts(build_result.pczt_parts).ok_or(PcztError::Build)?;
 
@@ -2331,7 +2651,14 @@ where
                     orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
                 })?;
 
-                orchard::Note::from_parts(recipient, value, rho, rseed).into_option()
+                orchard::Note::from_parts(
+                    recipient,
+                    value,
+                    rho,
+                    rseed,
+                    orchard::note::NoteVersion::V2,
+                )
+                .into_option()
             };
 
             let external_address = act
@@ -2471,7 +2798,7 @@ where
         domain: D,
         note: D::Note,
         output: &O,
-        output_pool: ShieldedProtocol,
+        output_pool: ShieldedPool,
         output_index: usize,
         pczt_recipient: PcztRecipient<AccountId>,
         external_address: Option<ZcashAddress>,
@@ -2532,7 +2859,7 @@ where
                             domain,
                             note,
                             action,
-                            ShieldedProtocol::Orchard,
+                            ShieldedPool::Orchard,
                             output_index,
                             pczt_recipient,
                             external_address,
@@ -2563,7 +2890,7 @@ where
                             domain,
                             note,
                             action,
-                            ShieldedProtocol::Sapling,
+                            ShieldedPool::Sapling,
                             output_index,
                             pczt_recipient,
                             external_address,
@@ -2738,7 +3065,7 @@ where
         from_addrs,
         to_account,
         confirmations_policy,
-        TransparentOutputFilter::All,
+        CoinbaseFilter::AllTransparentOutputs,
     )?;
 
     create_proposed_transactions(
