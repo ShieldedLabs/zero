@@ -170,6 +170,41 @@ docker port zaino    # empty (unless you deliberately published gRPC)
 docker port zallet   # empty (unless you deliberately published the wallet RPC)
 ```
 
+## Watch-only transparent import (z_importaddress)
+
+Migrating a zcashd `importaddress` / `importmulti` watch-only flow? Zallet's
+equivalent is `z_importaddress`, and the `zero-zallet` images ship with it
+enabled (the Dockerfile builds with `--features rpc-cli,zcashd-import`, which
+includes the `transparent-key-import` feature). It is a compile-time feature;
+there is no `zallet.toml` or environment switch.
+
+Two differences from zcashd matter:
+
+- **It takes a hex-encoded public key (P2PKH) or redeem script (P2SH), not a
+  `t1...` address.** zcashd accepted the bare address and watched its
+  scriptPubKey; zallet needs the actual key material. For a P2PKH address you
+  must supply its 33-byte compressed (or 65-byte uncompressed) pubkey.
+- **`rescan` (third parameter, default `true`) rescans from the target
+  account's birthday, not from genesis.** The call returns immediately and
+  the scan runs in the background sync tasks (watch `getwalletstatus`).
+  History older than the account's birthday will not be discovered, so
+  import into an account whose birthday predates the address's first use.
+
+```sh
+# The account UUID comes from z_getnewaccount (or z_listaccounts):
+docker compose exec zallet zallet \
+  --datadir /var/lib/zallet --config /etc/zallet/zallet.toml \
+  rpc z_importaddress <account-uuid> <hex-pubkey-or-redeem-script>
+#   -> {"type": "p2pkh", "address": "t1..."}
+```
+
+One caveat when auditing a binary: `help` and `rpc.discover` list every
+method known at build time, whether or not its feature was compiled in, so
+`help z_importaddress` proves nothing. A build without the feature answers
+every call with "z_importaddress requires the transparent-key-import
+feature"; these images answer with real parameter validation, and the smoke
+workflow asserts exactly that.
+
 ## Security notes
 
 - **Never publish Zebra's 8232.** It is unauthenticated by design here;
