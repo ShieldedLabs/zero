@@ -187,14 +187,19 @@ Two differences from zcashd matter:
 - **`rescan` (third parameter, default `true`) rescans from the target
   account's birthday, not from genesis.** The call returns immediately and
   the scan runs in the background sync tasks (watch `getwalletstatus`).
-  History older than the account's birthday will not be discovered, so
-  import into an account whose birthday predates the address's first use.
+  History older than the account's birthday will not be discovered, and
+  `z_getnewaccount` pins a new account's birthday at the current chain tip.
+  To import an address that already has history, create the target account
+  with `z_recoveraccounts` instead: it takes an explicit `birthday_height`,
+  which must be set before the address's first use.
 
 ```sh
-# The account UUID comes from z_getnewaccount (or z_listaccounts):
+# The account UUID comes from z_getnewaccount / z_recoveraccounts (or
+# z_listaccounts). The `zallet rpc` CLI parses each param as JSON, so
+# string params need the extra quotes:
 docker compose exec zallet zallet \
   --datadir /var/lib/zallet --config /etc/zallet/zallet.toml \
-  rpc z_importaddress <account-uuid> <hex-pubkey-or-redeem-script>
+  rpc z_importaddress '"<account-uuid>"' '"<hex-pubkey-or-redeem-script>"'
 #   -> {"type": "p2pkh", "address": "t1..."}
 ```
 
