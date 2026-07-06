@@ -29,6 +29,7 @@ use zaino_fetch::{
     chain::{transaction::FullTransaction, utils::ParseFromSlice},
     jsonrpsee::{
         connector::{JsonRpSeeConnector, RpcError},
+        raw_transaction::validate_raw_transaction_hex,
         response::{
             address_deltas::{GetAddressDeltasParams, GetAddressDeltasResponse},
             block_deltas::{BlockDelta, BlockDeltas, InputDelta, OutputDelta},
@@ -92,12 +93,11 @@ use chrono::{DateTime, Utc};
 use futures::TryFutureExt as _;
 use hex::{FromHex as _, ToHex};
 use indexmap::IndexMap;
-use std::{error::Error, fmt, str::FromStr, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, str::FromStr, sync::Arc};
 use tokio::{
     sync::mpsc,
     time::{self, timeout},
 };
-use tonic::async_trait;
 use tower::{Service, ServiceExt};
 use tracing::{info, instrument, warn};
 
@@ -171,7 +171,6 @@ impl Status for StateService {
     }
 }
 
-#[async_trait]
 // #[allow(deprecated)]
 impl ZcashService for StateService {
     const BACKEND_TYPE: BackendType = BackendType::State;
@@ -220,21 +219,27 @@ impl ZcashService for StateService {
 
         info!("Chain syncer launched");
 
-        // Wait for ReadStateService to catch up to primary database:
+        // Wait for ReadStateService to catch up to the validator's best chain tip.
+        // Height alone is insufficient during reorgs: the same height can refer to
+        // different blocks until JSON-RPC and ReadStateService agree on tip hash.
         loop {
-            let server_height = rpc_client.get_blockchain_info().await?.blocks;
+            let blockchain_info = rpc_client.get_blockchain_info().await?;
+            let server_height = blockchain_info.blocks;
+            let server_tip_hash = blockchain_info.best_block_hash;
 
             let syncer_response = read_state_service
                 .ready()
                 .and_then(|service| service.call(ReadRequest::Tip))
                 .await?;
-            let (syncer_height, _) = expected_read_response!(syncer_response, Tip).ok_or(
-                RpcError::new_from_legacycode(LegacyCode::Misc, "no blocks in chain"),
-            )?;
+            let (syncer_height, syncer_tip_hash) =
+                expected_read_response!(syncer_response, Tip).ok_or(
+                    RpcError::new_from_legacycode(LegacyCode::Misc, "no blocks in chain"),
+                )?;
 
-            if server_height.0 == syncer_height.0 {
+            if server_height == syncer_height && server_tip_hash == syncer_tip_hash {
                 info!(
                     height = syncer_height.0,
+                    tip_hash = %syncer_tip_hash,
                     "ReadStateService synced with Zebra"
                 );
                 break;
@@ -242,6 +247,8 @@ impl ZcashService for StateService {
                 info!(
                     syncer_height = syncer_height.0,
                     validator_height = server_height.0,
+                    syncer_tip_hash = %syncer_tip_hash,
+                    validator_tip_hash = %server_tip_hash,
                     "ReadStateService syncing with Zebra"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -501,7 +508,9 @@ impl StateServiceSubscriber {
             let mut nonce = *header.nonce;
             nonce.reverse();
 
-            let sapling_activation = NetworkUpgrade::Sapling.activation_height(&network);
+            let sapling_activation = crate::chain_index::ShieldedPool::Sapling
+                .activation_upgrade()
+                .activation_height(&network);
             let sapling_tree_size = sapling_tree.count();
             let final_sapling_root: [u8; 32] =
                 if sapling_activation.is_some() && height >= sapling_activation.unwrap() {
@@ -625,7 +634,7 @@ impl StateServiceSubscriber {
                         {
                             Ok(_) => {}
                             Err(e) => {
-                                warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                warn!(%e, "GetBlockRange channel closed unexpectedly");
                             }
                         }
                     }
@@ -643,7 +652,7 @@ impl StateServiceSubscriber {
                             {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                    warn!(%e, "GetBlockRange channel closed unexpectedly");
                                 }
                             }
                         } else {
@@ -653,7 +662,7 @@ impl StateServiceSubscriber {
                                 .await
                                 .is_err()
                             {
-                                warn!("GetBlockRangeStream closed unexpectedly: {}", e);
+                                warn!(%e, "GetBlockRangeStream closed unexpectedly");
                             }
                         }
                     }
@@ -724,6 +733,7 @@ impl StateServiceSubscriber {
                 let state_2 = state.clone();
                 let state_3 = state.clone();
                 let state_4 = state.clone();
+                let state_5 = state.clone();
 
                 let blockandsize_future = {
                     let req = ReadRequest::BlockAndSize(hash_or_height);
@@ -739,7 +749,16 @@ impl StateServiceSubscriber {
                             .await
                     }
                 };
-
+                let ironwood_future = {
+                    let req = ReadRequest::IronwoodTree(hash_or_height);
+                    async move {
+                        state_5
+                            .clone()
+                            .ready()
+                            .and_then(|service| service.call(req))
+                            .await
+                    }
+                };
                 let block_info_future = {
                     let req = ReadRequest::BlockInfo(hash_or_height);
                     async move {
@@ -750,9 +769,10 @@ impl StateServiceSubscriber {
                             .await
                     }
                 };
-                let (fullblock, orchard_tree_response, header, block_info) = futures::join!(
+                let (fullblock, orchard_tree_response, ironwood_tree_response, header, block_info) = futures::join!(
                     blockandsize_future,
                     orchard_future,
+                    ironwood_future,
                     StateServiceSubscriber::get_block_header_inner(
                         &state_3,
                         network,
@@ -785,7 +805,7 @@ impl StateServiceSubscriber {
                                             TransactionObject::from_transaction(
                                                 transaction.clone(),
                                                 Some(header_obj.height()),
-                                                Some(header_obj.confirmations() as u32),
+                                                Some(header_obj.confirmations()),
                                                 network,
                                                 DateTime::<Utc>::from_timestamp(
                                                     header_obj.time(),
@@ -826,15 +846,27 @@ impl StateServiceSubscriber {
                         "missing orchard tree",
                     )))?;
 
-                let final_orchard_root = match NetworkUpgrade::Nu5.activation_height(network) {
+                let final_orchard_root = match crate::chain_index::ShieldedPool::Orchard
+                    .activation_upgrade()
+                    .activation_height(network)
+                {
                     Some(activation_height) if header_obj.height() >= activation_height => {
                         Some(orchard_tree.root().into())
                     }
                     _otherwise => None,
                 };
 
-                let trees =
-                    GetBlockTrees::new(header_obj.sapling_tree_size(), orchard_tree.count());
+                let ironwood_tree_response = ironwood_tree_response?;
+                let ironwood_tree = expected_read_response!(ironwood_tree_response, IronwoodTree)
+                    .ok_or(StateServiceError::RpcError(
+                    RpcError::new_from_legacycode(LegacyCode::Misc, "missing ironwood tree"),
+                ))?;
+
+                let trees = GetBlockTrees::new(
+                    header_obj.sapling_tree_size(),
+                    orchard_tree.count(),
+                    ironwood_tree.count(),
+                );
 
                 let (chain_supply, value_pools) = (
                     GetBlockchainInfoBalance::chain_supply(*block_info.value_pools()),
@@ -963,7 +995,6 @@ fn sapling_key_bytes(s: &sapling_crypto::PaymentAddress) -> ([u8; 11], [u8; 32])
     (diversifier, pk_d)
 }
 
-#[async_trait]
 // #[allow(deprecated)]
 impl ZcashIndexer for StateServiceSubscriber {
     type Error = StateServiceError;
@@ -1195,6 +1226,7 @@ impl ZcashIndexer for StateServiceSubscriber {
         &self,
         raw_transaction_hex: String,
     ) -> Result<SentTransactionHash, Self::Error> {
+        validate_raw_transaction_hex(&raw_transaction_hex).map_err(StateServiceError::RpcError)?;
         // Offload to the json rpc connector, as ReadStateService
         // doesn't yet interface with the mempool
         self.rpc_client
@@ -1237,118 +1269,179 @@ impl ZcashIndexer for StateServiceSubscriber {
 
         match zblock {
             GetBlock::Object(boxed_block) => {
-                #[allow(clippy::result_large_err)]
-                let deltas = boxed_block
-                    .tx()
-                    .iter()
-                    .enumerate()
-                    .map(|(tx_index, tx)| match tx {
-                        GetBlockTransaction::Object(txo) => {
-                            let txid = txo.txid().to_string();
+                // Resolve each transparent spend's prevout ourselves: the
+                // verbosity-2 object from Zebra's stateless
+                // `TransactionObject::from_transaction` leaves input
+                // value/address `None`, so we look the spent output up via the
+                // best-chain `ReadRequest::Transaction` (finalized +
+                // non-finalized, so same-block prevouts resolve too).
+                let network = self.data.network();
+                let mut state = self.read_state_service.clone();
+                // Per-call cache: many inputs may reference the same prevtxid,
+                // so each previous transaction is fetched at most once.
+                let mut prevtx_cache: HashMap<
+                    zebra_chain::transaction::Hash,
+                    Arc<zebra_chain::transaction::Transaction>,
+                > = HashMap::new();
 
-                            let inputs: Vec<InputDelta> = txo
-                                .inputs()
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(i, vin)| match vin {
-                                    Input::Coinbase { .. } => None,
-                                    Input::NonCoinbase {
-                                        txid: prevtxid,
-                                        vout: prevout,
-                                        value,
-                                        value_zat,
-                                        address,
-                                        ..
-                                    } => {
-                                        let zats = if let Some(z) = value_zat {
-                                            *z
-                                        } else if let Some(v) = value {
-                                            (v * 100_000_000.0).round() as i64
-                                        } else {
-                                            return None;
-                                        };
-
-                                        let addr = match address {
-                                            Some(a) => a.clone(),
-                                            None => return None,
-                                        };
-
-                                        let input_amt: Amount = match (-zats).try_into() {
-                                            Ok(a) => a,
-                                            Err(_) => return None,
-                                        };
-
-                                        Some(InputDelta {
-                                            address: addr,
-                                            satoshis: input_amt,
-                                            index: i as u32,
-                                            prevtxid: prevtxid.clone(),
-                                            prevout: *prevout,
-                                        })
-                                    }
-                                })
-                                .collect::<Vec<_>>();
-
-                            let outputs: Vec<OutputDelta> =
-                                txo.outputs()
-                                    .iter()
-                                    .filter_map(|vout| {
-                                        let addr_opt =
-                                            vout.script_pub_key().addresses().as_ref().and_then(
-                                                |v| if v.len() == 1 { v.first() } else { None },
-                                            );
-
-                                        let addr = addr_opt?.clone();
-
-                                        let output_amt: Amount<NonNegative> =
-                                            match vout.value_zat().try_into() {
-                                                Ok(a) => a,
-                                                Err(_) => return None,
-                                            };
-
-                                        Some(OutputDelta {
-                                            address: addr,
-                                            satoshis: output_amt,
-                                            index: vout.n(),
-                                        })
-                                    })
-                                    .collect::<Vec<_>>();
-
-                            Ok::<_, Self::Error>(BlockDelta {
-                                txid,
-                                index: tx_index as u32,
-                                inputs,
-                                outputs,
-                            })
+                let mut deltas = Vec::with_capacity(boxed_block.tx().len());
+                for (tx_index, tx) in boxed_block.tx().iter().enumerate() {
+                    let txo = match tx {
+                        GetBlockTransaction::Object(txo) => txo,
+                        GetBlockTransaction::Hash(_) => {
+                            return Err(StateServiceError::Custom(
+                                "Unexpected hash when expecting object".to_string(),
+                            ))
                         }
-                        GetBlockTransaction::Hash(_) => Err(StateServiceError::Custom(
-                            "Unexpected hash when expecting object".to_string(),
-                        )),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    };
+
+                    let txid = txo.txid().to_string();
+
+                    let mut inputs: Vec<InputDelta> = Vec::new();
+                    for (i, vin) in txo.inputs().iter().enumerate() {
+                        let (prevtxid, prevout) = match vin {
+                            Input::Coinbase { .. } => continue,
+                            Input::NonCoinbase {
+                                txid: prevtxid,
+                                vout: prevout,
+                                ..
+                            } => (prevtxid, *prevout),
+                        };
+
+                        let prev_hash = zebra_chain::transaction::Hash::from_str(prevtxid)
+                            .map_err(|e| {
+                                StateServiceError::Custom(format!(
+                                    "getblockdeltas: invalid prevout txid {prevtxid}: {e}"
+                                ))
+                            })?;
+
+                        let prev_tx = match prevtx_cache.get(&prev_hash) {
+                            Some(prev_tx) => prev_tx.clone(),
+                            None => {
+                                let response = state
+                                    .ready()
+                                    .and_then(|service| {
+                                        service.call(ReadRequest::Transaction(prev_hash))
+                                    })
+                                    .await?;
+                                let mined_tx = expected_read_response!(response, Transaction)
+                                    .ok_or_else(|| {
+                                        StateServiceError::Custom(format!(
+                                            "getblockdeltas: prevout tx {prevtxid} not in best chain"
+                                        ))
+                                    })?;
+                                prevtx_cache.insert(prev_hash, mined_tx.tx.clone());
+                                mined_tx.tx
+                            }
+                        };
+
+                        let output = prev_tx.outputs().get(prevout as usize).ok_or_else(|| {
+                            StateServiceError::Custom(format!(
+                                "getblockdeltas: prevout index {prevout} out of range for {prevtxid}"
+                            ))
+                        })?;
+
+                        // Nonstandard script ⇒ no derivable address ⇒ skip
+                        // (matches the outputs branch). This is the only
+                        // legitimate skip; it is not loss of a resolvable spend.
+                        let address = match output.address(&network) {
+                            Some(a) => a.to_string(),
+                            None => continue,
+                        };
+
+                        // Inputs are debits, so the amount leaves the address.
+                        let satoshis: Amount =
+                            (-output.value().zatoshis()).try_into().map_err(|e| {
+                                StateServiceError::Custom(format!(
+                                    "getblockdeltas: input amount out of range for {prevtxid}:{prevout}: {e}"
+                                ))
+                            })?;
+
+                        inputs.push(InputDelta {
+                            address,
+                            satoshis,
+                            index: i as u32,
+                            prevtxid: prevtxid.clone(),
+                            prevout,
+                        });
+                    }
+
+                    let outputs: Vec<OutputDelta> = txo
+                        .outputs()
+                        .iter()
+                        .filter_map(|vout| {
+                            let addr_opt = vout
+                                .script_pub_key()
+                                .addresses()
+                                .as_ref()
+                                .and_then(|v| if v.len() == 1 { v.first() } else { None });
+
+                            let addr = addr_opt?.clone();
+
+                            let output_amt: Amount<NonNegative> = match vout.value_zat().try_into()
+                            {
+                                Ok(a) => a,
+                                Err(_) => return None,
+                            };
+
+                            Some(OutputDelta {
+                                address: addr,
+                                satoshis: output_amt,
+                                index: vout.n(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    deltas.push(BlockDelta {
+                        txid,
+                        index: tx_index as u32,
+                        inputs,
+                        outputs,
+                    });
+                }
 
                 Ok(BlockDeltas {
                     hash: boxed_block.hash().to_string(),
                     confirmations: boxed_block.confirmations(),
-                    size: boxed_block.size().expect("size should be present"),
-                    height: boxed_block.height().expect("height should be present").0,
-                    version: boxed_block.version().expect("version should be present"),
+                    size: boxed_block.size().ok_or_else(|| {
+                        StateServiceError::Custom("getblockdeltas: block size missing".into())
+                    })?,
+                    height: boxed_block
+                        .height()
+                        .ok_or_else(|| {
+                            StateServiceError::Custom("getblockdeltas: block height missing".into())
+                        })?
+                        .0,
+                    version: boxed_block.version().ok_or_else(|| {
+                        StateServiceError::Custom("getblockdeltas: block version missing".into())
+                    })?,
                     merkle_root: boxed_block
                         .merkle_root()
-                        .expect("merkle root should be present")
+                        .ok_or_else(|| {
+                            StateServiceError::Custom(
+                                "getblockdeltas: block merkle root missing".into(),
+                            )
+                        })?
                         .encode_hex::<String>(),
                     deltas,
-                    time: boxed_block.time().expect("time should be present"),
-
-                    median_time: self.median_time_past(&boxed_block).await.unwrap(),
-                    nonce: hex::encode(boxed_block.nonce().unwrap()),
+                    time: boxed_block.time().ok_or_else(|| {
+                        StateServiceError::Custom("getblockdeltas: block time missing".into())
+                    })?,
+                    median_time: self.median_time_past(&boxed_block).await.map_err(|e| {
+                        StateServiceError::Custom(format!("getblockdeltas: median_time_past: {e}"))
+                    })?,
+                    nonce: hex::encode(boxed_block.nonce().ok_or_else(|| {
+                        StateServiceError::Custom("getblockdeltas: block nonce missing".into())
+                    })?),
                     bits: boxed_block
                         .bits()
-                        .expect("bits should be present")
+                        .ok_or_else(|| {
+                            StateServiceError::Custom("getblockdeltas: block bits missing".into())
+                        })?
                         .to_string(),
-                    difficulty: boxed_block
-                        .difficulty()
-                        .expect("difficulty should be present"),
+                    difficulty: boxed_block.difficulty().ok_or_else(|| {
+                        StateServiceError::Custom("getblockdeltas: block difficulty missing".into())
+                    })?,
                     previous_block_hash: boxed_block
                         .previous_block_hash()
                         .map(|hash| hash.to_string()),
@@ -1406,7 +1499,7 @@ impl ZcashIndexer for StateServiceSubscriber {
                     )))?,
             };
 
-            let (sapling, orchard) = self.indexer.get_treestate(block_data.hash()).await?;
+            let treestates = self.indexer.get_treestate(block_data.hash()).await?;
             let time: u32 = block_data.data().time().try_into().map_err(|_error| {
                 StateServiceError::RpcError(RpcError::new_from_legacycode(
                     zebra_rpc::server::error::LegacyCode::InvalidParameter,
@@ -1414,19 +1507,26 @@ impl ZcashIndexer for StateServiceSubscriber {
                 ))
             })?;
 
-            #[allow(deprecated)]
-            Ok(GetTreestateResponse::from_parts(
+            Ok(super::build_treestate_response(
                 (*block_data.hash()).into(),
                 block_data.height().into(),
                 time,
-                sapling,
-                orchard,
+                treestates,
             ))
         }
         .await;
 
         if let Ok(response) = local_result {
             return Ok(response);
+        }
+
+        let snapshot = self.indexer.snapshot_nonfinalized_state().await?;
+        if !self
+            .indexer
+            .hash_or_height_known_for_treestate(&snapshot, &fallback_hash_or_height)
+            .await?
+        {
+            return local_result;
         }
 
         self.rpc_client
@@ -1475,7 +1575,7 @@ impl ZcashIndexer for StateServiceSubscriber {
         // Zebra displays transaction and block hashes in big-endian byte-order,
         // following the u256 convention set by Bitcoin and zcashd.
         match self.read_state_service.best_tip() {
-            Some(x) => return Ok(GetBlockHash::new(x.1)),
+            Some(x) => Ok(GetBlockHash::new(x.1)),
             None => {
                 // try RPC if state read fails:
                 Ok(self.rpc_client.get_best_blockhash().await?.into())
@@ -1712,11 +1812,12 @@ impl ZcashIndexer for StateServiceSubscriber {
 
         let (height, confirmations, block_hash, in_best_chain) = match best_chain_location {
             Some(BestChainLocation::Block(block_hash, height)) => {
-                let confirmations = snapshot
+                let confirmations: i64 = snapshot
                     .max_serviceable_height()
                     .0
                     .saturating_sub(height.0)
-                    .saturating_add(1);
+                    .saturating_add(1)
+                    .into();
 
                 (
                     Some(zebra_chain::block::Height::from(height)),
@@ -1821,67 +1922,8 @@ impl ZcashIndexer for StateServiceSubscriber {
         )?;
         Ok(chain_height)
     }
-
-    /// Helper function, to get the list of taddresses that have sends or reciepts
-    /// within a given block range
-    async fn get_taddress_txids_helper(
-        &self,
-        request: TransparentAddressBlockFilter,
-    ) -> Result<Vec<String>, Self::Error> {
-        let chain_height = self.chain_height().await?;
-        let (start, end) = match request.range {
-            Some(range) => {
-                let start = if let Some(start) = range.start {
-                    match u32::try_from(start.height) {
-                        Ok(height) => Some(height.min(chain_height.0)),
-                        Err(_) => {
-                            return Err(Self::Error::from(tonic::Status::invalid_argument(
-                                "Error: Start height out of range. Failed to convert to u32.",
-                            )))
-                        }
-                    }
-                } else {
-                    None
-                };
-                let end = if let Some(end) = range.end {
-                    match u32::try_from(end.height) {
-                        Ok(height) => Some(height.min(chain_height.0)),
-                        Err(_) => {
-                            return Err(Self::Error::from(tonic::Status::invalid_argument(
-                                "Error: End height out of range. Failed to convert to u32.",
-                            )))
-                        }
-                    }
-                } else {
-                    None
-                };
-                match (start, end) {
-                    (Some(start), Some(end)) => {
-                        if start > end {
-                            (Some(end), Some(start))
-                        } else {
-                            (Some(start), Some(end))
-                        }
-                    }
-                    _ => (start, end),
-                }
-            }
-            None => {
-                return Err(Self::Error::from(tonic::Status::invalid_argument(
-                    "Error: No block range given.",
-                )))
-            }
-        };
-        self.get_address_tx_ids(GetAddressTxIdsRequest::new(
-            vec![request.address],
-            start,
-            end,
-        ))
-        .await
-    }
 }
 
-#[async_trait]
 // #[allow(deprecated)]
 impl LightWalletIndexer for StateServiceSubscriber {
     /// Return the height of the tip of the best chain
@@ -2399,7 +2441,7 @@ impl LightWalletIndexer for StateServiceSubscriber {
                     {
                         Ok(stream) => stream,
                         Err(e) => {
-                            warn!("Error fetching stream from mempool: {:?}", e);
+                            warn!(?e, "error fetching mempool stream");
                             channel_tx
                                 .send(Err(tonic::Status::internal("Error getting mempool stream")))
                                 .await
@@ -2465,27 +2507,21 @@ impl LightWalletIndexer for StateServiceSubscriber {
                 "Invalid hash or height",
             )),
         )?;
-        #[allow(deprecated)]
-        let (hash, height, time, sapling, orchard) =
-            <StateServiceSubscriber as ZcashIndexer>::z_get_treestate(
-                self,
-                hash_or_height.to_string(),
-            )
-            .await?
-            .into_parts();
-        Ok(TreeState {
-            network: self
-                .config
+
+        let treestate_response = <StateServiceSubscriber as ZcashIndexer>::z_get_treestate(
+            self,
+            hash_or_height.to_string(),
+        )
+        .await?;
+
+        Ok(super::tree_state_from_treestate_response(
+            self.config
                 .common
                 .network
                 .to_zebra_network()
                 .bip70_network_name(),
-            height: height.0 as u64,
-            hash: hash.to_string(),
-            time,
-            sapling_tree: sapling.map(hex::encode).unwrap_or_default(),
-            orchard_tree: orchard.map(hex::encode).unwrap_or_default(),
-        })
+            treestate_response,
+        ))
     }
 
     /// GetLatestTreeState returns the note commitment tree state corresponding to the chain tip.
@@ -2696,7 +2732,7 @@ impl LightWalletIndexer for StateServiceSubscriber {
                 .unwrap_or_default(),
             upgrade_name: nu_name.to_string(),
             upgrade_height: nu_height.0 as u64,
-            lightwallet_protocol_version: "v0.4.0".to_string(),
+            lightwallet_protocol_version: "v0.5.0".to_string(),
         })
     }
 
@@ -2882,7 +2918,7 @@ mod tests {
         use zcash_keys::address::Address;
         use zcash_protocol::consensus::NetworkType;
 
-        // Canonical source: integration-tests/src/lib.rs::rpc::json_rpc
+        // Canonical source: live-tests/clientless/src/lib.rs::rpc::json_rpc
         // Tracked for DRY consolidation: https://github.com/zingolabs/zaino/issues/988
         const SAPLING_ADDRESS: &str = "zregtestsapling1jalqhycwumq3unfxlzyzcktq3n478n82k2wacvl8gwfxk6ahshkxmtp2034qj28n7gl92ka5wca";
         const EXPECTED_DIVERSIFIER: &str = "977e0b930ee6c11e4d26f8";

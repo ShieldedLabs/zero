@@ -2,6 +2,11 @@
 
 use super::*;
 
+use crate::chain_index::ShieldedPool;
+
+#[cfg(feature = "prometheus")]
+use crate::metric_names::*;
+
 /// Cheap heap-size estimate for a buffered [`IndexedBlock`], used only to bound the bulk-sync write
 /// batch in [`DbV1::write_blocks_to_height`]. Exactness is not required — it just keeps the batch's
 /// peak memory roughly within the configured budget.
@@ -16,7 +21,8 @@ fn approx_indexed_block_bytes(block: &IndexedBlock) -> u64 {
                 + transparent.outputs().len()
                 + tx.sapling().spends().len()
                 + tx.sapling().outputs().len()
-                + tx.orchard().actions().len();
+                + tx.orchard().actions().len()
+                + tx.ironwood().actions().len();
             256 + items as u64 * 128
         })
         .sum()
@@ -29,11 +35,6 @@ fn approx_indexed_block_bytes(block: &IndexedBlock) -> u64 {
 #[cfg(not(feature = "transparent_address_history_experimental"))]
 const SYNC_WRITE_BATCH_MAX_BLOCKS: usize = 100_000;
 
-/// Maximum wall-clock time spent buffering a single bulk-sync write batch before flushing, so
-/// commits (and progress) happen regularly even when block fetches are slow.
-#[cfg(not(feature = "transparent_address_history_experimental"))]
-const SYNC_WRITE_BATCH_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Interval between in-flight "syncing height" progress logs during bulk sync.
 #[cfg(not(feature = "transparent_address_history_experimental"))]
 const SYNC_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -45,7 +46,155 @@ use crate::version;
 ///
 /// This trait represents the mutating surface (append / delete tip / update metadata). Writes are
 /// performed via LMDB write transactions and validated before becoming visible as “known-good”.
-#[async_trait]
+/// Per-transaction pool lists for one block's row entries, with the duplicate-txid
+/// guard applied.
+struct BlockPoolLists {
+    /// `(txid, transparent)` pairs — both halves come from one binding per
+    /// transaction, so misalignment is structurally impossible.
+    transactions: Vec<(TransactionHash, Option<TransparentCompactTx>)>,
+    sapling: Vec<Option<SaplingCompactTx>>,
+    orchard: Vec<Option<OrchardCompactTx>>,
+    ironwood: Vec<Option<OrchardCompactTx>>,
+}
+
+/// Builds the per-transaction pool lists for one block: each pool records
+/// `Some(compact data)` for a transaction with data in that pool, `None` otherwise,
+/// keeping every list index-aligned with the block's txids.
+fn extract_block_pool_lists(block: &IndexedBlock) -> Result<BlockPoolLists, FinalisedStateError> {
+    let block_height = block.context.index.height;
+    let block_hash = block.context.index.hash;
+
+    let tx_len = block.transactions().len();
+    let mut transactions: Vec<(TransactionHash, Option<TransparentCompactTx>)> =
+        Vec::with_capacity(tx_len);
+    let mut txid_set: HashSet<TransactionHash> = HashSet::with_capacity(tx_len);
+    let mut sapling = Vec::with_capacity(tx_len);
+    let mut orchard = Vec::with_capacity(tx_len);
+    let mut ironwood = Vec::with_capacity(tx_len);
+
+    for tx in block.transactions() {
+        let hash = tx.txid();
+        if !txid_set.insert(*hash) {
+            return Err(FinalisedStateError::InvalidBlock {
+                height: block_height.0,
+                hash: block_hash,
+                reason: format!("duplicate transaction hash in block: {hash:?}"),
+            });
+        }
+
+        // Transparent transactions — paired with the txid at the source binding.
+        let transparent_data =
+            if tx.transparent().inputs().is_empty() && tx.transparent().outputs().is_empty() {
+                None
+            } else {
+                Some(tx.transparent().clone())
+            };
+        transactions.push((*hash, transparent_data));
+
+        // Sapling transactions
+        let sapling_data = if tx.sapling().spends().is_empty() && tx.sapling().outputs().is_empty()
+        {
+            None
+        } else {
+            Some(tx.sapling().clone())
+        };
+        sapling.push(sapling_data);
+
+        // Orchard transactions
+        let orchard_data = if tx.orchard().actions().is_empty() {
+            None
+        } else {
+            Some(tx.orchard().clone())
+        };
+        orchard.push(orchard_data);
+
+        // Ironwood transactions (NU6.3; modelled with the Orchard compact types).
+        let ironwood_data = if tx.ironwood().actions().is_empty() {
+            None
+        } else {
+            Some(tx.ironwood().clone())
+        };
+        ironwood.push(ironwood_data);
+    }
+
+    Ok(BlockPoolLists {
+        transactions,
+        sapling,
+        orchard,
+        ironwood,
+    })
+}
+
+/// Cheap in-memory correctness check: the block's txids must reproduce the header's
+/// merkle root.
+fn verify_header_merkle_root(
+    txids: &[TransactionHash],
+    block: &IndexedBlock,
+) -> Result<(), FinalisedStateError> {
+    let txid_bytes: Vec<[u8; 32]> = txids.iter().map(|txid| txid.0).collect();
+    let computed_merkle_root = DbV1::calculate_block_merkle_root(&txid_bytes);
+    if &computed_merkle_root != block.data().merkle_root() {
+        return Err(FinalisedStateError::InvalidBlock {
+            height: block.context.index.height.0,
+            hash: block.context.index.hash,
+            reason: "header merkle root does not match block txids".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// One block's row entries, ready to put. Everything is keyed by the block height
+/// except `height_entry` (the hash-keyed height index). `ironwood_entry` is `None`
+/// when the block has no ironwood data — the ironwood table is sparse; readers treat
+/// an absent row as "no ironwood data".
+struct BlockRowEntries {
+    height_entry: StoredEntryFixed<Height>,
+    header_entry: StoredEntryVar<BlockHeaderData>,
+    commitment_tree_entry: StoredEntryVar<CommitmentTreeData>,
+    txid_entry: StoredEntryVar<TxidList>,
+    transparent_entry: StoredEntryVar<TransparentTxList>,
+    sapling_entry: StoredEntryVar<SaplingTxList>,
+    orchard_entry: StoredEntryVar<OrchardTxList>,
+    ironwood_entry: Option<StoredEntryVar<OrchardTxList>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_block_row_entries(
+    block: &IndexedBlock,
+    block_hash_bytes: &[u8],
+    block_height_bytes: &[u8],
+    txids: Vec<TransactionHash>,
+    transparent: Vec<Option<TransparentCompactTx>>,
+    sapling: Vec<Option<SaplingCompactTx>>,
+    orchard: Vec<Option<OrchardCompactTx>>,
+    ironwood: Vec<Option<OrchardCompactTx>>,
+) -> BlockRowEntries {
+    BlockRowEntries {
+        height_entry: StoredEntryFixed::new(block_hash_bytes, block.context.index.height),
+        header_entry: StoredEntryVar::new(
+            block_height_bytes,
+            BlockHeaderData::new(block.context, *block.data()),
+        ),
+        // Stored as a `StoredEntryVar` because `CommitmentTreeData` V2 is
+        // variable-length (optional Ironwood root).
+        commitment_tree_entry: StoredEntryVar::new(
+            block_height_bytes,
+            *block.commitment_tree_data(),
+        ),
+        txid_entry: StoredEntryVar::new(block_height_bytes, TxidList::new(txids)),
+        transparent_entry: StoredEntryVar::new(
+            block_height_bytes,
+            TransparentTxList::new(transparent),
+        ),
+        sapling_entry: StoredEntryVar::new(block_height_bytes, SaplingTxList::new(sapling)),
+        orchard_entry: StoredEntryVar::new(block_height_bytes, OrchardTxList::new(orchard)),
+        ironwood_entry: ironwood
+            .iter()
+            .any(Option::is_some)
+            .then(|| StoredEntryVar::new(block_height_bytes, OrchardTxList::new(ironwood))),
+    }
+}
+
 impl DbWrite for DbV1 {
     async fn write_block(&self, block: IndexedBlock) -> Result<(), FinalisedStateError> {
         self.write_block(block).await
@@ -61,43 +210,49 @@ impl DbWrite for DbV1 {
         source: &S,
     ) -> Result<(), FinalisedStateError> {
         use crate::chain_index::finalised_state::build_indexed_block_from_source;
-        use zebra_chain::parameters::NetworkUpgrade;
 
         let network = self.config.network;
         let zebra_network = network.to_zebra_network();
-        let sapling_activation_height = NetworkUpgrade::Sapling
+        let sapling_activation_height = ShieldedPool::Sapling
+            .activation_upgrade()
             .activation_height(&zebra_network)
             .expect("Sapling activation height must be set");
-        let nu5_activation_height = NetworkUpgrade::Nu5.activation_height(&zebra_network);
+        let nu5_activation_height = ShieldedPool::Orchard
+            .activation_upgrade()
+            .activation_height(&zebra_network);
+        let nu6_3_activation_height = ShieldedPool::Ironwood
+            .activation_upgrade()
+            .activation_height(&zebra_network);
 
         // Seed `parent_chainwork` from the current tip header (the block before the first one we
         // write). On an empty database this is genesis with zero chainwork. Read raw rather than via
         // `get_block_header`, which routes through `resolve_validated_hash_or_height` →
         // `validate_block_blocking` (a full re-validation for any height above `validated_tip`); the
         // tip is already on disk and trusted here, exactly as the v1.2 migration reads block data.
-        let (start_height, mut parent_chainwork) = match self.tip_height().await? {
-            None => (GENESIS_HEIGHT.0, crate::ChainWork::from_u256(0.into())),
-            Some(tip) => {
-                let tip_bytes = tip.to_bytes()?;
-                let chainwork = tokio::task::block_in_place(|| {
-                    let ro = self.env.begin_ro_txn()?;
-                    match ro.get(self.headers, &tip_bytes) {
-                        Ok(raw) => {
-                            let entry = StoredEntryVar::<BlockHeaderData>::from_bytes(raw)
-                                .map_err(|e| {
-                                    FinalisedStateError::Custom(format!(
-                                        "tip header decode error: {e}"
-                                    ))
-                                })?;
-                            Ok::<_, FinalisedStateError>(entry.inner().context.chainwork)
+        let (start_height, mut parent_chainwork): (u32, Option<crate::ChainWork>) =
+            match self.tip_height().await? {
+                None => (GENESIS_HEIGHT.0, None),
+                Some(tip) => {
+                    let tip_bytes = tip.to_bytes()?;
+                    let chainwork = tokio::task::block_in_place(|| {
+                        let ro = self.env.begin_ro_txn()?;
+                        match ro.get(self.headers, &tip_bytes) {
+                            Ok(raw) => {
+                                let entry = StoredEntryVar::<BlockHeaderData>::from_bytes(raw)
+                                    .map_err(|e| {
+                                        FinalisedStateError::Custom(format!(
+                                            "tip header decode error: {e}"
+                                        ))
+                                    })?;
+                                Ok::<_, FinalisedStateError>(Some(entry.inner().context.chainwork))
+                            }
+                            Err(lmdb::Error::NotFound) => Ok(None),
+                            Err(e) => Err(FinalisedStateError::LmdbError(e)),
                         }
-                        Err(lmdb::Error::NotFound) => Ok(crate::ChainWork::from_u256(0.into())),
-                        Err(e) => Err(FinalisedStateError::LmdbError(e)),
-                    }
-                })?;
-                (tip.0 + 1, chainwork)
-            }
-        };
+                    })?;
+                    (tip.0 + 1, chainwork)
+                }
+            };
 
         // Nothing to do when the tip already meets the target. Importantly, this means a steady-state
         // poll (the indexer calls `sync_to_height` repeatedly) does *not* trigger the bulk accumulator
@@ -107,8 +262,10 @@ impl DbWrite for DbV1 {
         }
 
         info!(
-            "write_blocks_to_height: syncing finalised blocks {start_height}..={} on {:?}",
-            height.0, network
+            start_height,
+            target = height.0,
+            ?network,
+            "write_blocks_to_height: syncing finalised blocks"
         );
 
         // Bulk path: buffer blocks up to a byte budget, then write the whole batch in one
@@ -118,7 +275,20 @@ impl DbWrite for DbV1 {
         // earlier-in-batch uncommitted blocks), so it keeps the per-block path.
         #[cfg(not(feature = "transparent_address_history_experimental"))]
         {
-            let batch_budget = self.config.storage.database.sync_write_batch_bytes.max(1);
+            // `.max(1)` guards a misconfigured `sync_write_batch_size = 0`: a 0 budget would fail
+            // the `batch_bytes < batch_budget` check on the first iteration (`0 < 0`), buffer no
+            // blocks, and stall the sync. A 1-byte floor still guarantees forward progress
+            // (worst case, one block per batch).
+            let batch_budget = (self
+                .config
+                .storage
+                .database
+                .sync_write_batch_size
+                .to_byte_count() as u64)
+                .max(1);
+            let batch_interval = std::time::Duration::from_secs(
+                self.config.storage.database.sync_checkpoint_interval,
+            );
             let mut next = start_height;
             let mut last_progress_log = std::time::Instant::now();
             while next <= height.0 {
@@ -133,18 +303,24 @@ impl DbWrite for DbV1 {
                 while next <= height.0
                     && batch_bytes < batch_budget
                     && batch.len() < SYNC_WRITE_BATCH_MAX_BLOCKS
-                    && batch_started.elapsed() < SYNC_WRITE_BATCH_MAX_INTERVAL
+                    && batch_started.elapsed() < batch_interval
                 {
+                    #[cfg(feature = "prometheus")]
+                    let build_start = std::time::Instant::now();
                     let block = build_indexed_block_from_source(
                         source,
                         network,
                         sapling_activation_height,
                         nu5_activation_height,
+                        nu6_3_activation_height,
                         next,
                         parent_chainwork,
                     )
                     .await?;
-                    parent_chainwork = block.context.chainwork;
+                    #[cfg(feature = "prometheus")]
+                    metrics::histogram!(SYNC_BLOCK_BUILD_SECONDS)
+                        .record(build_start.elapsed().as_secs_f64());
+                    parent_chainwork = Some(block.context.chainwork);
                     batch_bytes = batch_bytes.saturating_add(approx_indexed_block_bytes(&block));
                     batch.push(block);
                     next += 1;
@@ -152,11 +328,16 @@ impl DbWrite for DbV1 {
                     // In-flight progress: the block being fetched, throttled by time. (The committed
                     // tip is reported by the per-batch commit log below.)
                     if last_progress_log.elapsed() >= SYNC_PROGRESS_LOG_INTERVAL {
+                        #[cfg(feature = "prometheus")]
+                        {
+                            metrics::gauge!(SYNC_FINALIZED_HEIGHT).set((next - 1) as f64);
+                            metrics::gauge!(SYNC_TARGET_HEIGHT).set(height.0 as f64);
+                        }
                         info!(
-                            "write_blocks_to_height: syncing height {} / {} on {:?}",
-                            next - 1,
-                            height.0,
-                            network
+                            current = next - 1,
+                            target = height.0,
+                            ?network,
+                            "write_blocks_to_height: syncing"
                         );
                         last_progress_log = std::time::Instant::now();
                     }
@@ -168,21 +349,34 @@ impl DbWrite for DbV1 {
 
                 // Write + sort + commit the batch atomically, then force durability. The on-disk
                 // `headers` tip never runs ahead of the indexes, so resume is gap-free.
+                #[cfg(feature = "prometheus")]
+                let write_start = std::time::Instant::now();
                 tokio::task::block_in_place(|| self.write_block_batch_blocking(&batch))?;
                 tokio::task::block_in_place(|| self.env.sync(true)).map_err(|e| {
                     FinalisedStateError::Custom(format!("LMDB checkpoint sync failed: {e}"))
                 })?;
+                #[cfg(feature = "prometheus")]
+                metrics::histogram!(SYNC_BLOCK_WRITE_SECONDS)
+                    .record(write_start.elapsed().as_secs_f64());
 
                 // Only after the batch is committed + synced do we advance the validated tip.
                 for block in &batch {
                     self.mark_validated(block.context.index.height.0);
+                    #[cfg(feature = "prometheus")]
+                    record_block_throughput(block);
                 }
                 self.status.store(StatusType::Ready);
                 info!(
-                    "write_blocks_to_height: committed batch to height {} ({} blocks)",
-                    next - 1,
-                    batch.len()
+                    height = next - 1,
+                    blocks = batch.len(),
+                    "write_blocks_to_height: committed batch"
                 );
+                #[cfg(feature = "prometheus")]
+                {
+                    metrics::gauge!(DB_TIP_HEIGHT).set((next - 1) as f64);
+                    metrics::gauge!(SYNC_LAST_BLOCK_WRITTEN_AT)
+                        .set(crate::chain_index::unix_now_secs());
+                }
             }
         }
         #[cfg(feature = "transparent_address_history_experimental")]
@@ -193,11 +387,12 @@ impl DbWrite for DbV1 {
                     network,
                     sapling_activation_height,
                     nu5_activation_height,
+                    nu6_3_activation_height,
                     height_int,
                     parent_chainwork,
                 )
                 .await?;
-                parent_chainwork = block.context.chainwork;
+                parent_chainwork = Some(block.context.chainwork);
 
                 self.write_block_with_options(block, false).await?;
             }
@@ -208,25 +403,7 @@ impl DbWrite for DbV1 {
         // once the chain is large. Use it only for the first build or an unusually large gap (e.g. a
         // sync interrupted far behind the on-disk tip); in steady state apply just the delta for the
         // blocks we wrote — O(range) work — which produces the identical accumulator at the tip.
-        match self.read_tx_out_set_accumulator_built_height().await? {
-            Some(built) if built.0 >= height.0 => {}
-            Some(built) if height.0.saturating_sub(built.0) <= ACCUMULATOR_INCREMENTAL_MAX_GAP => {
-                info!(
-                    "write_blocks_to_height: updating txout-set accumulator {}..={}",
-                    built.0 + 1,
-                    height.0
-                );
-                self.update_tx_out_set_accumulator_for_range(built, height)
-                    .await?;
-            }
-            _ => {
-                info!(
-                    "write_blocks_to_height: rebuilding txout-set accumulator to height {}",
-                    height.0
-                );
-                self.rebuild_tx_out_set_accumulator().await?;
-            }
-        }
+        self.advance_tx_out_set_accumulator_to_tip(height).await?;
 
         Ok(())
     }
@@ -381,38 +558,24 @@ impl DbV1 {
         if block_already_exists {
             self.status.store(StatusType::Ready);
             info!(
-                "Block {} at height {} already exists in FinalisedState, skipping write.",
-                &block_hash, &block_height.0
+                %block_hash,
+                height = block_height.0,
+                "block already exists in FinalisedState, skipping write"
             );
             return Ok(());
         }
 
-        // Build DBHeight
-        let height_entry = StoredEntryFixed::new(&block_hash_bytes, block.context.index.height);
+        // Build the per-transaction pool lists (with the duplicate-txid guard applied).
+        // The accumulator consumes the paired `(txid, transparent)` slice; for storage
+        // the pairs are `unzip`ped into the `TxidList` / `TransparentTxList` shapes.
+        let pool_lists = extract_block_pool_lists(&block)?;
 
-        // Build header
-        let header_entry = StoredEntryVar::new(
-            &block_height_bytes,
-            BlockHeaderData::new(block.context, *block.data()),
-        );
-
-        // Build commitment tree data
-        let commitment_tree_entry =
-            StoredEntryFixed::new(&block_height_bytes, *block.commitment_tree_data());
-
-        // Build transaction indexes.
-        //
-        // `transactions` pairs each transaction hash with its transparent data. Both halves
-        // are sourced from the same `tx` in the loop below, so misalignment is structurally
-        // impossible — the pair shares one binding. Downstream the accumulator consumes the
-        // paired slice; for storage we `unzip` into the existing `TxidList` / `TransparentTxList`
-        // shapes.
-        let tx_len = block.transactions().len();
-        let mut transactions: Vec<(TransactionHash, Option<TransparentCompactTx>)> =
-            Vec::with_capacity(tx_len);
-        let mut txid_set: HashSet<TransactionHash> = HashSet::with_capacity(tx_len);
-        let mut sapling = Vec::with_capacity(tx_len);
-        let mut orchard = Vec::with_capacity(tx_len);
+        #[cfg(feature = "transparent_address_history_experimental")]
+        let txid_set: HashSet<TransactionHash> = pool_lists
+            .transactions
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect();
 
         let mut spent_map: HashMap<Outpoint, TxLocation> = HashMap::new();
 
@@ -428,42 +591,6 @@ impl DbV1 {
 
         #[allow(clippy::unused_enumerate_index)]
         for (_tx_index, tx) in block.transactions().iter().enumerate() {
-            let hash = tx.txid();
-
-            if !txid_set.insert(*hash) {
-                return Err(FinalisedStateError::InvalidBlock {
-                    height: block_height.0,
-                    hash: block_hash,
-                    reason: format!("duplicate transaction hash in block: {hash:?}"),
-                });
-            }
-
-            // Transparent transactions — paired with the txid at the source binding.
-            let transparent_data =
-                if tx.transparent().inputs().is_empty() && tx.transparent().outputs().is_empty() {
-                    None
-                } else {
-                    Some(tx.transparent().clone())
-                };
-            transactions.push((*hash, transparent_data));
-
-            // Sapling transactions
-            let sapling_data =
-                if tx.sapling().spends().is_empty() && tx.sapling().outputs().is_empty() {
-                    None
-                } else {
-                    Some(tx.sapling().clone())
-                };
-            sapling.push(sapling_data);
-
-            // Orchard transactions
-            let orchard_data = if tx.orchard().actions().is_empty() {
-                None
-            } else {
-                Some(tx.orchard().clone())
-            };
-            orchard.push(orchard_data);
-
             // Transaction location
             let tx_index =
                 u16::try_from(_tx_index).map_err(|_| FinalisedStateError::InvalidBlock {
@@ -475,13 +602,7 @@ impl DbV1 {
             let tx_location = TxLocation::new(block_height.into(), tx_index);
 
             // Transparent Inputs: Build Spent Outpoints Index
-            for input in tx.transparent().inputs().iter() {
-                if input.is_null_prevout() {
-                    continue;
-                }
-
-                let prev_outpoint = Outpoint::new(*input.prevout_txid(), input.prevout_index());
-
+            for prev_outpoint in tx.transparent().spent_outpoints() {
                 if spent_map.insert(prev_outpoint, tx_location).is_some() {
                     return Err(FinalisedStateError::InvalidBlock {
                         height: block_height.0,
@@ -513,7 +634,8 @@ impl DbV1 {
                     let prev_tx_hash = TransactionHash(*prev_outpoint.prev_txid());
                     if txid_set.contains(&prev_tx_hash) {
                         // Locate the paired (txid, transparent_data) within this block.
-                        if let Some((tx_index, (_, Some(prev_transparent)))) = transactions
+                        if let Some((tx_index, (_, Some(prev_transparent)))) = pool_lists
+                            .transactions
                             .iter()
                             .enumerate()
                             .find(|(_, (h, _))| h == &prev_tx_hash)
@@ -572,20 +694,22 @@ impl DbV1 {
 
         // Accumulator maintenance is deferred on the bulk-sync path (`update_tx_out_set == false`)
         // and rebuilt once at the tip; only the single-block append path maintains it incrementally.
-        let tx_out_set_info_accumulator = if update_tx_out_set {
-            Some(
-                self.calculate_tx_out_set_info_accumulator_after_block(
-                    block_height,
-                    &transactions,
-                    &spent_map,
-                )
-                .await?,
+        let tx_out_set_info_accumulator = self
+            .maybe_calculate_tx_out_set_info_accumulator_after_block(
+                update_tx_out_set,
+                block_height,
+                &pool_lists.transactions,
+                &spent_map,
             )
-        } else {
-            None
-        };
+            .await?;
 
         // Split the paired vector into the per-table shapes used for storage.
+        let BlockPoolLists {
+            transactions,
+            sapling,
+            orchard,
+            ironwood,
+        } = pool_lists;
         let (txids, transparent): (Vec<TransactionHash>, Vec<Option<TransparentCompactTx>>) =
             transactions.into_iter().unzip();
 
@@ -594,17 +718,7 @@ impl DbV1 {
         // lets us mark the block validated after a successful write without the expensive
         // post-commit re-read + spent-index cross-check (which only re-verifies on-disk integrity of
         // bytes we just wrote from memory, and is redundant for our own writes).
-        {
-            let txid_bytes: Vec<[u8; 32]> = txids.iter().map(|txid| txid.0).collect();
-            let computed_merkle_root = Self::calculate_block_merkle_root(&txid_bytes);
-            if &computed_merkle_root != block.data().merkle_root() {
-                return Err(FinalisedStateError::InvalidBlock {
-                    height: block_height.0,
-                    hash: block_hash,
-                    reason: "header merkle root does not match block txids".to_string(),
-                });
-            }
-        }
+        verify_header_merkle_root(&txids, &block)?;
 
         // Reverse txid index entries (`txid -> TxLocation`). Built before `txids` is moved into
         // the `TxidList` below, and sorted by txid so the random-keyed `txid_location` B-tree
@@ -622,35 +736,19 @@ impl DbV1 {
         }
         txid_location_entries.sort_by_key(|entry| entry.0);
 
-        let txid_entry = StoredEntryVar::new(&block_height_bytes, TxidList::new(txids));
-        let transparent_entry =
-            StoredEntryVar::new(&block_height_bytes, TransparentTxList::new(transparent));
-        let sapling_entry = StoredEntryVar::new(&block_height_bytes, SaplingTxList::new(sapling));
-        let orchard_entry = StoredEntryVar::new(&block_height_bytes, OrchardTxList::new(orchard));
+        let entries = build_block_row_entries(
+            &block,
+            &block_hash_bytes,
+            &block_height_bytes,
+            txids,
+            transparent,
+            sapling,
+            orchard,
+            ironwood,
+        );
 
         // if any database writes fail, or block validation fails, remove block from database and return err.
-        let zaino_db = Self {
-            env: Arc::clone(&self.env),
-            headers: self.headers,
-            txids: self.txids,
-            transparent: self.transparent,
-            sapling: self.sapling,
-            orchard: self.orchard,
-            commitment_tree_data: self.commitment_tree_data,
-            heights: self.heights,
-            spent: self.spent,
-            txid_location: self.txid_location,
-            tx_out_set_info_accumulator: self.tx_out_set_info_accumulator,
-            #[cfg(feature = "transparent_address_history_experimental")]
-            address_history: self.address_history,
-            metadata: self.metadata,
-            validated_tip: Arc::clone(&self.validated_tip),
-            validated_set: self.validated_set.clone(),
-            db_handler: std::sync::Mutex::new(None),
-            cancel_token: self.cancel_token.clone(),
-            status: self.status.clone(),
-            config: self.config.clone(),
-        };
+        let zaino_db = self.detached_handle();
         let join_handle = tokio::task::spawn_blocking(move || {
             // Write block to FinalisedState
             let mut txn = zaino_db.env.begin_rw_txn()?;
@@ -658,21 +756,21 @@ impl DbV1 {
             txn.put(
                 zaino_db.headers,
                 &block_height_bytes,
-                &header_entry.to_bytes()?,
+                &entries.header_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
             txn.put(
                 zaino_db.heights,
                 &block_hash_bytes,
-                &height_entry.to_bytes()?,
+                &entries.height_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
             txn.put(
                 zaino_db.txids,
                 &block_height_bytes,
-                &txid_entry.to_bytes()?,
+                &entries.txid_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
@@ -690,28 +788,37 @@ impl DbV1 {
             txn.put(
                 zaino_db.transparent,
                 &block_height_bytes,
-                &transparent_entry.to_bytes()?,
+                &entries.transparent_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
             txn.put(
                 zaino_db.sapling,
                 &block_height_bytes,
-                &sapling_entry.to_bytes()?,
+                &entries.sapling_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
             txn.put(
                 zaino_db.orchard,
                 &block_height_bytes,
-                &orchard_entry.to_bytes()?,
+                &entries.orchard_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
+
+            if let Some(ironwood_entry) = &entries.ironwood_entry {
+                txn.put(
+                    zaino_db.ironwood,
+                    &block_height_bytes,
+                    &ironwood_entry.to_bytes()?,
+                    WriteFlags::NO_OVERWRITE,
+                )?;
+            }
 
             txn.put(
                 zaino_db.commitment_tree_data,
                 &block_height_bytes,
-                &commitment_tree_entry.to_bytes()?,
+                &entries.commitment_tree_entry.to_bytes()?,
                 WriteFlags::NO_OVERWRITE,
             )?;
 
@@ -731,28 +838,11 @@ impl DbV1 {
             // Persist the incrementally-maintained accumulator and advance its freshness watermark
             // in the same transaction as the block, so the watermark always tracks the height the
             // accumulator reflects. Skipped on the deferred (bulk-sync) path.
-            if let Some(tx_out_set_info_accumulator) = tx_out_set_info_accumulator {
-                let tx_out_set_info_accumulator_entry = StoredEntryFixed::new(
-                    TX_OUT_SET_INFO_ACCUMULATOR_KEY,
-                    tx_out_set_info_accumulator,
-                );
-
-                txn.put(
-                    zaino_db.tx_out_set_info_accumulator,
-                    &TX_OUT_SET_INFO_ACCUMULATOR_KEY,
-                    &tx_out_set_info_accumulator_entry.to_bytes()?,
-                    WriteFlags::empty(),
-                )?;
-
-                let watermark =
-                    StoredEntryFixed::new(TX_OUT_SET_ACCUMULATOR_BUILT_HEIGHT_KEY, block_height);
-                txn.put(
-                    zaino_db.metadata,
-                    &TX_OUT_SET_ACCUMULATOR_BUILT_HEIGHT_KEY,
-                    &watermark.to_bytes()?,
-                    WriteFlags::empty(),
-                )?;
-            }
+            zaino_db.put_maintained_tx_out_set_accumulator(
+                &mut txn,
+                tx_out_set_info_accumulator,
+                block_height,
+            )?;
 
             #[cfg(feature = "transparent_address_history_experimental")]
             {
@@ -865,7 +955,7 @@ impl DbV1 {
         let post_result = match join_handle.await {
             Ok(inner_res) => inner_res,
             Err(join_err) => {
-                warn!("Tokio task error (spawn_blocking join error): {}", join_err);
+                warn!(%join_err, "tokio spawn_blocking join error");
 
                 // Best-effort delete of partially written block; ignore delete result.
                 let _ = self.delete_block(&block).await;
@@ -892,14 +982,15 @@ impl DbV1 {
                 }
                 if block.context.index.height.0 % 100 == 0 {
                     info!(
-                        "Successfully committed block {} at height {} to FinalisedState.",
-                        &block.context.index.hash, &block.context.index.height
+                        hash = %block.context.index.hash,
+                        height = ?block.context.index.height,
+                        "committed block to FinalisedState"
                     );
                 } else {
                     tracing::debug!(
-                        "Successfully committed block {} at height {} to FinalisedState.",
-                        &block.context.index.hash,
-                        &block.context.index.height
+                        hash = %block.context.index.hash,
+                        height = ?block.context.index.height,
+                        "committed block to FinalisedState"
                     );
                 }
 
@@ -962,16 +1053,18 @@ impl DbV1 {
                         // Block was already written correctly by another process
                         self.status.store(StatusType::Ready);
                         info!(
-                            "Block {} at height {} was already written by another process, skipping.",
-                            &block_hash, &block_height.0
+                            %block_hash,
+                            height = block_height.0,
+                            "block already written by another process, skipping"
                         );
                         Ok(())
                     }
                     Err(e) => {
-                        warn!("Error writing block to DB: {e}");
+                        warn!(%e, "error writing block to DB");
                         warn!(
-                            "Deleting corrupt block from DB at height: {} with hash: {:?}",
-                            block_height.0, block_hash.0
+                            height = block_height.0,
+                            hash = ?block_hash.0,
+                            "deleting corrupt block from DB"
                         );
 
                         let _ = self.delete_block(&block).await;
@@ -989,10 +1082,11 @@ impl DbV1 {
                 }
             }
             Err(e) => {
-                warn!("Error writing block to DB: {e}");
+                warn!(%e, "error writing block to DB");
                 warn!(
-                    "Deleting corrupt block from DB at height: {} with hash: {:?}",
-                    block_height.0, block_hash.0
+                    height = block_height.0,
+                    hash = ?block_hash.0,
+                    "deleting corrupt block from DB"
                 );
 
                 let _ = self.delete_block(&block).await;
@@ -1138,56 +1232,10 @@ impl DbV1 {
                 }
             }
 
-            let height_entry = StoredEntryFixed::new(&block_hash_bytes, block_height);
-            let header_entry = StoredEntryVar::new(
-                &block_height_bytes,
-                BlockHeaderData::new(block.context, *block.data()),
-            );
-            let commitment_tree_entry =
-                StoredEntryFixed::new(&block_height_bytes, *block.commitment_tree_data());
-
-            let tx_len = block.transactions().len();
-            let mut txids: Vec<TransactionHash> = Vec::with_capacity(tx_len);
-            let mut txid_set: HashSet<TransactionHash> = HashSet::with_capacity(tx_len);
-            let mut transparent: Vec<Option<TransparentCompactTx>> = Vec::with_capacity(tx_len);
-            let mut sapling = Vec::with_capacity(tx_len);
-            let mut orchard = Vec::with_capacity(tx_len);
+            // Build the per-transaction pool lists (with the duplicate-txid guard applied).
+            let pool_lists = extract_block_pool_lists(block)?;
 
             for (tx_index, tx) in block.transactions().iter().enumerate() {
-                let hash = tx.txid();
-                if !txid_set.insert(*hash) {
-                    return Err(FinalisedStateError::InvalidBlock {
-                        height: block_height.0,
-                        hash: block_hash,
-                        reason: format!("duplicate transaction hash in block: {hash:?}"),
-                    });
-                }
-                txids.push(*hash);
-
-                let transparent_data = if tx.transparent().inputs().is_empty()
-                    && tx.transparent().outputs().is_empty()
-                {
-                    None
-                } else {
-                    Some(tx.transparent().clone())
-                };
-                transparent.push(transparent_data);
-
-                let sapling_data =
-                    if tx.sapling().spends().is_empty() && tx.sapling().outputs().is_empty() {
-                        None
-                    } else {
-                        Some(tx.sapling().clone())
-                    };
-                sapling.push(sapling_data);
-
-                let orchard_data = if tx.orchard().actions().is_empty() {
-                    None
-                } else {
-                    Some(tx.orchard().clone())
-                };
-                orchard.push(orchard_data);
-
                 let tx_index =
                     u16::try_from(tx_index).map_err(|_| FinalisedStateError::InvalidBlock {
                         height: block_height.0,
@@ -1196,78 +1244,86 @@ impl DbV1 {
                     })?;
                 let tx_location = TxLocation::new(block_height.0, tx_index);
 
-                for input in tx.transparent().inputs().iter() {
-                    if input.is_null_prevout() {
-                        continue;
-                    }
-                    let prev_outpoint = Outpoint::new(*input.prevout_txid(), input.prevout_index());
+                for prev_outpoint in tx.transparent().spent_outpoints() {
                     spent_batch.push((prev_outpoint.to_bytes()?, tx_location));
                 }
 
-                txid_location_batch.push(((*hash).into(), tx_location));
+                txid_location_batch.push(((*tx.txid()).into(), tx_location));
             }
+
+            let BlockPoolLists {
+                transactions,
+                sapling,
+                orchard,
+                ironwood,
+            } = pool_lists;
+            let (txids, transparent): (Vec<TransactionHash>, Vec<Option<TransparentCompactTx>>) =
+                transactions.into_iter().unzip();
 
             // Cheap in-memory correctness check: txids must reproduce the header merkle root.
-            let txid_bytes: Vec<[u8; 32]> = txids.iter().map(|t| t.0).collect();
-            let computed_merkle_root = Self::calculate_block_merkle_root(&txid_bytes);
-            if &computed_merkle_root != block.data().merkle_root() {
-                return Err(FinalisedStateError::InvalidBlock {
-                    height: block_height.0,
-                    hash: block_hash,
-                    reason: "header merkle root does not match block txids".to_string(),
-                });
-            }
+            verify_header_merkle_root(&txids, block)?;
 
-            let txid_entry = StoredEntryVar::new(&block_height_bytes, TxidList::new(txids));
-            let transparent_entry =
-                StoredEntryVar::new(&block_height_bytes, TransparentTxList::new(transparent));
-            let sapling_entry =
-                StoredEntryVar::new(&block_height_bytes, SaplingTxList::new(sapling));
-            let orchard_entry =
-                StoredEntryVar::new(&block_height_bytes, OrchardTxList::new(orchard));
+            let entries = build_block_row_entries(
+                block,
+                &block_hash_bytes,
+                &block_height_bytes,
+                txids,
+                transparent,
+                sapling,
+                orchard,
+                ironwood,
+            );
 
             // Height-keyed tables (+ the hash-keyed `heights`, one entry/block) written per block.
             put_idempotent(
                 &mut txn,
                 self.headers,
                 &block_height_bytes,
-                &header_entry.to_bytes()?,
+                &entries.header_entry.to_bytes()?,
             )?;
             put_idempotent(
                 &mut txn,
                 self.heights,
                 &block_hash_bytes,
-                &height_entry.to_bytes()?,
+                &entries.height_entry.to_bytes()?,
             )?;
             put_idempotent(
                 &mut txn,
                 self.txids,
                 &block_height_bytes,
-                &txid_entry.to_bytes()?,
+                &entries.txid_entry.to_bytes()?,
             )?;
             put_idempotent(
                 &mut txn,
                 self.transparent,
                 &block_height_bytes,
-                &transparent_entry.to_bytes()?,
+                &entries.transparent_entry.to_bytes()?,
             )?;
             put_idempotent(
                 &mut txn,
                 self.sapling,
                 &block_height_bytes,
-                &sapling_entry.to_bytes()?,
+                &entries.sapling_entry.to_bytes()?,
             )?;
             put_idempotent(
                 &mut txn,
                 self.orchard,
                 &block_height_bytes,
-                &orchard_entry.to_bytes()?,
+                &entries.orchard_entry.to_bytes()?,
             )?;
+            if let Some(ironwood_entry) = &entries.ironwood_entry {
+                put_idempotent(
+                    &mut txn,
+                    self.ironwood,
+                    &block_height_bytes,
+                    &ironwood_entry.to_bytes()?,
+                )?;
+            }
             put_idempotent(
                 &mut txn,
                 self.commitment_tree_data,
                 &block_height_bytes,
-                &commitment_tree_entry.to_bytes()?,
+                &entries.commitment_tree_entry.to_bytes()?,
             )?;
 
             prev_height = Some(block_height.0);
@@ -1432,13 +1488,7 @@ impl DbV1 {
             let tx_location = TxLocation::new(block_height.into(), _tx_index as u16);
 
             // Build Spent Outpoints Index
-            for input in tx.transparent().inputs().iter() {
-                if input.is_null_prevout() {
-                    continue;
-                }
-
-                let prev_outpoint = Outpoint::new(*input.prevout_txid(), input.prevout_index());
-
+            for prev_outpoint in tx.transparent().spent_outpoints() {
                 if spent_map.insert(prev_outpoint, tx_location).is_some() {
                     return Err(FinalisedStateError::InvalidBlock {
                         height: block_height.0,
@@ -1471,7 +1521,8 @@ impl DbV1 {
                     let prev_tx_hash = TransactionHash(*prev_outpoint.prev_txid());
                     if txid_set.contains(&prev_tx_hash) {
                         // Locate the paired (txid, transparent_data) within this block.
-                        if let Some((tx_index, (_, Some(prev_transparent)))) = transactions
+                        if let Some((tx_index, (_, Some(prev_transparent)))) = pool_lists
+                            .transactions
                             .iter()
                             .enumerate()
                             .find(|(_, (h, _))| h == &prev_tx_hash)
@@ -1548,40 +1599,11 @@ impl DbV1 {
             .collect();
 
         // Delete all block data from db.
-        let zaino_db = Self {
-            env: Arc::clone(&self.env),
-            headers: self.headers,
-            txids: self.txids,
-            transparent: self.transparent,
-            sapling: self.sapling,
-            orchard: self.orchard,
-            commitment_tree_data: self.commitment_tree_data,
-            heights: self.heights,
-            spent: self.spent,
-            txid_location: self.txid_location,
-            tx_out_set_info_accumulator: self.tx_out_set_info_accumulator,
-            #[cfg(feature = "transparent_address_history_experimental")]
-            address_history: self.address_history,
-            metadata: self.metadata,
-            validated_tip: Arc::clone(&self.validated_tip),
-            validated_set: self.validated_set.clone(),
-            db_handler: std::sync::Mutex::new(None),
-            cancel_token: self.cancel_token.clone(),
-            status: self.status.clone(),
-            config: self.config.clone(),
-        };
+        let zaino_db = self.detached_handle();
         tokio::task::spawn_blocking(move || {
             let mut txn = zaino_db.env.begin_rw_txn()?;
 
-            let tx_out_set_info_accumulator_entry =
-                StoredEntryFixed::new(TX_OUT_SET_INFO_ACCUMULATOR_KEY, tx_out_set_info_accumulator);
-
-            txn.put(
-                zaino_db.tx_out_set_info_accumulator,
-                &TX_OUT_SET_INFO_ACCUMULATOR_KEY,
-                &tx_out_set_info_accumulator_entry.to_bytes()?,
-                WriteFlags::empty(),
-            )?;
+            zaino_db.put_tx_out_set_accumulator(&mut txn, tx_out_set_info_accumulator)?;
 
             // Delete spent data
             for outpoint in spent_map.keys() {
@@ -1709,13 +1731,15 @@ impl DbV1 {
                 }
             }
 
-            // Delete block data
+            // Delete block data. `ironwood` is `NotFound`-tolerant below, so deleting a pre-v1.3.0
+            // block (which has no ironwood row) is a no-op.
             for &db in &[
                 zaino_db.headers,
                 zaino_db.txids,
                 zaino_db.transparent,
                 zaino_db.sapling,
                 zaino_db.orchard,
+                zaino_db.ironwood,
                 zaino_db.commitment_tree_data,
             ] {
                 match txn.del(db, &block_height_bytes, None) {
@@ -1934,4 +1958,20 @@ impl DbV1 {
         self.status.store(StatusType::Ready);
         Ok(())
     }
+}
+
+/// Increments per-block throughput counters (transactions, Sapling outputs,
+/// Orchard actions). Only compiled when the `prometheus` feature is enabled.
+#[cfg(feature = "prometheus")]
+fn record_block_throughput(block: &IndexedBlock) {
+    let transactions = block.transactions().len() as u64;
+    let mut sapling_outputs: u64 = 0;
+    let mut orchard_actions: u64 = 0;
+    for tx in block.transactions() {
+        sapling_outputs = sapling_outputs.saturating_add(tx.sapling().outputs().len() as u64);
+        orchard_actions = orchard_actions.saturating_add(tx.orchard().actions().len() as u64);
+    }
+    metrics::counter!(SYNC_TRANSACTIONS_TOTAL).increment(transactions);
+    metrics::counter!(SYNC_SAPLING_OUTPUTS_TOTAL).increment(sapling_outputs);
+    metrics::counter!(SYNC_ORCHARD_ACTIONS_TOTAL).increment(orchard_actions);
 }

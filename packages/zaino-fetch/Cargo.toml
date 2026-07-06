@@ -6,12 +6,15 @@ repository = { workspace = true }
 homepage = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
-version = "0.2.0"
+version = "0.2.1"
 
 [features]
-default = ["zcashd_support"]
+default = []
 
-# Support for connecting to a zcashd validator node. Default-on; being
+# Prometheus metrics emission (outbound RPC request counting / latency).
+prometheus = ["metrics"]
+
+# Support for connecting to a zcashd validator node. Opt-in (default off, docs/adr/0005); being
 # deprecated. Gates the zcashd-shaped getpeerinfo parsing. Dropping it
 # (`--no-default-features`) compiles zcashd parsing out. See
 # docs/adr/0001-zcashd-support-feature-gate.md.
@@ -28,6 +31,9 @@ zebra-rpc = { workspace = true }
 # Tracing
 tracing = { workspace = true }
 
+# Metrics
+metrics = { workspace = true, optional = true }
+
 # Miscellaneous Workspace
 tokio = { workspace = true, features = ["full"] }
 tonic = { workspace = true, features = ["tls-native-roots"] }
@@ -43,8 +49,6 @@ serde = { workspace = true, features = ["derive"] }
 hex = { workspace = true, features = ["serde"] }
 indexmap = { workspace = true, features = ["serde"] }
 base64 = { workspace = true }
-byteorder = { workspace = true }
-sha2 = { workspace = true }
 jsonrpsee-types = { workspace = true }
 derive_more = { workspace = true, features = ["from"] }
 

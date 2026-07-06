@@ -6,7 +6,6 @@ use super::*;
 ///
 /// Exposes `zcash_client_backend`-compatible compact blocks derived from stored header + shielded
 /// transaction data.
-#[async_trait]
 impl CompactBlockExt for DbV1 {
     async fn get_compact_block(
         &self,
@@ -147,6 +146,26 @@ impl DbV1 {
                 None => &[],
             };
 
+            // ----- Fetch Ironwood Tx Data -----
+            //
+            // Ironwood rows exist only from schema v1.3.0 (NU6.3) onward, so a missing row is not an
+            // error — it just means the block has no ironwood data.
+            let ironwood_stored_entry_var = if pool_types.includes_ironwood() {
+                match txn.get(self.ironwood, &height_bytes) {
+                    Ok(raw) => Some(StoredEntryVar::<OrchardTxList>::from_bytes(raw).map_err(
+                        |e| FinalisedStateError::Custom(format!("ironwood decode error: {e}")),
+                    )?),
+                    Err(lmdb::Error::NotFound) => None,
+                    Err(e) => return Err(FinalisedStateError::LmdbError(e)),
+                }
+            } else {
+                None
+            };
+            let ironwood = match ironwood_stored_entry_var.as_ref() {
+                Some(stored_entry_var) => stored_entry_var.inner().tx(),
+                None => &[],
+            };
+
             // ----- Construct CompactTx -----
             let vtx: Vec<zaino_proto::proto::compact_formats::CompactTx> = txids
                 .iter()
@@ -185,6 +204,17 @@ impl DbV1 {
                         })
                         .unwrap_or_default();
 
+                    let ironwood_actions = ironwood
+                        .get(i)
+                        .and_then(|opt| opt.as_ref())
+                        .map(|o| {
+                            o.actions()
+                                .iter()
+                                .map(|a| a.into_compact())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
                     let (vin, vout) = transparent
                         .get(i)
                         .and_then(|opt| opt.as_ref())
@@ -206,6 +236,7 @@ impl DbV1 {
                     if spends.is_empty()
                         && outputs.is_empty()
                         && actions.is_empty()
+                        && ironwood_actions.is_empty()
                         && vin.is_empty()
                         && vout.is_empty()
                     {
@@ -219,6 +250,7 @@ impl DbV1 {
                         spends,
                         outputs,
                         actions,
+                        ironwood_actions,
                         vin,
                         vout,
                     })
@@ -235,15 +267,17 @@ impl DbV1 {
                 }
                 Err(e) => return Err(FinalisedStateError::LmdbError(e)),
             };
-            let commitment_tree_data: CommitmentTreeData = *StoredEntryFixed::from_bytes(raw)
-                .map_err(|e| {
-                    FinalisedStateError::Custom(format!("commitment_tree decode error: {e}"))
-                })?
-                .inner();
+            let commitment_tree_data: CommitmentTreeData =
+                *StoredEntryVar::<CommitmentTreeData>::from_bytes(raw)
+                    .map_err(|e| {
+                        FinalisedStateError::Custom(format!("commitment_tree decode error: {e}"))
+                    })?
+                    .inner();
 
             let chain_metadata = zaino_proto::proto::compact_formats::ChainMetadata {
                 sapling_commitment_tree_size: commitment_tree_data.sizes().sapling(),
                 orchard_commitment_tree_size: commitment_tree_data.sizes().orchard(),
+                ironwood_commitment_tree_size: commitment_tree_data.sizes().ironwood(),
             };
 
             // ----- Construct CompactBlock -----
@@ -321,29 +355,7 @@ impl DbV1 {
             tokio::sync::mpsc::channel::<Result<CompactBlock, tonic::Status>>(128);
 
         // Clone everything the blocking task needs so we can move it into the blocking closure.
-        // This mirrors patterns already used elsewhere in this module.
-        let zaino_db = Self {
-            env: Arc::clone(&self.env),
-            headers: self.headers,
-            txids: self.txids,
-            transparent: self.transparent,
-            sapling: self.sapling,
-            orchard: self.orchard,
-            commitment_tree_data: self.commitment_tree_data,
-            heights: self.heights,
-            spent: self.spent,
-            txid_location: self.txid_location,
-            tx_out_set_info_accumulator: self.tx_out_set_info_accumulator,
-            #[cfg(feature = "transparent_address_history_experimental")]
-            address_history: self.address_history,
-            metadata: self.metadata,
-            validated_tip: Arc::clone(&self.validated_tip),
-            validated_set: self.validated_set.clone(),
-            db_handler: std::sync::Mutex::new(None),
-            cancel_token: self.cancel_token.clone(),
-            status: self.status.clone(),
-            config: self.config.clone(),
-        };
+        let zaino_db = self.detached_handle();
 
         tokio::task::spawn_blocking(move || {
             /// Maximum number of blocks to stream per LMDB read transaction.
@@ -970,6 +982,52 @@ impl DbV1 {
                         None => &[],
                     };
 
+                    // Ironwood is fetched with a tolerant point lookup rather than a lockstep cursor:
+                    // rows are sparse (present only from schema v1.3.0 / NU6.3), so a missing row must
+                    // not desync a height-aligned cursor. `NotFound` simply means "no ironwood here".
+                    let ironwood_entries: Option<StoredEntryVar<OrchardTxList>> =
+                        if pool_types.includes_ironwood() {
+                            let ironwood_key = match current_height.to_bytes() {
+                                Ok(key) => key,
+                                Err(error) => {
+                                    send_status(
+                                        &sender,
+                                        tonic::Status::internal(format!(
+                                            "ironwood height to_bytes failed: {error}"
+                                        )),
+                                    );
+                                    return;
+                                }
+                            };
+                            match txn.get(zaino_db.ironwood, &ironwood_key) {
+                                Ok(raw) => match StoredEntryVar::<OrchardTxList>::from_bytes(raw)
+                                    .map_err(|error| format!("ironwood decode error: {error}"))
+                                {
+                                    Ok(entry) => Some(entry),
+                                    Err(message) => {
+                                        send_status(&sender, tonic::Status::internal(message));
+                                        return;
+                                    }
+                                },
+                                Err(lmdb::Error::NotFound) => None,
+                                Err(error) => {
+                                    send_status(
+                                        &sender,
+                                        tonic::Status::internal(format!(
+                                            "lmdb get(ironwood) failed: {error}"
+                                        )),
+                                    );
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                    let ironwood = match ironwood_entries.as_ref() {
+                        Some(entry) => entry.inner().tx(),
+                        None => &[],
+                    };
+
                     // Invariant: if a pool is requested, its per-height vector length must match txids.
                     if pool_types.includes_transparent() && transparent.len() != txids.len() {
                         send_status(
@@ -1003,6 +1061,22 @@ impl DbV1 {
                                 current_height.0,
                                 txids.len(),
                                 orchard.len(),
+                            )),
+                        );
+                        return;
+                    }
+                    // Ironwood rows are optional; only enforce alignment when a row is present.
+                    if pool_types.includes_ironwood()
+                        && !ironwood.is_empty()
+                        && ironwood.len() != txids.len()
+                    {
+                        send_status(
+                            &sender,
+                            tonic::Status::internal(format!(
+                                "ironwood list length mismatch at height {}: txids={}, ironwood={}",
+                                current_height.0,
+                                txids.len(),
+                                ironwood.len(),
                             )),
                         );
                         return;
@@ -1057,6 +1131,17 @@ impl DbV1 {
                             })
                             .unwrap_or_default();
 
+                        let ironwood_actions = ironwood
+                            .get(i)
+                            .and_then(|opt| opt.as_ref())
+                            .map(|o| {
+                                o.actions()
+                                    .iter()
+                                    .map(|a| a.into_compact())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+
                         let (vin, vout) = transparent
                             .get(i)
                             .and_then(|opt| opt.as_ref())
@@ -1072,6 +1157,7 @@ impl DbV1 {
                         if spends.is_empty()
                             && outputs.is_empty()
                             && actions.is_empty()
+                            && ironwood_actions.is_empty()
                             && vin.is_empty()
                             && vout.is_empty()
                         {
@@ -1085,6 +1171,7 @@ impl DbV1 {
                             spends,
                             outputs,
                             actions,
+                            ironwood_actions,
                             vin,
                             vout,
                         });
@@ -1092,8 +1179,10 @@ impl DbV1 {
 
                     // ----- Decode commitment tree data and construct block -----
                     let commitment_tree_data: CommitmentTreeData =
-                        match StoredEntryFixed::from_bytes(raw_commitment_tree_bytes)
-                            .map_err(|error| format!("commitment_tree decode error: {error}"))
+                        match StoredEntryVar::<CommitmentTreeData>::from_bytes(
+                            raw_commitment_tree_bytes,
+                        )
+                        .map_err(|error| format!("commitment_tree decode error: {error}"))
                         {
                             Ok(entry) => *entry.inner(),
                             Err(message) => {
@@ -1105,6 +1194,7 @@ impl DbV1 {
                     let chain_metadata = zaino_proto::proto::compact_formats::ChainMetadata {
                         sapling_commitment_tree_size: commitment_tree_data.sizes().sapling(),
                         orchard_commitment_tree_size: commitment_tree_data.sizes().orchard(),
+                        ironwood_commitment_tree_size: commitment_tree_data.sizes().ironwood(),
                     };
 
                     let compact_block = zaino_proto::proto::compact_formats::CompactBlock {

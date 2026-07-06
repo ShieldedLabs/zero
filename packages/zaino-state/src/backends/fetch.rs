@@ -4,7 +4,6 @@ use futures::StreamExt;
 use hex::FromHex;
 use std::{io::Cursor, str::FromStr, time};
 use tokio::{sync::mpsc, time::timeout};
-use tonic::async_trait;
 use tracing::{info, instrument, warn};
 use zebra_state::HashOrHeight;
 
@@ -26,6 +25,7 @@ use zaino_fetch::{
     chain::{transaction::FullTransaction, utils::ParseFromSlice},
     jsonrpsee::{
         connector::{JsonRpSeeConnector, RpcError},
+        raw_transaction::validate_raw_transaction_hex,
         response::{
             address_deltas::{GetAddressDeltasParams, GetAddressDeltasResponse},
             block_deltas::BlockDeltas,
@@ -111,7 +111,6 @@ impl Status for FetchService {
     }
 }
 
-#[async_trait]
 #[allow(deprecated)]
 impl ZcashService for FetchService {
     const BACKEND_TYPE: BackendType = BackendType::Fetch;
@@ -241,7 +240,6 @@ impl FetchServiceSubscriber {
     }
 }
 
-#[async_trait]
 impl ZcashIndexer for FetchServiceSubscriber {
     #[allow(deprecated)]
     type Error = FetchServiceError;
@@ -298,8 +296,7 @@ impl ZcashIndexer for FetchServiceSubscriber {
     /// Some fields from the zcashd reference are missing from Zebra's [`GetBlockchainInfoResponse`]. It only contains the fields
     /// [required for lightwalletd support.](https://github.com/zcash/lightwalletd/blob/v0.4.9/common/common.go#L72-L89)
     async fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResponse, Self::Error> {
-        Ok(self
-            .fetcher
+        self.fetcher
             .get_blockchain_info()
             .await?
             .try_into()
@@ -310,7 +307,7 @@ impl ZcashIndexer for FetchServiceSubscriber {
                         "chainwork not hex-encoded integer",
                     ),
                 )
-            })?)
+            })
     }
 
     /// Returns details on the active state of the TX memory pool.
@@ -391,6 +388,7 @@ impl ZcashIndexer for FetchServiceSubscriber {
         &self,
         raw_transaction_hex: String,
     ) -> Result<SentTransactionHash, Self::Error> {
+        validate_raw_transaction_hex(&raw_transaction_hex)?;
         Ok(self
             .fetcher
             .send_raw_transaction(raw_transaction_hex)
@@ -607,7 +605,7 @@ impl ZcashIndexer for FetchServiceSubscriber {
                     )?,
             };
 
-            let (sapling, orchard) = self.indexer.get_treestate(block_data.hash()).await?;
+            let treestates = self.indexer.get_treestate(block_data.hash()).await?;
             let time: u32 = block_data.data().time().try_into().map_err(|_error| {
                 #[allow(deprecated)]
                 FetchServiceError::RpcError(RpcError::new_from_legacycode(
@@ -616,19 +614,26 @@ impl ZcashIndexer for FetchServiceSubscriber {
                 ))
             })?;
 
-            #[allow(deprecated)]
-            Ok(GetTreestateResponse::from_parts(
+            Ok(super::build_treestate_response(
                 (*block_data.hash()).into(),
                 block_data.height().into(),
                 time,
-                sapling,
-                orchard,
+                treestates,
             ))
         }
         .await;
 
         if let Ok(response) = local_result {
             return Ok(response);
+        }
+
+        let snapshot = self.indexer.snapshot_nonfinalized_state().await?;
+        if !self
+            .indexer
+            .hash_or_height_known_for_treestate(&snapshot, &fallback_hash_or_height)
+            .await?
+        {
+            return local_result;
         }
 
         self.fetcher
@@ -749,11 +754,12 @@ impl ZcashIndexer for FetchServiceSubscriber {
 
         let (height, confirmations, block_hash, in_best_chain) = match best_chain_location {
             Some(types::BestChainLocation::Block(block_hash, height)) => {
-                let confirmations = snapshot
+                let confirmations: i64 = snapshot
                     .max_serviceable_height()
                     .0
                     .saturating_sub(height.0)
-                    .saturating_add(1);
+                    .saturating_add(1)
+                    .into();
 
                 (
                     Some(zebra_chain::block::Height::from(height)),
@@ -884,7 +890,6 @@ impl ZcashIndexer for FetchServiceSubscriber {
     }
 }
 
-#[async_trait]
 #[allow(deprecated)]
 impl LightWalletIndexer for FetchServiceSubscriber {
     /// Return the height of the tip of the best chain
@@ -1122,7 +1127,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                             )))
                             .await
                         {
-                            warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                            warn!(%e, "GetBlockRange channel closed unexpectedly");
                         };
                         return;
                     };
@@ -1160,7 +1165,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                             {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                    warn!(%e, "GetBlockRange channel closed unexpectedly");
                                 }
                             }
                         }
@@ -1181,7 +1186,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                                 {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                        warn!(%e, "GetBlockRange channel closed unexpectedly");
                                     }
                                 }
                             } else {
@@ -1191,7 +1196,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                                     .await
                                     .is_err()
                                 {
-                                    warn!("GetBlockRangeStream closed unexpectedly: {}", e);
+                                    warn!(%e, "GetBlockRangeStream closed unexpectedly");
                                 }
                             }
                         }
@@ -1255,7 +1260,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                             )))
                             .await
                         {
-                            warn!("GetBlockRangeNullifiers channel closed unexpectedly: {}", e);
+                            warn!(%e, "GetBlockRangeNullifiers channel closed unexpectedly");
                         };
                         return;
                     };
@@ -1307,7 +1312,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                             {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                    warn!(%e, "GetBlockRange channel closed unexpectedly");
                                 }
                             }
                         }
@@ -1329,7 +1334,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                                 {
                                     Ok(_) => {}
                                     Err(e) => {
-                                        warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                                        warn!(%e, "GetBlockRange channel closed unexpectedly");
                                     }
                                 }
                             } else {
@@ -1340,7 +1345,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                                     .await
                                     .is_err()
                                 {
-                                    warn!("GetBlockRangeStream closed unexpectedly: {}", e);
+                                    warn!(%e, "GetBlockRangeStream closed unexpectedly");
                                 }
                             }
                         }
@@ -1748,7 +1753,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                             )))
                             .await
                         {
-                            warn!("GetMempoolStream channel closed unexpectedly: {}", e);
+                            warn!(%e, "GetMempoolStream channel closed unexpectedly");
                         };
                         return;
                     };
@@ -1818,27 +1823,20 @@ impl LightWalletIndexer for FetchServiceSubscriber {
             )),
         )?;
 
-        #[allow(deprecated)]
-        let (hash, height, time, sapling, orchard) =
-            <FetchServiceSubscriber as ZcashIndexer>::z_get_treestate(
-                self,
-                hash_or_height.to_string(),
-            )
-            .await?
-            .into_parts();
-        Ok(TreeState {
-            network: self
-                .config
+        let treestate_response = <FetchServiceSubscriber as ZcashIndexer>::z_get_treestate(
+            self,
+            hash_or_height.to_string(),
+        )
+        .await?;
+
+        Ok(super::tree_state_from_treestate_response(
+            self.config
                 .common
                 .network
                 .to_zebra_network()
                 .bip70_network_name(),
-            height: height.0 as u64,
-            hash: hash.to_string(),
-            time,
-            sapling_tree: sapling.map(hex::encode).unwrap_or_default(),
-            orchard_tree: orchard.map(hex::encode).unwrap_or_default(),
-        })
+            treestate_response,
+        ))
     }
 
     /// GetLatestTreeState returns the note commitment tree state corresponding to the chain tip.
@@ -2050,7 +2048,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                 .unwrap_or_default(),
             upgrade_name: nu_name.to_string(),
             upgrade_height: nu_height.0 as u64,
-            lightwallet_protocol_version: "v0.4.0".to_string(),
+            lightwallet_protocol_version: "v0.5.0".to_string(),
         })
     }
 
