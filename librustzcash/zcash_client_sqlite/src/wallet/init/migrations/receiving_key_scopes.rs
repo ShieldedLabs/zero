@@ -362,6 +362,7 @@ mod tests {
             BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: None,
+                ironwood_anchor: None,
             },
         );
         let mut transparent_signing_set = TransparentSigningSet::new();

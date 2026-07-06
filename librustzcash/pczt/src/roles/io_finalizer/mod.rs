@@ -29,10 +29,12 @@ impl IoFinalizer {
     pub fn finalize_io(self) -> Result<Pczt, Error> {
         let Self { pczt } = self;
 
+        let has_orchard_actions = !pczt.orchard.actions.is_empty();
+        let has_ironwood_actions = !pczt.ironwood.actions.is_empty();
         let has_shielded_spends =
-            !(pczt.sapling.spends.is_empty() && pczt.orchard.actions.is_empty());
+            !(pczt.sapling.spends.is_empty() && !has_orchard_actions && !has_ironwood_actions);
         let has_shielded_outputs =
-            !(pczt.sapling.outputs.is_empty() && pczt.orchard.actions.is_empty());
+            !(pczt.sapling.outputs.is_empty() && !has_orchard_actions && !has_ironwood_actions);
 
         // We can't build a transaction that has no spends or outputs.
         // However, we don't attempt to reject an entirely dummy transaction.
@@ -48,6 +50,7 @@ impl IoFinalizer {
             transparent,
             mut sapling,
             mut orchard,
+            mut ironwood,
             tx_data,
         } = pczt.extract_tx_data(
             |t| {
@@ -56,6 +59,7 @@ impl IoFinalizer {
             },
             |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
             |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
+            |i| i.extract_effects().map_err(ExtractError::IronwoodExtract),
         )?;
 
         // After shielded IO finalization, the transaction effects cannot be modified
@@ -68,18 +72,33 @@ impl IoFinalizer {
         let txid_parts = tx_data.digest(TxIdDigester);
         let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
 
+        // The Sapling bundle is always finalized: unlike the Orchard-protocol
+        // Transaction Extractor, the Sapling one requires `bsk` to be set even when
+        // the bundle is empty.
         sapling
             .finalize_io(shielded_sighash, OsRng)
             .map_err(Error::SaplingFinalize)?;
-        orchard
-            .finalize_io(shielded_sighash, OsRng)
-            .map_err(Error::OrchardFinalize)?;
+        // An empty Orchard-protocol bundle carries no value commitment information
+        // and contributes nothing to the transaction; leave its `bsk` unset so that
+        // it stays in its canonical empty form (and so remains omissible by, or
+        // representable in, the serialization formats).
+        if has_orchard_actions {
+            orchard
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::OrchardFinalize)?;
+        }
+        if has_ironwood_actions {
+            ironwood
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::IronwoodFinalize)?;
+        }
 
         Ok(Pczt {
             global,
             transparent: crate::transparent::Bundle::serialize_from(transparent),
             sapling: crate::sapling::Bundle::serialize_from(sapling),
             orchard: crate::orchard::Bundle::serialize_from(orchard),
+            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
         })
     }
 }
@@ -90,6 +109,7 @@ pub enum Error {
     Extract(crate::ExtractError),
     NoOutputs,
     NoSpends,
+    IronwoodFinalize(orchard::pczt::IoFinalizerError),
     OrchardFinalize(orchard::pczt::IoFinalizerError),
     SaplingFinalize(sapling::pczt::IoFinalizerError),
 }

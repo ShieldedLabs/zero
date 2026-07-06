@@ -3,7 +3,7 @@ use std::{collections::HashSet, rc::Rc};
 use incrementalmerkletree::Position;
 use orchard::{
     keys::Diversifier,
-    note::{Note, Nullifier, RandomSeed, Rho},
+    note::{Note, NoteVersion, Nullifier, RandomSeed, Rho},
 };
 use rusqlite::{Connection, Row, named_params, types::Value};
 
@@ -18,12 +18,15 @@ use zcash_client_backend::{
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{
-    ShieldedProtocol,
+    ShieldedPool,
     consensus::{self, BlockHeight},
 };
 use zip32::Scope;
 
-use crate::{AccountRef, AccountUuid, AddressRef, ReceivedNoteId, TxRef, error::SqliteClientError};
+use crate::{
+    AccountRef, AccountUuid, AddressRef, IRONWOOD_TABLES_PREFIX, ORCHARD_TABLES_PREFIX,
+    ReceivedNoteId, TxRef, error::SqliteClientError,
+};
 
 use super::{
     KeyScope, common::UnspentNoteMeta, get_account, get_account_ref, memo_repr, upsert_address,
@@ -33,7 +36,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
     params: &P,
     row: &Row,
 ) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
-    let note_id = ReceivedNoteId(ShieldedProtocol::Orchard, row.get("id")?);
+    let note_id = ReceivedNoteId(ShieldedPool::Orchard, row.get("id")?);
     let txid = row.get::<_, [u8; 32]>("txid").map(TxId::from_bytes)?;
     let action_index = row.get("action_index")?;
     let diversifier = {
@@ -62,6 +65,13 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
         let rseed_bytes: [u8; 32] = row.get("rseed")?;
         Option::from(RandomSeed::from_bytes(rseed_bytes, &rho)).ok_or_else(|| {
             SqliteClientError::CorruptedData("Invalid Orchard random seed.".to_string())
+        })
+    }?;
+
+    let note_version = {
+        let code: i64 = row.get("note_version")?;
+        parse_note_version(code).ok_or_else(|| {
+            SqliteClientError::CorruptedData(format!("Unrecognized note version code {code}"))
         })
     }?;
 
@@ -110,6 +120,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 orchard::value::NoteValue::from_raw(note_value),
                 rho,
                 rseed,
+                note_version,
             ))
             .ok_or_else(|| SqliteClientError::CorruptedData("Invalid Orchard note.".to_string()))?;
 
@@ -139,7 +150,7 @@ pub(crate) fn get_spendable_orchard_note<P: consensus::Parameters>(
         params,
         txid,
         index,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         target_height,
         to_received_note,
     )
@@ -162,7 +173,7 @@ pub(crate) fn select_spendable_orchard_notes<P: consensus::Parameters>(
         target_height,
         confirmations_policy,
         exclude,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         to_received_note,
     )
 }
@@ -202,7 +213,8 @@ pub(crate) fn get_unspent_orchard_notes_at_historical_height<P: consensus::Param
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.action_index,
-             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.commitment_tree_position,
+             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version,
+             rn.commitment_tree_position,
              accounts.ufvk AS ufvk, rn.recipient_key_scope,
              t.mined_height,
              NULL AS max_shielding_input_height
@@ -283,13 +295,37 @@ pub(crate) fn select_unspent_note_meta(
 ) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
     super::common::select_unspent_note_meta(
         conn,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         wallet_birthday,
         anchor_height,
     )
 }
 
+/// Encodes a note plaintext version for storage in the `note_version` column of a received-notes
+/// table. The encoding matches the note plaintext lead byte signaling the version.
+pub(crate) fn note_version_code(version: NoteVersion) -> i64 {
+    match version {
+        NoteVersion::V2 => 2,
+        NoteVersion::V3 => 3,
+    }
+}
+
+/// Decodes a note plaintext version from its `note_version` column encoding, returning `None` if
+/// the code is not a recognized version.
+pub(crate) fn parse_note_version(code: i64) -> Option<NoteVersion> {
+    match code {
+        2 => Some(NoteVersion::V2),
+        3 => Some(NoteVersion::V3),
+        _ => None,
+    }
+}
+
 /// Records the specified shielded output as having been received.
+///
+/// The output's note plaintext version determines the pool to which the note belongs — version 2
+/// note plaintexts can be obtained only under the Orchard note encryption domain, and version 3
+/// note plaintexts only under the Ironwood domain — so the note is recorded in
+/// `orchard_received_notes` or `ironwood_received_notes` accordingly.
 ///
 /// This implementation relies on the facts that:
 /// - A transaction will not contain more than 2^63 shielded outputs.
@@ -309,18 +345,23 @@ pub(crate) fn put_received_note<
 ) -> Result<AccountRef, SqliteClientError> {
     let account_id = get_account_ref(conn, output.account_id())?;
     let address_id = ensure_address(conn, params, output, target_or_mined_height)?;
-    let mut stmt_upsert_received_note = conn.prepare_cached(
-        "INSERT INTO orchard_received_notes (
+    let note_version = output.note().version();
+    let table_prefix = match note_version {
+        NoteVersion::V2 => ORCHARD_TABLES_PREFIX,
+        NoteVersion::V3 => IRONWOOD_TABLES_PREFIX,
+    };
+    let mut stmt_upsert_received_note = conn.prepare_cached(&format!(
+        "INSERT INTO {table_prefix}_received_notes (
             transaction_id, action_index, account_id, address_id,
             diversifier, value, rho, rseed, memo, nf,
             is_change, commitment_tree_position,
-            recipient_key_scope
+            recipient_key_scope, note_version
         )
         VALUES (
             :transaction_id, :action_index, :account_id, :address_id,
             :diversifier, :value, :rho, :rseed, :memo, :nf,
             :is_change, :commitment_tree_position,
-            :recipient_key_scope
+            :recipient_key_scope, :note_version
         )
         ON CONFLICT (transaction_id, action_index) DO UPDATE
         SET account_id = :account_id,
@@ -333,9 +374,10 @@ pub(crate) fn put_received_note<
             memo = IFNULL(:memo, memo),
             is_change = MAX(:is_change, is_change),
             commitment_tree_position = IFNULL(:commitment_tree_position, commitment_tree_position),
-            recipient_key_scope = :recipient_key_scope
-        RETURNING orchard_received_notes.id",
-    )?;
+            recipient_key_scope = :recipient_key_scope,
+            note_version = :note_version
+        RETURNING id",
+    ))?;
 
     let rseed = output.note().rseed();
     let to = output.note().recipient();
@@ -355,6 +397,7 @@ pub(crate) fn put_received_note<
         ":is_change": output.is_change(),
         ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from),
         ":recipient_key_scope": output.recipient_key_scope().map(|s| KeyScope::from(s).encode()),
+        ":note_version": note_version_code(note_version),
     ];
 
     let received_note_id = stmt_upsert_received_note
@@ -363,11 +406,14 @@ pub(crate) fn put_received_note<
 
     if let Some(spent_in) = spent_in {
         conn.execute(
-            "INSERT INTO orchard_received_note_spends (orchard_received_note_id, transaction_id)
-             VALUES (:orchard_received_note_id, :transaction_id)
-             ON CONFLICT (orchard_received_note_id, transaction_id) DO NOTHING",
+            &format!(
+                "INSERT INTO {table_prefix}_received_note_spends
+                    ({table_prefix}_received_note_id, transaction_id)
+                 VALUES (:received_note_id, :transaction_id)
+                 ON CONFLICT ({table_prefix}_received_note_id, transaction_id) DO NOTHING"
+            ),
             named_params![
-                ":orchard_received_note_id": received_note_id,
+                ":received_note_id": received_note_id,
                 ":transaction_id": spent_in.0
             ],
         )?;
@@ -386,7 +432,7 @@ pub(crate) fn get_orchard_nullifiers(
     conn: &Connection,
     query: NullifierQuery,
 ) -> Result<Vec<(AccountUuid, Nullifier)>, SqliteClientError> {
-    super::common::get_nullifiers(conn, ShieldedProtocol::Orchard, query, |nf_bytes| {
+    super::common::get_nullifiers(conn, ShieldedPool::Orchard, query, |nf_bytes| {
         Nullifier::from_bytes(<&[u8; 32]>::try_from(nf_bytes).map_err(|_| {
             SqliteClientError::CorruptedData(
                 "unable to parse Orchard nullifier: expected 32 bytes".to_string(),
@@ -756,6 +802,104 @@ pub(crate) mod tests {
     #[test]
     fn propose_and_build_shielding_coinbase_succeeds() {
         testing::pool::propose_and_build_shielding_coinbase_succeeds::<OrchardPoolTester>();
+    }
+
+    /// `put_received_note` must record a note in the received-notes table for the pool implied
+    /// by the note's plaintext version: version 2 notes belong to the Orchard pool and version 3
+    /// notes to the Ironwood pool.
+    #[test]
+    fn put_received_note_routes_by_note_plaintext_version() {
+        use orchard::{
+            keys::{FullViewingKey, SpendingKey},
+            note::{Note, NoteVersion, RandomSeed, Rho},
+            value::NoteValue,
+        };
+        use rusqlite::named_params;
+        use zcash_client_backend::{
+            DecryptedOutput, TransferType,
+            data_api::{Account as _, testing::TestBuilder},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::memo::MemoBytes;
+
+        use crate::{TxRef, testing::db::TestDbFactory};
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account_uuid = st.test_account().unwrap().id();
+        let network = *st.network();
+
+        // The recipient need not correspond to the receiving account here: internally-scoped
+        // outputs skip address derivation, and this test exercises only note storage.
+        let sk: SpendingKey = Option::from(SpendingKey::from_bytes([0x2a; 32])).unwrap();
+        let recipient = FullViewingKey::from(&sk).address_at(0u32, zip32::Scope::External);
+        let rho = Option::from(Rho::from_bytes(&[0; 32])).unwrap();
+        let rseed = Option::from(RandomSeed::from_bytes([0x1b; 32], &rho)).unwrap();
+        let note = |value: u64, version: NoteVersion| {
+            Option::from(Note::from_parts(
+                recipient,
+                NoteValue::from_raw(value),
+                rho,
+                rseed,
+                version,
+            ))
+            .unwrap()
+        };
+        let output = |index: usize, note: Note| {
+            DecryptedOutput::new(
+                index,
+                note,
+                account_uuid,
+                MemoBytes::empty(),
+                TransferType::AccountInternal,
+            )
+        };
+
+        let conn = st.wallet_mut().conn_mut();
+        let tx = conn.transaction().unwrap();
+        let tx_ref = tx
+            .query_row(
+                "INSERT INTO transactions (txid, min_observed_height)
+                 VALUES (:txid, 0)
+                 RETURNING id_tx",
+                named_params![":txid": [0x7fu8; 32].as_slice()],
+                |row| row.get::<_, i64>(0).map(TxRef),
+            )
+            .unwrap();
+
+        // An Orchard note and an Ironwood note sharing an action index may both be recorded.
+        super::put_received_note(
+            &tx,
+            &network,
+            &output(0, note(10_000, NoteVersion::V2)),
+            tx_ref,
+            None,
+            None,
+        )
+        .unwrap();
+        super::put_received_note(
+            &tx,
+            &network,
+            &output(0, note(20_000, NoteVersion::V3)),
+            tx_ref,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let note_row = |table: &str| {
+            tx.query_row(
+                &format!("SELECT value, note_version FROM {table}_received_notes"),
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(note_row("orchard"), (10_000, 2));
+        assert_eq!(note_row("ironwood"), (20_000, 3));
     }
 
     #[test]

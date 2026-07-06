@@ -27,6 +27,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
+          - NU6.3
           - NU7
 
         include:
@@ -92,6 +93,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
+          - NU6.3
           - NU7
 
         include:
@@ -115,6 +117,8 @@ jobs:
         exclude:
           - target: macOS
             state: all-features
+          - target: macOS
+            state: NU6.3
           - target: macOS
             state: NU7
 
@@ -159,6 +163,7 @@ jobs:
           - Sapling-only
           - Orchard
           - all-features
+          - NU6.3
           - NU7
 
         include:
