@@ -17,9 +17,10 @@ pub use network_chain_tip_height_estimator::NetworkChainTipHeightEstimator;
 
 /// The maximum estimated distance to the network chain tip that is considered "at or near tip".
 ///
-/// Allows for normal block-time variance and propagation delay.
-/// Most chain forks are 1–7 blocks long; 1 is used in sync progress tracking.
-pub const AT_OR_NEAR_TIP_THRESHOLD: block::HeightDiff = 2;
+/// Allows for normal block-time variance and propagation delay. Considering the 75 second target
+/// for the time between blocks on mainnet, this equals approximately 6 minutes of time the node
+/// can stay without receiving a new block before being considered far from the tip.
+pub const AT_OR_NEAR_TIP_THRESHOLD: block::HeightDiff = 5;
 
 /// An interface for querying the chain tip.
 ///

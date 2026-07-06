@@ -18,7 +18,11 @@ Specifically, we will:
 
 ## Receiving Disclosures
 
-The Zcash Foundation is committed to working with researchers who submit security vulnerability notifications to us to resolve those issues on an appropriate timeline and perform a coordinated release, giving credit to the reporter if they would like.
+The Zcash Foundation is committed to working with researchers who submit
+security vulnerability notifications to us to resolve those issues on an
+appropriate timeline and perform a coordinated release, giving credit to the
+reporter if they would like. We align our reporting channels with the broader
+Zcash ecosystem disclosure process.
 
 For the Zero distribution of Zebra, maintained by Shielded Labs, report security
 vulnerabilities through the Shielded Labs security disclosure group on Signal:
@@ -32,7 +36,7 @@ disclose the vulnerability, and then remove you from the waiting room.
 
 ## Sending Disclosures
 
-In the case where we become aware of security issues affecting other projects that has never affected Zebra or Zcash, our intention is to inform those projects of security issues on a best effort basis.
+In the case where we become aware of security issues affecting other projects that have never affected Zebra or Zcash, our intention is to inform those projects of security issues on a best effort basis.
 
 In the case where we fix a security issue in Zebra or Zcash that also affects the following neighboring projects, our intention is to engage in responsible disclosures with them as described in <https://github.com/RD-Crypto-Spec/Responsible-Disclosure>, subject to the deviations described in the section at the bottom of this document.
 
@@ -42,7 +46,9 @@ We have set up agreements with the following neighboring projects to share vulne
 
 Specifically, we have agreed to engage in responsible disclosures for security issues affecting Zebra or Zcash technology with the following contacts:
 
-- The Electric Coin Company - <security@z.cash> via PGP
+- Zcash Open Development Lab (ZODL), which maintains the `zcash/zcash` core
+  node, `librustzcash`, `zallet`, and related software, via its security
+  disclosure process at <https://github.com/zcash/.github/blob/main/SECURITY.md>
 
 ## Deviations from the Standard
 

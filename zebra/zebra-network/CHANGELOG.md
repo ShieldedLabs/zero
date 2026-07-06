@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- `MinimumPeerVersion::chain_tip_height()` is replaced by `chain_tip()`, which returns a
+  reference to the underlying chain tip instead of a `Height`
+  ([#10732](https://github.com/ZcashFoundation/zebra/pull/10732))
+
+## [10.0.0] - 2026-07-02
+
+### Breaking Changes
+
+- `Request::PushTransaction` now carries the sending peer's address as a second field
+  (`Option<PeerSocketAddr>`), so directly pushed transactions are attributed to the
+  sending peer and subject to the same per-peer mempool admission cap as advertised
+  transaction IDs
+  ([GHSA-m9xx-8rcj-vmgp](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-m9xx-8rcj-vmgp)).
+
+### Added
+
+- Added the Regtest-only network config option `should_allow_unshielded_coinbase_spends`,
+  controlling whether coinbase outputs may be spent into transparent outputs. Setting it
+  on a configured Testnet is rejected with an error
+  ([#10698](https://github.com/ZcashFoundation/zebra/pull/10698)).
+
 ## [9.0.0] - 2026-06-10
 
 ### Breaking Changes

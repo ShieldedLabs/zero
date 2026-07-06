@@ -12,12 +12,6 @@ fail-fast = true
 status-level = "pass"
 default-filter = 'not test(/^stateful::/) and not test(/^e2e::/) and not test(=unit::end_of_support::check_no_git_dependencies)'
 
-# --- Platform overrides ---
-
-[[profile.default.overrides]]
-platform = 'cfg(target_os = "windows")'
-filter = "not test(=integration::database::delete_old_databases)"
-
 # --- CI Profile (PRs) ---
 
 [profile.ci]
@@ -27,17 +21,17 @@ slow-timeout = { period = "5m", terminate-after = 4 }
 default-filter = 'not test(/^stateful::/) and not test(/^e2e::/) and not test(=unit::end_of_support::check_no_git_dependencies)'
 
 [[profile.ci.overrides]]
-platform = 'cfg(target_os = "windows")'
-filter = "not test(=integration::database::delete_old_databases)"
-
-[[profile.ci.overrides]]
 filter = 'test(=integration::network::disconnects_from_misbehaving_peers)'
 retries = 2
 slow-timeout = { period = "5m", terminate-after = 2 }
 
+# These tests sync mainnet to genesis from live peers; they normally finish in
+# ~10-30s, but a slow/unreachable peer can stall them. Fail fast after 10m and
+# retry instead of hanging near the old 30m hard limit, where they flaked.
 [[profile.ci.overrides]]
 filter = 'test(=integration::sync::sync_one_checkpoint_mainnet) or test(=integration::sync::restart_stop_at_height)'
-slow-timeout = { period = "15m", terminate-after = 2 }
+slow-timeout = { period = "5m", terminate-after = 2 }
+retries = 2
 
 [[profile.ci.overrides]]
 filter = "test(=peer_set::set::tests::vectors::peer_set_ready_multiple_connections) or test(=peer_set::set::tests::vectors::peer_set_ready_single_connection) or test(=peer_set::set::tests::vectors::peer_set_rejects_connections_past_per_ip_limit) or test(=peer_set::set::tests::vectors::peer_set_route_inv_advertised_registry)"
@@ -53,14 +47,18 @@ fail-fast = false
 failure-output = "immediate"
 success-output = "immediate"
 default-filter = 'test(/^stateful::/)'
+# Default hard timeout for stateful tests; longer-running tests override it below.
+slow-timeout = { period = "30m", terminate-after = 2 }
 
 [test-groups]
 serial-state = { max-threads = 1 }
 
+# Stateful tests share on-disk state, so run them serially. This override sets
+# only the test-group: adding slow-timeout here would shadow every per-test
+# timeout below, since nextest applies the first matching override per setting.
 [[profile.ci-stateful.overrides]]
 filter = 'test(/^stateful::/)'
 test-group = 'serial-state'
-slow-timeout = { period = "30m", terminate-after = 2 }
 
 [[profile.ci-stateful.overrides]]
 filter = 'test(=stateful::sync::sync_to_mandatory_checkpoint_mainnet) or test(=stateful::sync::sync_to_mandatory_checkpoint_testnet)'
@@ -69,10 +67,6 @@ slow-timeout = { period = "1500m", terminate-after = 1 }
 [[profile.ci-stateful.overrides]]
 filter = 'test(=stateful::sync::sync_past_mandatory_checkpoint_mainnet) or test(=stateful::sync::sync_past_mandatory_checkpoint_testnet) or test(=stateful::rpc::rpc_get_block_from_cached_state) or test(=stateful::lightwalletd::lightwalletd_test_suite) or test(=stateful::lightwalletd::lwd_grpc_wallet)'
 slow-timeout = { period = "60m", terminate-after = 2 }
-
-[[profile.ci-stateful.overrides]]
-filter = 'test(=stateful::rpc::rpc_get_block_template) or test(=stateful::rpc::rpc_submit_block) or test(=stateful::rpc::fully_synced_rpc_z_getsubtreesbyindex_snapshot_test) or test(=stateful::indexer::has_spending_transaction_ids) or test(=stateful::sync::sync_update_mainnet) or test(=stateful::lightwalletd::lwd_sync_update) or test(=stateful::lightwalletd::lwd_rpc_send_tx)'
-slow-timeout = { period = "30m", terminate-after = 2 }
 
 # --- CI E2E Profile (GCP VMs) ---
 # CI selects specific tests via --filter-expr / NEXTEST_FILTER. The scoped
@@ -83,11 +77,15 @@ fail-fast = false
 failure-output = "immediate"
 success-output = "immediate"
 default-filter = 'test(/^e2e::/)'
+# Default hard timeout for e2e tests; longer-running tests override it below.
+slow-timeout = { period = "60m", terminate-after = 2 }
 
+# E2e tests share on-disk state, so run them serially. This override sets only
+# the test-group: adding slow-timeout here would shadow every per-test timeout
+# below, since nextest applies the first matching override per setting.
 [[profile.ci-e2e.overrides]]
 filter = 'test(/^e2e::/)'
 test-group = 'serial-state'
-slow-timeout = { period = "60m", terminate-after = 2 }
 
 [[profile.ci-e2e.overrides]]
 filter = 'test(=e2e::sync::sync_full_mainnet) or test(=e2e::lightwalletd::lwd_sync_full)'
@@ -100,10 +98,6 @@ slow-timeout = { period = "1500m", terminate-after = 1 }
 [[profile.ci-e2e.overrides]]
 filter = 'test(=e2e::checkpoints::generate_checkpoints_mainnet) or test(=e2e::checkpoints::generate_checkpoints_testnet)'
 slow-timeout = { period = "90m", terminate-after = 1 }
-
-[[profile.ci-e2e.overrides]]
-filter = 'test(=e2e::sync::sync_large_checkpoints_empty) or test(=e2e::sync::sync_large_checkpoints_mempool_mainnet)'
-slow-timeout = { period = "60m", terminate-after = 2 }
 
 # --- Special Profile ---
 
