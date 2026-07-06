@@ -34,7 +34,7 @@ pub(crate) type DbHandle = deadpool::managed::Object<connection::WalletManager>;
 // Bumped to 0.1.0-alpha.4 because the embedded Zaino chain indexer made a
 // backwards-incompatible change to its database format (zingolabs/zaino#914),
 // pulled in by this release. Wallet databases last touched by 0.1.0-alpha.3 or
-// earlier must be recreated from scratch. See zcash/wallet#394.
+// earlier must be recreated from scratch. See zcash/zallet#394.
 const MIN_COMPATIBLE_ZALLET_VERSION: &str = "0.1.0-alpha.4";
 
 /// Returns the full list of migrations defined in Zallet, to be applied alongside the
@@ -81,7 +81,7 @@ impl Database {
             // migrations, some of which make use of the network params), to avoid
             // leaving the database in an inconsistent state. We can assume the network
             // metadata table is present, as it's added by the initial migrations.
-            handle.with_raw(|conn, _| verify_existing_database(conn, config))?;
+            handle.with_raw(|conn, _| verify_existing_database(conn, config, &path))?;
 
             info!("Applying latest database migrations");
         } else {
@@ -100,7 +100,7 @@ impl Database {
                 // defer initialization until later, or expose enough of the
                 // keystore read logic to let us parse the keystore database here
                 // before the KeyStore component is initialized.
-                //       https://github.com/zcash/wallet/issues/18
+                //       https://github.com/zcash/zallet/issues/18
                 // TODO: Support multi-seed or seed-absent migrations.
                 //       https://github.com/zcash/librustzcash/issues/1284
                 Err(schemerz::MigratorError::Migration {
@@ -177,14 +177,16 @@ impl Database {
 fn verify_existing_database(
     conn: &rusqlite::Connection,
     config: &ZalletConfig,
+    db_path: &std::path::Path,
 ) -> Result<(), Error> {
     verify_alpha_db_compatibility(conn)?;
-    verify_wallet_network_type(conn, config)
+    verify_wallet_network_type(conn, config, db_path)
 }
 
 fn verify_wallet_network_type(
     conn: &rusqlite::Connection,
     config: &ZalletConfig,
+    db_path: &std::path::Path,
 ) -> Result<(), Error> {
     let wallet_network_type = conn
         .query_row(
@@ -200,6 +202,7 @@ fn verify_wallet_network_type(
         Err(ErrorKind::Init
             .context(fl!(
                 "err-init-config-db-mismatch",
+                db_path = db_path.display().to_string(),
                 db_network_type = crate::network::kind::type_to_str(&wallet_network_type.0),
                 config_network_type = crate::network::kind::type_to_str(&config.consensus.network),
             ))

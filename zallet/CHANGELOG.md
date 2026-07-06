@@ -6,26 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 During the alpha period, no Semantic Versioning is followed; all releases should
 be considered breaking changes.
 
-## [0.1.0-alpha.4] - PLANNED
+## [0.1.0-alpha.4] - 2026-06-25
 
 ### Added
 
+- `zallet generate-encryption-identity` command, which generates the wallet's age
+  encryption identity using the `age` library that Zallet already embeds. This
+  removes the need for the external `rage` / `rage-keygen` tool when setting up a
+  wallet. It supports both plain and passphrase-encrypted identities; in
+  non-interactive contexts the passphrase is read from the
+  `ZALLET_IDENTITY_PASSPHRASE` environment variable.
+- Cookie file authentication for the JSON-RPC interface. A random credential
+  is generated on startup and written to `{datadir}/.cookie`, enabling
+  `zallet rpc` to authenticate automatically without manual password setup.
+  Cookie auth coexists with configured `[[rpc.auth]]` users.
 - RPC methods:
   - `decoderawtransaction`
   - `decodescript`
   - `getwalletstatus`
   - `verifymessage`
   - `z_converttex`
+  - `z_exportkey` (Sapling extended spending keys only)
   - `z_importaddress`
+  - `z_importkey` (Sapling extended spending keys only)
   - `z_shieldcoinbase`
 
 ### Changed
-
 - **This release is not compatible with wallets created by earlier alpha
   releases.** The embedded Zaino chain indexer made a backwards-incompatible
   change to its database format (zingolabs/zaino#914), which this release pulls
   in. Zallet now refuses to open wallet databases last used by `0.1.0-alpha.3`
   or earlier; start again with a fresh Zallet wallet or a new data directory.
+- MSRV updated to 1.88
 - Updated the Zaino chain indexer to a pre-release `rc-0.4.0` build
   (zingolabs/zaino#1238) that retains NU 6.2 support and adds optional
   ("ephemeral") finalised state. The embedded indexer now runs in ephemeral
@@ -45,21 +57,19 @@ be considered breaking changes.
 - Significant performance improvements to `zallet migrate-zcashd-wallet`.
 - `zallet migrate-zcashd-wallet` now accepts `--no-scan` to skip chain scanning
   during migration.
+- `zallet rpc` now sends credentials via the `Authorization` header instead of
+  embedding them in the HTTP URL.
 
 ### Fixed
-
-- The wallet no longer permanently stops following the chain after a few
-  hundred blocks of history. The embedded indexer's finalised-state database
-  was configured with a size limit of 0 (a workaround for slow start-up,
-  zingolabs/zaino#249), so its sync loop eventually failed with `MDB_MAP_FULL`
-  and gave up; running the finalised state ephemerally removes the database
-  (and the workaround) entirely.
 - `listaddresses` no longer returns an internal error when the wallet contains
   standalone imported transparent keys (e.g. from a `zcashd` migration).
 - No longer crashes in regtest mode when a Sapling or NU5 activation height is
   not defined.
 - Zallet now refuses to open wallet databases from incompatible earlier alpha
   releases instead of attempting to migrate them.
+- The network-mismatch startup error now reports the path of the wallet database
+  and explains that a database is permanently tied to one network, so the cause
+  and the available remedies are clear.
 - `z_sendmany` no longer drop standalone transparent signing keys when the same
   address backs multiple proposal inputs. Keys are now accumulated per address
   rather than overwritten.

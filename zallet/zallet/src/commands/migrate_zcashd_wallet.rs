@@ -33,7 +33,7 @@ use zip32::{AccountId, fingerprint::SeedFingerprint};
 use crate::{
     cli::MigrateZcashdWalletCmd,
     components::{
-        chain::{Chain, ChainError, ChainView, ZainoChain},
+        chain::{Chain, ChainError, ChainFactory, ChainView},
         database::Database,
         keystore::KeyStore,
     },
@@ -55,8 +55,10 @@ pub const ZCASHD_LEGACY_SOURCE: &str = "zcashd_legacy";
 /// key derivation after the zcashd v4.7.0 upgrade.
 pub const ZCASHD_MNEMONIC_SOURCE: &str = "zcashd_mnemonic";
 
-impl AsyncRunnable for MigrateZcashdWalletCmd {
-    async fn run(&self) -> Result<(), Error> {
+impl MigrateZcashdWalletCmd {
+    /// Runs the zcashd-wallet migration against the chain backend produced by
+    /// `factory`.
+    pub(crate) async fn run_with<F: ChainFactory>(&self, factory: &F) -> Result<(), Error> {
         let config = APP.config();
 
         if !self.this_is_alpha_code_and_you_will_need_to_redo_the_migration_later {
@@ -67,7 +69,7 @@ impl AsyncRunnable for MigrateZcashdWalletCmd {
         let (chain, _chain_indexer_task_handle) = if self.no_scan {
             (None, None)
         } else {
-            let (c, h) = ZainoChain::new(&config).await?;
+            let (c, h) = factory.build(&config).await?;
             (Some(c), Some(h))
         };
         let db = Database::open(&config).await?;
@@ -92,6 +94,14 @@ impl AsyncRunnable for MigrateZcashdWalletCmd {
     }
 }
 
+impl AsyncRunnable for MigrateZcashdWalletCmd {
+    async fn run(&self) -> Result<(), Error> {
+        crate::application::chain_runtime()
+            .run_migrate_zcashd_wallet(self)
+            .await
+    }
+}
+
 impl MigrateZcashdWalletCmd {
     fn dump_wallet(&self) -> Result<ZcashdWallet, MigrateError> {
         let wallet_path = if self.path.is_relative() {
@@ -109,19 +119,31 @@ impl MigrateZcashdWalletCmd {
         // Resolve the `db_dump` utility. An explicit `--zcashd-install-dir` uses that
         // installation's binary; otherwise prefer the BDB 6.2 `db_dump` vendored by
         // `zewif-zcashd` (via `BDBDump::from_file`), which falls back to one on the `PATH`.
+        let db_dump_unavailable = || {
+            MigrateError::Wrapped(
+                ErrorKind::Generic
+                    .context(fl!("err-migrate-wallet-db-dump-not-found"))
+                    .into(),
+            )
+        };
         let db_dump = match &self.zcashd_install_dir {
             Some(path) => {
                 let db_dump_path = path.join("zcutil").join("bin").join("db_dump");
                 if !db_dump_path.is_file() {
-                    return Err(MigrateError::Wrapped(
-                        ErrorKind::Generic
-                            .context(fl!("err-migrate-wallet-db-dump-not-found"))
-                            .into(),
-                    ));
+                    return Err(db_dump_unavailable());
                 }
                 BDBDump::from_file_with_path(db_dump_path.as_path(), wallet_path.as_path())
             }
-            None => BDBDump::from_file(wallet_path.as_path()),
+            None => {
+                // `from_file` tries the vendored `db_dump` and then one on the `PATH`. If
+                // it fails and there is no `db_dump` on the `PATH` either, report it as
+                // unavailable rather than surfacing a raw execution error.
+                let dumped = BDBDump::from_file(wallet_path.as_path());
+                if dumped.is_err() && which::which("db_dump").is_err() {
+                    return Err(db_dump_unavailable());
+                }
+                dumped
+            }
         }
         .map_err(|e| MigrateError::Zewif {
             error_type: ZewifError::BdbDump,
@@ -366,12 +388,12 @@ impl MigrateZcashdWalletCmd {
             for wallet_tx in wallet.transactions().values() {
                 let block_hash = BlockHash(*wallet_tx.hash_block().as_ref());
                 // Skip transactions that were unmined when the zcashd wallet was last written.
-                if block_hash.0 != [0; 32] {
-                    if let Entry::Vacant(entry) = main_chain_block_heights.entry(block_hash) {
-                        // Ignore any blocks that are not in the main chain.
-                        if let Some(height) = chain_view.block_height(&block_hash).await? {
-                            entry.insert(height);
-                        }
+                if block_hash.0 != [0; 32]
+                    && let Entry::Vacant(entry) = main_chain_block_heights.entry(block_hash)
+                {
+                    // Ignore any blocks that are not in the main chain.
+                    if let Some(height) = chain_view.block_height(&block_hash).await? {
+                        entry.insert(height);
                     }
                 }
             }
@@ -643,7 +665,7 @@ impl MigrateZcashdWalletCmd {
 
             if !account_exists {
                 db_data.import_account_ufvk(
-                    &format!("zcashd legacy sapling {}", idx),
+                    &format!("zcashd legacy sapling {idx}"),
                     &ufvk,
                     &wallet_birthday,
                     AccountPurpose::Spending { derivation },
@@ -676,7 +698,7 @@ impl MigrateZcashdWalletCmd {
 
             if db_data.get_account_for_ufvk(&ufvk)?.is_none() {
                 db_data.import_account_ufvk(
-                    &format!("zcashd imported view-only sapling {}", idx),
+                    &format!("zcashd imported view-only sapling {idx}"),
                     &ufvk,
                     &wallet_birthday,
                     AccountPurpose::ViewOnly,
