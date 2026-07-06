@@ -1982,6 +1982,12 @@ end = "2025-12-16"
 
 [[trusted.orchard]]
 criteria = "safe-to-deploy"
+user-id = 1244
+start = "2022-10-19"
+end = "2027-06-30"
+
+[[trusted.orchard]]
+criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
 start = "2021-01-07"
 end = "2026-12-05"
@@ -2273,6 +2279,12 @@ criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
 start = "2024-03-01"
 end = "2025-04-22"
+
+[[trusted.zcash_history]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2026-07-01"
+end = "2027-07-01"
 
 [[trusted.zcash_keys]]
 criteria = "safe-to-deploy"

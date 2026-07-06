@@ -43,6 +43,7 @@ impl Updater {
             transparent,
             sapling,
             orchard,
+            ironwood,
         } = self.pczt;
 
         f(GlobalUpdater(&mut global));
@@ -53,6 +54,7 @@ impl Updater {
                 transparent,
                 sapling,
                 orchard,
+                ironwood,
             },
         }
     }

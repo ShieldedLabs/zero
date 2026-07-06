@@ -11,6 +11,41 @@ workspace.
 ## Unreleased
 
 ### Added
+- A new migration adds a `note_version` column to `orchard_received_notes`,
+  recording the note plaintext version from which each received note was
+  obtained. The Orchard note encryption domain accepts only version 2 note
+  plaintexts, so existing rows are backfilled as version 2.
+- A new migration adds the `ironwood_received_notes` and
+  `ironwood_received_note_spends` tables, mirroring the corresponding Orchard
+  tables. Received notes obtained from version 3 (Ironwood) note plaintexts
+  are recorded in `ironwood_received_notes`; Ironwood notes are stored
+  separately from Orchard notes because the two pools have distinct note
+  commitment trees, and because an Orchard action and an Ironwood action in
+  the same transaction may share an action index.
+- A new migration recreates the `v_received_outputs` and
+  `v_received_output_spends` views to include received Ironwood notes and their
+  spends, tagged with the Ironwood pool code (4). Ironwood notes now appear in
+  `v_transactions`, `v_tx_outputs`, and the balances derived from them.
+- The wallet database now persists Ironwood note commitment tree data. A new
+  migration adds the `ironwood_tree_shards`, `ironwood_tree_cap`,
+  `ironwood_tree_checkpoints`, and `ironwood_tree_checkpoint_marks_removed`
+  tables (mirroring the Orchard shard-tree tables), the
+  `ironwood_commitment_tree_size` and `ironwood_action_count` columns on
+  `blocks`, and the `v_ironwood_shard_scan_ranges`,
+  `v_ironwood_shard_unscanned_ranges`, and `v_ironwood_shards_scan_state` views.
+  The `WalletCommitmentTrees::with_ironwood_tree_mut` implementation now provides
+  the persisted Ironwood tree (Ironwood note commitments are Orchard-shaped, so
+  the tree reuses the Orchard shard store under a separate table prefix).
+- Block scan-range planning now extends suggested scan ranges to complete
+  Ironwood note commitment tree subtrees when Ironwood notes are detected,
+  mirroring the existing Sapling and Orchard behavior. The extension activates at
+  NU6.3.
+- A new database migration adds `sapling_tree_retained_checkpoints` and
+  `orchard_tree_retained_checkpoints` tables that back explicit retention of
+  note commitment tree checkpoints as durable "anchors". `SqliteShardStore`
+  now implements the `shardtree` retained-checkpoint store methods, and once
+  the NU6.3 activation height is reached scanning retains roughly four anchors
+  per day (see the `zcash_client_backend` changelog).
 - `zcash_client_sqlite::error::SqliteClientError::PutBlocksCommitmentTree`, a
   new variant that records the shielded pool and the range of block heights
   being added to the wallet when a note commitment tree error occurs during a
@@ -24,13 +59,62 @@ workspace.
   during a truncation operation (`truncate_to_height` or
   `truncate_to_chain_state`). Previously such errors surfaced as the generic
   `CommitmentTree` variant without the affected pool or target height.
+- The `InputSource::get_spendable_transparent_outputs` implementation now
+  accepts `CoinbaseFilter::NonCoinbaseOnly`, restricting the SQL query to
+  outputs that are not from coinbase transactions. Outputs with an unknown
+  `tx_index` are treated as non-coinbase.
+- Added an implementation of `InputSource::select_spendable_transparent_outputs`
+  (behind the `transparent-inputs` feature flag). The query orders eligible
+  outputs by descending value (backed by a new
+  `idx_transparent_received_outputs_value_zat` index) and accumulates them,
+  recomputing the cumulative ZIP 317 marginal fee cost of the gathered
+  inputs via the supplied `fee_rule: &StandardFeeRule` at each step, stopping
+  once the post-fee accumulated value meets the requested `TargetValue` or
+  the supplied `max_inputs` cap is reached, whichever happens first. This
+  bounds the work done to the prefix of the table needed to satisfy the
+  request, so a wallet with many small transparent UTXOs does not have to
+  materialize its full UTXO set to build a small transfer. When an
+  `address_allow_list` is supplied, the restriction to the given addresses is
+  applied within the SQL query, so that ineligible outputs do not consume
+  the value bound.
+- `zcash_client_sqlite::error::SqliteClientError::FeeRuleError`, a new variant
+  (behind the `transparent-inputs` feature flag) that wraps an error produced
+  by a `FeeRule` during transparent input selection.
 
 ### Changed
+- Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_address 0.13.0-pre.0`,
+  `zcash_transparent 0.9.0-pre.0`, `zcash_keys 0.15.0-pre.0`,
+  `zcash_primitives 0.29.0-pre.0`, `zcash_proofs 0.29.0-pre.0`.
 - (behind the new `spend-index` feature) `WalletRead::transaction_data_requests`
   emits `TransactionDataRequest::GetSpendingTx` for transparent spend
   detection instead of `TransactionDataRequest::TransactionsInvolvingAddress`.
   `TransactionsInvolvingAddress` is still emitted for ephemeral-address discovery,
   and for spend detection when `spend-index` is disabled.
+- The database schema now includes a `UNIQUE` index on
+  `addresses.cached_transparent_receiver_address`, making account-by-transparent-address
+  lookups index-backed (previously a full table scan) and enforcing that each transparent
+  receiver belongs to at most one address record. If a pre-existing database already contains
+  duplicate cached transparent receiver addresses, the migration that adds the index resolves
+  them in place: within a single account it keeps a canonical record (preferring an HD-derived
+  record over an imported one), repoints the affected received outputs to it, and deletes the
+  redundant records, preserving the earliest recorded `exposed_at_height` among the merged
+  records. A receiver duplicated across more than one account is resolved by derivation:
+  when exactly one of the records reproduces the receiver when derived from its own account's
+  viewing key at its recorded child index, that record is retained and the received outputs of
+  the others are reattributed to it (this can occur for wallets migrated from `zcashd`, where an
+  address may have been both imported standalone into one account and derived by another,
+  including under the ZIP 32 account index 0x7FFFFFFF used for the `zcashd` legacy account).
+  A cross-account duplicate for which no unique record can be verified by derivation causes
+  the migration to abort.
+
+### Fixed
+- Deriving a transparent address that was previously imported as a standalone receiver now
+  upgrades the existing address record in place to its derived form, instead of failing on the
+  transparent-receiver uniqueness invariant added in this release. If the import was recorded
+  under a different account, the record's account attribution — and that of any outputs
+  received at the address — moves to the deriving account, since successful derivation
+  establishes that account's ownership of the address. Funds received at such an address
+  become spendable once the account derives it.
 
 ## [0.21.1] - 2026-06-19
 

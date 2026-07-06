@@ -8,10 +8,13 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
-## [Unreleased]
+## [0.9.0-pre.0] - 2026-06-30
 
 ### Added
 - `transparent::bundle::OutPoint` now implements `std::hash::Hash`.
+
+### Changed
+- Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_address 0.13.0-pre.0`.
 
 ## [0.8.0] - 2026-06-02
 

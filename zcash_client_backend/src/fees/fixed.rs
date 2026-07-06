@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 
 use zcash_primitives::transaction::fees::{fixed::FeeRule as FixedFeeRule, transparent};
 use zcash_protocol::{
-    ShieldedProtocol, consensus,
+    ShieldedPool, consensus,
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
 };
@@ -28,7 +28,7 @@ use super::orchard as orchard_fees;
 pub struct SingleOutputChangeStrategy<I> {
     fee_rule: FixedFeeRule,
     change_memo: Option<MemoBytes>,
-    fallback_change_pool: ShieldedProtocol,
+    fallback_change_pool: ShieldedPool,
     dust_output_policy: DustOutputPolicy,
     meta_source: PhantomData<I>,
 }
@@ -42,7 +42,7 @@ impl<I> SingleOutputChangeStrategy<I> {
     pub fn new(
         fee_rule: FixedFeeRule,
         change_memo: Option<MemoBytes>,
-        fallback_change_pool: ShieldedProtocol,
+        fallback_change_pool: ShieldedPool,
         dust_output_policy: DustOutputPolicy,
     ) -> Self {
         Self {
@@ -83,6 +83,8 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
         transparent_outputs: &[impl transparent::OutputView],
         sapling: &impl sapling_fees::BundleView<NoteRefT>,
         #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+        #[cfg(feature = "orchard")] ironwood: &impl orchard_fees::BundleView<NoteRefT>,
+        #[cfg(feature = "orchard")] orchard_change_to_ironwood: bool,
         ephemeral_balance: Option<EphemeralBalance>,
         _wallet_meta: &Self::AccountMetaT,
     ) -> Result<TransactionBalance, ChangeError<Self::Error, NoteRefT>> {
@@ -107,6 +109,10 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
+            #[cfg(feature = "orchard")]
+            orchard_change_to_ironwood,
             self.change_memo.as_ref(),
             ephemeral_balance,
         )
@@ -120,7 +126,7 @@ mod tests {
         fixed::FeeRule as FixedFeeRule, zip317::MINIMUM_FEE,
     };
     use zcash_protocol::{
-        ShieldedProtocol,
+        ShieldedPool,
         consensus::{Network, NetworkUpgrade, Parameters},
         value::Zatoshis,
     };
@@ -143,7 +149,7 @@ mod tests {
         let change_strategy = SingleOutputChangeStrategy::<MockWalletDb>::new(
             fee_rule,
             None,
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             DustOutputPolicy::default(),
         );
 
@@ -166,6 +172,10 @@ mod tests {
             ),
             #[cfg(feature = "orchard")]
             &orchard_fees::EmptyBundleView,
+            #[cfg(feature = "orchard")]
+            &orchard_fees::EmptyBundleView,
+            #[cfg(feature = "orchard")]
+            false,
             None,
             &(),
         );
@@ -184,7 +194,7 @@ mod tests {
         let change_strategy = SingleOutputChangeStrategy::<MockWalletDb>::new(
             fee_rule,
             None,
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             DustOutputPolicy::default(),
         );
 
@@ -214,6 +224,10 @@ mod tests {
             ),
             #[cfg(feature = "orchard")]
             &orchard_fees::EmptyBundleView,
+            #[cfg(feature = "orchard")]
+            &orchard_fees::EmptyBundleView,
+            #[cfg(feature = "orchard")]
+            false,
             None,
             &(),
         );

@@ -12,6 +12,8 @@ mod add_account_birthdays;
 mod add_account_uuids;
 mod add_transaction_trust_marker;
 mod add_transaction_views;
+mod add_transparent_receiver_address_index;
+mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod ensure_default_transparent_address;
@@ -23,8 +25,12 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
+mod ironwood_pool_code_views;
+mod ironwood_received_notes;
+mod ironwood_shardtree;
 mod ivk_item_cache;
 mod nullifier_map;
+mod orchard_note_version;
 mod orchard_received_notes;
 mod orchard_shardtree;
 mod received_notes_nullable_nf;
@@ -37,6 +43,7 @@ mod standalone_p2sh;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_gap_limit_handling;
+mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
 mod tx_retrieval_queue_expiry;
@@ -124,6 +131,8 @@ pub(super) fn all_migrations<
     //                        \      ensure_default_transparent_address    /                                 \
     //                         \                     |                    /                                   \
     //                          `---- fix_transparent_received_outputs --'                                     \
+    //                                    /         /           \    \                                         |
+    //                                   /         /             \   add_transparent_value_index               |
     //                                  /         /               \                                            |
     //           support_zcashd_wallet_import    /             fix_v_transactions_expired_unmined              |
     //                \                         /                    /        |         \                      |
@@ -136,8 +145,13 @@ pub(super) fn all_migrations<
     //                       `------------------- account_delete_cascade ---------------------------------'
     //                                        /               |              \
     //                       v_tx_outputs_key_scopes    standalone_p2sh    witness_stabilized_notes
-    //                                                        |
-    //                                                  ivk_item_cache
+    //                                                    /          \         \
+    //                                                   /            \      orchard_note_version
+    //                                                  /              \         \
+    //                                                 /                \      ironwood_received_notes
+    //                                                /                  \              |
+    //                                               /                    \     ironwood_pool_code_views
+    //                                          ivk_item_cache    add_transparent_receiver_address_index
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -183,6 +197,9 @@ pub(super) fn all_migrations<
             params: params.clone(),
         }),
         Box::new(orchard_shardtree::Migration {
+            params: params.clone(),
+        }),
+        Box::new(ironwood_shardtree::Migration {
             params: params.clone(),
         }),
         Box::new(orchard_received_notes::Migration),
@@ -231,6 +248,14 @@ pub(super) fn all_migrations<
         Box::new(witness_stabilized_notes::Migration {
             params: params.clone(),
         }),
+        Box::new(add_transparent_receiver_address_index::Migration {
+            params: params.clone(),
+        }),
+        Box::new(add_transparent_value_index::Migration),
+        Box::new(orchard_note_version::Migration),
+        Box::new(ironwood_received_notes::Migration),
+        Box::new(ironwood_pool_code_views::Migration),
+        Box::new(tree_retained_checkpoints::Migration),
     ]
 }
 
@@ -372,9 +397,13 @@ pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
+    ironwood_shardtree::MIGRATION_ID,
     v_tx_outputs_key_scopes::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
-    witness_stabilized_notes::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
+    ironwood_pool_code_views::MIGRATION_ID,
+    tree_retained_checkpoints::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -424,9 +453,11 @@ pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashSet;
 
+    use proptest::prelude::any;
+    use proptest::prop_compose;
     use rusqlite::Connection;
     use secrecy::Secret;
     use tempfile::NamedTempFile;
@@ -438,6 +469,90 @@ mod tests {
         testing::db::{test_clock, test_rng},
         wallet::init::WalletMigrator,
     };
+
+    /// A synthetic set of Orchard note payload values, for exercising migrations that touch the
+    /// `orchard_received_notes` table.
+    ///
+    /// The identity columns (`transaction_id`, `action_index`, `nf`) are assigned by the caller so
+    /// that they stay unique; this strategy fuzzes only the note payload. Kept in the shared
+    /// migration-test module so later migration tests can reuse it.
+    #[cfg(feature = "orchard")]
+    #[derive(Clone, Debug)]
+    pub(crate) struct ArbOrchardNote {
+        pub(crate) value: i64,
+        pub(crate) diversifier: [u8; 11],
+        pub(crate) rho: [u8; 32],
+        pub(crate) rseed: [u8; 32],
+        pub(crate) is_change: bool,
+        pub(crate) memo: Option<Vec<u8>>,
+    }
+
+    #[cfg(feature = "orchard")]
+    prop_compose! {
+        /// A strategy generating arbitrary [`ArbOrchardNote`] payload values. Note values are
+        /// constrained to the non-negative `i64` range, matching the on-chain 2^63 value bound.
+        pub(crate) fn arb_orchard_note()(
+            value in 0i64..=i64::MAX,
+            diversifier in any::<[u8; 11]>(),
+            rho in any::<[u8; 32]>(),
+            rseed in any::<[u8; 32]>(),
+            is_change in any::<bool>(),
+            memo in proptest::option::of(proptest::collection::vec(any::<u8>(), 0..64)),
+        ) -> ArbOrchardNote {
+            ArbOrchardNote {
+                value,
+                diversifier,
+                rho,
+                rseed,
+                is_change,
+                memo,
+            }
+        }
+    }
+
+    /// A synthetic set of Ironwood note payload values, for exercising migrations that touch the
+    /// `ironwood_received_notes` table.
+    ///
+    /// Ironwood notes ([ZIP 2005], NU6.3) are Orchard-protocol notes obtained from version 3 note
+    /// plaintexts, so the payload columns mirror those of [`ArbOrchardNote`]; the type is kept
+    /// distinct to follow Ironwood naming and to leave room for the two to diverge. The identity
+    /// columns (`transaction_id`, `action_index`, `nf`) are assigned by the caller so that they
+    /// stay unique; this strategy fuzzes only the note payload.
+    ///
+    /// [ZIP 2005]: https://zips.z.cash/zip-2005
+    #[cfg(feature = "orchard")]
+    #[derive(Clone, Debug)]
+    pub(crate) struct ArbIronwoodNote {
+        pub(crate) value: i64,
+        pub(crate) diversifier: [u8; 11],
+        pub(crate) rho: [u8; 32],
+        pub(crate) rseed: [u8; 32],
+        pub(crate) is_change: bool,
+        pub(crate) memo: Option<Vec<u8>>,
+    }
+
+    #[cfg(feature = "orchard")]
+    prop_compose! {
+        /// A strategy generating arbitrary [`ArbIronwoodNote`] payload values. Note values are
+        /// constrained to the non-negative `i64` range, matching the on-chain 2^63 value bound.
+        pub(crate) fn arb_ironwood_note()(
+            value in 0i64..=i64::MAX,
+            diversifier in any::<[u8; 11]>(),
+            rho in any::<[u8; 32]>(),
+            rseed in any::<[u8; 32]>(),
+            is_change in any::<bool>(),
+            memo in proptest::option::of(proptest::collection::vec(any::<u8>(), 0..64)),
+        ) -> ArbIronwoodNote {
+            ArbIronwoodNote {
+                value,
+                diversifier,
+                rho,
+                rseed,
+                is_change,
+                memo,
+            }
+        }
+    }
 
     /// Tests that we can migrate from a completely empty wallet database to the target
     /// migrations.
