@@ -266,12 +266,11 @@ impl Circuit {
     ) -> Circuit {
         let sender_address = spend.note.recipient();
         let rho_old = spend.note.rho();
-        let psi_old = spend.note.rseed().psi(&rho_old);
-        let rcm_old = spend.note.rseed().rcm(&rho_old);
+        let psi_old = spend.note.psi();
+        let rcm_old = spend.note.rcm();
 
-        let rho_new = output_note.rho();
-        let psi_new = output_note.rseed().psi(&rho_new);
-        let rcm_new = output_note.rseed().rcm(&rho_new);
+        let psi_new = output_note.psi();
+        let rcm_new = output_note.rcm();
 
         Circuit {
             path: Value::known(spend.merkle_path.auth_path()),
@@ -1402,9 +1401,9 @@ mod tests {
 
     use super::{Circuit, Instance, OrchardCircuitVersion, Proof, ProvingKey, VerifyingKey, K};
     use crate::{
-        bundle::{BundlePoolRestrictions, Flags},
+        bundle::{BundleVersion, Flags},
         keys::SpendValidatingKey,
-        note::{Note, Rho},
+        note::{Note, NoteVersion, Rho},
         tree::MerklePath,
         value::{ValueCommitTrapdoor, ValueCommitment},
     };
@@ -1432,7 +1431,9 @@ mod tests {
         circuit_version: OrchardCircuitVersion,
         output_matches_spend: bool,
     ) -> (Circuit, Instance) {
-        let (_, fvk, spent_note) = Note::dummy(&mut rng, None);
+        // Note Version does not matter for this
+        let note_version = NoteVersion::V2;
+        let (_, fvk, spent_note) = Note::dummy(&mut rng, None, note_version);
 
         let sender_address = spent_note.recipient();
         let nk = *fvk.nk();
@@ -1444,10 +1445,16 @@ mod tests {
         let rk = ak.randomize(&alpha);
 
         let output_note = if output_matches_spend {
-            Note::new(sender_address, spent_note.value(), rho, &mut rng)
+            Note::new(
+                sender_address,
+                spent_note.value(),
+                rho,
+                note_version,
+                &mut rng,
+            )
         } else {
             loop {
-                let (_, _, output_note) = Note::dummy(&mut rng, Some(rho));
+                let (_, _, output_note) = Note::dummy(&mut rng, Some(rho), note_version);
                 if !sender_address.same_expanded_receiver(&output_note.recipient()) {
                     break output_note;
                 }
@@ -1471,8 +1478,8 @@ mod tests {
                 pk_d_old: Value::known(*sender_address.pk_d()),
                 v_old: Value::known(spent_note.value()),
                 rho_old: Value::known(spent_note.rho()),
-                psi_old: Value::known(spent_note.rseed().psi(&spent_note.rho())),
-                rcm_old: Value::known(spent_note.rseed().rcm(&spent_note.rho())),
+                psi_old: Value::known(spent_note.psi()),
+                rcm_old: Value::known(spent_note.rcm()),
                 cm_old: Value::known(spent_note.commitment()),
                 alpha: Value::known(alpha),
                 ak: Value::known(ak),
@@ -1481,8 +1488,8 @@ mod tests {
                 g_d_new: Value::known(output_note.recipient().g_d()),
                 pk_d_new: Value::known(*output_note.recipient().pk_d()),
                 v_new: Value::known(output_note.value()),
-                psi_new: Value::known(output_note.rseed().psi(&output_note.rho())),
-                rcm_new: Value::known(output_note.rseed().rcm(&output_note.rho())),
+                psi_new: Value::known(output_note.psi()),
+                rcm_new: Value::known(output_note.rcm()),
                 rcv: Value::known(rcv),
             },
             Instance {
@@ -1560,8 +1567,8 @@ mod tests {
         let cmx = crate::note::ExtractedNoteCommitment::from_bytes(&read_32_bytes(&mut r)).unwrap();
         let enable_spend = read_bool(&mut r);
         let enable_output = read_bool(&mut r);
-        let (cross_address_bit, pool_restrictions) = match encoding {
-            ProofFixtureEncoding::LegacyTwoFlags => (0, BundlePoolRestrictions::OrchardNu6_2Only),
+        let (cross_address_bit, bundle_version) = match encoding {
+            ProofFixtureEncoding::LegacyTwoFlags => (0, BundleVersion::orchard_v2()),
             ProofFixtureEncoding::PostNu6_3ThreeFlags => {
                 // The fixture stores the instance-level *disable* bit; the NU6.3 flag
                 // byte carries the *enable* bit, so invert when reconstructing.
@@ -1572,13 +1579,13 @@ mod tests {
                 let cross_address_disabled = read_bool(&mut r);
                 (
                     u8::from(!cross_address_disabled) << 2,
-                    BundlePoolRestrictions::IronwoodNu6_3Onward,
+                    BundleVersion::ironwood_v3(),
                 )
             }
         };
         let flags = Flags::from_byte(
             u8::from(enable_spend) | (u8::from(enable_output) << 1) | cross_address_bit,
-            pool_restrictions,
+            bundle_version,
         )
         .expect("test vectors use canonical flag encodings");
 

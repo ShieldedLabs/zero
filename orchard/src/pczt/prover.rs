@@ -22,12 +22,12 @@ impl super::Bundle {
     ///
     /// # Errors
     ///
-    /// Returns [`ProverError::DisallowedCrossAddressTransfer`] if the bundle's
-    /// pool restrictions disable cross-address transfers, and any action's output
+    /// Returns [`ProverError::DisallowedCrossAddressTransfer`] if the bundle
+    /// disables cross-address transfers, and any action's output
     /// is addressed differently than its spent note.
     ///
     /// Returns [`ProverError::ProofFailed`] containing
-    /// [`plonk::Error::InvalidInstances`] if the bundle's pool restrictions disable
+    /// [`plonk::Error::InvalidInstances`] if the bundle disables
     /// cross-address transfers, and `pk` is not an
     /// [`OrchardCircuitVersion::PostNu6_3`] proving key.
     ///
@@ -77,6 +77,7 @@ impl super::Bundle {
                     action.spend.value.ok_or(ProverError::MissingValue)?,
                     action.spend.rho.ok_or(ProverError::MissingRho)?,
                     action.spend.rseed.ok_or(ProverError::MissingRandomSeed)?,
+                    action.spend.note_version,
                 )
                 .into_option()
                 .ok_or(ProverError::InvalidSpendNote)?;
@@ -98,6 +99,7 @@ impl super::Bundle {
                     action.output.value.ok_or(ProverError::MissingValue)?,
                     Rho::from_nf_old(action.spend.nullifier),
                     action.output.rseed.ok_or(ProverError::MissingRandomSeed)?,
+                    action.output.note_version,
                 )
                 .into_option()
                 .ok_or(ProverError::InvalidOutputNote)?;
@@ -186,7 +188,7 @@ impl fmt::Display for ProverError {
                 super::VerifyError::DisallowedCrossAddressTransfer => write!(
                     f,
                     "an action outputs to a different expanded receiver than it spends from, but the \
-                     bundle's pool restrictions disable cross-address transfers"
+                     bundle disables cross-address transfers"
                 ),
                 e => write!(f, "cross-address restriction verification failed: {e}"),
             },
