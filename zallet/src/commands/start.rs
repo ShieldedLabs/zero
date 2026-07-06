@@ -6,7 +6,12 @@ use tokio::{pin, select};
 use crate::{
     cli::StartCmd,
     commands::AsyncRunnable,
-    components::{chain::ZainoChain, database::Database, json_rpc::JsonRpc, sync::WalletSync},
+    components::{
+        chain::{ChainFactory, check_consensus_compatibility},
+        database::Database,
+        json_rpc::JsonRpc,
+        sync::WalletSync,
+    },
     config::ZalletConfig,
     error::Error,
     fl,
@@ -16,28 +21,29 @@ use crate::{
 #[cfg(zallet_build = "wallet")]
 use crate::components::keystore::KeyStore;
 
-impl AsyncRunnable for StartCmd {
-    async fn run(&self) -> Result<(), Error> {
+impl StartCmd {
+    /// Runs `zallet start` against the chain backend produced by `factory`.
+    pub(crate) async fn run_with<F: ChainFactory>(factory: &F) -> Result<(), Error> {
         let config = APP.config();
         let _lock = config.lock_datadir()?;
 
         // ALPHA: Warn when currently-unused config options are set.
         let warn_unused =
             |option: &str| warn!("{}", fl!("warn-config-unused", option = option.to_string()));
-        // TODO: https://github.com/zcash/wallet/issues/199
+        // TODO: https://github.com/zcash/zallet/issues/199
         if config.builder.spend_zeroconf_change.is_some() {
             warn_unused("builder.spend_zeroconf_change");
         }
-        // TODO: https://github.com/zcash/wallet/issues/200
+        // TODO: https://github.com/zcash/zallet/issues/200
         if config.builder.tx_expiry_delta.is_some() {
             warn_unused("builder.tx_expiry_delta");
         }
-        // TODO: https://github.com/zcash/wallet/issues/138
+        // TODO: https://github.com/zcash/zallet/issues/138
         #[cfg(zallet_build = "wallet")]
         if config.features.legacy_pool_seed_fingerprint.is_some() {
             warn_unused("features.legacy_pool_seed_fingerprint");
         }
-        // TODO: https://github.com/zcash/wallet/issues/201
+        // TODO: https://github.com/zcash/zallet/issues/201
         #[cfg(zallet_build = "wallet")]
         if config.keystore.require_backup.is_some() {
             warn_unused("keystore.require_backup");
@@ -48,7 +54,12 @@ impl AsyncRunnable for StartCmd {
         let keystore = KeyStore::new(&config, db.clone())?;
 
         // Start monitoring the chain.
-        let (chain, chain_indexer_task_handle) = ZainoChain::new(&config).await?;
+        let (chain, chain_indexer_task_handle) = factory.build(&config).await?;
+
+        // Refuse to start if the backing full node already follows consensus rules we
+        // cannot interpret. If the only incompatibilities are still in the future, this
+        // returns the height at which to shut down before reaching them.
+        let shutdown_height = check_consensus_compatibility(&chain).await?;
 
         // Launch RPC server.
         let rpc_task_handle = JsonRpc::spawn(
@@ -66,7 +77,7 @@ impl AsyncRunnable for StartCmd {
             wallet_sync_recover_history_task_handle,
             wallet_sync_batch_decryptor_task_handle,
             wallet_sync_data_requests_task_handle,
-        ) = WalletSync::spawn(&config, db, chain).await?;
+        ) = WalletSync::spawn(&config, db, chain, shutdown_height).await?;
 
         info!("Spawned Zallet tasks");
 
@@ -148,6 +159,12 @@ impl AsyncRunnable for StartCmd {
         info!("All tasks have been asked to stop, waiting for remaining tasks to finish");
 
         res
+    }
+}
+
+impl AsyncRunnable for StartCmd {
+    async fn run(&self) -> Result<(), Error> {
+        crate::application::chain_runtime().run_start().await
     }
 }
 

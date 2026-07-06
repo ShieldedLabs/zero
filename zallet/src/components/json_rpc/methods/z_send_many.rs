@@ -1,14 +1,11 @@
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use abscissa_core::Application;
 use jsonrpsee::core::{JsonValue, RpcResult};
-use schemars::JsonSchema;
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use zcash_address::{ZcashAddress, unified};
+use zcash_address::unified;
 use zcash_client_backend::data_api::wallet::SpendingKeys;
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::{
@@ -16,18 +13,18 @@ use zcash_client_backend::{
         Account,
         wallet::{
             ConfirmationsPolicy, create_proposed_transactions,
-            input_selection::GreedyInputSelector, propose_transfer,
+            input_selection::{GreedyInputSelector, TransparentSpendPolicy},
+            propose_transfer,
         },
     },
     fees::{DustOutputPolicy, StandardFeeRule, standard::MultiOutputChangeStrategy},
     wallet::OvkPolicy,
-    zip321::{Payment, TransactionRequest},
 };
 use zcash_client_sqlite::ReceivedNoteId;
 use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    PoolType, ShieldedProtocol,
+    PoolType, ShieldedPool,
     value::{MAX_MONEY, Zatoshis},
 };
 
@@ -38,11 +35,11 @@ use crate::{
         json_rpc::{
             asyncop::{ContextInfo, OperationId},
             payments::{
-                IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult, broadcast_transactions,
-                enforce_privacy_policy, get_account_for_address, parse_memo,
+                AmountParameter, IncompatiblePrivacyPolicy, PrivacyPolicy, SendResult,
+                broadcast_transactions, build_request, enforce_privacy_policy,
+                get_account_for_address,
             },
             server::LegacyCode,
-            utils::zatoshis_from_value,
         },
         keystore::KeyStore,
     },
@@ -52,21 +49,6 @@ use crate::{
 
 #[cfg(feature = "zcashd-import")]
 use crate::components::json_rpc::utils::collect_standalone_transparent_keys;
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub(crate) struct AmountParameter {
-    /// A taddr, zaddr, or Unified Address.
-    address: String,
-
-    /// The numeric amount in ZEC.
-    amount: JsonValue,
-
-    /// If the address is a zaddr, raw data represented in hexadecimal string format. If
-    /// the output is being sent to a transparent address, it’s an error to include this
-    /// field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    memo: Option<String>,
-}
 
 /// Response to a `z_sendmany` RPC request.
 pub(crate) type Response = RpcResult<ResultType>;
@@ -97,69 +79,18 @@ pub(crate) async fn call<C: Chain>(
     impl Future<Output = RpcResult<SendResult>>,
 )> {
     // TODO: Check that Sapling is active, by inspecting height of `chain` snapshot.
-    //       https://github.com/zcash/wallet/issues/237
-
-    if amounts.is_empty() {
-        return Err(
-            LegacyCode::InvalidParameter.with_static("Invalid parameter, amounts array is empty.")
-        );
-    }
+    //       https://github.com/zcash/zallet/issues/237
 
     if fee.is_some() {
         return Err(LegacyCode::InvalidParameter
             .with_static("Zallet always calculates fees internally; the fee field must be null."));
     }
 
-    let mut recipient_addrs = HashSet::new();
-    let mut payments = vec![];
-    let mut total_out = Zatoshis::ZERO;
-
-    for amount in &amounts {
-        let addr: ZcashAddress = amount.address.parse().map_err(|_| {
-            LegacyCode::InvalidParameter.with_message(format!(
-                "Invalid parameter, unknown address format: {}",
-                amount.address,
-            ))
-        })?;
-
-        if !recipient_addrs.insert(addr.clone()) {
-            return Err(LegacyCode::InvalidParameter.with_message(format!(
-                "Invalid parameter, duplicated recipient address: {}",
-                amount.address,
-            )));
-        }
-
-        let memo = amount.memo.as_deref().map(parse_memo).transpose()?;
-        let value = zatoshis_from_value(&amount.amount)?;
-
-        let payment = Payment::new(addr, Some(value), memo, None, None, vec![]).map_err(|e| {
-            LegacyCode::InvalidParameter.with_static(match e {
-                zcash_client_backend::zip321::PaymentError::TransparentMemo => {
-                    "Cannot send memo to transparent recipient"
-                }
-                zcash_client_backend::zip321::PaymentError::ZeroValuedTransparentOutput => {
-                    "Cannot send zero-valued output to transparent recipient"
-                }
-            })
-        })?;
-
-        payments.push(payment);
-        total_out = (total_out + value)
-            .ok_or_else(|| LegacyCode::InvalidParameter.with_static("Value too large"))?;
-    }
-
-    if payments.is_empty() {
-        return Err(LegacyCode::InvalidParameter.with_static("No recipients"));
-    }
-
-    let request = TransactionRequest::new(payments).map_err(|e| {
-        // TODO: Map errors to `zcashd` shape.
-        LegacyCode::InvalidParameter.with_message(format!("Invalid payment request: {e}"))
-    })?;
+    let request = build_request(&amounts)?;
 
     let account = match fromaddress.as_str() {
         // Select from the legacy transparent address pool.
-        // TODO: Support this if we're going to. https://github.com/zcash/wallet/issues/138
+        // TODO: Support this if we're going to. https://github.com/zcash/zallet/issues/138
         "ANY_TADDR" => Err(LegacyCode::WalletAccountsUnsupported
             .with_static("The legacy account is currently unsupported for spending from")),
         // Select the account corresponding to the given address.
@@ -184,7 +115,7 @@ pub(crate) async fn call<C: Chain>(
     }?;
 
     // Sanity check for transaction size
-    // TODO: https://github.com/zcash/wallet/issues/255
+    // TODO: https://github.com/zcash/zallet/issues/255
 
     let confirmations_policy = match minconf {
         Some(minconf) => NonZeroU32::new(minconf).map_or(
@@ -202,7 +133,7 @@ pub(crate) async fn call<C: Chain>(
     let params = *wallet.params();
 
     // TODO: Fetch the real maximums within the account so we can detect correctly.
-    //       https://github.com/zcash/wallet/issues/257
+    //       https://github.com/zcash/zallet/issues/257
     let mut max_sapling_available = Zatoshis::const_from_u64(MAX_MONEY);
     let mut max_orchard_available = Zatoshis::const_from_u64(MAX_MONEY);
 
@@ -270,7 +201,7 @@ pub(crate) async fn call<C: Chain>(
     let change_strategy = MultiOutputChangeStrategy::new(
         StandardFeeRule::Zip317,
         None,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         DustOutputPolicy::default(),
         APP.config().note_management.split_policy(),
     );
@@ -290,6 +221,9 @@ pub(crate) async fn call<C: Chain>(
         &change_strategy,
         request,
         confirmations_policy,
+        // Zallet does not yet spend transparent funds in a general transfer; `ANY_TADDR`
+        // spending is rejected above. This preserves the prior shielded-only behavior.
+        &TransparentSpendPolicy::ShieldedOnly,
     )
     // TODO: Map errors to `zcashd` shape.
     .map_err(|e| LegacyCode::Wallet.with_message(format!("Failed to propose transaction: {e}")))?;
@@ -302,7 +236,7 @@ pub(crate) async fn call<C: Chain>(
             .shielded_inputs()
             .iter()
             .flat_map(|inputs| inputs.notes())
-            .filter(|note| note.note().protocol() == ShieldedProtocol::Orchard)
+            .filter(|note| note.note().protocol() == ShieldedPool::Orchard)
             .count();
 
         let orchard_outputs = step
@@ -350,7 +284,7 @@ pub(crate) async fn call<C: Chain>(
         .await
         .map_err(|e| match e.kind() {
             // TODO: Improve internal error types.
-            //       https://github.com/zcash/wallet/issues/256
+            //       https://github.com/zcash/zallet/issues/256
             crate::error::ErrorKind::Generic if e.to_string() == "Wallet is locked" => {
                 LegacyCode::WalletUnlockNeeded.with_message(e.to_string())
             }
