@@ -1,2 +1,4 @@
-# Auto-generated upstream-watch reports (zero-upstream-watch scheduled task)
-/reports/
+/target
+**/*.rs.bk
+.vscode
+action-circuit-layout.png
