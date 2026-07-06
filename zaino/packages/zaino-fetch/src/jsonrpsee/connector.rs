@@ -46,6 +46,9 @@ use crate::jsonrpsee::{
 
 use super::response::{GetDifficultyResponse, GetNetworkSolPsResponse};
 
+#[cfg(feature = "prometheus")]
+use crate::metric_names::*;
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RpcRequest<T> {
     jsonrpc: String,
@@ -194,6 +197,42 @@ pub struct JsonRpSeeConnector {
     auth_method: AuthMethod,
 }
 
+/// Emit the standard outbound-JSON-RPC metric triple for one completed request:
+/// request count, request duration, and — when `is_err` — an error count. Keyed
+/// by method so the emission lives in exactly one place.
+#[cfg(feature = "prometheus")]
+fn record_outbound_rpc_metrics(method: &'static str, start: std::time::Instant, is_err: bool) {
+    metrics::counter!(RPC_OUTBOUND_REQUESTS_TOTAL, "method" => method).increment(1);
+    metrics::histogram!(RPC_OUTBOUND_REQUEST_DURATION_SECONDS, "method" => method)
+        .record(start.elapsed().as_secs_f64());
+    if is_err {
+        metrics::counter!(RPC_OUTBOUND_ERRORS_TOTAL, "method" => method).increment(1);
+    }
+}
+
+/// Whether the outbound JSON-RPC client keeps a cookie store (required
+/// for cookie-authenticated validators).
+enum CookieSupport {
+    Enabled,
+    Disabled,
+}
+
+/// Builds the outbound JSON-RPC HTTP client shared by every connector
+/// entry point: 2s connect timeout, 5s request timeout, no redirects.
+fn build_rpc_client(cookies: CookieSupport) -> Result<Client, reqwest::Error> {
+    // reqwest is built with `rustls-no-provider`, which never
+    // auto-selects a rustls CryptoProvider (zingolabs/zaino#1360).
+    zaino_common::crypto::ensure_default_crypto_provider();
+    let mut builder = ClientBuilder::new()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    if matches!(cookies, CookieSupport::Enabled) {
+        builder = builder.cookie_store(true);
+    }
+    builder.build()
+}
+
 impl JsonRpSeeConnector {
     /// Creates a new JsonRpSeeConnector with Basic Authentication.
     pub fn new_with_basic_auth(
@@ -201,12 +240,8 @@ impl JsonRpSeeConnector {
         username: String,
         password: String,
     ) -> Result<Self, TransportError> {
-        let client = ClientBuilder::new()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(TransportError::ReqwestError)?;
+        let client =
+            build_rpc_client(CookieSupport::Disabled).map_err(TransportError::ReqwestError)?;
 
         Ok(Self {
             url,
@@ -220,13 +255,8 @@ impl JsonRpSeeConnector {
     pub fn new_with_cookie_auth(url: Url, cookie_path: &Path) -> Result<Self, TransportError> {
         let cookie_password = read_and_parse_cookie_token(cookie_path)?;
 
-        let client = ClientBuilder::new()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .cookie_store(true)
-            .build()
-            .map_err(TransportError::ReqwestError)?;
+        let client =
+            build_rpc_client(CookieSupport::Enabled).map_err(TransportError::ReqwestError)?;
 
         Ok(Self {
             url,
@@ -293,13 +323,15 @@ impl JsonRpSeeConnector {
         R: std::fmt::Debug + for<'de> Deserialize<'de> + ResponseToError,
     >(
         &self,
-        method: &str,
+        method: &'static str,
         params: T,
     ) -> Result<R, RpcRequestError<R::RpcError>>
     where
         R::RpcError: Send + Sync + 'static,
     {
         let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
+        #[cfg(feature = "prometheus")]
+        let rpc_start = std::time::Instant::now();
 
         let max_attempts = 5;
         let mut attempts = 0;
@@ -326,14 +358,18 @@ impl JsonRpSeeConnector {
 
             if body_str.contains("Work queue depth exceeded") {
                 if attempts >= max_attempts {
+                    #[cfg(feature = "prometheus")]
+                    record_outbound_rpc_metrics(method, rpc_start, true);
                     return Err(RpcRequestError::ServerWorkQueueFull);
                 }
+                #[cfg(feature = "prometheus")]
+                metrics::counter!(RPC_OUTBOUND_RETRIES_TOTAL, "method" => method).increment(1);
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
 
             let code = status.as_u16();
-            return match code {
+            let rpc_result = match code {
                 // Invalid
                 ..100 | 600.. => Err(RpcRequestError::Transport(
                     TransportError::InvalidStatusCode(code),
@@ -369,6 +405,11 @@ impl JsonRpSeeConnector {
                     code,
                 ))),
             };
+
+            #[cfg(feature = "prometheus")]
+            record_outbound_rpc_metrics(method, rpc_start, rpc_result.is_err());
+
+            return rpc_result;
         }
     }
 
@@ -952,12 +993,8 @@ async fn test_node_connection(
     url: Url,
     auth_method: AuthMethod,
 ) -> Result<(), TestNodeConnectionError> {
-    let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(2))
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(TestNodeConnectionError::ClientBuild)?;
+    let client =
+        build_rpc_client(CookieSupport::Disabled).map_err(TestNodeConnectionError::ClientBuild)?;
 
     let request_body = r#"{"jsonrpc":"2.0","method":"getinfo","params":[],"id":1}"#;
     let mut request_builder = client
@@ -1044,7 +1081,7 @@ pub async fn test_node_and_return_url(
         }
         interval.tick().await;
     }
-    error!("Error: Zainod needs to connect to a zcash Validator node. (either zcashd or zebrad). Failed to connect to a Validator at {url}. Perhaps the Validator is not running or perhaps there was an authentication error.");
+    error!(%url, "failed to connect to validator node — is zcashd/zebrad running? check authentication");
     std::process::exit(1);
 }
 

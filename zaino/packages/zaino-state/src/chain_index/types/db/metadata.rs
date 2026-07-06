@@ -102,10 +102,16 @@ impl ZainoVersionedSerde for MempoolInfo {
     }
 }
 
-/// 24 byte body.
+/// Fixed-length encoding metadata for `MempoolInfo`.
+///
+/// v1 consists of 8 byte size + 8 byte bytes + 8 byte usage
 impl FixedEncodedLen for MempoolInfo {
-    /// 8 byte size + 8 byte bytes + 8 byte usage
-    const ENCODED_LEN: usize = 8 + 8 + 8;
+    fn encoded_len(version: u8) -> Option<usize> {
+        match version {
+            version::V1 => Some(24),
+            _ => None,
+        }
+    }
 }
 
 impl From<zaino_fetch::jsonrpsee::response::GetMempoolInfoResponse> for MempoolInfo {
@@ -219,6 +225,39 @@ impl FinalisedTxOutSetInfoAccumulator {
         Ok(())
     }
 
+    /// Folds another accumulator into this one: XOR the multiset commitments (self-inverse and
+    /// order-independent) and checked-sum the additive counters.
+    ///
+    /// Used to recombine the per-shard partials of a sharded rebuild. Because XOR and addition are
+    /// both commutative and associative, the recombined result is independent of the shard count and
+    /// of the order shards are folded in.
+    pub fn combine(&mut self, other: &Self) -> Result<(), AccumulatorDeltaError> {
+        for (dst, src) in self
+            .hash_serialized
+            .iter_mut()
+            .zip(other.hash_serialized.iter())
+        {
+            *dst ^= *src;
+        }
+        self.transactions = self
+            .transactions
+            .checked_add(other.transactions)
+            .ok_or(AccumulatorDeltaError::Overflow("transactions"))?;
+        self.transaction_outputs = self
+            .transaction_outputs
+            .checked_add(other.transaction_outputs)
+            .ok_or(AccumulatorDeltaError::Overflow("transaction_outputs"))?;
+        self.bytes_serialized = self
+            .bytes_serialized
+            .checked_add(other.bytes_serialized)
+            .ok_or(AccumulatorDeltaError::Overflow("bytes_serialized"))?;
+        self.total_zatoshis = self
+            .total_zatoshis
+            .checked_add(other.total_zatoshis)
+            .ok_or(AccumulatorDeltaError::Overflow("total_zatoshis"))?;
+        Ok(())
+    }
+
     /// Applies a single UTXO leaving the set to all per-output fields. Inverse of
     /// [`Self::apply_added_output`].
     pub fn apply_removed_output(
@@ -295,9 +334,16 @@ impl ZainoVersionedSerde for FinalisedTxOutSetInfoAccumulator {
     }
 }
 
+/// Fixed-length encoding metadata for `FinalisedTxOutSetInfoAccumulator`.
+///
+/// v1 consists of 8 + 8 + 8 + 32 + 8 = 64 bytes
 impl FixedEncodedLen for FinalisedTxOutSetInfoAccumulator {
-    /// 8 + 8 + 8 + 32 + 8 = 64 bytes.
-    const ENCODED_LEN: usize = 8 + 8 + 8 + 32 + 8;
+    fn encoded_len(version: u8) -> Option<usize> {
+        match version {
+            version::V1 => Some(64),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,7 +366,7 @@ mod tests {
 
         assert_eq!(
             encoded_accumulator.len(),
-            FinalisedTxOutSetInfoAccumulator::VERSIONED_LEN
+            FinalisedTxOutSetInfoAccumulator::latest_versioned_len().unwrap()
         );
 
         let decoded_accumulator =
@@ -339,6 +385,93 @@ mod tests {
         assert_eq!(accumulator.bytes_serialized, 0);
         assert_eq!(accumulator.hash_serialized, [0u8; 32]);
         assert_eq!(accumulator.total_zatoshis, 0);
+    }
+
+    #[test]
+    fn combine_xors_commitments_and_sums_counters() {
+        let a = FinalisedTxOutSetInfoAccumulator::new(2, 10, 100, [0xaa; 32], 500);
+        let b = FinalisedTxOutSetInfoAccumulator::new(3, 7, 70, [0x0f; 32], 250);
+
+        let mut combined = a;
+        combined.combine(&b).expect("no overflow");
+
+        assert_eq!(combined.transactions, 5);
+        assert_eq!(combined.transaction_outputs, 17);
+        assert_eq!(combined.bytes_serialized, 170);
+        assert_eq!(combined.total_zatoshis, 750);
+        assert_eq!(combined.hash_serialized, [0xaa ^ 0x0f; 32]);
+    }
+
+    #[test]
+    fn combine_is_order_independent() {
+        let a = FinalisedTxOutSetInfoAccumulator::new(2, 10, 100, [0xaa; 32], 500);
+        let b = FinalisedTxOutSetInfoAccumulator::new(3, 7, 70, [0x0f; 32], 250);
+
+        let mut ab = a;
+        ab.combine(&b).expect("no overflow");
+        let mut ba = b;
+        ba.combine(&a).expect("no overflow");
+
+        assert_eq!(
+            ab, ba,
+            "XOR + addition are commutative, so combine must be order-independent"
+        );
+    }
+
+    #[test]
+    fn combine_detects_counter_overflow() {
+        let mut a = FinalisedTxOutSetInfoAccumulator::new(u64::MAX, 0, 0, [0; 32], 0);
+        let b = FinalisedTxOutSetInfoAccumulator::new(1, 0, 0, [0; 32], 0);
+
+        assert!(
+            a.combine(&b).is_err(),
+            "a counter overflow must surface as an error, never silently wrap"
+        );
+    }
+
+    #[test]
+    fn combine_recombines_partitioned_outputs() {
+        // This is the property the sharded rebuild relies on: accumulating disjoint groups of the
+        // UTXO set and folding the partials with `combine` must equal accumulating the whole set in
+        // one pass. (`apply_added_output` does not touch `transactions`, so this exercises the XOR
+        // commitment and the per-output additive counters; the `transactions` sum is covered above.)
+        let outputs: Vec<(Outpoint, TxOutCompact)> = (0..6u32)
+            .map(|i| {
+                let outpoint = Outpoint::new([i as u8; 32], i);
+                let out = TxOutCompact::new(1_000 + u64::from(i), [i as u8; 20], (i % 2) as u8)
+                    .expect("script_type 0/1 is valid");
+                (outpoint, out)
+            })
+            .collect();
+
+        let mut whole = FinalisedTxOutSetInfoAccumulator::empty();
+        for (outpoint, out) in &outputs {
+            whole
+                .apply_added_output(outpoint, out)
+                .expect("no overflow");
+        }
+
+        // Split into two arbitrary disjoint groups, accumulate each, and recombine.
+        let mut part_a = FinalisedTxOutSetInfoAccumulator::empty();
+        for (outpoint, out) in &outputs[..2] {
+            part_a
+                .apply_added_output(outpoint, out)
+                .expect("no overflow");
+        }
+        let mut part_b = FinalisedTxOutSetInfoAccumulator::empty();
+        for (outpoint, out) in &outputs[2..] {
+            part_b
+                .apply_added_output(outpoint, out)
+                .expect("no overflow");
+        }
+
+        let mut combined = part_a;
+        combined.combine(&part_b).expect("no overflow");
+
+        assert_eq!(
+            combined, whole,
+            "combining partials of a partition must equal accumulating the whole set"
+        );
     }
 
     #[test]
