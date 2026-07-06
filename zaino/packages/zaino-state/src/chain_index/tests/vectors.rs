@@ -87,16 +87,17 @@ pub(in crate::chain_index::tests) fn copy_dir_recursive(
 /// each call site picks its own consumption strategy (by-value iteration,
 /// collection, accumulator updates, etc.) without duplicating the metadata
 /// boilerplate.
-pub(in crate::chain_index::tests) fn indexed_block_chain(
+pub(crate) fn indexed_block_chain(
     blocks: &[TestVectorBlockData],
 ) -> impl Iterator<Item = IndexedBlock> + '_ {
-    let mut parent_chain_work = ChainWork::from_u256(0.into());
+    let mut parent_chain_work: Option<ChainWork> = None;
     blocks.iter().map(move |vector| {
         let metadata = BlockMetadata::new(
             vector.sapling_root,
             vector.sapling_tree_size as u32,
             vector.orchard_root,
             vector.orchard_tree_size as u32,
+            None,
             parent_chain_work,
             zebra_chain::parameters::Network::new_regtest(
                 zebra_chain::parameters::testnet::ConfiguredActivationHeights {
@@ -111,6 +112,7 @@ pub(in crate::chain_index::tests) fn indexed_block_chain(
                     // see https://zips.z.cash/#nu6-1-candidate-zips for info on NU6.1
                     nu6_1: None,
                     nu6_2: None,
+                    nu6_3: None,
                     nu7: None,
                 }
                 .into(),
@@ -118,7 +120,7 @@ pub(in crate::chain_index::tests) fn indexed_block_chain(
         );
         let chain_block =
             IndexedBlock::try_from(BlockWithMetadata::new(&vector.zebra_block, metadata)).unwrap();
-        parent_chain_work = chain_block.context.chainwork;
+        parent_chain_work = Some(chain_block.context.chainwork);
         chain_block
     })
 }
