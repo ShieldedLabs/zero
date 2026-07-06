@@ -10,7 +10,7 @@ use zebra_chain::{
     amount::{self, NegativeAllowed, NonNegative},
     block,
     history_tree::HistoryTreeError,
-    orchard, sapling, sprout, transaction, transparent,
+    ironwood, orchard, sapling, sprout, transaction, transparent,
     value_balance::{ValueBalance, ValueBalanceError},
     work::difficulty::CompactDifficulty,
 };
@@ -82,6 +82,18 @@ pub enum StateInitError {
         /// The database path at which no database was found.
         path: PathBuf,
     },
+
+    /// A read-only state was requested together with an ephemeral database.
+    ///
+    /// A read-only secondary follows another process's primary database and must
+    /// never delete it, whereas an ephemeral database deletes its files on drop. The
+    /// two are mutually exclusive, so requesting both is a fatal configuration error.
+    #[error(
+        "cannot open read-only state: an ephemeral database was also requested. \
+         Hint: a read-only state follows an existing Zebra node's database and must not \
+         delete it; set `ephemeral = false`, or do not request a read-only state"
+    )]
+    ReadOnlyEphemeralConflict,
 }
 
 /// An error describing why a block could not be queued to be committed to the state.
@@ -206,6 +218,11 @@ pub enum ReconsiderError {
     /// The reconsider request was dropped before processing.
     #[error("reconsider block request was unexpectedly dropped")]
     ReconsiderResponseDropped,
+
+    /// Replaying an invalidated block into the restored chain failed contextual
+    /// validation.
+    #[error("replaying a previously invalidated block failed contextual validation: {0}")]
+    ReplayFailed(#[source] ValidateContextError),
 }
 
 /// An error describing why a block failed contextual validation.
@@ -314,6 +331,13 @@ pub enum ValidateContextError {
     #[non_exhaustive]
     DuplicateOrchardNullifier {
         nullifier: orchard::Nullifier,
+        in_finalized_state: bool,
+    },
+
+    #[error("ironwood double-spend: duplicate nullifier: {nullifier:?}, in finalized state: {in_finalized_state:?}")]
+    #[non_exhaustive]
+    DuplicateIronwoodNullifier {
+        nullifier: ironwood::Nullifier,
         in_finalized_state: bool,
     },
 
@@ -430,6 +454,19 @@ pub enum ValidateContextError {
         tx_index_in_block: Option<usize>,
         transaction_hash: transaction::Hash,
     },
+
+    #[error(
+        "unknown Ironwood anchor: {anchor:?},\n\
+         {height:?}, index in block: {tx_index_in_block:?}, {transaction_hash:?}"
+    )]
+    #[non_exhaustive]
+    UnknownIronwoodAnchor {
+        // Ironwood reuses the Orchard tree root type.
+        anchor: orchard::tree::Root,
+        height: Option<block::Height>,
+        tx_index_in_block: Option<usize>,
+        transaction_hash: transaction::Hash,
+    },
 }
 
 impl From<sprout::tree::NoteCommitmentTreeError> for ValidateContextError {
@@ -465,6 +502,15 @@ impl DuplicateNullifierError for sapling::Nullifier {
 impl DuplicateNullifierError for orchard::Nullifier {
     fn duplicate_nullifier_error(&self, in_finalized_state: bool) -> ValidateContextError {
         ValidateContextError::DuplicateOrchardNullifier {
+            nullifier: *self,
+            in_finalized_state,
+        }
+    }
+}
+
+impl DuplicateNullifierError for ironwood::Nullifier {
+    fn duplicate_nullifier_error(&self, in_finalized_state: bool) -> ValidateContextError {
+        ValidateContextError::DuplicateIronwoodNullifier {
             nullifier: *self,
             in_finalized_state,
         }
