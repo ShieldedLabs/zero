@@ -896,6 +896,7 @@ bool ContextualCheckTransaction(
     bool nu6Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6);
     bool nu6point1Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_1);
     bool nu6point2Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_2);
+    bool nu6point3Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_3);
     bool futureActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_ZFUTURE);
 
     assert(!saplingActive || overwinterActive); // Sapling cannot be active unless Overwinter is
@@ -905,7 +906,8 @@ bool ContextualCheckTransaction(
     assert(!nu6Active || nu5Active);            // NU6 cannot be active unless NU5 is
     assert(!nu6point1Active || nu6Active);      // NU6.1 cannot be active unless NU6 is
     assert(!nu6point2Active || nu6point1Active); // NU6.2 cannot be active unless NU6.1 is
-    assert(!futureActive || nu6point2Active);   // ZFUTURE must include consensus rules for all supported network upgrades.
+    assert(!nu6point3Active || nu6point2Active); // NU6.3 cannot be active unless NU6.2 is
+    assert(!futureActive || nu6point3Active);   // ZFUTURE must include consensus rules for all supported network upgrades.
 
     auto& orchard_bundle = tx.GetOrchardBundle();
 
@@ -1135,7 +1137,9 @@ bool ContextualCheckTransaction(
     if (nu5Active) {
         // Reject transactions with invalid version group id
         if (!futureActive) {
-            if (!(tx.nVersionGroupId == SAPLING_VERSION_GROUP_ID || tx.nVersionGroupId == ZIP225_VERSION_GROUP_ID)) {
+            if (!(tx.nVersionGroupId == SAPLING_VERSION_GROUP_ID ||
+                  tx.nVersionGroupId == ZIP225_VERSION_GROUP_ID ||
+                  (nu6point3Active && tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID))) {
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
                     error("ContextualCheckTransaction(): invalid NU5 tx version"),
@@ -1199,6 +1203,52 @@ bool ContextualCheckTransaction(
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
                     error("ContextualCheckTransaction(): Sprout JoinSplits not allowed in ZIP225 transactions"),
+                    REJECT_INVALID, "bad-tx-has-joinsplits");
+            }
+        }
+
+        // Reject transactions with invalid version
+        if (tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID) {
+            if (tx.nVersion < ZIP248_MIN_TX_VERSION) {
+                return state.DoS(
+                    dosLevelConstricting,
+                    error("ContextualCheckTransaction(): ZIP248 version too low"),
+                    REJECT_INVALID, "bad-tx-zip248-version-too-low");
+            }
+
+            if (tx.nVersion > ZIP248_MAX_TX_VERSION) {
+                return state.DoS(
+                    dosLevelPotentiallyRelaxing,
+                    error("ContextualCheckTransaction(): ZIP248 version too high"),
+                    REJECT_INVALID, "bad-tx-zip248-version-too-high");
+            }
+
+            if (!tx.GetConsensusBranchId().has_value()) {
+                // NOTE: This is an internal zcashd consistency
+                // check; it does not correspond to a consensus rule in the
+                // protocol specification, but is instead an artifact of the
+                // internal zcashd transaction representation.
+                return state.DoS(
+                    dosLevelPotentiallyRelaxing,
+                    error("ContextualCheckTransaction(): transaction does not have consensus branch id field set"),
+                    REJECT_INVALID, "bad-tx-consensus-branch-id-missing");
+            }
+
+            // tx.nConsensusBranchId must match the current consensus branch id
+            if (tx.GetConsensusBranchId().value() != consensusBranchId) {
+                return state.DoS(
+                    dosLevelPotentiallyRelaxing,
+                    error(
+                        "ContextualCheckTransaction(): transaction's consensus branch id (%08x) does not match the current consensus branch (%08x)",
+                        tx.GetConsensusBranchId().value(), consensusBranchId),
+                    REJECT_INVALID, "bad-tx-consensus-branch-id-mismatch");
+            }
+
+            // v6 transactions must have empty joinSplits
+            if (!(tx.vJoinSplit.empty())) {
+                return state.DoS(
+                    dosLevelPotentiallyRelaxing,
+                    error("ContextualCheckTransaction(): Sprout JoinSplits not allowed in ZIP248 transactions"),
                     REJECT_INVALID, "bad-tx-has-joinsplits");
             }
         }
@@ -1300,6 +1350,52 @@ bool ContextualCheckTransaction(
             return state.Invalid(
                 error("ContextualCheckTransaction(): transaction has Orchard actions (temporarily disabled)"),
                 REJECT_INVALID, "bad-tx-has-orchard-actions");
+        }
+    }
+
+    // Rules that apply to NU6.3 or later:
+    // @nomerge: double-check the NU6.3 rules in this block against the final spec
+    if (nu6point3Active) {
+        if (tx.IsCoinBase()) {
+            // From NU6.3 the Orchard pool prohibits cross-address transfers, which
+            // makes Orchard coinbase actions unconstructible: a coinbase action spends
+            // a dummy note, and the restricted circuit constrains its output to the
+            // dummy's own receiver. Shielded coinbase moves to the Ironwood pool. See
+            // the Orchard `ProtocolVersion::V3` documentation.
+            if (orchard_bundle.IsPresent()) {
+                return state.DoS(
+                    DOS_LEVEL_BLOCK,
+                    error("ContextualCheckTransaction(): NU6.3 coinbase has Orchard actions"),
+                    REJECT_INVALID, "bad-cb-has-orchard-actions");
+            }
+
+            // As with Sapling and Orchard shielded coinbase (ZIP 213), Ironwood
+            // coinbase outputs must be recoverable with the all-zeroes outgoing
+            // viewing key.
+            // @nomerge: verify that ciphertext recovery handles the Ironwood pool's V3
+            // (ZIP 2005) note plaintexts; the check below is shared with Orchard, whose
+            // notes use V2 plaintexts.
+            if (!tx.GetIronwoodBundle().CoinbaseOutputsAreValid()) {
+                return state.DoS(
+                    DOS_LEVEL_BLOCK,
+                    error("ContextualCheckTransaction(): Ironwood coinbase action has invalid ciphertext"),
+                    REJECT_INVALID, "bad-cb-action-invalid-ciphertext");
+            }
+        }
+    } else {
+        // Rules that apply generally before NU6.3.
+
+        // Check that Ironwood transaction components are not present prior to
+        // NU6.3. NOTE: This is an internal zcashd consistency check; it does not
+        // correspond to a consensus rule in the protocol specification (only v6
+        // transactions carry an Ironwood slot, and the v6 format is already rejected
+        // above before NU6.3 activation), but is instead an artifact of the internal
+        // zcashd transaction representation.
+        if (tx.GetIronwoodBundle().IsPresent()) {
+            return state.DoS(
+                dosLevelPotentiallyRelaxing,
+                error("ContextualCheckTransaction(): pre-NU6.3 transaction has Ironwood actions"),
+                REJECT_INVALID, "bad-tx-has-ironwood-actions");
         }
     }
 
