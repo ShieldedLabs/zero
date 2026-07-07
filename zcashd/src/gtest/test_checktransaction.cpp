@@ -4,6 +4,7 @@
 #include "main.h"
 #include "primitives/transaction.h"
 #include "consensus/validation.h"
+#include "consensus/upgrades.h"
 #include "transaction_builder.h"
 #include "gtest/utils.h"
 #include "test/test_util.h"
@@ -1665,4 +1666,40 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
     }
 
     RegtestDeactivateNU5();
+}
+
+// A v6 (ZIP 248) transaction is contextually rejected while NU6.3 is not active,
+// even when it carries NU6.3's consensus branch id.
+TEST(ChecktransactionTests, V6TxRejectedBeforeNU6_3) {
+    RegtestActivateNU6point2();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP248_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+
+    CTransaction tx(mtx);
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-nu5-tx-version-group-id", BodyCorruption::Default, "")).Times(1);
+    ContextualCheckTransaction(tx, state, Params(), 1, true);
+
+    RegtestDeactivateNU6point2();
+}
+
+// An empty v6 (ZIP 248) transaction is contextually valid once NU6.3 is active.
+TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP248_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+
+    CTransaction tx(mtx);
+    MockCValidationState state;
+    EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 1, true));
+
+    RegtestDeactivateNU6point3();
 }
