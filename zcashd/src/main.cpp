@@ -1424,6 +1424,9 @@ bool ContextualCheckTransaction(
             case ZIP225_VERSION_GROUP_ID:
                 // Allow V5 transactions while futureActive
                 break;
+            case ZIP248_VERSION_GROUP_ID:
+                // Allow V6 transactions while futureActive
+                break;
             default:
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
