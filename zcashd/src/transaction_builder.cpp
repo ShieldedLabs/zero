@@ -49,19 +49,40 @@ namespace orchard {
 
 Builder::Builder(
     bool coinbase,
+    orchard::BundleVersion bundle_version,
     uint256 anchor) : inner(nullptr, orchard_builder_free)
 {
-    // Coinbase bundles must not spend notes; outputs are enabled in both cases.
-    // The cross-address bit is only meaningful for (Ironwood, V3) bundles and is
-    // ignored by the FFI otherwise.
-    // TODO: BundleVersion{} is (Orchard, InsecureV1); thread the height-appropriate
-    // BundleVersion through from callers so post-NU6.2 bundles prove against the
-    // correct circuit.
     orchard::Flags flags{};
     flags.spends_enabled = !coinbase;
     flags.outputs_enabled = true;
-    flags.cross_address_enabled = false;
-    inner.reset(orchard_builder_new(coinbase, orchard::BundleVersion{}, flags, anchor.IsNull() ? nullptr : anchor.begin()));
+    // The cross-address flag-byte bit exists only for (Ironwood, V3) bundles; earlier
+    // protocol versions permit cross-address transfers unconditionally, and the FFI
+    // masks the bit for them.
+    // NOTE: an Ironwood *coinbase* bundle will also need cross-address enabled (its
+    // outputs pay real recipients from dummy spends); revisit when shielded coinbase
+    // moves to the Ironwood pool post-NU6.3.
+    flags.cross_address_enabled = !coinbase &&
+        bundle_version.value_pool == orchard::OrchardValuePool::Ironwood &&
+        bundle_version.protocol_version == orchard::ProtocolVersion::V3;
+
+    inner.reset(orchard_builder_new(coinbase, bundle_version, flags, anchor.IsNull() ? nullptr : anchor.begin()));
+}
+
+ProtocolVersion ProtocolVersionForHeight(const CChainParams& chainparams, int nHeight)
+{
+    // Before NU6.2 on test networks, use the historical insecure revision so that
+    // tests can reconstruct pre-NU6.2 Orchard history. Mainnet always proves against
+    // a sound circuit: the emergency Orchard-disabling soft fork activated there long
+    // ago, and this makes the behaviour easier to reason about during sync or when
+    // eclipsed.
+    if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_3)) {
+        return ProtocolVersion::V3;
+    }
+    if (chainparams.NetworkIDString() == CBaseChainParams::MAIN ||
+        chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_2)) {
+        return ProtocolVersion::V2;
+    }
+    return ProtocolVersion::InsecureV1;
 }
 
 bool Builder::AddSpend(orchard::SpendInfo spendInfo)
@@ -237,8 +258,10 @@ TransactionBuilder::TransactionBuilder(
 
     // Ignore the Orchard anchor if we can't use it yet.
     if (orchardAnchor.has_value() && mtx.nVersion >= ZIP225_MIN_TX_VERSION) {
-        // Choose the Orchard circuit to prove against (see CChainParams::UseFixedCircuitForProving).
-        orchardBuilder = orchard::Builder(false, orchardAnchor.value());
+        orchardBuilder = orchard::Builder(
+            false,
+            {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersionForHeight(params, nHeight)},
+            orchardAnchor.value());
     }
 }
 

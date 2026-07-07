@@ -309,7 +309,10 @@ public:
         // TODO: With the new BundleType::DEFAULT this is no longer true. Fix this.
         uint256 orchardAnchor;
         uint256 dataToBeSigned;
-        auto builder = orchard::Builder(false, orchardAnchor);
+        // Any bundle version works here (only the tree root matters); the historical
+        // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
         mutableTx.orchardBundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
         orchardNullifier = mutableTx.orchardBundle.GetNullifiers()[0];
 
@@ -341,7 +344,10 @@ template<> void AppendRandomLeaf(OrchardMerkleFrontier &tree) {
     // append a random leaf to OrchardMerkleFrontier.
     uint256 orchardAnchor;
     uint256 dataToBeSigned;
-    auto builder = orchard::Builder(false, orchardAnchor);
+    // Any bundle version works here (only the tree root matters); the historical
+        // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
     auto bundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
     tree.AppendBundle(bundle);
 }
