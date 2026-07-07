@@ -110,9 +110,18 @@ $(CXXBRIDGE_H) $(CXXBRIDGE_CPP): $(CXXBRIDGE_RS)
 # "ccache <compiler>" prefix, so pass just the compiler (the last word) as the
 # Windows (gnullvm) Rust linker.
 RUST_TARGET_LINKER = $(lastword $(CC))
+# Opt-in zcash_unstable feature gate. Pass e.g. ZCASH_UNSTABLE=nu6.3 (judah-build.sh
+# does this) to compile the Rust side with --cfg zcash_unstable="nu6.3". Empty by
+# default so normal builds are unaffected. The inner quotes are escaped so they
+# survive into the shell recipe and reach rustc as a cfg string value.
+ZCASH_UNSTABLE ?=
+ZCASH_UNSTABLE_RUSTFLAG = $(if $(ZCASH_UNSTABLE),--cfg zcash_unstable=\"$(ZCASH_UNSTABLE)\")
+# Declare the zcash_unstable cfg name and its expected values so rustc's
+# unexpected_cfgs lint stays quiet whether or not the gate is enabled.
+ZCASH_UNSTABLE_CHECKCFG = --check-cfg cfg(zcash_unstable,values(\"nu6.3\",\"nu7\"))
 RUST_ENV_VARS = \
   RUSTC="$(RUSTC)" \
-  RUSTFLAGS="--cfg=rust_secp_no_symbol_renaming -L native=$(abs_top_srcdir)/src/secp256k1/.libs" \
+  RUSTFLAGS="--cfg=rust_secp_no_symbol_renaming $(ZCASH_UNSTABLE_RUSTFLAG) $(ZCASH_UNSTABLE_CHECKCFG) --cfg=zcash_unstable=\"nu6.3\" -L native=$(abs_top_srcdir)/src/secp256k1/.libs" \
   CC="$(CC)" \
   CFLAGS="$(CFLAGS)" \
   CXX="$(CXX)" \
