@@ -3,10 +3,11 @@ use std::{convert::TryFrom, mem, ptr};
 use group::{Group as _, GroupEncoding as _};
 use memuse::DynamicUsage;
 use orchard::{
-    bundle::Authorized,
+    bundle::{Authorized, BundleVersion},
     keys::OutgoingViewingKey,
     note_encryption::OrchardDomain,
     primitives::redpallas::{Signature, SpendAuth},
+    ValuePool,
 };
 use pasta_curves::pallas;
 use zcash_note_encryption::try_output_recovery_with_ovk;
@@ -73,6 +74,12 @@ pub(crate) fn parse_orchard_bundle(
         .map_err(|_| format!("unknown consensus branch id {:#010x}", consensus_branch_id))?;
     let result = match format {
         ffi::BundleFormat::V5 => orchard_serialization::read_v5_bundle(reader, branch_id),
+        ffi::BundleFormat::V6Orchard => {
+            orchard_serialization::read_v6_bundle(reader, branch_id, ValuePool::Orchard)
+        }
+        ffi::BundleFormat::V6Ironwood => {
+            orchard_serialization::read_v6_bundle(reader, branch_id, ValuePool::Ironwood)
+        }
         _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
     };
     match result {
@@ -103,6 +110,24 @@ impl Bundle {
     ) -> Result<(), String> {
         match format {
             ffi::BundleFormat::V5 => orchard_serialization::write_v5_bundle(self.inner(), writer),
+            ffi::BundleFormat::V6Orchard | ffi::BundleFormat::V6Ironwood => {
+                let expected = if format == ffi::BundleFormat::V6Orchard {
+                    BundleVersion::orchard_v3()
+                } else {
+                    BundleVersion::ironwood_v3()
+                };
+
+                if let Some(bundle) = self.inner() {
+                    if bundle.bundle_version() != expected {
+                        return Err(format!(
+                            "bundle version {:?} does not match the requested v6 slot",
+                            bundle.bundle_version()
+                        ));
+                    }
+                }
+
+                orchard_serialization::write_v6_bundle(self.inner(), writer)
+            }
             _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
         }
         .map_err(|e| format!("Failed to serialize Orchard-protocol bundle: {}", e))

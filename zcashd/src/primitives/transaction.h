@@ -471,6 +471,7 @@ private:
     std::optional<uint32_t> nConsensusBranchId;
     SaplingBundle saplingBundle;
     OrchardBundle orchardBundle;
+    OrchardBundle ironwoodBundle;
 
     /** Memory only. */
     const WTxId wtxid;
@@ -577,6 +578,11 @@ public:
             nVersionGroupId == ZIP225_VERSION_GROUP_ID &&
             nVersion == ZIP225_TX_VERSION;
 
+        bool isZip248V6 =
+            fOverwintered &&
+            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
+            nVersion == ZIP248_TX_VERSION;
+
         // It is not possible to make the transaction's serialized form vary on
         // a per-enabled-feature basis. The approach here is that all
         // serialization rules for not-yet-released features must be
@@ -587,11 +593,11 @@ public:
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
 
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture)) {
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip248V6 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
-        if (isZip225V5) {
+        if (isZip225V5 || isZip248V6) {
             // Common Transaction Fields (plus version bytes above)
             uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
@@ -611,10 +617,17 @@ public:
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
+            orchard::BundleFormat orchardFormat = isZip248V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
             if (ser_action.ForRead()) {
-                orchardBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V5);
+                orchardBundle.Unserialize(s, consensusBranchId, orchardFormat);
+                if (isZip248V6) {
+                    ironwoodBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V6Ironwood);
+                }
             } else {
-                orchardBundle.Serialize(s, orchard::BundleFormat::V5);
+                orchardBundle.Serialize(s, orchardFormat);
+                if (isZip248V6) {
+                    ironwoodBundle.Serialize(s, orchard::BundleFormat::V6Ironwood);
+                }
             }
         } else {
             // Legacy transaction formats
@@ -733,6 +746,13 @@ public:
         return orchardBundle;
     }
 
+    /**
+     * Returns the Ironwood bundle for the transaction (always empty pre-v6).
+     */
+    const OrchardBundle& GetIronwoodBundle() const {
+        return ironwoodBundle;
+    }
+
     /*
      * Context for the two methods below:
      * As at most one of vpub_new and vpub_old is non-zero in every JoinSplit,
@@ -793,6 +813,7 @@ struct CMutableTransaction
     uint32_t nExpiryHeight{0};
     SaplingBundle saplingBundle;
     OrchardBundle orchardBundle;
+    OrchardBundle ironwoodBundle;
     std::vector<JSDescription> vJoinSplit;
     ed25519::VerificationKey joinSplitPubKey;
     ed25519::Signature joinSplitSig;
@@ -835,15 +856,19 @@ struct CMutableTransaction
             fOverwintered &&
             nVersionGroupId == ZIP225_VERSION_GROUP_ID &&
             nVersion == ZIP225_TX_VERSION;
+        bool isZip248V6 =
+            fOverwintered &&
+            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
+            nVersion == ZIP248_TX_VERSION;
         bool isFuture =
             fOverwintered &&
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture)) {
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip248V6 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
-        if (isZip225V5) {
+        if (isZip225V5 || isZip248V6) {
             // Common Transaction Fields (plus version bytes above)
             uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
@@ -863,10 +888,17 @@ struct CMutableTransaction
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
+            orchard::BundleFormat orchardFormat = isZip248V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
             if (ser_action.ForRead()) {
-                orchardBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V5);
+                orchardBundle.Unserialize(s, consensusBranchId, orchardFormat);
+                if (isZip248V6) {
+                    ironwoodBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V6Ironwood);
+                }
             } else {
-                orchardBundle.Serialize(s, orchard::BundleFormat::V5);
+                orchardBundle.Serialize(s, orchardFormat);
+                if (isZip248V6) {
+                    ironwoodBundle.Serialize(s, orchard::BundleFormat::V6Ironwood);
+                }
             }
         } else {
             // Legacy transaction formats

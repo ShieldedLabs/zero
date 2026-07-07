@@ -1,14 +1,45 @@
 #include <gtest/gtest.h>
 
 #include "gtest/utils.h"
+#include "consensus/upgrades.h" // @claude for NetworkUpgradeInfo[UPGRADE_NU6_3].nBranchId
 #include "primitives/transaction.h"
+#include "streams.h" // @claude for CDataStream in the v6 round-trip test
 #include "transaction_builder.h"
+#include "version.h" // @claude for PROTOCOL_VERSION in the v6 round-trip test
 #include "zcash/Note.hpp"
 #include "zcash/Address.hpp"
 
 #include <array>
 
 #include <rust/ed25519.h>
+
+// Round-trips an empty v6 (ZIP 248) transaction through serialization. Constructing // @claude
+// the CTransaction exercises UpdateHash, whose librustzcash reparse rejects any // @claude
+// non-canonical v6 encoding — including a missing or malformed Ironwood slot — so // @claude
+// this doubles as a check that the C++ serializer emits the canonical v6 format. // @claude
+TEST(Transaction, V6EmptyBundlesRoundTrip) { // @claude
+    CMutableTransaction mtx; // @claude
+    mtx.fOverwintered = true; // @claude
+    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID; // @claude
+    mtx.nVersion = ZIP248_TX_VERSION; // @claude
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId; // @claude
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION); // @claude
+    ss << mtx; // @claude
+    const std::vector<unsigned char> bytes(ss.begin(), ss.end()); // @claude
+
+    CTransaction tx(deserialize, ss); // @claude
+    EXPECT_EQ(tx.GetHash(), mtx.GetHash()); // @claude
+    EXPECT_EQ(tx.GetAuthDigest(), mtx.GetAuthDigest()); // @claude
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent()); // @claude
+    EXPECT_FALSE(tx.GetIronwoodBundle().IsPresent()); // @claude
+    EXPECT_EQ(tx.GetConsensusBranchId(), mtx.nConsensusBranchId); // @claude
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION); // @claude
+    ss2 << tx; // @claude
+    const std::vector<unsigned char> bytes2(ss2.begin(), ss2.end()); // @claude
+    EXPECT_EQ(bytes, bytes2); // @claude
+} // @claude
 
 TEST(Transaction, JSDescriptionRandomized) {
     // construct a merkle tree

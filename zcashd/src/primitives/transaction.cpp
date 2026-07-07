@@ -97,6 +97,7 @@ CMutableTransaction::CMutableTransaction(const CTransaction& tx) : nVersion(tx.n
                                                                    vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                                                                    saplingBundle(tx.GetSaplingBundle()),
                                                                    orchardBundle(tx.GetOrchardBundle()),
+                                                                   ironwoodBundle(tx.GetIronwoodBundle()),
                                                                    vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
 }
@@ -160,6 +161,7 @@ CTransaction::CTransaction() : nVersion(CTransaction::SPROUT_MIN_CURRENT_VERSION
                                vin(), vout(), nLockTime(0),
                                saplingBundle(),
                                orchardBundle(),
+                               ironwoodBundle(),
                                vJoinSplit(), joinSplitPubKey(), joinSplitSig() { }
 
 CTransaction::CTransaction(const CMutableTransaction &tx) : nVersion(tx.nVersion), fOverwintered(tx.fOverwintered), nVersionGroupId(tx.nVersionGroupId), nExpiryHeight(tx.nExpiryHeight),
@@ -167,6 +169,7 @@ CTransaction::CTransaction(const CMutableTransaction &tx) : nVersion(tx.nVersion
                                                             vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                                                             saplingBundle(tx.saplingBundle),
                                                             orchardBundle(tx.orchardBundle),
+                                                            ironwoodBundle(tx.ironwoodBundle),
                                                             vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
     UpdateHash();
@@ -181,6 +184,7 @@ CTransaction::CTransaction(
                               vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                               saplingBundle(tx.saplingBundle),
                               orchardBundle(tx.orchardBundle),
+                              ironwoodBundle(tx.ironwoodBundle),
                               vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
 {
     assert(evilDeveloperFlag);
@@ -193,6 +197,7 @@ CTransaction::CTransaction(CMutableTransaction &&tx) : nVersion(tx.nVersion),
                                                        nLockTime(tx.nLockTime), nExpiryHeight(tx.nExpiryHeight),
                                                        saplingBundle(std::move(tx.saplingBundle)),
                                                        orchardBundle(std::move(tx.orchardBundle)),
+                                                       ironwoodBundle(std::move(tx.ironwoodBundle)),
                                                        vJoinSplit(std::move(tx.vJoinSplit)),
                                                        joinSplitPubKey(std::move(tx.joinSplitPubKey)), joinSplitSig(std::move(tx.joinSplitSig))
 {
@@ -210,6 +215,7 @@ CTransaction& CTransaction::operator=(const CTransaction &tx) {
     *const_cast<uint32_t*>(&nExpiryHeight) = tx.nExpiryHeight;
     saplingBundle = tx.saplingBundle;
     orchardBundle = tx.orchardBundle;
+    ironwoodBundle = tx.ironwoodBundle;
     *const_cast<std::vector<JSDescription>*>(&vJoinSplit) = tx.vJoinSplit;
     *const_cast<ed25519::VerificationKey*>(&joinSplitPubKey) = tx.joinSplitPubKey;
     *const_cast<ed25519::Signature*>(&joinSplitSig) = tx.joinSplitSig;
@@ -251,6 +257,19 @@ CAmount CTransaction::GetValueOut() const
             throw std::runtime_error("CTransaction::GetValueOut(): valueBalanceOrchard out of range");
         }
         nValueOut += -valueBalanceOrchard;
+
+        if (!MoneyRange(nValueOut)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
+        }
+    }
+
+    auto valueBalanceIronwood = ironwoodBundle.GetValueBalance();
+    if (valueBalanceIronwood <= 0) {
+        // NB: negative valueBalanceIronwood "takes" money from the transparent value pool just as outputs do
+        if (!MoneyDeltaRange(valueBalanceIronwood)) {
+            throw std::runtime_error("CTransaction::GetValueOut(): valueBalanceIronwood out of range");
+        }
+        nValueOut += -valueBalanceIronwood;
 
         if (!MoneyRange(nValueOut)) {
             throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
@@ -299,6 +318,18 @@ CAmount CTransaction::GetShieldedValueIn() const
         }
     }
 
+    auto valueBalanceIronwood = ironwoodBundle.GetValueBalance();
+    if (valueBalanceIronwood >= 0) {
+        // NB: positive valueBalanceIronwood "gives" money to the transparent value pool just as inputs do
+        if (valueBalanceIronwood > MAX_MONEY) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): valueBalanceIronwood out of range");
+        }
+        nValue += valueBalanceIronwood;
+        if (!MoneyRange(nValue)) {
+            throw std::runtime_error("CTransaction::GetShieldedValueIn(): nValue out of range");
+        }
+    }
+
     for (const auto& jsDescription : vJoinSplit) {
         // NB: vpub_new "gives" money to the transparent value pool just as inputs do
         if (!MoneyRange(jsDescription.vpub_new)) {
@@ -328,7 +359,9 @@ size_t CTransaction::GetLogicalActionCount() const {
             vJoinSplit.size(),
             GetSaplingSpendsCount(),
             GetSaplingOutputsCount(),
-            orchardBundle.GetNumActions());
+            // @nomerge: confirm against the final ZIP 317 revision that Orchard and
+            // Ironwood actions combine into one logical-action count like this
+            orchardBundle.GetNumActions() + ironwoodBundle.GetNumActions());
 }
 
 std::string CTransaction::ToString() const
@@ -360,6 +393,11 @@ std::string CTransaction::ToString() const
                 orchardBundle.GetValueBalance(),
                 orchardBundle.GetNumActions());
         }
+        if (nVersion >= ZIP248_TX_VERSION) { // @claude
+            str += strprintf(", valueBalanceIronwood=%u, vIronwoodAction.size=%u", // @claude
+                ironwoodBundle.GetValueBalance(), // @claude
+                ironwoodBundle.GetNumActions()); // @claude
+        } // @claude
         str += ")\n";
     } else if (nVersion >= 3) {
         str += strprintf("CTransaction(hash=%s, ver=%d, fOverwintered=%d, nVersionGroupId=%08x, vin.size=%u, vout.size=%u, nLockTime=%u, nExpiryHeight=%u)\n",

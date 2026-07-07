@@ -318,6 +318,10 @@ pub(crate) mod ffi {
     pub enum BundleFormat {
         /// The single Orchard bundle of a v5 (ZIP 225) transaction.
         V5,
+        /// The Orchard bundle of a v6 (ZIP 248) transaction.
+        V6Orchard,
+        /// The Ironwood bundle of a v6 (ZIP 248) transaction.
+        V6Ironwood,
     }
 
     #[namespace = "orchard"]

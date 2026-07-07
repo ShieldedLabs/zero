@@ -1,4 +1,4 @@
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::io::Cursor;
 use std::{ptr, slice};
 
@@ -8,7 +8,8 @@ use tracing::error;
 use transparent::{address::Script, sighash::TransparentAuthorizingContext};
 use zcash_encoding::Vector;
 use zcash_primitives::transaction::{
-    sighash::SignableInput, sighash_v5::v5_signature_hash, txid::TxIdDigester, Authorization,
+    sighash::{signature_hash, SignableInput},
+    txid::TxIdDigester, Authorization,
     Transaction, TransactionData, TxDigests, TxVersion,
 };
 use zcash_protocol::{consensus::BranchId, value::Zatoshis};
@@ -292,7 +293,7 @@ pub extern "C" fn zcash_transaction_zip244_signature_digest(
                         bundle,
                         hash_type,
                         index,
-                        // `script_code` is unused by `v5_signature_hash`, so instead of passing the
+                        // `script_code` is unused by the v5 and v6 sighash algorithms, so instead of passing the
                         // real `script_code` across the FFI (and paying the serialization and parsing
                         // cost for no benefit), we set it to the prevout's `script_pubkey`. This
                         // happens to be correct anyway for every output script kind except P2SH.
@@ -319,13 +320,13 @@ pub extern "C" fn zcash_transaction_zip244_signature_digest(
         }
     };
 
-    let sighash = v5_signature_hash(
+    let sighash = signature_hash(
         &precomputed_tx.tx,
         &signable_input,
         &precomputed_tx.txid_parts,
     );
 
-    // `v5_signature_hash` output is always 32 bytes.
-    *unsafe { &mut *sighash_ret } = sighash.as_ref().try_into().unwrap();
+    // `signature_hash` output is always 32 bytes.
+    *unsafe { &mut *sighash_ret } = *sighash.as_ref();
     true
 }
