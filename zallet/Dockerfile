@@ -57,6 +57,12 @@ COPY . .
 ARG SOURCE_DATE_EPOCH=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
+# Backend + feature selection. The default matches upstream's stock build
+# (zebra-state backend). The z3-stack bundle overrides this with the `zaino`
+# backend, which fetches chain data over JSON-RPC and needs no co-located
+# zebrad state or indexer gRPC.
+ARG FEATURES="zebra-state,rpc-cli,zcashd-import"
+
 # Build NATIVELY for whatever architecture this image is running as. buildx
 # already places the container on the target arch (per --platform), so the
 # host's default Rust target IS the target — we must NOT pass an explicit
@@ -69,7 +75,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN set -eux; \
     export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"; \
     cargo build --release --locked \
-      --bin zallet --features rpc-cli,zcashd-import; \
+      --bin zallet --no-default-features --features "${FEATURES}"; \
     install -D -m0755 target/release/zallet /out/zallet; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
