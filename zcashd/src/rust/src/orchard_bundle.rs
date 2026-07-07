@@ -5,7 +5,8 @@ use memuse::DynamicUsage;
 use orchard::{
     bundle::{Authorized, BundleVersion},
     keys::OutgoingViewingKey,
-    note_encryption::OrchardDomain,
+    note::NoteVersion,
+    note_encryption::{IronwoodDomain, OrchardDomain},
     primitives::redpallas::{Signature, SpendAuth},
     ValuePool,
 };
@@ -272,16 +273,30 @@ impl Bundle {
     /// transaction.
     pub(crate) fn coinbase_outputs_are_valid(&self) -> bool {
         if let Some(bundle) = self.inner() {
+            // Recovery must use the note-encryption domain matching the
+            // bundle's pool: Orchard notes use V2 plaintexts, Ironwood notes
+            // use V3 plaintexts (ZIP 2005). Recovery mechanics are otherwise
+            // identical.
+            let note_version = bundle.bundle_version().note_version();
+            let ovk = OutgoingViewingKey::from([0u8; 32]);
             for act in bundle.actions() {
-                if try_output_recovery_with_ovk(
-                    &OrchardDomain::for_action(act),
-                    &OutgoingViewingKey::from([0u8; 32]),
-                    act,
-                    act.cv_net(),
-                    &act.encrypted_note().out_ciphertext,
-                )
-                .is_none()
-                {
+                let recovered = match note_version {
+                    NoteVersion::V2 => try_output_recovery_with_ovk(
+                        &OrchardDomain::for_action(act),
+                        &ovk,
+                        act,
+                        act.cv_net(),
+                        &act.encrypted_note().out_ciphertext,
+                    ),
+                    NoteVersion::V3 => try_output_recovery_with_ovk(
+                        &IronwoodDomain::for_action(act),
+                        &ovk,
+                        act,
+                        act.cv_net(),
+                        &act.encrypted_note().out_ciphertext,
+                    ),
+                };
+                if recovered.is_none() {
                     return false;
                 }
             }
