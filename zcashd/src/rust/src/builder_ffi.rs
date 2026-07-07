@@ -23,24 +23,12 @@ use zcash_primitives::transaction::{
 use zcash_protocol::{consensus::BranchId, memo::MemoBytes, value::ZatBalance};
 
 use crate::{
-    bridge::ffi::OrchardUnauthorizedBundlePtr,
+    bridge::ffi::{self, OrchardUnauthorizedBundlePtr},
     transaction_ffi::{MapTransparent, TransparentAuth},
-    ORCHARD_PK, ORCHARD_PK_INSECURE,
+    ORCHARD_PK_INSECURE, ORCHARD_PK_NU6_2, ORCHARD_PK_NU6_3,
 };
 
 use orchard::circuit::OrchardCircuitVersion;
-
-// Maps the caller's "use the fixed circuit?" decision (C++ `CChainParams::UseFixedCircuitForProving`) to
-// an Orchard circuit version. `true` selects the fixed (NU6.2-onward) circuit; `false` selects
-// the historical insecure circuit, which the caller only chooses pre-NU6.2 on regtest, so that
-// tests can reconstruct pre-NU6.2 Orchard history.
-fn circuit_version_for(use_fixed_circuit_for_proving: bool) -> OrchardCircuitVersion {
-    if use_fixed_circuit_for_proving {
-        OrchardCircuitVersion::FixedPostNu6_2
-    } else {
-        OrchardCircuitVersion::InsecurePreNu6_2
-    }
-}
 
 pub struct OrchardSpendInfo {
     fvk: FullViewingKey,
@@ -68,25 +56,55 @@ pub extern "C" fn orchard_spend_info_free(spend_info: *mut OrchardSpendInfo) {
 #[no_mangle]
 pub extern "C" fn orchard_builder_new(
     coinbase: bool,
+    bundle_version: ffi::BundleVersion,
+    flags: ffi::Flags,
     anchor: *const [u8; 32],
-    use_fixed_circuit_for_proving: bool,
 ) -> *mut Builder {
     let bundle_type = if coinbase {
         BundleType::Coinbase
     } else {
         BundleType::DEFAULT
     };
+    let cross_address_bit =
+        flags.cross_address_enabled && bundle_version.protocol_version == ffi::ProtocolVersion::V3;
+    let bundle_version = match (bundle_version.value_pool, bundle_version.protocol_version) {
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::InsecureV1) => {
+            orchard::bundle::BundleVersion::orchard_insecure_v1()
+        }
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::V2) => {
+            orchard::bundle::BundleVersion::orchard_v2()
+        }
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::V3) => {
+            orchard::bundle::BundleVersion::orchard_v3()
+        }
+        (ffi::ValuePool::Ironwood, ffi::ProtocolVersion::V3) => {
+            orchard::bundle::BundleVersion::ironwood_v3()
+        }
+        _ => panic!("invalid Orchard bundle version"),
+    };
+    let flags = orchard::bundle::Flags::from_byte(
+        (flags.spends_enabled as u8)
+            | ((flags.outputs_enabled as u8) << 1)
+            | ((cross_address_bit as u8) << 2),
+        bundle_version,
+    )
+    .expect("invalid Orchard bundle flags");
     let anchor = unsafe { anchor.as_ref() }
         .map(|a| orchard::Anchor::from_bytes(*a).unwrap())
         .unwrap_or_else(|| MerkleHashOrchard::empty_root(32.into()).into());
     // The builder stamps this circuit version onto each action's circuit; the proving key
     // passed to `orchard_unauthorized_bundle_prove_and_sign` must match.
-    Box::into_raw(Box::new(Builder::new_for_version(
-        bundle_type,
-        anchor,
-        circuit_version_for(use_fixed_circuit_for_proving),
-    )))
+    Box::into_raw(Box::new(
+        Builder::new(bundle_type, bundle_version, flags, anchor)
+            .expect("failed to build orchard bundle"), /* @nocommit: infallible? + errors */
+    ))
 }
+// orchard_builder_new_nu6_3(
+//     coinbase: bool,
+//     anchor: *const [u8; 32],
+// ) -> *mut Builder {
+//     orchard_builder_new(coinbase, anchor, orchard::BundleProtocol::)
+// }
 
 #[no_mangle]
 pub extern "C" fn orchard_builder_add_spend(
@@ -203,15 +221,24 @@ pub extern "C" fn orchard_unauthorized_bundle_prove_and_sign(
 
     let mut rng = OsRng;
     // Prove against the key for the circuit version the bundle was built for (chosen in
-    // `orchard_builder_new`), which the bundle carries: the fixed circuit (`ORCHARD_PK`), or
-    // the historical insecure circuit (`ORCHARD_PK_INSECURE`, reached only pre-NU6.2 on
-    // regtest). Reading the version from the bundle keeps it the single source of truth, so the
+    // `orchard_builder_new`), which the bundle carries:
+    // - the Nu6.3 ironwood circuit (`ORCHARD_PK_NU6_3`)
+    // - the Nu6.2 fixed circuit (`ORCHARD_PK_NU6_2`)
+    // - the historical insecure circuit (`ORCHARD_PK_INSECURE`, reached only pre-NU6.2 on
+    // regtest).
+    // Reading the version from the bundle keeps it the single source of truth, so the
     // proving key cannot disagree with the circuit the actions were built against.
     let proof = match bundle.circuit_version() {
-        OrchardCircuitVersion::FixedPostNu6_2 => bundle.create_proof(
-            ORCHARD_PK
+        OrchardCircuitVersion::PostNu6_3 => bundle.create_proof(
+            ORCHARD_PK_NU6_3
                 .get()
-                .expect("Parameters not loaded: ORCHARD_PK should have been initialized"),
+                .expect("Parameters not loaded: ORCHARD_PK_NU6_3 should have been initialized"),
+            &mut rng,
+        ),
+        OrchardCircuitVersion::FixedPostNu6_2 => bundle.create_proof(
+            ORCHARD_PK_NU6_2
+                .get()
+                .expect("Parameters not loaded: ORCHARD_PK_NU6_2 should have been initialized"),
             &mut rng,
         ),
         OrchardCircuitVersion::InsecurePreNu6_2 => {

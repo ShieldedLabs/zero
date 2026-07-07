@@ -27,6 +27,7 @@
 #include "policy/policy.h"
 #include "pow.h"
 #include "reverse_iterator.h"
+#include "rust/bridge.h"
 #include "time.h"
 #include "txmempool.h"
 #include "ui_interface.h"
@@ -1824,6 +1825,18 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetRejectCode());
 }
 
+::orchard::OrchardCircuitVersion OrchardCircuitVersionFromHeight(const Consensus::Params& consensusParams, int height) {
+    auto orchard_circuit_version = orchard::OrchardCircuitVersion::InsecurePreNu6_2;
+    if (consensusParams.NetworkUpgradeActive(height, Consensus::UPGRADE_NU6_3)) {
+        orchard_circuit_version = orchard::OrchardCircuitVersion::PostNu6_3;
+    } else if (consensusParams.NetworkUpgradeActive(height, Consensus::UPGRADE_NU6_2)) {
+        orchard_circuit_version = orchard::OrchardCircuitVersion::FixedPostNu6_2;
+    }
+
+    return orchard_circuit_version;
+}
+
+
 bool AcceptToMemoryPool(
         const CChainParams& chainparams,
         CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
@@ -2082,7 +2095,7 @@ bool AcceptToMemoryPool(
         // verifying key.
         std::optional<rust::Box<orchard::BatchValidator>> orchardAuth = orchard::init_batch_validator(
             true,
-            chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_NU6_2));
+            OrchardCircuitVersionFromHeight(chainparams.GetConsensus(), nextBlockHeight));
 
         // Check shielded input signatures.
         if (!ContextualCheckShieldedInputs(
@@ -3305,12 +3318,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // Disable Sapling and Orchard batch validation if possible.
     std::optional<rust::Box<sapling::BatchValidator>> saplingAuth = fExpensiveChecks ?
         std::optional(sapling::init_batch_validator(fCacheResults)) : std::nullopt;
+
     // The batch is typed to the Orchard circuit in force at this block's height: NU6.2 changed
     // the circuit and thus the verifying key.
-    std::optional<rust::Box<orchard::BatchValidator>> orchardAuth = fExpensiveChecks ?
-        std::optional(orchard::init_batch_validator(
-            fCacheResults,
-            consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_NU6_2)))
+    std::optional<rust::Box<orchard::BatchValidator>> orchardAuth = fExpensiveChecks
+        ? std::optional(orchard::init_batch_validator(fCacheResults, OrchardCircuitVersionFromHeight(consensusParams, pindex->nHeight)))
         : std::nullopt;
 
     // If in initial block download, and this block is an ancestor of a checkpoint,

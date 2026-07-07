@@ -4,10 +4,11 @@ use std::sync::LazyLock;
 
 use bls12_381::Bls12;
 use sapling::circuit::{OutputParameters, SpendParameters};
+use orchard::circuit::OrchardCircuitVersion;
 use tracing::info;
 
 use crate::{
-    ORCHARD_PK, ORCHARD_VK_FIXED, ORCHARD_VK_INSECURE, SAPLING_OUTPUT_PARAMS, SAPLING_OUTPUT_VK,
+    ORCHARD_PK_NU6_2, ORCHARD_PK_NU6_3, ORCHARD_VK_FIXED, ORCHARD_VK_INSECURE, SAPLING_OUTPUT_PARAMS, SAPLING_OUTPUT_VK,
     SAPLING_SPEND_PARAMS, SAPLING_SPEND_VK, SPROUT_GROTH16_PARAMS_PATH, SPROUT_GROTH16_VK,
 };
 
@@ -69,7 +70,9 @@ fn zksnark_params(sprout_path: String, load_proving_keys: bool) {
     // Generate Orchard parameters.
     info!(target: "main", "Loading Orchard parameters");
     if load_proving_keys {
-        ORCHARD_PK.get_or_init(orchard::circuit::ProvingKey::build);
+        // @nomerge: is 2 different statics the correct approach?
+        ORCHARD_PK_NU6_2.get_or_init(|| orchard::circuit::ProvingKey::build(OrchardCircuitVersion::FixedPostNu6_2));
+        ORCHARD_PK_NU6_3.get_or_init(|| orchard::circuit::ProvingKey::build(OrchardCircuitVersion::PostNu6_3));
     }
     LazyLock::force(&ORCHARD_VK_INSECURE);
     LazyLock::force(&ORCHARD_VK_FIXED);

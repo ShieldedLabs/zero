@@ -246,7 +246,8 @@ impl Bundle {
     }
 
     fn commitment<D: TransactionDigest<Authorized>>(&self, digester: D) -> D::SaplingDigest {
-        digester.digest_sapling(self.inner())
+        digester.digest_sapling(zcash_primitives::transaction::TxVersion::V5, self.inner())
+        // @nocommit: parameterize?; zcash_unstable
     }
 }
 

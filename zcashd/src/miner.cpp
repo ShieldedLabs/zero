@@ -220,8 +220,7 @@ public:
         // tree root via a null (all zeroes) uint256.
         uint256 orchardAnchor;
         // Choose the Orchard circuit to prove against (see CChainParams::UseFixedCircuitForProving).
-        bool useFixedCircuitForProving = chainparams.UseFixedCircuitForProving(nHeight);
-        auto builder = orchard::Builder(true, orchardAnchor, useFixedCircuitForProving);
+        auto builder = orchard::Builder(true, orchardAnchor);
 
         // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
         uint256 ovk;

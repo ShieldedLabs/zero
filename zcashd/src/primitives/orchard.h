@@ -66,18 +66,18 @@ public:
     }
 
     template<typename Stream>
-    void Serialize(Stream& s) const {
+    void Serialize(Stream& s, orchard::BundleFormat format) const {
         try {
-            inner->serialize(*ToRustStream(s));
+            inner->serialize(*ToRustStream(s), format);
         } catch (const std::exception& e) {
             throw std::ios_base::failure(e.what());
         }
     }
 
     template<typename Stream>
-    void Unserialize(Stream& s) {
+    void Unserialize(Stream& s, uint32_t consensusBranchId, orchard::BundleFormat format) {
         try {
-            inner = orchard_bundle::parse(*ToRustStream(s));
+            inner = orchard_bundle::parse(*ToRustStream(s), consensusBranchId, format);
         } catch (const std::exception& e) {
             throw std::ios_base::failure(e.what());
         }
@@ -97,8 +97,9 @@ public:
     ///
     /// `sighash` must be for the transaction this bundle is within.
     void QueueAuthValidation(
-        orchard::BatchValidator& batch, const uint256& sighash) const
-    {
+        orchard::BatchValidator& batch,
+        const uint256& sighash
+    ) const {
         batch.add_bundle(inner->box_clone(), sighash.GetRawBytes());
     }
 

@@ -49,10 +49,19 @@ namespace orchard {
 
 Builder::Builder(
     bool coinbase,
-    uint256 anchor,
-    bool useFixedCircuitForProving) : inner(nullptr, orchard_builder_free)
+    uint256 anchor) : inner(nullptr, orchard_builder_free)
 {
-    inner.reset(orchard_builder_new(coinbase, anchor.IsNull() ? nullptr : anchor.begin(), useFixedCircuitForProving));
+    // Coinbase bundles must not spend notes; outputs are enabled in both cases.
+    // The cross-address bit is only meaningful for (Ironwood, V3) bundles and is
+    // ignored by the FFI otherwise.
+    // TODO: BundleVersion{} is (Orchard, InsecureV1); thread the height-appropriate
+    // BundleVersion through from callers so post-NU6.2 bundles prove against the
+    // correct circuit.
+    orchard::Flags flags{};
+    flags.spends_enabled = !coinbase;
+    flags.outputs_enabled = true;
+    flags.cross_address_enabled = false;
+    inner.reset(orchard_builder_new(coinbase, orchard::BundleVersion{}, flags, anchor.IsNull() ? nullptr : anchor.begin()));
 }
 
 bool Builder::AddSpend(orchard::SpendInfo spendInfo)
@@ -229,8 +238,7 @@ TransactionBuilder::TransactionBuilder(
     // Ignore the Orchard anchor if we can't use it yet.
     if (orchardAnchor.has_value() && mtx.nVersion >= ZIP225_MIN_TX_VERSION) {
         // Choose the Orchard circuit to prove against (see CChainParams::UseFixedCircuitForProving).
-        bool useFixedCircuitForProving = Params().UseFixedCircuitForProving(nHeight);
-        orchardBuilder = orchard::Builder(false, orchardAnchor.value(), useFixedCircuitForProving);
+        orchardBuilder = orchard::Builder(false, orchardAnchor.value());
     }
 }
 

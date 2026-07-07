@@ -10,6 +10,17 @@
 #include "rust/transaction.h"
 
 #ifdef __cplusplus
+// Do NOT include "rust/bridge.h" here: the generated bridge.h includes THIS
+// header (to obtain the Orchard*Ptr C typedefs below) before it declares the
+// `orchard` cxx types, so including it back would form a cycle in which each
+// header uses a type the other hasn't declared yet. Forward-declare the two
+// cxx structs we reference; they are only used by value in declarations, which
+// does not require a complete type.
+namespace orchard {
+struct BundleVersion;
+struct Flags;
+}
+
 extern "C" {
 #endif
 
@@ -34,15 +45,11 @@ void orchard_spend_info_free(OrchardSpendInfoPtr* ptr);
 /// Construct a new Orchard transaction builder.
 ///
 /// If `anchor` is `null`, the root of the empty Orchard commitment tree is used.
-///
-/// `use_fixed_circuit_for_proving` selects the circuit version to build the bundle's proof
-/// against: the fixed (NU6.2-onward) circuit, or the historical (insecure) circuit. It is
-/// recorded on the bundle and reused when its proof is created, and should be computed via
-/// `CChainParams::UseFixedCircuitForProving`.
 OrchardBuilderPtr* orchard_builder_new(
     bool coinbase,
-    const unsigned char* anchor,
-    bool use_fixed_circuit_for_proving);
+    orchard::BundleVersion bundle_version,
+    orchard::Flags flags,
+    const unsigned char* anchor);
 
 /// Frees an Orchard builder returned from `orchard_builder_new`.
 void orchard_builder_free(OrchardBuilderPtr* ptr);

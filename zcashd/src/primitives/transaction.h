@@ -63,7 +63,7 @@ static_assert(ZIP225_TX_VERSION <= ZIP225_MAX_TX_VERSION,
 
 // ZIP248 transaction version group id
 // (defined in section _ of the protocol spec) // @nomerge doc reference
-static constexpr uint32_t ZIP248_VERSION_GROUP_ID = 0xDDDDDDDD; // @nomerge: real group id
+static constexpr uint32_t ZIP248_VERSION_GROUP_ID = 0xD884B698;
 static_assert(ZIP248_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
 
 // ZIP248 transaction version
@@ -593,12 +593,12 @@ public:
 
         if (isZip225V5) {
             // Common Transaction Fields (plus version bytes above)
+            uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
-                uint32_t consensusBranchId;
                 READWRITE(consensusBranchId);
                 *const_cast<std::optional<uint32_t>*>(&nConsensusBranchId) = consensusBranchId;
             } else {
-                uint32_t consensusBranchId = nConsensusBranchId.value();
+                consensusBranchId = nConsensusBranchId.value();
                 READWRITE(consensusBranchId);
             }
             READWRITE(*const_cast<uint32_t*>(&nLockTime));
@@ -611,8 +611,11 @@ public:
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
-            // Orchard Transaction Fields
-            READWRITE(orchardBundle);
+            if (ser_action.ForRead()) {
+                orchardBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V5);
+            } else {
+                orchardBundle.Serialize(s, orchard::BundleFormat::V5);
+            }
         } else {
             // Legacy transaction formats
             READWRITE(*const_cast<std::vector<CTxIn>*>(&vin));
@@ -842,12 +845,12 @@ struct CMutableTransaction
 
         if (isZip225V5) {
             // Common Transaction Fields (plus version bytes above)
+            uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
-                uint32_t consensusBranchId;
                 READWRITE(consensusBranchId);
                 nConsensusBranchId = consensusBranchId;
             } else {
-                uint32_t consensusBranchId = nConsensusBranchId.value();
+                consensusBranchId = nConsensusBranchId.value();
                 READWRITE(consensusBranchId);
             }
             READWRITE(nLockTime);
@@ -860,8 +863,11 @@ struct CMutableTransaction
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
-            // Orchard Transaction Fields
-            READWRITE(orchardBundle);
+            if (ser_action.ForRead()) {
+                orchardBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V5);
+            } else {
+                orchardBundle.Serialize(s, orchard::BundleFormat::V5);
+            }
         } else {
             // Legacy transaction formats
             READWRITE(vin);

@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 
-use zcash_history::{Entry as MMREntry, Tree as MMRTree, Version, V1, V2};
+use zcash_history::{Entry as MMREntry, Tree as MMRTree, Version, V1, V2, V3};
 use zcash_protocol::consensus::BranchId;
 
 #[cxx::bridge]
@@ -47,14 +47,21 @@ mod ffi {
 }
 
 /// Switch the tree version on the epoch it is for.
-fn dispatch<S, T>(cbranch: u32, input: S, v1: impl FnOnce(S) -> T, v2: impl FnOnce(S) -> T) -> T {
+fn dispatch<S, T>(
+    cbranch: u32,
+    input: S,
+    v1: impl FnOnce(S) -> T,
+    v2: impl FnOnce(S) -> T,
+    v3: impl FnOnce(S) -> T,
+) -> T {
     match BranchId::try_from(cbranch).unwrap() {
         BranchId::Sprout
         | BranchId::Overwinter
         | BranchId::Sapling
         | BranchId::Heartwood
         | BranchId::Canopy => v1(input),
-        _ => v2(input),
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2 => v2(input),
+        _ => v3(input),
     }
 }
 
@@ -111,6 +118,7 @@ pub(crate) fn append(
         buf_ret,
         |buf_ret| append_inner::<V1>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
         |buf_ret| append_inner::<V2>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
+        |buf_ret| append_inner::<V3>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
     )
 }
 
@@ -184,6 +192,7 @@ pub(crate) fn remove(
         (),
         |()| remove_inner::<V1>(cbranch, t_len, indices, nodes, p_len),
         |()| remove_inner::<V2>(cbranch, t_len, indices, nodes, p_len),
+        |()| remove_inner::<V3>(cbranch, t_len, indices, nodes, p_len),
     )
 }
 
@@ -227,6 +236,7 @@ fn hash_node(
         (),
         |()| hash_node_inner::<V1>(cbranch, node_bytes),
         |()| hash_node_inner::<V2>(cbranch, node_bytes),
+        |()| hash_node_inner::<V3>(cbranch, node_bytes),
     )
 }
 

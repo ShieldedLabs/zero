@@ -1,9 +1,9 @@
-use std::{mem, ptr};
+use std::{convert::TryFrom, mem, ptr};
 
 use group::{Group as _, GroupEncoding as _};
 use memuse::DynamicUsage;
 use orchard::{
-    bundle::{Authorized, ProofSizeEnforcement},
+    bundle::Authorized,
     keys::OutgoingViewingKey,
     note_encryption::OrchardDomain,
     primitives::redpallas::{Signature, SpendAuth},
@@ -11,7 +11,7 @@ use orchard::{
 use pasta_curves::pallas;
 use zcash_note_encryption::try_output_recovery_with_ovk;
 use zcash_primitives::transaction::components::orchard as orchard_serialization;
-use zcash_protocol::value::ZatBalance;
+use zcash_protocol::{consensus::BranchId, value::ZatBalance};
 
 use crate::{bridge::ffi, streams::CppStream};
 
@@ -64,9 +64,21 @@ pub(crate) unsafe fn orchard_bundle_from_raw_box(
     Bundle::from_raw_box(bundle)
 }
 
-/// Parses an authorized Orchard bundle from the given stream.
-pub(crate) fn parse_orchard_bundle(reader: &mut CppStream<'_>) -> Result<Box<Bundle>, String> {
-    Bundle::parse(reader)
+pub(crate) fn parse_orchard_bundle(
+    reader: &mut CppStream<'_>,
+    consensus_branch_id: u32,
+    format: ffi::BundleFormat,
+) -> Result<Box<Bundle>, String> {
+    let branch_id = BranchId::try_from(consensus_branch_id)
+        .map_err(|_| format!("unknown consensus branch id {:#010x}", consensus_branch_id))?;
+    let result = match format {
+        ffi::BundleFormat::V5 => orchard_serialization::read_v5_bundle(reader, branch_id),
+        _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
+    };
+    match result {
+        Ok(parsed) => Ok(Box::new(Bundle(parsed))),
+        Err(e) => Err(format!("Failed to parse Orchard-protocol bundle: {}", e)),
+    }
 }
 
 impl Bundle {
@@ -84,29 +96,16 @@ impl Bundle {
         Box::new(self.clone())
     }
 
-    /// Parses an authorized Orchard bundle from the given stream.
-    pub(crate) fn parse(reader: &mut CppStream<'_>) -> Result<Box<Self>, String> {
-        // This standalone bundle parse is deliberately lenient about the proof size
-        // (ProofSizeEnforcement::Unenforced): it has no transaction context (and hence no
-        // consensus branch id), and a node must be able to parse Orchard bundles from earlier
-        // epochs whose proofs predate the canonical-size rule.
-        //
-        // The canonical-proof-size consensus rule is instead enforced when a whole transaction
-        // is parsed (see `zcash_transaction_digests` / `Transaction::read`), where the proof
-        // size is checked against the transaction's own consensus branch id (Strict for NU6.2
-        // onward). That parse is reached for every transaction via CTransaction::UpdateHash.
-        match orchard_serialization::read_v5_bundle(reader, ProofSizeEnforcement::Unenforced) {
-            Ok(parsed) => Ok(Box::new(Bundle(parsed))),
-            Err(e) => Err(format!("Failed to parse Orchard bundle: {}", e)),
+    pub(crate) fn serialize(
+        &self,
+        writer: &mut CppStream<'_>,
+        format: ffi::BundleFormat,
+    ) -> Result<(), String> {
+        match format {
+            ffi::BundleFormat::V5 => orchard_serialization::write_v5_bundle(self.inner(), writer),
+            _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
         }
-    }
-
-    /// Serializes an authorized Orchard bundle to the given stream.
-    ///
-    /// If `bundle == None`, this serializes `nActionsOrchard = 0`.
-    pub(crate) fn serialize(&self, writer: &mut CppStream<'_>) -> Result<(), String> {
-        orchard_serialization::write_v5_bundle(self.inner(), writer)
-            .map_err(|e| format!("Failed to serialize Orchard bundle: {}", e))
+        .map_err(|e| format!("Failed to serialize Orchard-protocol bundle: {}", e))
     }
 
     pub(crate) fn inner(&self) -> Option<&orchard::Bundle<Authorized, ZatBalance>> {

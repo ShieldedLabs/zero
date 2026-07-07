@@ -65,7 +65,7 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         .strInfo = "See https://z.cash/upgrade/nu6.2/ for details.",
     },
     {
-        .nBranchId = 0xcccccccc, // :nomerge unknown branch ID
+        .nBranchId = 0x37a5165b,
         .strName = "NU6.3",
         .strInfo = "See https://z.cash/upgrade/nu6.3/ for details.",
     },

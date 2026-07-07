@@ -43,10 +43,10 @@ enum UpgradeIndex : uint32_t {
     UPGRADE_NU6,
     UPGRADE_NU6_1,
     UPGRADE_NU6_2,
+    UPGRADE_NU6_3,
     // Add new network upgrades before this line.
     // NOTE: Also add new upgrades to NetworkUpgradeInfo in upgrades.cpp
     UPGRADE_ZFUTURE,
-    UPGRADE_NU6_3, // @nomerge: move up
     MAX_NETWORK_UPGRADES
 };
 

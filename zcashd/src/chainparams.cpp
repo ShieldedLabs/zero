@@ -146,8 +146,8 @@ public:
         consensus.nTemporaryOrchardDisablingSoftForkHeight = 3363426;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 3364600;
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170151; // @nomerge: Nu6.3 activation height/protocol version
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 0xCCCCCCCC; // @nomerge: Nu6.3 activation height/protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160;
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 0xCCCCCCCC; // @nomerge: Nu6.3 activation height
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -536,8 +536,8 @@ public:
         consensus.nTemporaryOrchardDisablingSoftForkHeight = 4048500;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 4052000;
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170151; // @nomerge: Nu6.3 activation height/protocol version
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 4052001; // @nomerge: Nu6.3 activation height/protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160; // @nomerge: Nu6.3 protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 4134000;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -875,7 +875,7 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170151; // @nomerge: Nu6.3 activation height/protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160; // @nomerge: Nu6.3 protocol version
         consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;

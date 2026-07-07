@@ -94,7 +94,7 @@ public:
     // `useFixedCircuitForProving` selects the circuit version to prove against (the fixed circuit, else
     // the historical insecure one). The bundle records it and reuses it in ProveAndSign. Compute
     // it with `CChainParams::UseFixedCircuitForProving`; the default (true) is correct for non-test callers.
-    Builder(bool coinbase, uint256 anchor, bool useFixedCircuitForProving = true);
+    Builder(bool coinbase, uint256 anchor);
 
     // Builder should never be copied
     Builder(const Builder&) = delete;
