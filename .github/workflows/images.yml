@@ -59,7 +59,11 @@ jobs:
           - name: zero-zallet
             context: zallet
             dockerfile: zallet/Dockerfile
-            build_args: ""
+            # zaino backend: the z3-stack bundle feeds zallet over JSON-RPC;
+            # the default zebra-state backend would require zebrad's indexer
+            # gRPC and a shared state volume (see deploy/z3-stack/README.md).
+            build_args: |
+              FEATURES=zaino,rpc-cli,zcashd-import
     steps:
       - name: Checkout
         uses: actions/checkout@v4
