@@ -1391,7 +1391,9 @@ TEST(ChecktransactionTests, InvalidOrchardShieldedCoinbase) {
         .GetChangeAddress();
     mtx.vin.resize(1);
     mtx.vin[0].prevout.SetNull();
-    auto builder = orchard::Builder(true, uint256());
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
     builder.AddOutput(std::nullopt, to, 0, std::nullopt);
     mtx.orchardBundle = builder
         .Build().value()
@@ -1420,7 +1422,9 @@ TEST(ChecktransactionTests, NU5AcceptsOrchardShieldedCoinbase) {
     auto chainparams = Params();
 
     uint256 orchardAnchor;
-    auto builder = orchard::Builder(true, orchardAnchor);
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
 
     // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
     RawHDSeed rawSeed(32, 0);
@@ -1565,7 +1569,9 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
     auto chainparams = Params();
 
     uint256 orchardAnchor;
-    auto builder = orchard::Builder(true, orchardAnchor);
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
 
     // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
     RawHDSeed rawSeed(32, 0);

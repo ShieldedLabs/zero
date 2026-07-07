@@ -454,7 +454,10 @@ public:
             .GetChangeAddress();
         uint256 orchardAnchor;
         uint256 dataToBeSigned;
-        auto builder = orchard::Builder(false, orchardAnchor);
+        // Any bundle version works here (only the tree root matters); the historical
+        // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
         builder.AddOutput(std::nullopt, to, 0, std::nullopt);
         mutableTxV5.orchardBundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
         orchardNullifier = mutableTxV5.orchardBundle.GetNullifiers().at(0);
