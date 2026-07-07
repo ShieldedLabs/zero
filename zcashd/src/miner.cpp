@@ -219,8 +219,13 @@ public:
         // means the Orchard anchor is unconstrained, so we set it to the empty
         // tree root via a null (all zeroes) uint256.
         uint256 orchardAnchor;
-        // Choose the Orchard circuit to prove against (see CChainParams::UseFixedCircuitForProving).
-        auto builder = orchard::Builder(true, orchardAnchor);
+        // TODO: from NU6.3, coinbase must carry no Orchard actions (the Orchard pool
+        // prohibits the cross-address transfers that coinbase outputs require);
+        // shielded coinbase must move to the Ironwood pool.
+        auto builder = orchard::Builder(
+            true,
+            {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersionForHeight(chainparams, nHeight)},
+            orchardAnchor);
 
         // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
         uint256 ovk;
