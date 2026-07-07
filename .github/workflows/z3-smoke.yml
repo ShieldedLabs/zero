@@ -161,6 +161,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ghcr.io/shieldedlabs/zero-zallet:smoke
+          build-args: |
+            FEATURES=zaino,rpc-cli,zcashd-import
           cache-from: type=gha,scope=zero-zallet
 
       # From here on this is the bundle's README walkthrough, scripted.
