@@ -1371,16 +1371,26 @@ bool ContextualCheckTransaction(
 
             // As with Sapling and Orchard shielded coinbase (ZIP 213), Ironwood
             // coinbase outputs must be recoverable with the all-zeroes outgoing
-            // viewing key.
-            // @nomerge: verify that ciphertext recovery handles the Ironwood pool's V3
-            // (ZIP 2005) note plaintexts; the check below is shared with Orchard, whose
-            // notes use V2 plaintexts.
+            // viewing key. Recovery dispatches on the bundle's pool, so Ironwood
+            // notes are checked as V3 (ZIP 2005) note plaintexts.
             if (!tx.GetIronwoodBundle().CoinbaseOutputsAreValid()) {
                 return state.DoS(
                     DOS_LEVEL_BLOCK,
                     error("ContextualCheckTransaction(): Ironwood coinbase action has invalid ciphertext"),
                     REJECT_INVALID, "bad-cb-action-invalid-ciphertext");
             }
+        }
+
+        // [NU6.3 onward] valueBalanceOrchard MUST be nonnegative (ZIP 258).
+        // The Orchard pool is closed to new inflows: a negative
+        // valueBalanceOrchard moves value from the transparent value pool into
+        // the Orchard pool. Unshielding (positive) and zero balances remain
+        // legal. This applies to both v5 and v6 transactions.
+        if (orchard_bundle.GetValueBalance() < 0) {
+            return state.DoS(
+                dosLevelConstricting,
+                error("ContextualCheckTransaction(): NU6.3 transaction has negative Orchard value balance"),
+                REJECT_INVALID, "bad-tx-orchard-negative-valuebalance");
         }
     } else {
         // Rules that apply generally before NU6.3.
