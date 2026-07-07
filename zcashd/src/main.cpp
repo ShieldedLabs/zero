@@ -1507,12 +1507,16 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         if (tx.nVersionGroupId != OVERWINTER_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZIP225_VERSION_GROUP_ID &&
+                tx.nVersionGroupId != ZIP248_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZFUTURE_VERSION_GROUP_ID) {
             return state.DoS(100, error("CheckTransaction(): unknown tx version group id"),
                     REJECT_INVALID, "bad-tx-version-group-id");
         }
     }
     auto orchard_bundle = tx.GetOrchardBundle();
+    // @nomerge: the Ironwood checks in this function are mirrored from Orchard's;
+    // double-check them against the final NU6.3 spec before merging
+    const auto& ironwood_bundle = tx.GetIronwoodBundle();
 
     // Check Orchard action fields that are not validated by the proof circuit:
     // - rk must not be the identity (causes a crash in proof verification)
@@ -1525,6 +1529,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
                          REJECT_INVALID, "bad-orchard-action-identity-point");
     }
 
+    // The same action-field encoding rules apply to the Ironwood bundle.
+    if (!ironwood_bundle.ValidateWithoutProofVerification()) {
+        return state.DoS(100, error("CheckTransaction(): invalid Ironwood action field encoding"),
+                         REJECT_INVALID, "bad-ironwood-action-identity-point");
+    }
+
     // Transactions must contain some potential source of funds. This rejects
     // obviously-invalid transaction constructions early, but cannot prevent
     // e.g. a pure Sapling transaction with only dummy spends (which is
@@ -1535,7 +1545,8 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     if (tx.vin.empty() &&
         tx.vJoinSplit.empty() &&
         tx.GetSaplingSpendsCount() == 0 &&
-        !orchard_bundle.SpendsEnabled())
+        !orchard_bundle.SpendsEnabled() &&
+        !ironwood_bundle.SpendsEnabled())
     {
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-no-source-of-funds");
     }
@@ -1550,7 +1561,8 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     if (tx.vout.empty() &&
         tx.vJoinSplit.empty() &&
         tx.GetSaplingOutputsCount() == 0 &&
-        !orchard_bundle.OutputsEnabled())
+        !orchard_bundle.OutputsEnabled() &&
+        !ironwood_bundle.OutputsEnabled())
     {
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-no-sink-of-funds");
     }
@@ -1597,7 +1609,7 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         }
     }
 
-    // nSpendsSapling, nOutputsSapling, and nActionsOrchard MUST all be less than 2^16
+    // nSpendsSapling, nOutputsSapling, nActionsOrchard, and nActionsIronwood MUST all be less than 2^16
     size_t max_elements = (1 << 16) - 1;
     if (tx.GetSaplingSpendsCount() > max_elements) {
         return state.DoS(
@@ -1617,6 +1629,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
             error("CheckTransaction(): 2^16 or more Orchard actions"),
             REJECT_INVALID, "bad-tx-too-many-orchard-actions");
     }
+    if (ironwood_bundle.GetNumActions() > max_elements) {
+        return state.DoS(
+            100,
+            error("CheckTransaction(): 2^16 or more Ironwood actions"),
+            REJECT_INVALID, "bad-tx-too-many-ironwood-actions");
+    }
 
     // Check that if neither Orchard spends nor outputs are enabled, the transaction contains
     // no Orchard actions. This subsumes the check that valueBalanceOrchard must equal zero
@@ -1626,6 +1644,14 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
             100,
             error("CheckTransaction(): Orchard actions are present, but flags do not permit Orchard spends or outputs"),
             REJECT_INVALID, "bad-tx-orchard-flags-disable-actions");
+    }
+
+    // The same flags rule applies to the Ironwood bundle.
+    if (ironwood_bundle.GetNumActions() > 0 && !ironwood_bundle.OutputsEnabled() && !ironwood_bundle.SpendsEnabled()) {
+        return state.DoS(
+            100,
+            error("CheckTransaction(): Ironwood actions are present, but flags do not permit Ironwood spends or outputs"),
+            REJECT_INVALID, "bad-tx-ironwood-flags-disable-actions");
     }
 
     auto valueBalanceOrchard = orchard_bundle.GetValueBalance();
@@ -1639,6 +1665,24 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     if (valueBalanceOrchard <= 0) {
         // NB: negative valueBalanceOrchard "takes" money from the transparent value pool just as outputs do
         nValueOut += -valueBalanceOrchard;
+
+        if (!MoneyRange(nValueOut)) {
+            return state.DoS(100, error("CheckTransaction(): txout total out of range"),
+                             REJECT_INVALID, "bad-txns-txouttotal-toolarge");
+        }
+    }
+
+    auto valueBalanceIronwood = ironwood_bundle.GetValueBalance();
+
+    // Check for overflow valueBalanceIronwood
+    if (valueBalanceIronwood > MAX_MONEY || valueBalanceIronwood < -MAX_MONEY) {
+        return state.DoS(100, error("CheckTransaction(): abs(tx.valueBalanceIronwood) too large"),
+                         REJECT_INVALID, "bad-txns-valuebalance-toolarge");
+    }
+
+    if (valueBalanceIronwood <= 0) {
+        // NB: negative valueBalanceIronwood "takes" money from the transparent value pool just as outputs do
+        nValueOut += -valueBalanceIronwood;
 
         if (!MoneyRange(nValueOut)) {
             return state.DoS(100, error("CheckTransaction(): txout total out of range"),
@@ -1718,6 +1762,17 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
                                     REJECT_INVALID, "bad-txns-txintotal-toolarge");
             }
         }
+
+        // Also check for Ironwood
+        if (valueBalanceIronwood >= 0) {
+            // NB: positive valueBalanceIronwood "adds" money to the transparent value pool, just as inputs do
+            nValueIn += valueBalanceIronwood;
+
+            if (!MoneyRange(nValueIn)) {
+                return state.DoS(100, error("CheckTransaction(): txin total out of range"),
+                                    REJECT_INVALID, "bad-txns-txintotal-toolarge");
+            }
+        }
     }
 
     // Check for duplicate inputs
@@ -1771,6 +1826,21 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         }
     }
 
+    // Check for duplicate ironwood nullifiers in this transaction. The Ironwood
+    // pool has its own nullifier set, so duplicates are only checked within the
+    // bundle, not across the Orchard and Ironwood bundles.
+    {
+        std::set<uint256> vIronwoodNullifiers;
+        for (const uint256& nf : ironwood_bundle.GetNullifiers())
+        {
+            if (vIronwoodNullifiers.count(nf))
+                return state.DoS(100, error("CheckTransaction(): duplicate nullifiers"),
+                            REJECT_INVALID, "bad-ironwood-nullifiers-duplicate");
+
+            vIronwoodNullifiers.insert(nf);
+        }
+    }
+
     if (tx.IsCoinBase())
     {
         // There should be no joinsplits in a coinbase transaction
@@ -1786,6 +1856,9 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         if (orchard_bundle.SpendsEnabled())
             return state.DoS(100, error("CheckTransaction(): coinbase has enableSpendsOrchard set"),
                              REJECT_INVALID, "bad-cb-has-orchard-spend");
+        if (ironwood_bundle.SpendsEnabled())
+            return state.DoS(100, error("CheckTransaction(): coinbase has enableSpendsIronwood set"),
+                             REJECT_INVALID, "bad-cb-has-ironwood-spend");
 
         // A coinbase transaction has no Sapling spends or spend-enabled Orchard
         // actions (rejected above), so its shielded value balance is the negation
@@ -1802,6 +1875,9 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         if (orchard_bundle.GetValueBalance() > 0)
             return state.DoS(100, error("CheckTransaction(): coinbase has positive Orchard value balance"),
                              REJECT_INVALID, "bad-cb-positive-orchard-valuebalance");
+        if (ironwood_bundle.GetValueBalance() > 0)
+            return state.DoS(100, error("CheckTransaction(): coinbase has positive Ironwood value balance"),
+                             REJECT_INVALID, "bad-cb-positive-ironwood-valuebalance");
 
         if (tx.vin[0].scriptSig.size() < 2 || tx.vin[0].scriptSig.size() > 100)
             return state.DoS(100, false, REJECT_INVALID, "bad-cb-length");
