@@ -144,10 +144,25 @@ impl ZcashService for FetchService {
         );
         info!(build = %data.zebra_build(), subversion = %data.zebra_subversion(), "Connected to Zcash node");
 
+        // A freshly started validator answers RPC before it has fetched and
+        // committed its first block: zebra serves getblockchaininfo and an
+        // empty getrawmempool while getbestblockhash returns "No blocks in
+        // state" until genesis arrives, which can take minutes of peer
+        // discovery. Everything below assumes a servable tip (Mempool::spawn
+        // returns Critical on get_best_block_hash and the ChainIndex sync
+        // loop escalates to CriticalError), so wait here instead of
+        // crash-looping the whole process.
+        while let Err(e) = fetcher.get_best_blockhash().await {
+            info!(%e, "Waiting for validator to serve its first block");
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        }
+
         let source = ValidatorConnector::Fetch(fetcher.clone());
         let indexer = NodeBackedChainIndex::new(source, config.clone().into())
             .await
-            .unwrap();
+            .map_err(|e| {
+                FetchServiceError::Critical(format!("failed to initialize chain index: {e}"))
+            })?;
 
         let fetch_service = Self {
             fetcher,
