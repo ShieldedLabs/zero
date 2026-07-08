@@ -28,7 +28,7 @@ use zcash_primitives::{
     transaction::{
         components::sapling as sapling_serialization,
         txid::{BlockTxCommitmentDigester, TxIdDigester},
-        Authorized, Transaction, TransactionDigest,
+        Authorized, Transaction, TransactionDigest, TxVersion,
     },
 };
 use zcash_protocol::{memo::MemoBytes, value::ZatBalance};
@@ -675,7 +675,9 @@ impl BatchValidator {
     /// and signatures from this bundle may have already been added to the batch even if
     /// it fails other consensus rules.
     ///
-    /// `sighash` must be for the transaction this bundle is within.
+    /// `sighash` must be for the transaction this bundle is within, and `is_v6` must
+    /// indicate that transaction's version (the v6 Sapling digests differ from v5, so
+    /// the version selects the bundle validity cache key).
     ///
     /// If this batch was configured to not cache the results, then if the bundle was in
     /// the global bundle validity cache, it will have been removed (and this method will

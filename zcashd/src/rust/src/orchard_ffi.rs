@@ -51,7 +51,6 @@ pub(crate) fn orchard_batch_validation_init(
 }
 
 impl BatchValidator {
-    /// Adds an Orchard bundle to this batch.
     /// Adds an Orchard-protocol bundle to the validation batch (proof, spend-auth
     /// signatures, and binding signature), unless its validity is already cached.
     ///

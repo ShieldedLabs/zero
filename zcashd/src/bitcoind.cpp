@@ -129,6 +129,7 @@ bool AppInit(int argc, char* argv[])
         }
 
         // Check that the node operator is aware of `zcashd` deprecation.
+        /* @note(judah): we no longer want this to be forced on the operator...
         if (!GetBoolArg("-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025", false)) {
             auto confFilename = GetArg("-conf", BITCOIN_CONF_FILENAME);
             fprintf(stderr,
@@ -161,6 +162,7 @@ bool AppInit(int argc, char* argv[])
                 GetConfigFile(confFilename).string().c_str());
             return false;
         }
+        */
 
         // Check for -testnet or -regtest parameter (Params() calls are only valid after this clause)
         try {

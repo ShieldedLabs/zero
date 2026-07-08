@@ -37,7 +37,7 @@ class CCoinsViewTest : public CCoinsView
     std::map<uint256, SproutMerkleTree> mapSproutAnchors_;
     std::map<uint256, SaplingMerkleTree> mapSaplingAnchors_;
     std::map<uint256, OrchardMerkleFrontier> mapOrchardAnchors_;
-    std::map<uint256, OrchardMerkleFrontier> mapIronwoodAnchors_;
+    std::map<uint256, IronwoodMerkleFrontier> mapIronwoodAnchors_;
     std::map<uint256, bool> mapSproutNullifiers_;
     std::map<uint256, bool> mapSaplingNullifiers_;
     std::map<uint256, bool> mapOrchardNullifiers_;
@@ -48,7 +48,7 @@ public:
         hashBestSproutAnchor_ = SproutMerkleTree::empty_root();
         hashBestSaplingAnchor_ = SaplingMerkleTree::empty_root();
         hashBestOrchardAnchor_ = OrchardMerkleFrontier::empty_root();
-        hashBestIronwoodAnchor_ = OrchardMerkleFrontier::empty_root();
+        hashBestIronwoodAnchor_ = IronwoodMerkleFrontier::empty_root();
     }
     ~CCoinsViewTest() {}
 
@@ -100,14 +100,14 @@ public:
         }
     }
 
-    bool GetIronwoodAnchorAt(const uint256& rt, OrchardMerkleFrontier &tree) const {
-        if (rt == OrchardMerkleFrontier::empty_root()) {
-            OrchardMerkleFrontier new_tree;
+    bool GetIronwoodAnchorAt(const uint256& rt, IronwoodMerkleFrontier &tree) const {
+        if (rt == IronwoodMerkleFrontier::empty_root()) {
+            IronwoodMerkleFrontier new_tree;
             tree = new_tree;
             return true;
         }
 
-        std::map<uint256, OrchardMerkleFrontier>::const_iterator it = mapIronwoodAnchors_.find(rt);
+        std::map<uint256, IronwoodMerkleFrontier>::const_iterator it = mapIronwoodAnchors_.find(rt);
         if (it == mapIronwoodAnchors_.end()) {
             return false;
         } else {
@@ -267,7 +267,7 @@ public:
         BatchWriteAnchors<SproutMerkleTree, CAnchorsSproutMap, CAnchorsSproutCacheEntry>(mapSproutAnchors, mapSproutAnchors_);
         BatchWriteAnchors<SaplingMerkleTree, CAnchorsSaplingMap, CAnchorsSaplingCacheEntry>(mapSaplingAnchors, mapSaplingAnchors_);
         BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsOrchardMap, CAnchorsOrchardCacheEntry>(mapOrchardAnchors, mapOrchardAnchors_);
-        BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, mapIronwoodAnchors_);
+        BatchWriteAnchors<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, mapIronwoodAnchors_);
 
         BatchWriteNullifiers(mapSproutNullifiers, mapSproutNullifiers_);
         BatchWriteNullifiers(mapSaplingNullifiers, mapSaplingNullifiers_);

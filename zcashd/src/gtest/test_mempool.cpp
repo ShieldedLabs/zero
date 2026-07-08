@@ -31,7 +31,7 @@ public:
         return false;
     }
 
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
         return false;
     }
 

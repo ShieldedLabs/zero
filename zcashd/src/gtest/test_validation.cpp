@@ -51,7 +51,7 @@ public:
         return false;
     }
 
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
         return false;
     }
 
@@ -143,8 +143,13 @@ public:
 
 class MockCValidationState : public CValidationState {
 public:
+    // NB: this class must be token-identical to the `MockCValidationState` in
+    // the other gtest files. All of them share one linkage-deduplicated vtable
+    // (same class name in the global namespace across TUs), so a signature that
+    // fails to override `CValidationState::DoS` here (e.g. taking the reject
+    // reason by value) silently breaks the mocks in *other* test files.
     MOCK_METHOD6(DoS, bool(int level, bool ret,
-             unsigned int chRejectCodeIn, const std::string strRejectReasonIn,
+             unsigned int chRejectCodeIn, const std::string &strRejectReasonIn,
              BodyCorruption bodyCorruption,
              const std::string &strDebugMessageIn));
     MOCK_METHOD4(Invalid, bool(bool ret,

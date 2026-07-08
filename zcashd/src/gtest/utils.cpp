@@ -115,3 +115,8 @@ template<> void AppendRandomLeaf(OrchardMerkleFrontier &tree) {
     auto bundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
     tree.AppendBundle(bundle);
 }
+template<> void AppendRandomLeaf(IronwoodMerkleFrontier &tree) {
+    // The Ironwood frontier shares the Orchard tree machinery; only the root
+    // needs to change, so appending an Orchard bundle suffices.
+    AppendRandomLeaf<OrchardMerkleFrontier>(tree);
+}

@@ -316,6 +316,19 @@ struct CAnchorsOrchardCacheEntry
     CAnchorsOrchardCacheEntry() : entered(false), flags(0) {}
 };
 
+struct CAnchorsIronwoodCacheEntry
+{
+    bool entered; // This will be false if the anchor is removed from the cache
+    IronwoodMerkleFrontier tree; // The tree itself
+    unsigned char flags;
+
+    enum Flags {
+        DIRTY = (1 << 0), // This cache entry is potentially different from the version in the parent view.
+    };
+
+    CAnchorsIronwoodCacheEntry() : entered(false), flags(0) {}
+};
+
 struct CNullifiersCacheEntry
 {
     bool entered; // If the nullifier is spent or not
@@ -343,12 +356,6 @@ typedef boost::unordered_map<uint256, CCoinsCacheEntry, SaltedTxidHasher> CCoins
 typedef boost::unordered_map<uint256, CAnchorsSproutCacheEntry, SaltedTxidHasher> CAnchorsSproutMap;
 typedef boost::unordered_map<uint256, CAnchorsSaplingCacheEntry, SaltedTxidHasher> CAnchorsSaplingMap;
 typedef boost::unordered_map<uint256, CAnchorsOrchardCacheEntry, SaltedTxidHasher> CAnchorsOrchardMap;
-// The Ironwood pool reuses the Orchard tree machinery (same MerkleCRH), so its
-// cache entry has the identical layout. It is a distinct type (not a typedef of
-// CAnchorsOrchardCacheEntry) so that CAnchorsIronwoodMap and CAnchorsOrchardMap
-// are distinct types: the compiler then rejects transposing the two pools'
-// anchor maps in BatchWrite's long positional argument list.
-struct CAnchorsIronwoodCacheEntry : public CAnchorsOrchardCacheEntry {};
 typedef boost::unordered_map<uint256, CAnchorsIronwoodCacheEntry, SaltedTxidHasher> CAnchorsIronwoodMap;
 typedef boost::unordered_map<uint256, CNullifiersCacheEntry, SaltedTxidHasher> CNullifiersMap;
 typedef boost::unordered_map<uint32_t, HistoryCache> CHistoryCacheMap;
@@ -382,7 +389,7 @@ public:
     virtual bool GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const = 0;
 
     //! Retrieve the tree (Ironwood) at a particular anchored root in the chain
-    virtual bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const = 0;
+    virtual bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const = 0;
 
     //! Determine whether a nullifier is spent or not
     virtual bool GetNullifier(const uint256 &nullifier, ShieldedType type) const = 0;
@@ -522,7 +529,7 @@ public:
     bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const { return false; }
     bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const { return false; }
     bool GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const { return false; }
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const { return false; }
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const { return false; }
     bool GetNullifier(const uint256 &nullifier, ShieldedType type) const { return false; }
     bool GetCoins(const uint256 &txid, CCoins &coins) const { return false; }
     bool HaveCoins(const uint256 &txid) const { return false; }
@@ -569,7 +576,7 @@ public:
     bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const;
     bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const;
     bool GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const;
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const;
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const;
     bool GetNullifier(const uint256 &nullifier, ShieldedType type) const;
     bool GetCoins(const uint256 &txid, CCoins &coins) const;
     bool HaveCoins(const uint256 &txid) const;
@@ -665,6 +672,10 @@ protected:
     mutable CNullifiersMap cacheOrchardNullifiers;
     mutable CNullifiersMap cacheIronwoodNullifiers;
     mutable CHistoryCacheMap historyCacheMap;
+    // Note: there is deliberately no Ironwood subtree cache. Subtree data is
+    // only produced for the lightwalletd experimental feature, which does not
+    // yet know about the Ironwood pool; it can be added later without a
+    // consensus impact.
     mutable SubtreeCache cacheSaplingSubtrees = SubtreeCache(SAPLING);
     mutable SubtreeCache cacheOrchardSubtrees = SubtreeCache(ORCHARD);
 
@@ -679,7 +690,7 @@ public:
     bool GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const;
     bool GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const;
     bool GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const;
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const;
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const;
     bool GetNullifier(const uint256 &nullifier, ShieldedType type) const;
     bool GetCoins(const uint256 &txid, CCoins &coins) const;
     bool HaveCoins(const uint256 &txid) const;
@@ -714,10 +725,6 @@ public:
     // Adds the tree to mapSproutAnchors, mapSaplingAnchors, or mapOrchardAnchors
     // based on the type of tree and sets the current commitment root to this root.
     template<typename Tree> void PushAnchor(const Tree &tree);
-
-    // As PushAnchor, but for the Ironwood pool. Ironwood reuses the Orchard tree
-    // type, so PushAnchor's tree-type dispatch cannot distinguish it.
-    void PushIronwoodAnchor(const OrchardMerkleFrontier &tree);
 
     // Removes the current commitment root from mapAnchors and sets
     // the new current root.
@@ -836,12 +843,9 @@ private:
         uint256 &hash
     );
 
-    //! Interface for bringing an anchor into the cache. The shielded type is
-    //! needed in addition to the tree type because the Orchard and Ironwood
-    //! pools share a tree type.
+    //! Interface for bringing an anchor into the cache.
     template<typename Tree>
     void BringBestAnchorIntoCache(
-        ShieldedType type,
         const uint256 &currentRoot,
         Tree &tree
     );
