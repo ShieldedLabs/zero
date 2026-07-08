@@ -231,10 +231,21 @@ impl ZcashService for StateService {
                 .ready()
                 .and_then(|service| service.call(ReadRequest::Tip))
                 .await?;
-            let (syncer_height, syncer_tip_hash) =
-                expected_read_response!(syncer_response, Tip).ok_or(
-                    RpcError::new_from_legacycode(LegacyCode::Misc, "no blocks in chain"),
-                )?;
+            // A freshly started validator answers RPC before it has committed
+            // its first block (getblockchaininfo reports a genesis-hash
+            // placeholder), and the syncer has no tip until genesis arrives,
+            // which can take minutes of peer discovery. Everything below
+            // assumes a servable tip (Mempool::spawn returns Critical on
+            // get_best_block_hash and the ChainIndex sync loop escalates to
+            // CriticalError), so wait here instead of crash-looping the whole
+            // process.
+            let Some((syncer_height, syncer_tip_hash)) =
+                expected_read_response!(syncer_response, Tip)
+            else {
+                info!("Waiting for validator to serve its first block");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            };
 
             if server_height == syncer_height && server_tip_hash == syncer_tip_hash {
                 info!(
@@ -273,7 +284,9 @@ impl ZcashService for StateService {
             config.clone().into(),
         )
         .await
-        .unwrap();
+        .map_err(|e| {
+            StateServiceError::Critical(format!("failed to initialize chain index: {e}"))
+        })?;
 
         let state_service = Self {
             chain_tip_change,
