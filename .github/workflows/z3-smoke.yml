@@ -249,4 +249,11 @@ jobs:
         if: failure()
         run: |
           docker compose ps || true
-          docker compose logs --tail 200 || true
+          # Full logs per container, not a tail: a crash-looping container
+          # keeps every restart's output in one log, and the interesting
+          # part (the first crash) is at the top.
+          for c in zebra zaino zallet; do
+            echo "::group::$c (RestartCount=$(docker inspect --format '{{.RestartCount}}' "$c" 2>/dev/null || echo '?'))"
+            docker logs "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
