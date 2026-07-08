@@ -52,7 +52,22 @@ pub(crate) fn orchard_batch_validation_init(
 
 impl BatchValidator {
     /// Adds an Orchard bundle to this batch.
-    pub(crate) fn add_bundle(&mut self, bundle: Box<Bundle>, sighash: [u8; 32]) {
+    /// Adds an Orchard-protocol bundle to the validation batch (proof, spend-auth
+    /// signatures, and binding signature), unless its validity is already cached.
+    ///
+    /// `format` names the slot this bundle occupies in its transaction; it selects
+    /// the digest domain for the validity-cache entry (a v6 Orchard bundle digests
+    /// differently from a v5 one, and the bundle alone cannot tell those apart).
+    ///
+    /// Returns `false` if the bundle cannot be queued — e.g. it requires a circuit
+    /// feature the batch's verifying key does not support, or it is inconsistent
+    /// with `format` — in which case the transaction must be treated as invalid.
+    pub(crate) fn add_bundle(
+        &mut self,
+        bundle: Box<Bundle>,
+        sighash: [u8; 32],
+        format: crate::bridge::ffi::BundleFormat,
+    ) -> bool {
         let batch = self.0.as_mut();
         let bundle = bundle.inner();
 
@@ -60,18 +75,28 @@ impl BatchValidator {
             (Some(batch), Some(bundle)) => {
                 let cache = orchard_bundle_validity_cache();
 
-                // @nocommit: this may need to change?
-                let tx_version = match bundle.bundle_version().note_version() {
-                    orchard::NoteVersion::V2 => orchard::bundle::TxVersion::V5,
-                    orchard::NoteVersion::V3 => orchard::bundle::TxVersion::V6,
+                let tx_version = match format {
+                    crate::bridge::ffi::BundleFormat::V5 => orchard::bundle::TxVersion::V5,
+                    crate::bridge::ffi::BundleFormat::V6Orchard
+                    | crate::bridge::ffi::BundleFormat::V6Ironwood => {
+                        orchard::bundle::TxVersion::V6
+                    }
+                    // cxx shared enums are open sets in Rust
+                    _ => return false,
                 };
 
-                // Compute the cache entry for this bundle.
+                // Compute the cache entry for this bundle. The commitments fail only
+                // if the bundle's version is incompatible with the transaction format
+                // the caller says it occupies; such a bundle cannot be valid there.
                 let cache_entry = {
-                    let bundle_commitment = bundle.commitment(tx_version).expect("infallible?"); // @nocommit: errors
-                    let bundle_authorizing_commitment = bundle
-                        .authorizing_commitment(tx_version)
-                        .expect("infallible?"); // @nocommit: errors
+                    let Ok(bundle_commitment) = bundle.commitment(tx_version) else {
+                        return false;
+                    };
+                    let Ok(bundle_authorizing_commitment) =
+                        bundle.authorizing_commitment(tx_version)
+                    else {
+                        return false;
+                    };
                     cache.compute_entry(
                         bundle_commitment.0.as_bytes().try_into().unwrap(),
                         bundle_authorizing_commitment
@@ -85,16 +110,27 @@ impl BatchValidator {
 
                 // Check if this bundle's validation result exists in the cache.
                 if !cache.contains(cache_entry, &mut batch.queued_entries) {
-                    // The bundle has been added to `inner.queued_entries` because it was not
-                    // in the cache. We now add its authorization to the validation batch.
-                    batch
-                        .validator
-                        .add_bundle(bundle, sighash)
-                        .expect("invalid bundle"); // @nocommit: errors
+                    // The bundle has been added to `inner.queued_entries` because it
+                    // was not in the cache. We now add its authorization to the
+                    // validation batch. This fails only if the bundle requires a
+                    // circuit feature the batch's verifying key does not support
+                    // (e.g. a cross-address-restricted bundle against a pre-NU6.3
+                    // key); such a bundle is invalid in this batch's epoch.
+                    if batch.validator.add_bundle(bundle, sighash).is_err() {
+                        return false;
+                    }
                 }
+
+                true
             }
-            (Some(_), None) => debug!("Tx has no Orchard component"),
-            (None, _) => error!("orchard::BatchValidator has already been used"),
+            (Some(_), None) => {
+                debug!("Tx has no Orchard component");
+                true
+            }
+            (None, _) => {
+                error!("orchard::BatchValidator has already been used");
+                false
+            }
         }
     }
 

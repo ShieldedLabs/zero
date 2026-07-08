@@ -1485,7 +1485,8 @@ bool ContextualCheckShieldedInputs(
     // Create signature hashes for shielded components.
     if (!tx.vJoinSplit.empty() ||
         tx.GetSaplingBundle().IsPresent() ||
-        tx.GetOrchardBundle().IsPresent())
+        tx.GetOrchardBundle().IsPresent() ||
+        tx.GetIronwoodBundle().IsPresent())
     {
         // Empty output script.
         CScript scriptCode;
@@ -1524,9 +1525,11 @@ bool ContextualCheckShieldedInputs(
         }
     }
 
+    bool isV6 = tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID;
+
     // Queue Sapling bundle to be batch-validated. This also checks some consensus rules.
     if (saplingAuth.has_value()) {
-        if (!tx.GetSaplingBundle().QueueAuthValidation(*saplingAuth.value(), dataToBeSigned)) {
+        if (!tx.GetSaplingBundle().QueueAuthValidation(*saplingAuth.value(), dataToBeSigned, isV6)) {
             return state.DoS(
                 dosLevelPotentiallyRelaxing,
                 error("ContextualCheckShieldedInputs(): Sapling bundle invalid"),
@@ -1534,9 +1537,25 @@ bool ContextualCheckShieldedInputs(
         }
     }
 
-    // Queue Orchard bundle to be batch-validated.
+    // Queue the Orchard-protocol bundles (the Orchard bundle, and for v6 the
+    // Ironwood slot) to be batch-validated: proofs, spend-auth signatures, and
+    // binding signatures. From NU6.3 a single batch verifies all bundle kinds
+    // under the PostNu6_3 key.
     if (orchardAuth.has_value()) {
-        tx.GetOrchardBundle().QueueAuthValidation(*orchardAuth.value(), dataToBeSigned);
+        orchard::BundleFormat orchardFormat =
+            isV6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
+        if (!tx.GetOrchardBundle().QueueAuthValidation(*orchardAuth.value(), dataToBeSigned, orchardFormat)) {
+            return state.DoS(
+                dosLevelPotentiallyRelaxing,
+                error("ContextualCheckShieldedInputs(): Orchard bundle invalid"),
+                REJECT_INVALID, "bad-txns-orchard-bundle-invalid");
+        }
+        if (!tx.GetIronwoodBundle().QueueAuthValidation(*orchardAuth.value(), dataToBeSigned, orchard::BundleFormat::V6Ironwood)) {
+            return state.DoS(
+                dosLevelPotentiallyRelaxing,
+                error("ContextualCheckShieldedInputs(): Ironwood bundle invalid"),
+                REJECT_INVALID, "bad-txns-ironwood-bundle-invalid");
+        }
     }
 
     return true;

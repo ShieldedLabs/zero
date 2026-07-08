@@ -261,6 +261,7 @@ pub(crate) mod ffi {
             self: &mut SaplingBatchValidator,
             bundle: Box<SaplingBundle>,
             sighash: [u8; 32],
+            tx_is_v6: bool,
         ) -> bool;
         fn validate(self: &mut SaplingBatchValidator) -> bool;
     }
@@ -407,7 +408,12 @@ pub(crate) mod ffi {
             cache_store: bool,
             circuit_version: OrchardCircuitVersion,
         ) -> Box<OrchardBatchValidator>;
-        fn add_bundle(self: &mut OrchardBatchValidator, bundle: Box<Bundle>, sighash: [u8; 32]);
+        fn add_bundle(
+            self: &mut OrchardBatchValidator,
+            bundle: Box<Bundle>,
+            sighash: [u8; 32],
+            format: BundleFormat,
+        ) -> bool;
         fn validate(self: &mut OrchardBatchValidator) -> bool;
     }
 
