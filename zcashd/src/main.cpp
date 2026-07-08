@@ -154,10 +154,12 @@ namespace {
             case UnsatisfiedShieldedReq::SproutDuplicateNullifier:
             case UnsatisfiedShieldedReq::SaplingDuplicateNullifier:
             case UnsatisfiedShieldedReq::OrchardDuplicateNullifier:
+            case UnsatisfiedShieldedReq::IronwoodDuplicateNullifier:
                 return REJECT_DUPLICATE;
             case UnsatisfiedShieldedReq::SproutUnknownAnchor:
             case UnsatisfiedShieldedReq::SaplingUnknownAnchor:
             case UnsatisfiedShieldedReq::OrchardUnknownAnchor:
+            case UnsatisfiedShieldedReq::IronwoodUnknownAnchor:
                 return REJECT_INVALID;
         }
     }
@@ -171,6 +173,8 @@ namespace {
             case UnsatisfiedShieldedReq::SaplingUnknownAnchor:      return "bad-txns-sapling-unknown-anchor";
             case UnsatisfiedShieldedReq::OrchardDuplicateNullifier: return "bad-txns-orchard-duplicate-nullifier";
             case UnsatisfiedShieldedReq::OrchardUnknownAnchor:      return "bad-txns-orchard-unknown-anchor";
+            case UnsatisfiedShieldedReq::IronwoodDuplicateNullifier: return "bad-txns-ironwood-duplicate-nullifier";
+            case UnsatisfiedShieldedReq::IronwoodUnknownAnchor:      return "bad-txns-ironwood-unknown-anchor";
         }
     }
 
@@ -3375,6 +3379,16 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
         view.PopAnchor(OrchardMerkleFrontier::empty_root(), ORCHARD);
     }
 
+    // Set the old best Ironwood anchor back. As with Orchard, if the last
+    // block was not on or after the NU6.3 activation height,
+    // `hashFinalIronwoodRoot` is null, so we set the last anchor to the
+    // empty root in that case.
+    if (chainparams.GetConsensus().NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_NU6_3)) {
+        view.PopAnchor(pindex->pprev->hashFinalIronwoodRoot, IRONWOOD);
+    } else {
+        view.PopAnchor(OrchardMerkleFrontier::empty_root(), IRONWOOD);
+    }
+
     // This is guaranteed to be filled by LoadBlockIndex.
     assert(pindex->nCachedBranchId);
     auto consensusBranchId = pindex->nCachedBranchId.value();
@@ -3747,6 +3761,21 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         assert(view.GetOrchardAnchorAt(OrchardMerkleFrontier::empty_root(), orchard_tree));
     }
 
+    OrchardMerkleFrontier ironwood_tree;
+    if (pindex->pprev && consensusParams.NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_NU6_3)) {
+        // Verify that the view's current state corresponds to the previous block.
+        assert(pindex->pprev->hashFinalIronwoodRoot == view.GetBestAnchor(IRONWOOD));
+        // We only call ConnectBlock on top of the active chain's tip.
+        assert(!pindex->pprev->hashFinalIronwoodRoot.IsNull());
+
+        assert(view.GetIronwoodAnchorAt(pindex->pprev->hashFinalIronwoodRoot, ironwood_tree));
+    } else {
+        if (pindex->pprev) {
+            assert(pindex->pprev->hashFinalIronwoodRoot.IsNull());
+        }
+        assert(view.GetIronwoodAnchorAt(OrchardMerkleFrontier::empty_root(), ironwood_tree));
+    }
+
     // Here we determine whether the CCoinsView view of our latest
     // subtree matches that of the chain state. If it doesn't,
     // the node had not been writing the latest subtrees to the
@@ -4023,6 +4052,18 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             }
         }
 
+        if (tx.GetIronwoodBundle().IsPresent()) {
+            try {
+                // Ironwood subtree tracking for light clients is deferred; only
+                // the commitment tree itself is maintained here.
+                ironwood_tree.AppendBundle(tx.GetIronwoodBundle());
+            } catch (const rust::Error& e) {
+                return state.DoS(100,
+                    error("%s: block would overfill the Ironwood commitment tree.", __func__),
+                    REJECT_INVALID, "ironwood-commitment-tree-full");
+            }
+        }
+
         for (const auto& out : tx.vout) {
             transparentValueDelta += out.nValue;
             if (!MoneyDeltaRange(transparentValueDelta)) {
@@ -4046,6 +4087,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     view.PushAnchor(sprout_tree);
     view.PushAnchor(sapling_tree);
     view.PushAnchor(orchard_tree);
+    view.PushIronwoodAnchor(ironwood_tree);
 
     // Validate the Sapling and Orchard binding signatures here, before the
     // chain supply consistency check below. The binding signatures are what
@@ -4196,6 +4238,13 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             pindex->hashAuthDataRoot = hashAuthDataRoot.value();
             pindex->hashFinalOrchardRoot = orchard_tree.root();
             pindex->hashChainHistoryRoot = hashChainHistoryRoot.value();
+        }
+
+        // As with hashFinalOrchardRoot, this is only set for blocks on or
+        // after the NU6.3 activation block, and only once the block has been
+        // connected to the main chain.
+        if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_NU6_3)) {
+            pindex->hashFinalIronwoodRoot = ironwood_tree.root();
         }
     }
     blockundo.old_sprout_tree_root = old_sprout_tree_root;
@@ -4678,6 +4727,7 @@ bool static DisconnectTip(CValidationState &state, const CChainParams& chainpara
     uint256 sproutAnchorBeforeDisconnect = pcoinsTip->GetBestAnchor(SPROUT);
     uint256 saplingAnchorBeforeDisconnect = pcoinsTip->GetBestAnchor(SAPLING);
     uint256 orchardAnchorBeforeDisconnect = pcoinsTip->GetBestAnchor(ORCHARD);
+    uint256 ironwoodAnchorBeforeDisconnect = pcoinsTip->GetBestAnchor(IRONWOOD);
     int64_t nStart = GetTimeMicros();
     {
         CCoinsViewCache view(pcoinsTip);
@@ -4690,6 +4740,7 @@ bool static DisconnectTip(CValidationState &state, const CChainParams& chainpara
     uint256 sproutAnchorAfterDisconnect = pcoinsTip->GetBestAnchor(SPROUT);
     uint256 saplingAnchorAfterDisconnect = pcoinsTip->GetBestAnchor(SAPLING);
     uint256 orchardAnchorAfterDisconnect = pcoinsTip->GetBestAnchor(ORCHARD);
+    uint256 ironwoodAnchorAfterDisconnect = pcoinsTip->GetBestAnchor(IRONWOOD);
     // Write the chain state to disk, if necessary.
     if (!FlushStateToDisk(chainparams, state, FLUSH_STATE_IF_NEEDED))
         return false;
@@ -4727,6 +4778,11 @@ bool static DisconnectTip(CValidationState &state, const CChainParams& chainpara
             // The anchor may not change between block disconnects,
             // in which case we don't want to evict from the mempool yet!
             mempool.removeWithAnchor(orchardAnchorBeforeDisconnect, ORCHARD);
+        }
+        if (ironwoodAnchorBeforeDisconnect != ironwoodAnchorAfterDisconnect) {
+            // The anchor may not change between block disconnects,
+            // in which case we don't want to evict from the mempool yet!
+            mempool.removeWithAnchor(ironwoodAnchorBeforeDisconnect, IRONWOOD);
         }
     }
 

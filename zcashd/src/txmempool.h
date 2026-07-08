@@ -356,6 +356,7 @@ private:
     std::map<uint256, const CTransaction*> mapSproutNullifiers;
     std::map<libzcash::nullifier_t, const CTransaction*> mapSaplingNullifiers;
     std::map<uint256, const CTransaction*> mapOrchardNullifiers;
+    std::map<uint256, const CTransaction*> mapIronwoodNullifiers;
     RecentlyEvictedList* recentlyEvicted = new RecentlyEvictedList(GetNodeClock(), DEFAULT_MEMPOOL_EVICTION_MEMORY_MINUTES * 60);
     MempoolLimitTxSet* limitSet = new MempoolLimitTxSet(DEFAULT_MEMPOOL_TOTAL_COST_LIMIT);
 

@@ -439,6 +439,9 @@ bool CTxMemPool::addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry,
     for (const uint256 &orchardNullifier : tx.GetOrchardBundle().GetNullifiers()) {
         mapOrchardNullifiers[orchardNullifier] = &tx;
     }
+    for (const uint256 &ironwoodNullifier : tx.GetIronwoodBundle().GetNullifiers()) {
+        mapIronwoodNullifiers[ironwoodNullifier] = &tx;
+    }
 
     nTransactionsUpdated++;
     totalTxSize += entry.GetTxSize();
@@ -569,6 +572,9 @@ void CTxMemPool::removeUnchecked(txiter it)
     }
     for (const uint256 &orchardNullifier : it->GetTx().GetOrchardBundle().GetNullifiers()) {
         mapOrchardNullifiers.erase(orchardNullifier);
+    }
+    for (const uint256 &ironwoodNullifier : it->GetTx().GetIronwoodBundle().GetNullifiers()) {
+        mapIronwoodNullifiers.erase(ironwoodNullifier);
     }
 
     totalTxSize -= it->GetTxSize();
@@ -721,6 +727,14 @@ void CTxMemPool::removeWithAnchor(const uint256 &invalidRoot, ShieldedType type)
                 }
                 break;
             }
+            case IRONWOOD:
+            {
+                auto anchor = tx.GetIronwoodBundle().GetAnchor();
+                if (anchor == invalidRoot) {
+                    transactionsToRemove.push_back(tx);
+                }
+                break;
+            }
             default:
                 throw runtime_error("Unknown shielded type");
             break;
@@ -772,6 +786,15 @@ void CTxMemPool::removeConflicts(const CTransaction &tx, std::list<CTransaction>
     for (const uint256 &orchardNullifier : tx.GetOrchardBundle().GetNullifiers()) {
         std::map<uint256, const CTransaction*>::iterator it = mapOrchardNullifiers.find(orchardNullifier);
         if (it != mapOrchardNullifiers.end()) {
+            const CTransaction &txConflict = *it->second;
+            if (txConflict != tx) {
+                remove(txConflict, removed, true);
+            }
+        }
+    }
+    for (const uint256 &ironwoodNullifier : tx.GetIronwoodBundle().GetNullifiers()) {
+        std::map<uint256, const CTransaction*>::iterator it = mapIronwoodNullifiers.find(ironwoodNullifier);
+        if (it != mapIronwoodNullifiers.end()) {
             const CTransaction &txConflict = *it->second;
             if (txConflict != tx) {
                 remove(txConflict, removed, true);
@@ -1001,6 +1024,7 @@ void CTxMemPool::check(const CCoinsViewCache *pcoins) const
     checkNullifiers(mapSproutNullifiers);
     checkNullifiers(mapSaplingNullifiers);
     checkNullifiers(mapOrchardNullifiers);
+    checkNullifiers(mapIronwoodNullifiers);
 
     assert(totalTxSize == checkTotal);
     assert(innerUsage == cachedInnerUsage);
@@ -1162,6 +1186,8 @@ bool CTxMemPool::nullifierExists(const uint256& nullifier, ShieldedType type) co
             return mapSaplingNullifiers.count(nullifier.GetRawBytes());
         case ORCHARD:
             return mapOrchardNullifiers.count(nullifier);
+        case IRONWOOD:
+            return mapIronwoodNullifiers.count(nullifier);
         default:
             throw runtime_error("Unknown nullifier type");
     }
@@ -1239,7 +1265,8 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
     // Nullifier set tracking
     total += memusage::DynamicUsage(mapSproutNullifiers) +
              memusage::DynamicUsage(mapSaplingNullifiers) +
-             memusage::DynamicUsage(mapOrchardNullifiers);
+             memusage::DynamicUsage(mapOrchardNullifiers) +
+             memusage::DynamicUsage(mapIronwoodNullifiers);
 
     // DoS mitigation
     total += memusage::DynamicUsage(recentlyEvicted) + memusage::DynamicUsage(limitSet);
