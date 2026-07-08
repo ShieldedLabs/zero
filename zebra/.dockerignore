@@ -27,3 +27,10 @@
 !zebrad
 !docker/entrypoint.sh
 !docker/default-zebra-config.toml
+
+# [zero] Re-exclude test-only inputs swept in by the crate whitelists above
+# (last match wins). Proptest regression seeds are read at test runtime, never
+# by the release build, so committing a seed must not invalidate the cargo
+# build layer. Note the `tests` stage's containerized test runs won't see the
+# seeds; Zero CI only builds the `runtime` target.
+**/proptest-regressions

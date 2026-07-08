@@ -17,4 +17,11 @@ target/
 # Misc
 **/*.log
 
+# [zero] Docs never feed the zainod build (no crate include_str!'s markdown),
+# so doc-only changes must not invalidate the COPY layer and force a full
+# dependency recompile. live-tests/ stays included: its members are part of
+# the root workspace manifest, which cargo install resolves.
+docs/
+**/*.md
+
 

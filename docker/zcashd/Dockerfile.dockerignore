@@ -1,0 +1,16 @@
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile in preference
+# to the context root's .dockerignore, so this file filters the vendored
+# `zcashd/` build context without adding a [zero] delta inside the subtree.
+#
+# Goal: keep test/doc-only churn from invalidating the COPY layer (and with it
+# the ~20 min zcashd build). Everything zcutil/build.sh needs stays included.
+#
+# configure.ac generates doc/man/Makefile and qa/pull-tester/tests_config.ini,
+# so those two subdirectories must remain in the context (re-included below;
+# last match wins).
+qa
+!qa/pull-tester
+doc
+!doc/man
+.github
+**/*.md
