@@ -5,8 +5,10 @@ name: Z3 stack smoke test
 # serving lightwalletd gRPC, zallet answering wallet RPC with a node tip, no
 # crash-loops, nothing exposed that shouldn't be. None of the checks need a
 # synced chain, so the smoke phase takes minutes; the builds dominate and are
-# GHA-cached (same cache scopes as images.yml, so the two workflows keep each
-# other warm).
+# cached in GHCR (`:buildcache` refs, shared with images.yml, so the two
+# workflows keep each other warm). Registry cache has no 10 GiB Actions quota
+# and no 7-day expiry; the build job also warms zero-zcashd (not part of the
+# smoke stack) so release-day images.yml runs never start cold.
 #
 # Build definitions mirror deploy/z3-stack/docker-compose.build.yml; keep them
 # in sync if you change contexts, Dockerfiles, or build args.
@@ -27,12 +29,16 @@ on:
     # the paths above.
     - cron: "17 6 * * 1"
 
+# packages: write is for pushing the GHCR build cache; on fork PRs GitHub
+# forces the token to read-only, which is fine because PR runs write the
+# ephemeral GHA cache instead (see the cache-to expression below).
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  # Populate the build cache for the three images in parallel, so the smoke
-  # job's rebuilds are cache hits and its wall-clock is max(build) + smoke.
+  # Populate the build cache for the images in parallel, so the smoke job's
+  # rebuilds are cache hits and its wall-clock is max(build) + smoke.
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -56,6 +62,14 @@ jobs:
             dockerfile: zallet/Dockerfile
             build_args: |
               FEATURES=zaino,rpc-cli,zcashd-import
+          # Not part of the z3 stack; built here only to keep its build cache
+          # warm (registry cache entries are only refreshed when read, and
+          # zcashd is otherwise built solely on releases). A warm rebuild is
+          # seconds; a cold one repopulates off the release critical path.
+          - name: zero-zcashd
+            context: zcashd
+            dockerfile: docker/zcashd/Dockerfile
+            build_args: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,6 +78,16 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+
+      # Needed to push the GHCR build cache; pulls of the public cache refs
+      # are anonymous. On fork PRs the token is read-only, but those runs
+      # don't write to the registry (see cache-to below).
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve build args
         id: args
@@ -84,6 +108,10 @@ jobs:
             echo "BUILD_ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # Cache refs are hardcoded lowercase: registry references reject the
+      # uppercase in github.repository_owner. PR runs can't push packages
+      # (read-only token on forks), so they write the ephemeral GHA cache
+      # instead; every run reads both, so PR builds still start warm.
       - name: Build (cache only)
         uses: docker/build-push-action@v6
         with:
@@ -93,8 +121,10 @@ jobs:
           platforms: linux/amd64
           push: false
           build-args: ${{ steps.args.outputs.build_args }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-from: |
+            type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
+            type=gha,scope=${{ matrix.name }}
+          cache-to: ${{ github.event_name == 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.name) || format('type=registry,ref=ghcr.io/shieldedlabs/{0}:buildcache,mode=max,image-manifest=true', matrix.name) }}
 
   smoke:
     needs: build
@@ -136,7 +166,9 @@ jobs:
           tags: ghcr.io/shieldedlabs/zero-zebra:smoke
           build-args: |
             FEATURES=release_max_level_info,progress-bar,prometheus
-          cache-from: type=gha,scope=zero-zebra
+          cache-from: |
+            type=registry,ref=ghcr.io/shieldedlabs/zero-zebra:buildcache
+            type=gha,scope=zero-zebra
 
       - name: Load zaino image
         uses: docker/build-push-action@v6
@@ -150,7 +182,9 @@ jobs:
           build-args: |
             NO_TLS=true
             RUST_VERSION=${{ steps.zaino_args.outputs.rust_version }}
-          cache-from: type=gha,scope=zero-zaino
+          cache-from: |
+            type=registry,ref=ghcr.io/shieldedlabs/zero-zaino:buildcache
+            type=gha,scope=zero-zaino
 
       - name: Load zallet image
         uses: docker/build-push-action@v6
@@ -163,7 +197,9 @@ jobs:
           tags: ghcr.io/shieldedlabs/zero-zallet:smoke
           build-args: |
             FEATURES=zaino,rpc-cli,zcashd-import
-          cache-from: type=gha,scope=zero-zallet
+          cache-from: |
+            type=registry,ref=ghcr.io/shieldedlabs/zero-zallet:buildcache
+            type=gha,scope=zero-zallet
 
       # From here on this is the bundle's README walkthrough, scripted.
       - name: One-time wallet init (offline)

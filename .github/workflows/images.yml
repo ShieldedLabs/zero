@@ -124,5 +124,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ steps.args.outputs.build_args }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # Layer cache lives in GHCR as a `:buildcache` tag on each package
+          # (no 10 GiB Actions quota, no 7-day expiry; z3-smoke shares the
+          # same refs and keeps them warm). Hardcoded lowercase owner:
+          # registry references reject the uppercase in repository_owner.
+          # The gha cache-from is a transitional fallback; safe to drop once
+          # the registry cache is populated.
+          cache-from: |
+            type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
+            type=gha,scope=${{ matrix.name }}
+          cache-to: type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache,mode=max,image-manifest=true
