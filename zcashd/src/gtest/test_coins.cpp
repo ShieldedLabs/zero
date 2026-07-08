@@ -40,7 +40,7 @@ class CCoinsViewTest : public CCoinsView
     std::map<uint256, SproutMerkleTree> mapSproutAnchors_;
     std::map<uint256, SaplingMerkleTree> mapSaplingAnchors_;
     std::map<uint256, OrchardMerkleFrontier> mapOrchardAnchors_;
-    std::map<uint256, OrchardMerkleFrontier> mapIronwoodAnchors_;
+    std::map<uint256, IronwoodMerkleFrontier> mapIronwoodAnchors_;
     std::map<uint256, bool> mapSproutNullifiers_;
     std::map<uint256, bool> mapSaplingNullifiers_;
     std::map<uint256, bool> mapOrchardNullifiers_;
@@ -93,7 +93,7 @@ public:
         hashBestSproutAnchor_ = SproutMerkleTree::empty_root();
         hashBestSaplingAnchor_ = SaplingMerkleTree::empty_root();
         hashBestOrchardAnchor_ = OrchardMerkleFrontier::empty_root();
-        hashBestIronwoodAnchor_ = OrchardMerkleFrontier::empty_root();
+        hashBestIronwoodAnchor_ = IronwoodMerkleFrontier::empty_root();
     }
 
     bool GetSproutAnchorAt(const uint256& rt, SproutMerkleTree &tree) const {
@@ -144,14 +144,14 @@ public:
         }
     }
 
-    bool GetIronwoodAnchorAt(const uint256& rt, OrchardMerkleFrontier &tree) const {
-        if (rt == OrchardMerkleFrontier::empty_root()) {
-            OrchardMerkleFrontier new_tree;
+    bool GetIronwoodAnchorAt(const uint256& rt, IronwoodMerkleFrontier &tree) const {
+        if (rt == IronwoodMerkleFrontier::empty_root()) {
+            IronwoodMerkleFrontier new_tree;
             tree = new_tree;
             return true;
         }
 
-        std::map<uint256, OrchardMerkleFrontier>::const_iterator it = mapIronwoodAnchors_.find(rt);
+        std::map<uint256, IronwoodMerkleFrontier>::const_iterator it = mapIronwoodAnchors_.find(rt);
         if (it == mapIronwoodAnchors_.end()) {
             return false;
         } else {
@@ -372,7 +372,7 @@ public:
         BatchWriteAnchors<SproutMerkleTree, CAnchorsSproutMap, CAnchorsSproutCacheEntry>(mapSproutAnchors, mapSproutAnchors_);
         BatchWriteAnchors<SaplingMerkleTree, CAnchorsSaplingMap, CAnchorsSaplingCacheEntry>(mapSaplingAnchors, mapSaplingAnchors_);
         BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsOrchardMap, CAnchorsOrchardCacheEntry>(mapOrchardAnchors, mapOrchardAnchors_);
-        BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, mapIronwoodAnchors_);
+        BatchWriteAnchors<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, mapIronwoodAnchors_);
 
         BatchWriteNullifiers(mapSproutNullifiers, mapSproutNullifiers_);
         BatchWriteNullifiers(mapSaplingNullifiers, mapSaplingNullifiers_);
@@ -523,29 +523,8 @@ template<typename Tree> bool GetAnchorAt(const CCoinsViewCacheTest &cache, const
 template<> bool GetAnchorAt(const CCoinsViewCacheTest &cache, const uint256 &rt, SproutMerkleTree &tree) { return cache.GetSproutAnchorAt(rt, tree); }
 template<> bool GetAnchorAt(const CCoinsViewCacheTest &cache, const uint256 &rt, SaplingMerkleTree &tree) { return cache.GetSaplingAnchorAt(rt, tree); }
 template<> bool GetAnchorAt(const CCoinsViewCacheTest &cache, const uint256 &rt, OrchardMerkleFrontier &tree) { return cache.GetOrchardAnchorAt(rt, tree); }
+template<> bool GetAnchorAt(const CCoinsViewCacheTest &cache, const uint256 &rt, IronwoodMerkleFrontier &tree) { return cache.GetIronwoodAnchorAt(rt, tree); }
 
-// Ironwood reuses OrchardMerkleFrontier, so tree-type dispatch alone cannot
-// distinguish the two pools; these helpers dispatch on the shielded type.
-template<typename Tree> void PushAnchorAs(CCoinsViewCacheTest &cache, ShieldedType type, const Tree &tree)
-{
-    cache.PushAnchor(tree);
-}
-template<> void PushAnchorAs(CCoinsViewCacheTest &cache, ShieldedType type, const OrchardMerkleFrontier &tree)
-{
-    if (type == IRONWOOD) {
-        cache.PushIronwoodAnchor(tree);
-    } else {
-        cache.PushAnchor(tree);
-    }
-}
-template<typename Tree> bool GetAnchorAtAs(const CCoinsViewCacheTest &cache, ShieldedType type, const uint256 &rt, Tree &tree)
-{
-    return GetAnchorAt(cache, rt, tree);
-}
-template<> bool GetAnchorAtAs(const CCoinsViewCacheTest &cache, ShieldedType type, const uint256 &rt, OrchardMerkleFrontier &tree)
-{
-    return type == IRONWOOD ? cache.GetIronwoodAnchorAt(rt, tree) : cache.GetOrchardAnchorAt(rt, tree);
-}
 
 
 
@@ -683,7 +662,7 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
         AppendRandomLeaf(tree);
 
         // Add the anchor
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         // Remove the anchor
@@ -691,13 +670,13 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
         cache1.Flush();
 
         // Add the anchor back
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         // The base contains the anchor, of course!
         {
             Tree checkTree;
-            EXPECT_TRUE(GetAnchorAtAs(cache1, type, tree.root(), checkTree));
+            EXPECT_TRUE(GetAnchorAt(cache1, tree.root(), checkTree));
             EXPECT_TRUE(checkTree.root() == tree.root());
         }
     }
@@ -712,7 +691,7 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
         AppendRandomLeaf(tree);
 
         // Add the anchor and flush to disk
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         // Remove the anchor, but don't flush yet!
@@ -720,7 +699,7 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
 
         {
             CCoinsViewCacheTest cache2(&cache1); // Build cache on top
-            PushAnchorAs(cache2, type, tree); // Put the same anchor back!
+            cache2.PushAnchor(tree); // Put the same anchor back!
             cache2.Flush(); // Flush to cache1
         }
 
@@ -729,7 +708,7 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
         // treestate...
         {
             Tree checktree;
-            EXPECT_TRUE(GetAnchorAtAs(cache1, type, tree.root(), checktree));
+            EXPECT_TRUE(GetAnchorAt(cache1, tree.root(), checktree));
             EXPECT_TRUE(checktree.root() == tree.root()); // Oh, shucks.
         }
 
@@ -738,7 +717,7 @@ template<typename Tree> void anchorPopRegressionTestImpl(ShieldedType type)
         cache1.Flush();
         {
             Tree checktree;
-            EXPECT_TRUE(GetAnchorAtAs(cache1, type, tree.root(), checktree));
+            EXPECT_TRUE(GetAnchorAt(cache1, tree.root(), checktree));
             EXPECT_TRUE(checktree.root() == tree.root()); // Oh, shucks.
         }
     }
@@ -766,7 +745,7 @@ TEST(CoinsTests, AnchorPopRegression)
 
     {
     SCOPED_TRACE("Ironwood");
-        anchorPopRegressionTestImpl<OrchardMerkleFrontier>(IRONWOOD);
+        anchorPopRegressionTestImpl<IronwoodMerkleFrontier>(IRONWOOD);
     }
 }
 
@@ -782,12 +761,12 @@ template<typename Tree> void anchorRegressionTestImpl(ShieldedType type)
         Tree tree;
         AppendRandomLeaf(tree);
 
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         cache1.PopAnchor(Tree::empty_root(), type);
         EXPECT_TRUE(cache1.GetBestAnchor(type) == Tree::empty_root());
-        EXPECT_TRUE(!GetAnchorAtAs(cache1, type, tree.root(), tree));
+        EXPECT_TRUE(!GetAnchorAt(cache1, tree.root(), tree));
     }
 
     // Also correct behavior:
@@ -798,13 +777,13 @@ template<typename Tree> void anchorRegressionTestImpl(ShieldedType type)
         // Insert anchor into base.
         Tree tree;
         AppendRandomLeaf(tree);
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         cache1.PopAnchor(Tree::empty_root(), type);
         cache1.Flush();
         EXPECT_TRUE(cache1.GetBestAnchor(type) == Tree::empty_root());
-        EXPECT_TRUE(!GetAnchorAtAs(cache1, type, tree.root(), tree));
+        EXPECT_TRUE(!GetAnchorAt(cache1, tree.root(), tree));
     }
 
     // Works because we bring the anchor in from parent cache.
@@ -815,19 +794,19 @@ template<typename Tree> void anchorRegressionTestImpl(ShieldedType type)
         // Insert anchor into base.
         Tree tree;
         AppendRandomLeaf(tree);
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         {
             // Pop anchor.
             CCoinsViewCacheTest cache2(&cache1);
-            EXPECT_TRUE(GetAnchorAtAs(cache2, type, tree.root(), tree));
+            EXPECT_TRUE(GetAnchorAt(cache2, tree.root(), tree));
             cache2.PopAnchor(Tree::empty_root(), type);
             cache2.Flush();
         }
 
         EXPECT_TRUE(cache1.GetBestAnchor(type) == Tree::empty_root());
-        EXPECT_TRUE(!GetAnchorAtAs(cache1, type, tree.root(), tree));
+        EXPECT_TRUE(!GetAnchorAt(cache1, tree.root(), tree));
     }
 
     // Was broken:
@@ -838,7 +817,7 @@ template<typename Tree> void anchorRegressionTestImpl(ShieldedType type)
         // Insert anchor into base.
         Tree tree;
         AppendRandomLeaf(tree);
-        PushAnchorAs(cache1, type, tree);
+        cache1.PushAnchor(tree);
         cache1.Flush();
 
         {
@@ -849,7 +828,7 @@ template<typename Tree> void anchorRegressionTestImpl(ShieldedType type)
         }
 
         EXPECT_TRUE(cache1.GetBestAnchor(type) == Tree::empty_root());
-        EXPECT_TRUE(!GetAnchorAtAs(cache1, type, tree.root(), tree));
+        EXPECT_TRUE(!GetAnchorAt(cache1, tree.root(), tree));
     }
 }
 
@@ -875,7 +854,7 @@ TEST(CoinsTests, AnchorRegression)
 
     {
     SCOPED_TRACE("Ironwood");
-        anchorRegressionTestImpl<OrchardMerkleFrontier>(IRONWOOD);
+        anchorRegressionTestImpl<IronwoodMerkleFrontier>(IRONWOOD);
     }
 }
 
@@ -929,22 +908,22 @@ template<typename Tree> void anchorsFlushImpl(ShieldedType type)
     {
         CCoinsViewCacheTest cache(&base);
         Tree tree;
-        EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), tree));
+        EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), tree));
         AppendRandomLeaf(tree);
 
         newrt = tree.root();
 
-        PushAnchorAs(cache, type, tree);
+        cache.PushAnchor(tree);
         cache.Flush();
     }
 
     {
         CCoinsViewCacheTest cache(&base);
         Tree tree;
-        EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), tree));
+        EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), tree));
 
         // Get the cached entry.
-        EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), tree));
+        EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), tree));
 
         uint256 check_rt = tree.root();
 
@@ -973,7 +952,7 @@ TEST(CoinsTests,AnchorsFlushTest)
 
     {
     SCOPED_TRACE("Ironwood");
-        anchorsFlushImpl<OrchardMerkleFrontier>(IRONWOOD);
+        anchorsFlushImpl<IronwoodMerkleFrontier>(IRONWOOD);
     }
 }
 
@@ -990,7 +969,7 @@ template<typename Tree> void anchorsTestImpl(ShieldedType type)
     {
         Tree tree;
 
-        EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), tree));
+        EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), tree));
         EXPECT_TRUE(cache.GetBestAnchor(type) == tree.root());
         AppendRandomLeaf(tree);
         AppendRandomLeaf(tree);
@@ -1006,12 +985,12 @@ template<typename Tree> void anchorsTestImpl(ShieldedType type)
         uint256 newrt = tree.root();
         uint256 newrt2;
 
-        PushAnchorAs(cache, type, tree);
+        cache.PushAnchor(tree);
         EXPECT_TRUE(cache.GetBestAnchor(type) == newrt);
 
         {
             Tree confirm_same;
-            EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), confirm_same));
+            EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), confirm_same));
 
             EXPECT_TRUE(confirm_same.root() == newrt);
         }
@@ -1021,17 +1000,17 @@ template<typename Tree> void anchorsTestImpl(ShieldedType type)
 
         newrt2 = tree.root();
 
-        PushAnchorAs(cache, type, tree);
+        cache.PushAnchor(tree);
         EXPECT_TRUE(cache.GetBestAnchor(type) == newrt2);
 
         Tree test_tree;
-        EXPECT_TRUE(GetAnchorAtAs(cache, type, cache.GetBestAnchor(type), test_tree));
+        EXPECT_TRUE(GetAnchorAt(cache, cache.GetBestAnchor(type), test_tree));
 
         EXPECT_TRUE(tree.root() == test_tree.root());
 
         {
             Tree test_tree2;
-            GetAnchorAtAs(cache, type, newrt, test_tree2);
+            GetAnchorAt(cache, newrt, test_tree2);
 
             EXPECT_TRUE(test_tree2.root() == newrt);
         }
@@ -1039,8 +1018,8 @@ template<typename Tree> void anchorsTestImpl(ShieldedType type)
         {
             cache.PopAnchor(newrt, type);
             Tree obtain_tree;
-            assert(!GetAnchorAtAs(cache, type, newrt2, obtain_tree)); // should have been popped off
-            assert(GetAnchorAtAs(cache, type, newrt, obtain_tree));
+            assert(!GetAnchorAt(cache, newrt2, obtain_tree)); // should have been popped off
+            assert(GetAnchorAt(cache, newrt, obtain_tree));
 
             assert(obtain_tree.root() == newrt);
         }
@@ -1066,7 +1045,7 @@ TEST(CoinsTests, AnchorsTest)
 
     {
     SCOPED_TRACE("Ironwood");
-    anchorsTestImpl<OrchardMerkleFrontier>(IRONWOOD);
+    anchorsTestImpl<IronwoodMerkleFrontier>(IRONWOOD);
     }
 }
 

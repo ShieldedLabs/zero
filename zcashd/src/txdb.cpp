@@ -102,9 +102,9 @@ bool CCoinsViewDB::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &
     return read;
 }
 
-bool CCoinsViewDB::GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
-    if (rt == OrchardMerkleFrontier::empty_root()) {
-        OrchardMerkleFrontier new_tree;
+bool CCoinsViewDB::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+    if (rt == IronwoodMerkleFrontier::empty_root()) {
+        IronwoodMerkleFrontier new_tree;
         tree = new_tree;
         return true;
     }
@@ -169,7 +169,7 @@ uint256 CCoinsViewDB::GetBestAnchor(ShieldedType type) const {
             break;
         case IRONWOOD:
             if (!db.Read(DB_BEST_IRONWOOD_ANCHOR, hashBestAnchor))
-                return OrchardMerkleFrontier::empty_root();
+                return IronwoodMerkleFrontier::empty_root();
             break;
         default:
             throw runtime_error("Unknown shielded type");
@@ -400,7 +400,7 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
     ::BatchWriteAnchors<CAnchorsSproutMap, CAnchorsSproutMap::iterator, CAnchorsSproutCacheEntry, SproutMerkleTree>(batch, mapSproutAnchors, DB_SPROUT_ANCHOR);
     ::BatchWriteAnchors<CAnchorsSaplingMap, CAnchorsSaplingMap::iterator, CAnchorsSaplingCacheEntry, SaplingMerkleTree>(batch, mapSaplingAnchors, DB_SAPLING_ANCHOR);
     ::BatchWriteAnchors<CAnchorsOrchardMap, CAnchorsOrchardMap::iterator, CAnchorsOrchardCacheEntry, OrchardMerkleFrontier>(batch, mapOrchardAnchors, DB_ORCHARD_ANCHOR);
-    ::BatchWriteAnchors<CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry, OrchardMerkleFrontier>(batch, mapIronwoodAnchors, DB_IRONWOOD_ANCHOR);
+    ::BatchWriteAnchors<CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry, IronwoodMerkleFrontier>(batch, mapIronwoodAnchors, DB_IRONWOOD_ANCHOR);
 
     ::BatchWriteNullifiers(batch, mapSproutNullifiers, DB_NULLIFIER);
     ::BatchWriteNullifiers(batch, mapSaplingNullifiers, DB_SAPLING_NULLIFIER);
@@ -747,6 +747,7 @@ bool CBlockTreeDB::LoadBlockIndexGuts(
                 pindexNew->nSproutValue   = diskindex.nSproutValue;
                 pindexNew->nSaplingValue  = diskindex.nSaplingValue;
                 pindexNew->nOrchardValue  = diskindex.nOrchardValue;
+                pindexNew->nIronwoodValue = diskindex.nIronwoodValue;
                 pindexNew->hashFinalSaplingRoot = diskindex.hashFinalSaplingRoot;
                 pindexNew->hashFinalOrchardRoot = diskindex.hashFinalOrchardRoot;
                 pindexNew->hashFinalIronwoodRoot = diskindex.hashFinalIronwoodRoot;

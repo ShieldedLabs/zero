@@ -532,9 +532,14 @@ public:
         return false;
     }
 
-    bool GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
-        // Ironwood reuses the Orchard tree state in this benchmark fake.
-        return GetOrchardAnchorAt(rt, tree);
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+        // The benchmark blocks predate NU6.3, so only the empty tree exists.
+        if (rt == IronwoodMerkleFrontier::empty_root()) {
+            IronwoodMerkleFrontier emptyTree;
+            tree = emptyTree;
+            return true;
+        }
+        return false;
     }
 
     bool GetNullifier(const uint256 &nf, ShieldedType type) const {
@@ -560,9 +565,9 @@ public:
             case SAPLING:
                 return saplingTrees[0].root();
             case ORCHARD:
-            case IRONWOOD:
-                // Ironwood reuses the Orchard tree in this benchmark fake.
                 return orchardTrees[0].root();
+            case IRONWOOD:
+                return IronwoodMerkleFrontier::empty_root();
             default:
                 throw std::runtime_error("Unknown shielded type");
         }

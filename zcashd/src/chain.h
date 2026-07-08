@@ -315,6 +315,15 @@ public:
     //! Will be std::nullopt if and only if nChainTx is zero.
     std::optional<CAmount> nChainOrchardValue;
 
+    //! Change in value held by the Ironwood circuit over this block.
+    //! Not a std::optional because this was added before Ironwood (NU6.3) activated, so we
+    //! can rely on the invariant that every block before this was added had nIronwoodValue = 0.
+    CAmount nIronwoodValue;
+
+    //! (memory only) Total value held by the Ironwood circuit up to and including this block.
+    //! Will be std::nullopt if and only if nChainTx is zero.
+    std::optional<CAmount> nChainIronwoodValue;
+
     //! Change in value held by the development fund lockbox over this block.
     //!
     //! Not a std::optional because this is added before NU6 activation, so we can
@@ -414,6 +423,8 @@ public:
         nChainSaplingValue = std::nullopt;
         nOrchardValue = 0;
         nChainOrchardValue = std::nullopt;
+        nIronwoodValue = 0;
+        nChainIronwoodValue = std::nullopt;
 
         nVersion       = 0;
         hashMerkleRoot = uint256();
@@ -469,6 +480,8 @@ public:
         nChainSaplingValue = std::nullopt;
         nOrchardValue = 0;
         nChainOrchardValue = std::nullopt;
+        nIronwoodValue = 0;
+        nChainIronwoodValue = std::nullopt;
         nLockboxValue = 0;
         nChainLockboxValue = std::nullopt;
         hashSproutAnchor = uint256();
@@ -712,6 +725,7 @@ public:
         // was NU6.3-aware, these are always null / zero.
         if ((s.GetType() & SER_DISK) && (nVersion >= NU6_3_DATA_VERSION)) {
             READWRITE(hashFinalIronwoodRoot);
+            READWRITE(nIronwoodValue);
         }
 
         // If you have just added new serialized fields above, remember to add

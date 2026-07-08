@@ -52,7 +52,7 @@ CCoinsViewBacked::CCoinsViewBacked(CCoinsView *viewIn) : base(viewIn) { }
 bool CCoinsViewBacked::GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const { return base->GetSproutAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const { return base->GetSaplingAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const { return base->GetOrchardAnchorAt(rt, tree); }
-bool CCoinsViewBacked::GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const { return base->GetIronwoodAnchorAt(rt, tree); }
+bool CCoinsViewBacked::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const { return base->GetIronwoodAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetNullifier(const uint256 &nullifier, ShieldedType type) const { return base->GetNullifier(nullifier, type); }
 bool CCoinsViewBacked::GetCoins(const uint256 &txid, CCoins &coins) const { return base->GetCoins(txid, coins); }
 bool CCoinsViewBacked::HaveCoins(const uint256 &txid) const { return base->HaveCoins(txid); }
@@ -202,7 +202,7 @@ bool CCoinsViewCache::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontie
     return true;
 }
 
-bool CCoinsViewCache::GetIronwoodAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const {
+bool CCoinsViewCache::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
     CAnchorsIronwoodMap::const_iterator it = cacheIronwoodAnchors.find(rt);
     if (it != cacheIronwoodAnchors.end()) {
         if (it->second.entered) {
@@ -376,9 +376,9 @@ template<> void CCoinsViewCache::PushAnchor(const OrchardMerkleFrontier &tree)
     );
 }
 
-void CCoinsViewCache::PushIronwoodAnchor(const OrchardMerkleFrontier &tree)
+template<> void CCoinsViewCache::PushAnchor(const IronwoodMerkleFrontier &tree)
 {
-    AbstractPushAnchor<OrchardMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry>(
+    AbstractPushAnchor<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry>(
         tree,
         IRONWOOD,
         cacheIronwoodAnchors,
@@ -388,45 +388,38 @@ void CCoinsViewCache::PushIronwoodAnchor(const OrchardMerkleFrontier &tree)
 
 template<>
 void CCoinsViewCache::BringBestAnchorIntoCache(
-    ShieldedType type,
     const uint256 &currentRoot,
     SproutMerkleTree &tree
 )
 {
-    assert(type == SPROUT);
     assert(GetSproutAnchorAt(currentRoot, tree));
 }
 
 template<>
 void CCoinsViewCache::BringBestAnchorIntoCache(
-    ShieldedType type,
     const uint256 &currentRoot,
     SaplingMerkleTree &tree
 )
 {
-    assert(type == SAPLING);
     assert(GetSaplingAnchorAt(currentRoot, tree));
 }
 
 template<>
 void CCoinsViewCache::BringBestAnchorIntoCache(
-    ShieldedType type,
     const uint256 &currentRoot,
     OrchardMerkleFrontier &tree
 )
 {
-    // The Orchard and Ironwood pools share a tree type, so dispatch on the
-    // shielded type here.
-    switch (type) {
-        case ORCHARD:
-            assert(GetOrchardAnchorAt(currentRoot, tree));
-            break;
-        case IRONWOOD:
-            assert(GetIronwoodAnchorAt(currentRoot, tree));
-            break;
-        default:
-            assert(false);
-    }
+    assert(GetOrchardAnchorAt(currentRoot, tree));
+}
+
+template<>
+void CCoinsViewCache::BringBestAnchorIntoCache(
+    const uint256 &currentRoot,
+    IronwoodMerkleFrontier &tree
+)
+{
+    assert(GetIronwoodAnchorAt(currentRoot, tree));
 }
 
 void draftMMRNode(std::vector<uint32_t> &indices,
@@ -747,7 +740,7 @@ void CCoinsViewCache::AbstractPopAnchor(
         // so that its tree exists in memory.
         {
             Tree tree;
-            BringBestAnchorIntoCache(type, currentRoot, tree);
+            BringBestAnchorIntoCache(currentRoot, tree);
         }
 
         // Mark the anchor as unentered, removing it from view
@@ -788,7 +781,7 @@ void CCoinsViewCache::PopAnchor(const uint256 &newrt, ShieldedType type) {
             );
             break;
         case IRONWOOD:
-            AbstractPopAnchor<OrchardMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(
+            AbstractPopAnchor<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(
                 newrt,
                 IRONWOOD,
                 cacheIronwoodAnchors,
@@ -905,10 +898,12 @@ uint256 CCoinsViewCache::GetBestAnchor(ShieldedType type) const {
             if (hashOrchardAnchor.IsNull())
                 hashOrchardAnchor = base->GetBestAnchor(type);
             return hashOrchardAnchor;
+            break;
         case IRONWOOD:
             if (hashIronwoodAnchor.IsNull())
                 hashIronwoodAnchor = base->GetBestAnchor(type);
             return hashIronwoodAnchor;
+            break;
         default:
             throw std::runtime_error("Unknown shielded type");
     }
@@ -1246,6 +1241,8 @@ tl::expected<void, UnsatisfiedShieldedReq> CCoinsViewCache::CheckShieldedRequire
         }
     }
 
+    // The Orchard and Ironwood pools have separate, independent nullifier
+    // sets (ZIP 229); a nullifier only double-spends within its own pool.
     for (const uint256 &nullifier : tx.GetIronwoodBundle().GetNullifiers()) {
         if (GetNullifier(nullifier, IRONWOOD)) { // Prevent double spends
             auto txid = tx.GetHash().ToString();
@@ -1259,7 +1256,7 @@ tl::expected<void, UnsatisfiedShieldedReq> CCoinsViewCache::CheckShieldedRequire
 
     std::optional<uint256> ironwoodRoot = tx.GetIronwoodBundle().GetAnchor();
     if (ironwoodRoot) {
-        OrchardMerkleFrontier tree;
+        IronwoodMerkleFrontier tree;
         if (!GetIronwoodAnchorAt(ironwoodRoot.value(), tree)) {
             auto txid = tx.GetHash().ToString();
             auto anchor = ironwoodRoot.value().ToString();

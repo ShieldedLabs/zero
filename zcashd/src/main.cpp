@@ -1529,7 +1529,7 @@ bool ContextualCheckShieldedInputs(
         }
     }
 
-    bool isV6 = tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID;
+    const bool isV6 = tx.IsZip248V6();
 
     // Queue Sapling bundle to be batch-validated. This also checks some consensus rules.
     if (saplingAuth.has_value()) {
@@ -3386,7 +3386,7 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
     if (chainparams.GetConsensus().NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_NU6_3)) {
         view.PopAnchor(pindex->pprev->hashFinalIronwoodRoot, IRONWOOD);
     } else {
-        view.PopAnchor(OrchardMerkleFrontier::empty_root(), IRONWOOD);
+        view.PopAnchor(IronwoodMerkleFrontier::empty_root(), IRONWOOD);
     }
 
     // This is guaranteed to be filled by LoadBlockIndex.
@@ -3610,9 +3610,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // `chainparams.ZIP209Enabled()`).
     assert(pindex->nChainSaplingValue.has_value());
     assert(pindex->nChainOrchardValue.has_value());
+    assert(pindex->nChainIronwoodValue.has_value());
     assert(pindex->nChainLockboxValue.has_value());
     const CAmount sapling_supply = pindex->nChainSaplingValue.value();
     const CAmount orchard_supply = pindex->nChainOrchardValue.value();
+    const CAmount ironwood_supply = pindex->nChainIronwoodValue.value();
     const CAmount lockbox_supply = pindex->nChainLockboxValue.value();
 
     // Shielded pool turnstile checks (ZIP 209)
@@ -3665,6 +3667,14 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 error("%s: turnstile violation in Orchard shielded value pool at height %d (sprout=%d, sapling=%d, orchard=%d, lockbox=%d)", __func__,
                       pindex->nHeight, pindex->nChainSproutValue.value(), sapling_supply, orchard_supply, lockbox_supply),
                 REJECT_INVALID, "turnstile-violation-orchard");
+        }
+
+        // Ironwood
+        if (!MoneyRange(ironwood_supply)) {
+            return state.DoS(100,
+                error("%s: turnstile violation in Ironwood shielded value pool at height %d (sprout=%d, sapling=%d, orchard=%d, ironwood=%d, lockbox=%d)", __func__,
+                      pindex->nHeight, pindex->nChainSproutValue.value(), sapling_supply, orchard_supply, ironwood_supply, lockbox_supply),
+                REJECT_INVALID, "turnstile-violation-ironwood");
         }
     }
 
@@ -3761,7 +3771,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         assert(view.GetOrchardAnchorAt(OrchardMerkleFrontier::empty_root(), orchard_tree));
     }
 
-    OrchardMerkleFrontier ironwood_tree;
+    IronwoodMerkleFrontier ironwood_tree;
     if (pindex->pprev && consensusParams.NetworkUpgradeActive(pindex->pprev->nHeight, Consensus::UPGRADE_NU6_3)) {
         // Verify that the view's current state corresponds to the previous block.
         assert(pindex->pprev->hashFinalIronwoodRoot == view.GetBestAnchor(IRONWOOD));
@@ -3773,7 +3783,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         if (pindex->pprev) {
             assert(pindex->pprev->hashFinalIronwoodRoot.IsNull());
         }
-        assert(view.GetIronwoodAnchorAt(OrchardMerkleFrontier::empty_root(), ironwood_tree));
+        assert(view.GetIronwoodAnchorAt(IronwoodMerkleFrontier::empty_root(), ironwood_tree));
     }
 
     // Here we determine whether the CCoinsView view of our latest
@@ -3799,6 +3809,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     CAmount transparentValueDelta = 0;
     size_t total_sapling_tx = 0;
     size_t total_orchard_tx = 0;
+    size_t total_ironwood_tx = 0;
 
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
@@ -4080,6 +4091,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             total_orchard_tx += 1;
         }
 
+        if (tx.GetIronwoodBundle().IsPresent()) {
+            total_ironwood_tx += 1;
+        }
+
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
     }
@@ -4087,7 +4102,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     view.PushAnchor(sprout_tree);
     view.PushAnchor(sapling_tree);
     view.PushAnchor(orchard_tree);
-    view.PushIronwoodAnchor(ironwood_tree);
+    view.PushAnchor(ironwood_tree);
 
     // Validate the Sapling and Orchard binding signatures here, before the
     // chain supply consistency check below. The binding signatures are what
@@ -4165,6 +4180,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             assert(MoneyRange(sprout_supply));
             assert(MoneyRange(sapling_supply));
             assert(MoneyRange(orchard_supply));
+            assert(MoneyRange(ironwood_supply));
             assert(MoneyRange(lockbox_supply));
 
             // `nChainTotalSupply` and `nChainTransparentValue` may be unpopulated
@@ -4190,13 +4206,13 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                         REJECT_INVALID, "turnstile-violation-total");
                 }
 
-                static_assert(MAX_MONEY <= std::numeric_limits<CAmount>::max() / 5, "sum of five MoneyRange CAmounts must fit in CAmount");
-                const CAmount expected_total_supply = transparent_supply + sprout_supply + sapling_supply + orchard_supply + lockbox_supply;
+                static_assert(MAX_MONEY <= std::numeric_limits<CAmount>::max() / 6, "sum of six MoneyRange CAmounts must fit in CAmount");
+                const CAmount expected_total_supply = transparent_supply + sprout_supply + sapling_supply + orchard_supply + ironwood_supply + lockbox_supply;
                 if (expected_total_supply != total_supply) {
                     return AbortNode(
                         state,
-                        strprintf("%s: chain total supply does not match sum of pool balances at height %d (sprout=%d, sapling=%d, orchard=%d, lockbox=%d, transparent=%d, total=%d)", __func__,
-                                  pindex->nHeight, sprout_supply, sapling_supply, orchard_supply, lockbox_supply, transparent_supply, total_supply),
+                        strprintf("%s: chain total supply does not match sum of pool balances at height %d (sprout=%d, sapling=%d, orchard=%d, ironwood=%d, lockbox=%d, transparent=%d, total=%d)", __func__,
+                                  pindex->nHeight, sprout_supply, sapling_supply, orchard_supply, ironwood_supply, lockbox_supply, transparent_supply, total_supply),
                         _("The chain total supply does not match the sum of the pool balances. This indicates a fatal problem with the node's pool accounting. "
                           "Please restart zcashd with -reindex."));
                 }
@@ -4288,7 +4304,24 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // History read/write is started with Heartwood update.
     if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_HEARTWOOD)) {
         HistoryNode historyNode;
-        if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_NU5)) {
+        if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_NU6_3)) {
+            // NU6.3 starts a fresh per-epoch MMR whose nodes carry the Ironwood
+            // tree root and transaction count (ZIP 221 V3 nodes), so V3 leaves
+            // only ever appear from activation — no mixed-version tree.
+            historyNode = libzcash::NewV3Leaf(
+                block.GetHash(),
+                block.nTime,
+                block.nBits,
+                pindex->hashFinalSaplingRoot,
+                pindex->hashFinalOrchardRoot,
+                pindex->hashFinalIronwoodRoot,
+                ArithToUint256(GetBlockProof(*pindex)),
+                pindex->nHeight,
+                total_sapling_tx,
+                total_orchard_tx,
+                total_ironwood_tx
+            );
+        } else if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_NU5)) {
             historyNode = libzcash::NewV2Leaf(
                 block.GetHash(),
                 block.nTime,
@@ -4626,6 +4659,21 @@ struct PoolMetrics {
         return stats;
     }
 
+    static PoolMetrics Ironwood(CBlockIndex *pindex, CCoinsViewCache *view) {
+        PoolMetrics stats;
+        stats.value = pindex->nChainIronwoodValue;
+
+        // Before NU6.3 activation, the Ironwood commitment set is empty.
+        IronwoodMerkleFrontier ironwoodTree;
+        if (view->GetIronwoodAnchorAt(pindex->hashFinalIronwoodRoot, ironwoodTree)) {
+            stats.created = ironwoodTree.size();
+        } else {
+            stats.created = 0;
+        }
+
+        return stats;
+    }
+
     static PoolMetrics Transparent(CBlockIndex *pindex, CCoinsViewCache *view) {
         PoolMetrics stats;
         stats.value = pindex->nChainTransparentValue;
@@ -4695,12 +4743,14 @@ void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
     auto sproutPool = PoolMetrics::Sprout(pindexNew, pcoinsTip);
     auto saplingPool = PoolMetrics::Sapling(pindexNew, pcoinsTip);
     auto orchardPool = PoolMetrics::Orchard(pindexNew, pcoinsTip);
+    auto ironwoodPool = PoolMetrics::Ironwood(pindexNew, pcoinsTip);
     auto transparentPool = PoolMetrics::Transparent(pindexNew, pcoinsTip);
 
     MetricsGauge("zcash.chain.verified.block.height", pindexNew->nHeight);
     RenderPoolMetrics("sprout", sproutPool);
     RenderPoolMetrics("sapling", saplingPool);
     RenderPoolMetrics("orchard", orchardPool);
+    RenderPoolMetrics("ironwood", ironwoodPool);
     RenderPoolMetrics("transparent", transparentPool);
 
     {
@@ -5380,9 +5430,9 @@ static bool CheckBlockMerkleRoot(const CBlock& block, bool* mutated);
 // malformed block) or a hint telling the user to reindex (for the on-load
 // path where an overflow implies persisted-data corruption).
 //
-// On success, sets sproutValue, saplingValue, orchardValue, and lockboxValue
-// to the corresponding per-block deltas, and returns true. Returns false if
-// any running sum goes out of MoneyDeltaRange.
+// On success, sets sproutValue, saplingValue, orchardValue, ironwoodValue,
+// and lockboxValue to the corresponding per-block deltas, and returns true.
+// Returns false if any running sum goes out of MoneyDeltaRange.
 static bool ComputePoolDeltas(
     const CBlock& block,
     const CChainParams& chainparams,
@@ -5391,11 +5441,13 @@ static bool ComputePoolDeltas(
     CAmount& sproutValue,
     CAmount& saplingValue,
     CAmount& orchardValue,
+    CAmount& ironwoodValue,
     CAmount& lockboxValue)
 {
     sproutValue = 0;
     saplingValue = 0;
     orchardValue = 0;
+    ironwoodValue = 0;
 
     // Each lockbox disbursement produces a negative change to the lockbox value.
     // Each lockbox funding stream produces a positive change to the lockbox value.
@@ -5433,6 +5485,13 @@ static bool ComputePoolDeltas(
         if (!MoneyDeltaRange(orchardValue)) {
             return error("%s: orchard value delta out of range: %d at height %d.%s", __func__,
                 orchardValue, nHeight, corruptionHint);
+        }
+
+        // valueBalanceIronwood behaves the same way as valueBalanceSapling.
+        ironwoodValue -= tx.GetIronwoodBundle().GetValueBalance();
+        if (!MoneyDeltaRange(ironwoodValue)) {
+            return error("%s: ironwood value delta out of range: %d at height %d.%s", __func__,
+                ironwoodValue, nHeight, corruptionHint);
         }
 
         for (const auto& js : tx.vJoinSplit) {
@@ -5492,10 +5551,10 @@ static bool CheckRecomputedPoolDeltas(const CBlockIndex* pindex, const CChainPar
     // Recompute pool deltas from the block data. If an overflow is detected
     // here, it indicates persisted-deltas corruption (since the same block
     // was accepted at tip previously), so hint at reindexing.
-    CAmount sproutValue, saplingValue, orchardValue, lockboxValue;
+    CAmount sproutValue, saplingValue, orchardValue, ironwoodValue, lockboxValue;
     if (!ComputePoolDeltas(block, chainparams, pindex->nHeight,
                            " This may indicate on-disk corruption; please restart with -reindex.",
-                           sproutValue, saplingValue, orchardValue, lockboxValue)) {
+                           sproutValue, saplingValue, orchardValue, ironwoodValue, lockboxValue)) {
         return false;
     }
 
@@ -5522,6 +5581,7 @@ static bool CheckRecomputedPoolDeltas(const CBlockIndex* pindex, const CChainPar
     return checkDelta("nSproutValue", pindex->nSproutValue.value(), sproutValue)
         && checkDelta("nSaplingValue", pindex->nSaplingValue, saplingValue)
         && checkDelta("nOrchardValue", pindex->nOrchardValue, orchardValue)
+        && checkDelta("nIronwoodValue", pindex->nIronwoodValue, ironwoodValue)
         && checkDelta("nLockboxValue", pindex->nLockboxValue, lockboxValue);
 }
 
@@ -5542,6 +5602,8 @@ bool FallbackChainSupplyCheckpoint(CBlockIndex *pindex, const CChainParams& chai
     }
 
     // Verify that the checkpoint pool values sum to the total supply.
+    // The Ironwood pool has no term here: every chain supply checkpoint
+    // height predates NU6.3 activation, so its Ironwood balance is zero.
     assert(chainparams.ChainSupplyCheckpointTransparentValue()
          + chainparams.ChainSupplyCheckpointSproutValue()
          + chainparams.ChainSupplyCheckpointSaplingValue()
@@ -5580,6 +5642,11 @@ bool FallbackChainSupplyCheckpoint(CBlockIndex *pindex, const CChainParams& chai
         && applyCheckpoint("nChainOrchardValue",
                            pindex->nChainOrchardValue,
                            chainparams.ChainSupplyCheckpointOrchardValue())
+        // Every chain supply checkpoint height predates NU6.3 activation, so
+        // the Ironwood pool balance at the checkpoint is always zero.
+        && applyCheckpoint("nChainIronwoodValue",
+                           pindex->nChainIronwoodValue,
+                           0)
         && applyCheckpoint("nChainLockboxValue",
                            pindex->nChainLockboxValue,
                            chainparams.ChainSupplyCheckpointLockboxValue());
@@ -5615,6 +5682,7 @@ static bool AccumulateChainPoolValues(CBlockIndex *pindex)
         pindex->nChainSproutValue = pindex->nSproutValue;
         pindex->nChainSaplingValue = pindex->nSaplingValue;
         pindex->nChainOrchardValue = pindex->nOrchardValue;
+        pindex->nChainIronwoodValue = pindex->nIronwoodValue;
         pindex->nChainLockboxValue = pindex->nLockboxValue;
         return true;
     }
@@ -5657,6 +5725,17 @@ static bool AccumulateChainPoolValues(CBlockIndex *pindex)
         pindex->nChainOrchardValue = std::nullopt;
     }
 
+    // Ironwood
+    if (pindex->pprev->nChainIronwoodValue.has_value()) {
+        CAmount chainIronwoodValue = pindex->pprev->nChainIronwoodValue.value();
+        if (!MoneyRange(chainIronwoodValue) || !MoneyDeltaRange(pindex->nIronwoodValue)) {
+            return error("%s: ironwood pool value out of range at height %d", __func__, pindex->nHeight);
+        }
+        pindex->nChainIronwoodValue = chainIronwoodValue + pindex->nIronwoodValue;
+    } else {
+        pindex->nChainIronwoodValue = std::nullopt;
+    }
+
     // Lockbox
     if (pindex->pprev->nChainLockboxValue.has_value()) {
         CAmount chainLockboxValue = pindex->pprev->nChainLockboxValue.value();
@@ -5684,9 +5763,9 @@ bool SetChainPoolValues(
     // pindex->pprev is only permitted to be null for the genesis block
     assert (pindex->pprev || pindex->nHeight == 0);
 
-    CAmount sproutValue, saplingValue, orchardValue, lockboxValue;
+    CAmount sproutValue, saplingValue, orchardValue, ironwoodValue, lockboxValue;
     if (!ComputePoolDeltas(block, chainparams, pindex->nHeight, "",
-                           sproutValue, saplingValue, orchardValue, lockboxValue)) {
+                           sproutValue, saplingValue, orchardValue, ironwoodValue, lockboxValue)) {
         return false;
     }
     LogPrint("valuepool", "%s: Lockbox value is %d at height %d", __func__, lockboxValue, pindex->nHeight);
@@ -5719,6 +5798,7 @@ bool SetChainPoolValues(
     pindex->nSproutValue = sproutValue;
     pindex->nSaplingValue = saplingValue;
     pindex->nOrchardValue = orchardValue;
+    pindex->nIronwoodValue = ironwoodValue;
     pindex->nLockboxValue = lockboxValue;
     pindex->nChainLockboxValue = std::nullopt;
 
@@ -6846,6 +6926,7 @@ bool static LoadBlockIndexDB(const CChainParams& chainparams)
                     pindex->nChainSproutValue = std::nullopt;
                     pindex->nChainSaplingValue = std::nullopt;
                     pindex->nChainOrchardValue = std::nullopt;
+                    pindex->nChainIronwoodValue = std::nullopt;
                     pindex->nChainLockboxValue = std::nullopt;
                     mapBlocksUnlinked.insert(std::make_pair(pindex->pprev, pindex));
                 }
@@ -6895,6 +6976,7 @@ bool static LoadBlockIndexDB(const CChainParams& chainparams)
                 pindex->nChainSproutValue = 0;
                 pindex->nChainSaplingValue = 0;
                 pindex->nChainOrchardValue = 0;
+                pindex->nChainIronwoodValue = 0;
             }
         }
         // Construct in-memory chain of branch IDs.

@@ -753,6 +753,15 @@ public:
         return ironwoodBundle;
     }
 
+    /**
+     * Returns true if this transaction uses the v6 (ZIP 229) format.
+     */
+    bool IsZip248V6() const {
+        return fOverwintered &&
+            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
+            nVersion == ZIP248_TX_VERSION;
+    }
+
     /*
      * Context for the two methods below:
      * As at most one of vpub_new and vpub_old is non-zero in every JoinSplit,
