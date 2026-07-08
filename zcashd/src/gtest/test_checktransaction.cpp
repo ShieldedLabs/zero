@@ -1709,3 +1709,37 @@ TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
 
     RegtestDeactivateNU6point3();
 }
+
+// An Ironwood bundle's proof, spend-auth signatures, and binding signature validate
+// as a batch under the PostNu6_3 verifying key; the same bundle queued under a
+// different sighash must fail signature validation.
+TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+
+    uint256 orchardAnchor;
+    uint256 sighash = uint256S("aa");
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, orchardAnchor);
+    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    auto bundle = builder.Build().value().ProveAndSign({}, sighash).value();
+
+    {
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(bundle.QueueAuthValidation(*batch, sighash, orchard::BundleFormat::V6Ironwood));
+        EXPECT_TRUE(batch->validate());
+    }
+
+    {
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(bundle.QueueAuthValidation(*batch, uint256S("bb"), orchard::BundleFormat::V6Ironwood));
+        EXPECT_FALSE(batch->validate());
+    }
+
+    RegtestDeactivateNU6point3();
+}
