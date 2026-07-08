@@ -25,6 +25,7 @@ static const int CHAIN_HISTORY_ROOT_VERSION = 2010200;
 static const int NU5_DATA_VERSION = 4050000;
 static const int TRANSPARENT_VALUE_VERSION = 5040026;
 static const int NU6_DATA_VERSION = 5100025;
+static const int NU6_3_DATA_VERSION = 6200050;
 
 /**
  * Maximum amount of time that a block timestamp is allowed to be ahead of the
@@ -341,6 +342,14 @@ public:
     //!   once a block has been connected to the main chain, and will be null otherwise.
     uint256 hashFinalOrchardRoot;
 
+    //! Root of the Ironwood commitment tree as of the end of this block.
+    //!
+    //! - For blocks prior to (not including) the NU6.3 activation block, this is always
+    //!   null.
+    //! - For blocks including and after the NU6.3 activation block, this is only set
+    //!   once a block has been connected to the main chain, and will be null otherwise.
+    uint256 hashFinalIronwoodRoot;
+
     //! Root of the ZIP 221 history tree as of the end of the previous block.
     //!
     //! - For blocks prior to and including the Heartwood activation block, this is
@@ -388,6 +397,7 @@ public:
         hashFinalSproutRoot = uint256();
         hashFinalSaplingRoot = uint256();
         hashFinalOrchardRoot = uint256();
+        hashFinalIronwoodRoot = uint256();
         hashChainHistoryRoot = uint256();
         nSequenceId = 0;
 
@@ -466,6 +476,7 @@ public:
         hashFinalSaplingRoot = uint256();
         hashAuthDataRoot = uint256();
         hashFinalOrchardRoot = uint256();
+        hashFinalIronwoodRoot = uint256();
         hashChainHistoryRoot = uint256();
     }
 
@@ -694,6 +705,13 @@ public:
         // was NU6-aware, these are always null / zero.
         if ((s.GetType() & SER_DISK) && (nVersion >= NU6_DATA_VERSION)) {
             READWRITE(nLockboxValue);
+        }
+
+        // Only read/write NU6.3 data if the client version used to create this
+        // index was storing them. For block indices written before the client
+        // was NU6.3-aware, these are always null / zero.
+        if ((s.GetType() & SER_DISK) && (nVersion >= NU6_3_DATA_VERSION)) {
+            READWRITE(hashFinalIronwoodRoot);
         }
 
         // If you have just added new serialized fields above, remember to add

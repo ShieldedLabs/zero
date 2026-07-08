@@ -32,19 +32,23 @@ class CCoinsViewTest : public CCoinsView
     uint256 hashBestSproutAnchor_;
     uint256 hashBestSaplingAnchor_;
     uint256 hashBestOrchardAnchor_;
+    uint256 hashBestIronwoodAnchor_;
     std::map<uint256, CCoins> map_;
     std::map<uint256, SproutMerkleTree> mapSproutAnchors_;
     std::map<uint256, SaplingMerkleTree> mapSaplingAnchors_;
     std::map<uint256, OrchardMerkleFrontier> mapOrchardAnchors_;
+    std::map<uint256, OrchardMerkleFrontier> mapIronwoodAnchors_;
     std::map<uint256, bool> mapSproutNullifiers_;
     std::map<uint256, bool> mapSaplingNullifiers_;
     std::map<uint256, bool> mapOrchardNullifiers_;
+    std::map<uint256, bool> mapIronwoodNullifiers_;
 
 public:
     CCoinsViewTest() {
         hashBestSproutAnchor_ = SproutMerkleTree::empty_root();
         hashBestSaplingAnchor_ = SaplingMerkleTree::empty_root();
         hashBestOrchardAnchor_ = OrchardMerkleFrontier::empty_root();
+        hashBestIronwoodAnchor_ = OrchardMerkleFrontier::empty_root();
     }
     ~CCoinsViewTest() {}
 
@@ -96,6 +100,22 @@ public:
         }
     }
 
+    bool GetIronwoodAnchorAt(const uint256& rt, OrchardMerkleFrontier &tree) const {
+        if (rt == OrchardMerkleFrontier::empty_root()) {
+            OrchardMerkleFrontier new_tree;
+            tree = new_tree;
+            return true;
+        }
+
+        std::map<uint256, OrchardMerkleFrontier>::const_iterator it = mapIronwoodAnchors_.find(rt);
+        if (it == mapIronwoodAnchors_.end()) {
+            return false;
+        } else {
+            tree = it->second;
+            return true;
+        }
+    }
+
     bool GetNullifier(const uint256 &nf, ShieldedType type) const
     {
         const std::map<uint256, bool>* mapToUse;
@@ -108,6 +128,9 @@ public:
                 break;
             case ORCHARD:
                 mapToUse = &mapOrchardNullifiers_;
+                break;
+            case IRONWOOD:
+                mapToUse = &mapIronwoodNullifiers_;
                 break;
             default:
                 throw std::runtime_error("Unknown shielded type");
@@ -132,6 +155,9 @@ public:
                 break;
             case ORCHARD:
                 return hashBestOrchardAnchor_;
+                break;
+            case IRONWOOD:
+                return hashBestIronwoodAnchor_;
                 break;
             default:
                 throw std::runtime_error("Unknown shielded type");
@@ -213,12 +239,15 @@ public:
                     const uint256& hashSproutAnchor,
                     const uint256& hashSaplingAnchor,
                     const uint256& hashOrchardAnchor,
+                    const uint256& hashIronwoodAnchor,
                     CAnchorsSproutMap& mapSproutAnchors,
                     CAnchorsSaplingMap& mapSaplingAnchors,
                     CAnchorsOrchardMap& mapOrchardAnchors,
+                    CAnchorsIronwoodMap& mapIronwoodAnchors,
                     CNullifiersMap& mapSproutNullifiers,
                     CNullifiersMap& mapSaplingNullifiers,
                     CNullifiersMap& mapOrchardNullifiers,
+                    CNullifiersMap& mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
                     SubtreeCache &cacheOrchardSubtrees)
@@ -238,10 +267,12 @@ public:
         BatchWriteAnchors<SproutMerkleTree, CAnchorsSproutMap, CAnchorsSproutCacheEntry>(mapSproutAnchors, mapSproutAnchors_);
         BatchWriteAnchors<SaplingMerkleTree, CAnchorsSaplingMap, CAnchorsSaplingCacheEntry>(mapSaplingAnchors, mapSaplingAnchors_);
         BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsOrchardMap, CAnchorsOrchardCacheEntry>(mapOrchardAnchors, mapOrchardAnchors_);
+        BatchWriteAnchors<OrchardMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, mapIronwoodAnchors_);
 
         BatchWriteNullifiers(mapSproutNullifiers, mapSproutNullifiers_);
         BatchWriteNullifiers(mapSaplingNullifiers, mapSaplingNullifiers_);
         BatchWriteNullifiers(mapOrchardNullifiers, mapOrchardNullifiers_);
+        BatchWriteNullifiers(mapIronwoodNullifiers, mapIronwoodNullifiers_);
 
         if (!hashBlock.IsNull())
             hashBestBlock_ = hashBlock;
@@ -251,6 +282,8 @@ public:
             hashBestSaplingAnchor_ = hashSaplingAnchor;
         if (!hashOrchardAnchor.IsNull())
             hashBestOrchardAnchor_ = hashOrchardAnchor;
+        if (!hashIronwoodAnchor.IsNull())
+            hashBestIronwoodAnchor_ = hashIronwoodAnchor;
         return true;
     }
 
@@ -270,9 +303,11 @@ public:
                      memusage::DynamicUsage(cacheSproutAnchors) +
                      memusage::DynamicUsage(cacheSaplingAnchors) +
                      memusage::DynamicUsage(cacheOrchardAnchors) +
+                     memusage::DynamicUsage(cacheIronwoodAnchors) +
                      memusage::DynamicUsage(cacheSproutNullifiers) +
                      memusage::DynamicUsage(cacheSaplingNullifiers) +
                      memusage::DynamicUsage(cacheOrchardNullifiers) +
+                     memusage::DynamicUsage(cacheIronwoodNullifiers) +
                      memusage::DynamicUsage(historyCacheMap) +
                      memusage::DynamicUsage(cacheSaplingSubtrees) +
                      memusage::DynamicUsage(cacheOrchardSubtrees);
