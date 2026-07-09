@@ -1766,3 +1766,191 @@ TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
 
     RegtestDeactivateNU6point3();
 }
+
+// Helper: build a valid Orchard-format bundle in the given pool whose net value
+// balance is `-outputValue` (an output funded from the transparent pool, i.e.
+// value moving INTO the shielded pool). Built with the historical insecure
+// revision, which imposes no cross-address restriction, so an output to an
+// arbitrary recipient is constructible regardless of pool.
+static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmount outputValue) {
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    uint256 ovk;
+    auto builder = orchard::Builder(
+        true, {pool, orchard::ProtocolVersion::InsecureV1}, uint256());
+    builder.AddOutput(ovk, to, outputValue, std::nullopt);
+    // orchard::Builder pads to two Actions; the second is a zero-value dummy.
+    builder.AddOutput(ovk, to, 0, std::nullopt);
+    return builder.Build().value().ProveAndSign({}, uint256()).value();
+}
+
+// [NU6.3 onward] valueBalanceOrchard MUST be nonnegative (ZIP 258 / audit fix
+// fcd92c1). A non-coinbase transaction whose Orchard bundle moves value into the
+// pool (negative valueBalanceOrchard) is rejected from NU6.3; a zero balance is
+// accepted. Applies to both v5 and v6; tested here on v5.
+TEST(ChecktransactionTests, OrchardNegativeValueBalanceRejectedFromNU6_3) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // Reject case: negative valueBalanceOrchard.
+    {
+        auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, CAmount(1000));
+        ASSERT_LT(bundle.GetValueBalance(), 0);
+
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtx.nVersion = ZIP225_TX_VERSION;
+        mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        mtx.vin.resize(1);
+        mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0); // non-null => not a coinbase
+        mtx.orchardBundle = bundle;
+
+        CTransaction tx(mtx);
+        ASSERT_FALSE(tx.IsCoinBase());
+
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-orchard-negative-valuebalance", BodyCorruption::Default, "")).Times(1);
+        ContextualCheckTransaction(tx, state, Params(), 10, true);
+    }
+
+    // Accept case: zero valueBalanceOrchard passes the nonnegativity rule.
+    {
+        auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, CAmount(0));
+        ASSERT_EQ(bundle.GetValueBalance(), 0);
+
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtx.nVersion = ZIP225_TX_VERSION;
+        mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        mtx.vin.resize(1);
+        mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0);
+        mtx.orchardBundle = bundle;
+
+        CTransaction tx(mtx);
+        MockCValidationState state;
+        EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 10, true));
+    }
+
+    RegtestDeactivateNU6point3();
+}
+
+// A coinbase transaction must not have spend-enabled Ironwood actions
+// (CheckTransactionWithoutProofVerification, non-contextual).
+TEST(ChecktransactionTests, IronwoodCoinbaseRejectsSpends) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // A non-coinbase Ironwood builder produces a bundle with spends enabled.
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    auto bundle = builder.Build().value().ProveAndSign({}, uint256()).value();
+    ASSERT_TRUE(bundle.SpendsEnabled());
+
+    // Place it in an otherwise-valid coinbase transaction.
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout.SetNull();
+    mtx.vin[0].scriptSig << 123; // valid coinbase scriptSig length
+    mtx.ironwoodBundle = bundle;
+
+    CTransaction tx(mtx);
+    ASSERT_TRUE(tx.IsCoinBase());
+
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-has-ironwood-spend", BodyCorruption::Default, "")).Times(1);
+    CheckTransactionWithoutProofVerification(tx, state);
+
+    RegtestDeactivateNU6point3();
+}
+
+// A v6 transaction carrying a non-empty Ironwood bundle round-trips through
+// serialization: constructing the CTransaction reparses the bytes via
+// librustzcash (rejecting any non-canonical v6 encoding), and re-serialization
+// is byte-identical. Complements V6EmptyBundlesRoundTrip.
+TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    auto bundle = builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.ironwoodBundle = bundle;
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytes(ss.begin(), ss.end());
+
+    CTransaction tx(deserialize, ss);
+    EXPECT_TRUE(tx.GetIronwoodBundle().IsPresent());
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent());
+    EXPECT_EQ(tx.GetHash(), mtx.GetHash());
+    EXPECT_EQ(tx.GetAuthDigest(), mtx.GetAuthDigest());
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytes2(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytes, bytes2);
+
+    RegtestDeactivateNU6point3();
+}
+
+// CDiskBlockIndex serializes the NU6.3 Ironwood fields (hashFinalIronwoodRoot,
+// nIronwoodValue) only when the write-time client version is >= NU6_3_DATA_VERSION.
+// This checks both directions: the fields round-trip when the gate is open, and
+// are correctly skipped (left at their null/zero defaults) when it is not — the
+// per-version gating the whole *_DATA_VERSION mechanism relies on.
+TEST(ChecktransactionTests, CDiskBlockIndexRoundTripsIronwoodFields) {
+    const uint256 ironwoodRoot = uint256S("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const CAmount ironwoodValue = 123456789;
+
+    CDiskBlockIndex a;
+    a.nStatus = 0; // no HAVE_DATA/UNDO/ACTIVATES_UPGRADE conditional fields
+    a.nVersion = 4;
+    a.hashFinalIronwoodRoot = ironwoodRoot;
+    a.nIronwoodValue = ironwoodValue;
+
+    // Gate open: written at NU6.3-aware version, the fields round-trip.
+    {
+        CDataStream ss(SER_DISK, NU6_3_DATA_VERSION);
+        ss << a;
+        CDiskBlockIndex b;
+        ss >> b;
+        EXPECT_EQ(b.hashFinalIronwoodRoot, ironwoodRoot);
+        EXPECT_EQ(b.nIronwoodValue, ironwoodValue);
+    }
+
+    // Gate closed: written at an NU6-era version (before NU6.3), the Ironwood
+    // fields are not serialized, so on read they remain at their defaults.
+    {
+        CDataStream ss(SER_DISK, NU6_DATA_VERSION);
+        ss << a;
+        CDiskBlockIndex b;
+        ss >> b; // must not overrun / throw
+        EXPECT_TRUE(b.hashFinalIronwoodRoot.IsNull());
+        EXPECT_EQ(b.nIronwoodValue, 0);
+    }
+}
