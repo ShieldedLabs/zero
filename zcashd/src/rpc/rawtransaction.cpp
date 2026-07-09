@@ -178,10 +178,13 @@ UniValue TxActionsToJSON(const rust::Vec<orchard_bundle::Action>& actions)
     return arr;
 }
 
-// See https://zips.z.cash/zip-0225
-UniValue TxOrchardBundleToJSON(const CTransaction& tx, UniValue& entry)
+// Serializes an Orchard-format bundle (the Orchard pool per ZIP 225, or the
+// v6 Ironwood pool per ZIP 229). The two share a wire/JSON shape; only the
+// Ironwood pool can carry the cross-address flag (ZIP 229 flags bit 2), so it
+// is surfaced only when `isIronwood`.
+UniValue OrchardStyleBundleToJSON(const OrchardBundle& bundleWrapper, bool isIronwood)
 {
-    const auto& bundle = tx.GetOrchardBundle().GetDetails();
+    const auto& bundle = bundleWrapper.GetDetails();
 
     UniValue obj(UniValue::VOBJ);
     auto actions = bundle->actions();
@@ -193,10 +196,11 @@ UniValue TxOrchardBundleToJSON(const CTransaction& tx, UniValue& entry)
     if (!actions.empty()) {
         {
             UniValue obj_flags{UniValue::VOBJ};
-            auto enableSpends = bundle->enable_spends();
-            obj_flags.pushKV("enableSpends", enableSpends);
-            auto enableOutputs = bundle->enable_outputs();
-            obj_flags.pushKV("enableOutputs", enableOutputs);
+            obj_flags.pushKV("enableSpends", bundle->enable_spends());
+            obj_flags.pushKV("enableOutputs", bundle->enable_outputs());
+            if (isIronwood) {
+                obj_flags.pushKV("enableCrossAddress", bundle->enable_cross_address());
+            }
             obj.pushKV("flags", obj_flags);
         }
         auto anchor = bundle->anchor();
@@ -301,8 +305,10 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
             }
         }
         if (tx.nVersion >= ZIP225_TX_VERSION) {
-            UniValue orchard = TxOrchardBundleToJSON(tx, entry);
-            entry.pushKV("orchard", orchard);
+            entry.pushKV("orchard", OrchardStyleBundleToJSON(tx.GetOrchardBundle(), false));
+        }
+        if (tx.nVersion >= ZIP229_TX_VERSION) {
+            entry.pushKV("ironwood", OrchardStyleBundleToJSON(tx.GetIronwoodBundle(), true));
         }
     }
 
@@ -487,6 +493,19 @@ UniValue getrawtransaction(const UniValue& params, bool fHelp)
             "     \"anchor\" : \"hex\",          (string, optional) A root of the Orchard note commitment tree at some block height in the past\n"
             "     \"proof\" : \"hex\",           (string, optional) Encoding of aggregated zk-SNARK proofs for Orchard Actions\n"
             "     \"bindingSig\" : \"hex\"       (string, optional) An Orchard binding signature on the SIGHASH transaction hash\n"
+            "  },\n"
+            "  \"ironwood\" : {                  (JSON object with Ironwood-specific information; only present for v6 (ZIP 229) transactions)\n"
+            "     \"actions\" : [ ... ],         (JSON array) As for \"orchard\" above, for the Ironwood pool\n"
+            "     \"valueBalance\" : x.xxx,      (numeric, optional) The net value of Ironwood Actions in " + CURRENCY_UNIT + "\n"
+            "     \"valueBalanceZat\" : n,       (numeric, optional) The net value of Ironwood Actions in " + MINOR_CURRENCY_UNIT + "\n"
+            "     \"flags\" : { (optional)\n"
+            "       \"enableSpends\"       : true|false (bool)\n"
+            "       \"enableOutputs\"      : true|false (bool)\n"
+            "       \"enableCrossAddress\" : true|false (bool) Whether cross-address transfers are enabled (Ironwood only)\n"
+            "     },\n"
+            "     \"anchor\" : \"hex\",          (string, optional) A root of the Ironwood note commitment tree at some block height in the past\n"
+            "     \"proof\" : \"hex\",           (string, optional) Encoding of aggregated zk-SNARK proofs for Ironwood Actions\n"
+            "     \"bindingSig\" : \"hex\"       (string, optional) An Ironwood binding signature on the SIGHASH transaction hash\n"
             "  },\n"
             "  \"joinSplitPubKey\" : \"hex\",      (string, optional) An encoding of a JoinSplitSig public validating key\n"
             "  \"joinSplitSig\" : \"hex\",         (string, optional) The Sprout binding signature\n"

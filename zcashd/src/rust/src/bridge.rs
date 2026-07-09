@@ -307,6 +307,7 @@ pub(crate) mod ffi {
         fn num_actions(self: &Bundle) -> usize;
         fn enable_spends(self: &Bundle) -> bool;
         fn enable_outputs(self: &Bundle) -> bool;
+        fn enable_cross_address(self: &Bundle) -> bool;
         fn value_balance_zat(self: &Bundle) -> i64;
         fn anchor(self: &Bundle) -> [u8; 32];
         fn proof(self: &Bundle) -> Vec<u8>;
