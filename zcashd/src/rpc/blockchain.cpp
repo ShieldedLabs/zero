@@ -273,8 +273,9 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool tx
     valuePools.push_back(ValuePoolDesc("sprout", blockindex->nChainSproutValue, blockindex->nSproutValue));
     valuePools.push_back(ValuePoolDesc("sapling", blockindex->nChainSaplingValue, blockindex->nSaplingValue));
     valuePools.push_back(ValuePoolDesc("orchard", blockindex->nChainOrchardValue, blockindex->nOrchardValue));
-    valuePools.push_back(ValuePoolDesc("ironwood", blockindex->nChainIronwoodValue, blockindex->nIronwoodValue));
     valuePools.push_back(ValuePoolDesc("lockbox", blockindex->nChainLockboxValue, blockindex->nLockboxValue));
+    // Ironwood is appended last, matching Zebra's valuePools ordering.
+    valuePools.push_back(ValuePoolDesc("ironwood", blockindex->nChainIronwoodValue, blockindex->nIronwoodValue));
     result.pushKV("valuePools", valuePools);
 
     {
@@ -1167,8 +1168,9 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     valuePools.push_back(ValuePoolDesc("sprout", tip->nChainSproutValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("sapling", tip->nChainSaplingValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("orchard", tip->nChainOrchardValue, std::nullopt));
-    valuePools.push_back(ValuePoolDesc("ironwood", tip->nChainIronwoodValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("lockbox", tip->nChainLockboxValue, std::nullopt));
+    // Ironwood is appended last, matching Zebra's valuePools ordering.
+    valuePools.push_back(ValuePoolDesc("ironwood", tip->nChainIronwoodValue, std::nullopt));
     obj.pushKV("valuePools",            valuePools);
 
     const CChainParams& chainparams = Params();
