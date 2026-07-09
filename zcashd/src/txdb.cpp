@@ -378,9 +378,11 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
                               CNullifiersMap &mapIronwoodNullifiers,
                               CHistoryCacheMap &historyCacheMap,
                               SubtreeCache &cacheSaplingSubtrees,
-                              SubtreeCache &cacheOrchardSubtrees) {
+                              SubtreeCache &cacheOrchardSubtrees,
+                              SubtreeCache &cacheIronwoodSubtrees) {
     auto latestSaplingSubtree = GetLatestSubtree(SAPLING);
     auto latestOrchardSubtree = GetLatestSubtree(ORCHARD);
+    auto latestIronwoodSubtree = GetLatestSubtree(IRONWOOD);
 
     CDBBatch batch(db);
     size_t count = 0;
@@ -411,9 +413,11 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
 
     assert(cacheSaplingSubtrees.initialized);
     assert(cacheOrchardSubtrees.initialized);
+    assert(cacheIronwoodSubtrees.initialized);
 
     WriteSubtrees(batch, SAPLING, latestSaplingSubtree, cacheSaplingSubtrees.parentLatestSubtree, cacheSaplingSubtrees.newSubtrees);
     WriteSubtrees(batch, ORCHARD, latestOrchardSubtree, cacheOrchardSubtrees.parentLatestSubtree, cacheOrchardSubtrees.newSubtrees);
+    WriteSubtrees(batch, IRONWOOD, latestIronwoodSubtree, cacheIronwoodSubtrees.parentLatestSubtree, cacheIronwoodSubtrees.newSubtrees);
 
     if (!hashBlock.IsNull())
         batch.Write(DB_BEST_BLOCK, hashBlock);

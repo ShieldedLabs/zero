@@ -458,7 +458,8 @@ public:
                             CNullifiersMap &mapIronwoodNullifiers,
                             CHistoryCacheMap &historyCacheMap,
                             SubtreeCache &cacheSaplingSubtrees,
-                            SubtreeCache &cacheOrchardSubtrees) = 0;
+                            SubtreeCache &cacheOrchardSubtrees,
+                            SubtreeCache &cacheIronwoodSubtrees) = 0;
 
     //! Calculate statistics about the unspent transaction output set
     virtual bool GetStats(CCoinsStats &stats) const = 0;
@@ -558,7 +559,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees) { return false; }
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees) { return false; }
 
     bool GetStats(CCoinsStats &stats) const { return false; }
 };
@@ -606,7 +608,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees);
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees);
     bool GetStats(CCoinsStats &stats) const;
 };
 
@@ -672,12 +675,11 @@ protected:
     mutable CNullifiersMap cacheOrchardNullifiers;
     mutable CNullifiersMap cacheIronwoodNullifiers;
     mutable CHistoryCacheMap historyCacheMap;
-    // Note: there is deliberately no Ironwood subtree cache. Subtree data is
-    // only produced for the lightwalletd experimental feature, which does not
-    // yet know about the Ironwood pool; it can be added later without a
-    // consensus impact.
+    // Subtree data is only produced for the lightwalletd experimental feature;
+    // it has no consensus impact.
     mutable SubtreeCache cacheSaplingSubtrees = SubtreeCache(SAPLING);
     mutable SubtreeCache cacheOrchardSubtrees = SubtreeCache(ORCHARD);
+    mutable SubtreeCache cacheIronwoodSubtrees = SubtreeCache(IRONWOOD);
 
     /* Cached dynamic memory usage for the inner CCoins objects. */
     mutable size_t cachedCoinsUsage;
@@ -720,7 +722,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees);
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees);
 
     // Adds the tree to mapSproutAnchors, mapSaplingAnchors, or mapOrchardAnchors
     // based on the type of tree and sets the current commitment root to this root.

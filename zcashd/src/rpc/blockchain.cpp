@@ -1518,12 +1518,12 @@ UniValue z_getsubtreesbyindex(const UniValue& params, bool fHelp)
             "in the `subtrees` field is the Merkle root of a subtree containing 2^"+strHeight+" leaves.\n"
             + disabledMsg +
             "\nArguments:\n"
-            "1. \"pool\"        (string, required) The pool from which subtrees should be returned. Either \"sapling\" or \"orchard\".\n"
+            "1. \"pool\"        (string, required) The pool from which subtrees should be returned. One of \"sapling\", \"orchard\", or \"ironwood\".\n"
             "2. start_index   (numeric, required) The index of the first 2^"+strHeight+"-leaf subtree to return.\n"
             "2. limit         (numeric, optional) The maximum number of subtree values to return.\n"
             "\nResult:\n"
             "{\n"
-            "  \"pool\" : \"sapling|orchard\", (string) The shielded pool to which the subtrees belong\n"
+            "  \"pool\" : \"sapling|orchard|ironwood\", (string) The shielded pool to which the subtrees belong\n"
             "  \"start_index\": n,      (numeric) The index of the first subtree\n"
             "  \"subtrees\": [          (array) A sequential list of complete subtrees\n"
             "    {\n"
@@ -1549,8 +1549,10 @@ UniValue z_getsubtreesbyindex(const UniValue& params, bool fHelp)
         pool = SAPLING;
     } else if (strPool == "orchard") {
         pool = ORCHARD;
+    } else if (strPool == "ironwood") {
+        pool = IRONWOOD;
     } else {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Requested pool must be \"sapling\" or \"orchard\"");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Requested pool must be \"sapling\", \"orchard\", or \"ironwood\"");
     }
 
     libzcash::SubtreeIndex startIndex = params[1].get_int();

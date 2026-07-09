@@ -3352,6 +3352,7 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
 
         maybeDisconnectSubtree(SAPLING);
         maybeDisconnectSubtree(ORCHARD);
+        maybeDisconnectSubtree(IRONWOOD);
     }
 
     // set the old best Sprout anchor back
@@ -3795,6 +3796,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // We do not store subtrees unless lightwalletd is enabled.
     bool fUpdateSaplingSubtrees = fExperimentalLightWalletd && (view.CurrentSubtreeIndex(SAPLING) == sapling_tree.current_subtree_index());
     bool fUpdateOrchardSubtrees = fExperimentalLightWalletd && (view.CurrentSubtreeIndex(ORCHARD) == orchard_tree.current_subtree_index());
+    bool fUpdateIronwoodSubtrees = fExperimentalLightWalletd && (view.CurrentSubtreeIndex(IRONWOOD) == ironwood_tree.current_subtree_index());
 
     // Grab the consensus branch ID for this block.
     auto consensusBranchId = CurrentEpochBranchId(pindex->nHeight, consensusParams);
@@ -4065,9 +4067,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
         if (tx.GetIronwoodBundle().IsPresent()) {
             try {
-                // Ironwood subtree tracking for light clients is deferred; only
-                // the commitment tree itself is maintained here.
-                ironwood_tree.AppendBundle(tx.GetIronwoodBundle());
+                auto appendResult = ironwood_tree.AppendBundle(tx.GetIronwoodBundle());
+                if (fUpdateIronwoodSubtrees && appendResult.has_subtree_boundary) {
+                    libzcash::SubtreeData subtree(appendResult.completed_subtree_root, pindex->nHeight);
+
+                    view.PushSubtree(IRONWOOD, subtree);
+                    auto latest = view.GetLatestSubtree(IRONWOOD);
+
+                    // The latest subtree, according to the view, should now be one
+                    // less than the "current" subtree index according to the tree
+                    // itself, after the append takes place earlier in this loop.
+                    assert(latest.has_value());
+                    assert((latest->index + 1) == ironwood_tree.current_subtree_index());
+                }
             } catch (const rust::Error& e) {
                 return state.DoS(100,
                     error("%s: block would overfill the Ironwood commitment tree.", __func__),

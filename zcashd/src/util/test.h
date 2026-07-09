@@ -80,7 +80,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees) {
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees) {
         return false;
     }
     bool GetStats(CCoinsStats &stats) const { return false; }

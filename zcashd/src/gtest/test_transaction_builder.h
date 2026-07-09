@@ -90,7 +90,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees) {
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees) {
         return false;
     }
 
