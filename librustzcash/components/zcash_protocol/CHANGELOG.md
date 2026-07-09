@@ -10,6 +10,25 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_protocol::consensus::OrchardProtocolRevision`
+- `zcash_protocol::consensus::BranchId::orchard_protocol_revision`
+- `zcash_protocol::consensus::BranchId::network_upgrade`
+- `zcash_protocol::consensus::NetworkUpgrade::branch_id` (previously private)
+
+### Changed
+- MSRV is now 1.88
+
+## [0.10.0-pre.0] - 2026-06-30
+
+This release sets the NU6.3 activation height to 4134000 on testnet.
+Mainnet activation will be set in the 0.10.0 final release.
+
+### Added
+- `zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID}`
+- `zcash_protocol::consensus::{NetworkUpgrade::Nu6_3, BranchId::Nu6_3}`
+- `zcash_protocol::local_consensus::LocalNetwork::nu6_3`.
+
 ### Removed
 - All support for Transparent Zcash Extensions (TZEs), which was only ever
   available behind the `--cfg zcash_unstable="zfuture"` development flag and has

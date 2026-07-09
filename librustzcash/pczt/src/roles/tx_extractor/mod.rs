@@ -15,6 +15,7 @@ use crate::Pczt;
 
 mod orchard;
 pub use self::orchard::OrchardError;
+pub type IronwoodError = OrchardError;
 
 mod sapling;
 pub use self::sapling::SaplingError;
@@ -89,6 +90,10 @@ impl<'a> TransactionExtractor<'a> {
                 o.extract()
                     .map_err(|e| Error::Orchard(OrchardError::Extract(e)))
             },
+            |i| {
+                i.extract()
+                    .map_err(|e| Error::Ironwood(IronwoodError::Extract(e)))
+            },
         )?;
 
         // The commitment being signed is shared across all shielded inputs.
@@ -114,7 +119,7 @@ impl<'a> TransactionExtractor<'a> {
             },
         )?;
 
-        let tx = tx_data.freeze().expect("v5 tx can't fail here");
+        let tx = tx_data.freeze().expect("txid construction can't fail here");
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {
@@ -126,6 +131,10 @@ impl<'a> TransactionExtractor<'a> {
         if let Some(bundle) = tx.orchard_bundle() {
             orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
                 .map_err(Error::Orchard)?;
+        }
+        if let Some(bundle) = tx.ironwood_bundle() {
+            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Ironwood)?;
         }
 
         Ok(tx)
@@ -144,6 +153,7 @@ impl Authorization for Unbound {
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
+    Ironwood(IronwoodError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,

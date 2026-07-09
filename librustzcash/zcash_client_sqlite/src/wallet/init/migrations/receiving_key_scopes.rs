@@ -362,6 +362,8 @@ mod tests {
             BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: None,
+                ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let mut transparent_signing_set = TransparentSigningSet::new();
@@ -669,6 +671,8 @@ mod tests {
             Some(&BlockMetadata::from_parts(
                 height - 1,
                 prev_hash,
+                Some(0),
+                #[cfg(feature = "orchard")]
                 Some(0),
                 #[cfg(feature = "orchard")]
                 Some(0),

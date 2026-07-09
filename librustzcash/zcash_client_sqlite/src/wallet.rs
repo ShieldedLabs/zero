@@ -110,11 +110,11 @@ use zcash_keys::{
 };
 use zcash_primitives::{
     block::BlockHash,
-    merkle_tree::read_commitment_tree,
+    merkle_tree::{HashSer, read_commitment_tree},
     transaction::{Transaction, TransactionData, builder::DEFAULT_TX_EXPIRY_DELTA, fees::zip317},
 };
 use zcash_protocol::{
-    PoolType, ShieldedProtocol, TxId,
+    PoolType, ShieldedPool, TxId,
     consensus::{self, BlockHeight, BranchId, NetworkUpgrade, Parameters, TxIndex},
     memo::{Memo, MemoBytes},
     value::{ZatBalance, Zatoshis},
@@ -1242,10 +1242,10 @@ fn find_account_for_shielded_address<P: consensus::Parameters>(
                 "Not a valid Zcash recipient address".to_owned(),
             ))
         })?;
-        if let Address::Unified(stored_ua) = stored {
-            if address_receiver_matches_ua(address, &stored_ua, params) {
-                return Ok(Some(AccountUuid::from_uuid(row_uuid)));
-            }
+        if let Address::Unified(stored_ua) = stored
+            && address_receiver_matches_ua(address, &stored_ua, params)
+        {
+            return Ok(Some(AccountUuid::from_uuid(row_uuid)));
         }
     }
 
@@ -1922,7 +1922,7 @@ pub(crate) struct SubtreeProgressEstimator;
 fn estimate_tree_size<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
-    shielded_protocol: ShieldedProtocol,
+    shielded_protocol: ShieldedPool,
     pool_activation_height: BlockHeight,
     chain_tip_height: BlockHeight,
 ) -> Result<Option<u64>, SqliteClientError> {
@@ -1973,11 +1973,15 @@ fn estimate_tree_size<P: consensus::Parameters>(
     // Get the tree size at the last scanned height, if known.
     let last_scanned = block_max_scanned(conn, params)?.and_then(|last_scanned| {
         match shielded_protocol {
-            ShieldedProtocol::Sapling => last_scanned.sapling_tree_size(),
+            ShieldedPool::Sapling => last_scanned.sapling_tree_size(),
             #[cfg(feature = "orchard")]
-            ShieldedProtocol::Orchard => last_scanned.orchard_tree_size(),
+            ShieldedPool::Orchard => last_scanned.orchard_tree_size(),
             #[cfg(not(feature = "orchard"))]
-            ShieldedProtocol::Orchard => None,
+            ShieldedPool::Orchard => None,
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => last_scanned.ironwood_tree_size(),
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Ironwood => None,
         }
         .map(|tree_size| (last_scanned.block_height(), u64::from(tree_size)))
     });
@@ -2097,7 +2101,7 @@ fn estimate_tree_size<P: consensus::Parameters>(
 fn subtree_scan_progress<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
-    shielded_protocol: ShieldedProtocol,
+    shielded_protocol: ShieldedPool,
     pool_activation_height: BlockHeight,
     min_birthday_height: BlockHeight,
     recover_until_height: Option<BlockHeight>,
@@ -2364,7 +2368,7 @@ impl ProgressEstimator for SubtreeProgressEstimator {
         subtree_scan_progress(
             conn,
             params,
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             sapling_activation_height,
             birthday_height,
             recover_until_height,
@@ -2390,13 +2394,32 @@ impl ProgressEstimator for SubtreeProgressEstimator {
         subtree_scan_progress(
             conn,
             params,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             nu5_activation_height,
             birthday_height,
             recover_until_height,
             chain_tip_height,
         )
     }
+}
+
+fn next_subtree_index<H: HashSer, const SHARD_HEIGHT: u8>(
+    tx: &rusqlite::Transaction,
+    table_prefix: &'static str,
+) -> Result<u64, SqliteClientError> {
+    let shard_store = SqliteShardStore::<_, H, SHARD_HEIGHT>::from_connection(tx, table_prefix)?;
+
+    // The last shard will be incomplete, and we want the next range to overlap with
+    // the last complete shard, so return the index of the second-to-last shard root.
+    let roots = shard_store
+        .get_shard_roots()
+        .map_err(ShardTreeError::Storage)?;
+    Ok(roots
+        .iter()
+        .rev()
+        .nth(1)
+        .map(|addr| addr.index())
+        .unwrap_or(0))
 }
 
 /// Returns the spendable balance for the account at the specified height.
@@ -2492,7 +2515,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         anchor_height: Option<BlockHeight>,
         confirmations_policy: ConfirmationsPolicy,
         account_balances: &mut HashMap<AccountUuid, AccountBalance>,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
         with_pool_balance: F,
     ) -> Result<(), SqliteClientError>
     where
@@ -2676,7 +2699,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             anchor_height,
             confirmations_policy,
             &mut account_balances,
-            ShieldedProtocol::Orchard,
+            ShieldedPool::Orchard,
             |balances,
              spendable_value,
              change_pending_confirmation,
@@ -2694,6 +2717,33 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         drop(orchard_trace);
     }
 
+    #[cfg(feature = "orchard")]
+    {
+        let ironwood_trace = tracing::info_span!("ironwood_balances").entered();
+        with_pool_balances(
+            tx,
+            target_height,
+            anchor_height,
+            confirmations_policy,
+            &mut account_balances,
+            ShieldedPool::Ironwood,
+            |balances,
+             spendable_value,
+             change_pending_confirmation,
+             value_pending_spendability,
+             uneconomic_value| {
+                balances.with_ironwood_balance_mut::<_, SqliteClientError>(|bal| {
+                    bal.add_spendable_value(spendable_value)?;
+                    bal.add_pending_change_value(change_pending_confirmation)?;
+                    bal.add_pending_spendable_value(value_pending_spendability)?;
+                    bal.add_uneconomic_value(uneconomic_value)?;
+                    Ok(())
+                })
+            },
+        )?;
+        drop(ironwood_trace);
+    }
+
     let sapling_trace = tracing::info_span!("sapling_balances").entered();
     with_pool_balances(
         tx,
@@ -2701,7 +2751,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         anchor_height,
         confirmations_policy,
         &mut account_balances,
-        ShieldedProtocol::Sapling,
+        ShieldedPool::Sapling,
         |balances,
          spendable_value,
          change_pending_confirmation,
@@ -2726,47 +2776,25 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         &mut account_balances,
     )?;
 
-    // The approach used here for Sapling and Orchard subtree indexing was a quick hack
+    // The approach used here for shielded subtree indexing was a quick hack
     // that has not yet been replaced. TODO: Make less hacky.
     // https://github.com/zcash/librustzcash/issues/1249
-    let next_sapling_subtree_index = {
-        let shard_store =
-            SqliteShardStore::<_, ::sapling::Node, SAPLING_SHARD_HEIGHT>::from_connection(
-                tx,
-                crate::SAPLING_TABLES_PREFIX,
-            )?;
-
-        // The last shard will be incomplete, and we want the next range to overlap with
-        // the last complete shard, so return the index of the second-to-last shard root.
-        shard_store
-            .get_shard_roots()
-            .map_err(ShardTreeError::Storage)?
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|addr| addr.index())
-            .unwrap_or(0)
-    };
+    let next_sapling_subtree_index = next_subtree_index::<::sapling::Node, SAPLING_SHARD_HEIGHT>(
+        tx,
+        crate::SAPLING_TABLES_PREFIX,
+    )?;
 
     #[cfg(feature = "orchard")]
-    let next_orchard_subtree_index = {
-        let shard_store = SqliteShardStore::<
-            _,
-            ::orchard::tree::MerkleHashOrchard,
-            ORCHARD_SHARD_HEIGHT,
-        >::from_connection(tx, crate::ORCHARD_TABLES_PREFIX)?;
+    let next_orchard_subtree_index = next_subtree_index::<
+        ::orchard::tree::MerkleHashOrchard,
+        ORCHARD_SHARD_HEIGHT,
+    >(tx, crate::ORCHARD_TABLES_PREFIX)?;
 
-        // The last shard will be incomplete, and we want the next range to overlap with
-        // the last complete shard, so return the index of the second-to-last shard root.
-        shard_store
-            .get_shard_roots()
-            .map_err(ShardTreeError::Storage)?
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|addr| addr.index())
-            .unwrap_or(0)
-    };
+    #[cfg(feature = "orchard")]
+    let next_ironwood_subtree_index = next_subtree_index::<
+        ::orchard::tree::MerkleHashOrchard,
+        ORCHARD_SHARD_HEIGHT,
+    >(tx, crate::IRONWOOD_TABLES_PREFIX)?;
 
     let summary = WalletSummary::new(
         account_balances,
@@ -2776,6 +2804,8 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         next_sapling_subtree_index,
         #[cfg(feature = "orchard")]
         next_orchard_subtree_index,
+        #[cfg(feature = "orchard")]
+        next_ironwood_subtree_index,
     );
 
     Ok(Some(summary))
@@ -3046,7 +3076,7 @@ pub(crate) fn get_anchor_height(
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     let sapling_anchor_height = get_max_checkpointed_height(
         conn,
-        ShieldedProtocol::Sapling,
+        ShieldedPool::Sapling,
         target_height,
         min_confirmations,
     )?;
@@ -3054,7 +3084,7 @@ pub(crate) fn get_anchor_height(
     #[cfg(feature = "orchard")]
     let orchard_anchor_height = get_max_checkpointed_height(
         conn,
-        ShieldedProtocol::Orchard,
+        ShieldedPool::Orchard,
         target_height,
         min_confirmations,
     )?;
@@ -3083,12 +3113,30 @@ pub(crate) fn get_target_and_anchor_heights(
     }
 }
 
+/// A row of block metadata as selected by [`block_metadata`] and [`block_max_scanned`]: the block
+/// height and hash, the Sapling commitment tree size and legacy Sapling tree, and the Orchard and
+/// Ironwood commitment tree sizes.
+type BlockMetadataRow = (
+    BlockHeight,
+    Vec<u8>,
+    Option<u32>,
+    Vec<u8>,
+    Option<u32>,
+    Option<u32>,
+);
+
 fn parse_block_metadata<P: consensus::Parameters>(
     _params: &P,
-    row: (BlockHeight, Vec<u8>, Option<u32>, Vec<u8>, Option<u32>),
+    row: BlockMetadataRow,
 ) -> Result<BlockMetadata, SqliteClientError> {
-    let (block_height, hash_data, sapling_tree_size_opt, sapling_tree, _orchard_tree_size_opt) =
-        row;
+    let (
+        block_height,
+        hash_data,
+        sapling_tree_size_opt,
+        sapling_tree,
+        _orchard_tree_size_opt,
+        _ironwood_tree_size_opt,
+    ) = row;
     let sapling_tree_size = sapling_tree_size_opt.map_or_else(|| {
         if sapling_tree == BLOCK_SAPLING_FRONTIER_ABSENT {
             Err(SqliteClientError::CorruptedData("One of either the Sapling tree size or the legacy Sapling commitment tree must be present.".to_owned()))
@@ -3124,6 +3172,15 @@ fn parse_block_metadata<P: consensus::Parameters>(
         } else {
             Some(0)
         },
+        #[cfg(feature = "orchard")]
+        if _params
+            .activation_height(NetworkUpgrade::Nu6_3)
+            .is_some_and(|nu6_3_activation| block_height >= nu6_3_activation)
+        {
+            _ironwood_tree_size_opt
+        } else {
+            Some(0)
+        },
     ))
 }
 
@@ -3134,7 +3191,7 @@ pub(crate) fn block_metadata<P: consensus::Parameters>(
     block_height: BlockHeight,
 ) -> Result<Option<BlockMetadata>, SqliteClientError> {
     conn.query_row(
-        "SELECT height, hash, sapling_commitment_tree_size, sapling_tree, orchard_commitment_tree_size
+        "SELECT height, hash, sapling_commitment_tree_size, sapling_tree, orchard_commitment_tree_size, ironwood_commitment_tree_size
         FROM blocks
         WHERE height = :block_height",
         named_params![":block_height": u32::from(block_height)],
@@ -3144,12 +3201,14 @@ pub(crate) fn block_metadata<P: consensus::Parameters>(
             let sapling_tree_size: Option<u32> = row.get(2)?;
             let sapling_tree: Vec<u8> = row.get(3)?;
             let orchard_tree_size: Option<u32> = row.get(4)?;
+            let ironwood_tree_size: Option<u32> = row.get(5)?;
             Ok((
                 BlockHeight::from(height),
                 block_hash,
                 sapling_tree_size,
                 sapling_tree,
                 orchard_tree_size,
+                ironwood_tree_size,
             ))
         },
     )
@@ -3220,7 +3279,7 @@ pub(crate) fn block_max_scanned<P: consensus::Parameters>(
     params: &P,
 ) -> Result<Option<BlockMetadata>, SqliteClientError> {
     conn.query_row(
-        "SELECT blocks.height, hash, sapling_commitment_tree_size, sapling_tree, orchard_commitment_tree_size
+        "SELECT blocks.height, hash, sapling_commitment_tree_size, sapling_tree, orchard_commitment_tree_size, ironwood_commitment_tree_size
          FROM blocks
          JOIN (SELECT MAX(height) AS height FROM blocks) blocks_max
          ON blocks.height = blocks_max.height",
@@ -3231,12 +3290,14 @@ pub(crate) fn block_max_scanned<P: consensus::Parameters>(
             let sapling_tree_size: Option<u32> = row.get(2)?;
             let sapling_tree: Vec<u8> = row.get(3)?;
             let orchard_tree_size: Option<u32> = row.get(4)?;
+            let ironwood_tree_size: Option<u32> = row.get(5)?;
             Ok((
                 BlockHeight::from(height),
                 block_hash,
                 sapling_tree_size,
                 sapling_tree,
-                orchard_tree_size
+                orchard_tree_size,
+                ironwood_tree_size,
             ))
         },
     )
@@ -3340,6 +3401,18 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
         #[cfg(not(feature = "orchard"))]
         panic!("Sent a transaction with Orchard Actions without `orchard` enabled?");
     }
+    if let Some(_bundle) = sent_tx.tx().ironwood_bundle() {
+        #[cfg(feature = "orchard")]
+        {
+            detectable_via_scanning = true;
+            for action in _bundle.actions() {
+                orchard::mark_ironwood_note_spent(conn, tx_ref, action.nullifier())?;
+            }
+        }
+
+        #[cfg(not(feature = "orchard"))]
+        panic!("Sent a transaction with Ironwood Actions without `orchard` enabled?");
+    }
 
     #[cfg(feature = "transparent-inputs")]
     for utxo_outpoint in sent_tx.utxos_spent() {
@@ -3364,35 +3437,34 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                 if _pool == &PoolType::Transparent {
                     let address = Address::try_from_zcash_address(params, _zaddr.clone())
                         .expect("recipient is an understood Zcash address.");
-                    if let Some(taddr) = address.to_transparent_address() {
-                        if transparent::find_account_uuid_for_transparent_address(
+                    if let Some(taddr) = address.to_transparent_address()
+                        && transparent::find_account_uuid_for_transparent_address(
                             conn, params, &taddr,
                         )?
                         .is_some()
-                        {
-                            transparent::put_transparent_output(
-                                conn,
-                                params,
-                                gap_limits,
-                                &WalletTransparentOutput::from_parts(
-                                    OutPoint::new(
-                                        sent_tx.tx().txid().into(),
-                                        u32::try_from(output.output_index())
-                                            .expect("output index fits into a u32")
-                                    ),
-                                    TxOut::new(output.value(), taddr.script().into()),
-                                    None,
-                                    None,
-                                    Some(TransparentKeyScope::EXTERNAL),
-                                    Some(*sent_tx.funding_account()),
-                                )
-                                .expect(
-                                    "can extract a recipient address from an internal address script",
+                    {
+                        transparent::put_transparent_output(
+                            conn,
+                            params,
+                            gap_limits,
+                            &WalletTransparentOutput::from_parts(
+                                OutPoint::new(
+                                    sent_tx.tx().txid().into(),
+                                    u32::try_from(output.output_index())
+                                        .expect("output index fits into a u32"),
                                 ),
-                                sent_tx.target_height().into(),
-                                true,
-                            )?;
-                        }
+                                TxOut::new(output.value(), taddr.script().into()),
+                                None,
+                                None,
+                                Some(TransparentKeyScope::EXTERNAL),
+                                Some(*sent_tx.funding_account()),
+                            )
+                            .expect(
+                                "can extract a recipient address from an internal address script",
+                            ),
+                            sent_tx.target_height().into(),
+                            true,
+                        )?;
                     }
                 }
             }
@@ -3408,6 +3480,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                         &DecryptedOutput::new(
                             output.output_index(),
                             note.clone(),
+                            ShieldedPool::Sapling,
                             *receiving_account,
                             output
                                 .memo()
@@ -3420,13 +3493,16 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                     )?;
                 }
                 #[cfg(feature = "orchard")]
-                Note::Orchard(note) => {
+                orchard_note @ Note::Orchard { note, pool } => {
+                    let shielded_pool = orchard_note.pool();
                     orchard::put_received_note(
                         conn,
                         params,
+                        shielded_pool,
                         &DecryptedOutput::new(
                             output.output_index(),
-                            *note,
+                            (*note, *pool),
+                            shielded_pool,
                             *receiving_account,
                             output
                                 .memo()
@@ -3768,7 +3844,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         wdb.with_sapling_tree_mut(|tree| {
             tree.truncate_to_checkpoint(&truncation_height)
                 .map_err(|error| SqliteClientError::TruncateCommitmentTree {
-                    pool: ShieldedProtocol::Sapling,
+                    pool: ShieldedPool::Sapling,
                     height: truncation_height,
                     error,
                 })?;
@@ -3778,7 +3854,17 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         wdb.with_orchard_tree_mut(|tree| {
             tree.truncate_to_checkpoint(&truncation_height)
                 .map_err(|error| SqliteClientError::TruncateCommitmentTree {
-                    pool: ShieldedProtocol::Orchard,
+                    pool: ShieldedPool::Orchard,
+                    height: truncation_height,
+                    error,
+                })?;
+            Ok::<_, SqliteClientError>(())
+        })?;
+        #[cfg(feature = "orchard")]
+        wdb.with_ironwood_tree_mut(|tree| {
+            tree.truncate_to_checkpoint(&truncation_height)
+                .map_err(|error| SqliteClientError::TruncateCommitmentTree {
+                    pool: ShieldedPool::Ironwood,
                     height: truncation_height,
                     error,
                 })?;
@@ -3906,7 +3992,7 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
                 },
             )
             .map_err(|error| SqliteClientError::TruncateCommitmentTree {
-                pool: ShieldedProtocol::Sapling,
+                pool: ShieldedPool::Sapling,
                 height: target_height,
                 error,
             })?;
@@ -3923,7 +4009,23 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
                 },
             )
             .map_err(|error| SqliteClientError::TruncateCommitmentTree {
-                pool: ShieldedProtocol::Orchard,
+                pool: ShieldedPool::Orchard,
+                height: target_height,
+                error,
+            })?;
+            Ok::<_, SqliteClientError>(())
+        })?;
+        #[cfg(feature = "orchard")]
+        wdb.with_ironwood_tree_mut(|tree| {
+            tree.insert_frontier(
+                chain_state.final_ironwood_tree().clone(),
+                Retention::Checkpoint {
+                    id: target_height,
+                    marking: Marking::None,
+                },
+            )
+            .map_err(|error| SqliteClientError::TruncateCommitmentTree {
+                pool: ShieldedPool::Ironwood,
                 height: target_height,
                 error,
             })?;
@@ -4046,55 +4148,54 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     if let Some(max_scanned_height) = block_max_scanned(conn, params)
         .map_err(RewindError::DataSource)?
         .map(|m| m.block_height())
+        && target_height < max_scanned_height
     {
-        if target_height < max_scanned_height {
-            // Compute the floor height of the pruning window.
-            let pruning_floor = max_scanned_height.saturating_sub(PRUNING_DEPTH - 1);
-            let truncation_target = target_height.max(pruning_floor);
+        // Compute the floor height of the pruning window.
+        let pruning_floor = max_scanned_height.saturating_sub(PRUNING_DEPTH - 1);
+        let truncation_target = target_height.max(pruning_floor);
 
-            // Determine the minimum sapling and orchard checkpoints within the pruning window.
-            let sapling_window_floor = commitment_tree::min_checkpoint_id_at_or_above(
+        // Determine the minimum sapling and orchard checkpoints within the pruning window.
+        let sapling_window_floor = commitment_tree::min_checkpoint_id_at_or_above(
+            conn,
+            crate::SAPLING_TABLES_PREFIX,
+            truncation_target,
+        )
+        .map_err(ShardTreeError::Storage)
+        .map_err(SqliteClientError::from)
+        .map_err(RewindError::DataSource)?;
+
+        #[cfg(feature = "orchard")]
+        {
+            // Check that Orchard checkpoint matches the Sapling checkpoint. These should
+            // always match unless the database is corrupted.
+            let orchard_window_floor = commitment_tree::min_checkpoint_id_at_or_above(
                 conn,
-                crate::SAPLING_TABLES_PREFIX,
+                crate::ORCHARD_TABLES_PREFIX,
                 truncation_target,
             )
             .map_err(ShardTreeError::Storage)
             .map_err(SqliteClientError::from)
             .map_err(RewindError::DataSource)?;
-
-            #[cfg(feature = "orchard")]
-            {
-                // Check that Orchard checkpoint matches the Sapling checkpoint. These should
-                // always match unless the database is corrupted.
-                let orchard_window_floor = commitment_tree::min_checkpoint_id_at_or_above(
-                    conn,
-                    crate::ORCHARD_TABLES_PREFIX,
-                    truncation_target,
-                )
-                .map_err(ShardTreeError::Storage)
-                .map_err(SqliteClientError::from)
-                .map_err(RewindError::DataSource)?;
-                if orchard_window_floor != sapling_window_floor {
-                    return Err(RewindError::DataSource(SqliteClientError::CorruptedData(
-                        "Sapling and Orchard should have the same checkpoints".into(),
-                    )));
-                }
+            if orchard_window_floor != sapling_window_floor {
+                return Err(RewindError::DataSource(SqliteClientError::CorruptedData(
+                    "Sapling and Orchard should have the same checkpoints".into(),
+                )));
             }
-
-            // Combine the per-pool floors by taking the shallower (larger height).
-            let truncation_height = sapling_window_floor.unwrap_or(pruning_floor);
-
-            // Use `truncate_to_height_internal` to perform full truncation of data within the
-            // pruning window.
-            truncate_to_height_internal(
-                conn,
-                params,
-                #[cfg(feature = "transparent-inputs")]
-                gap_limits,
-                truncation_height,
-            )
-            .map_err(RewindError::DataSource)?;
         }
+
+        // Combine the per-pool floors by taking the shallower (larger height).
+        let truncation_height = sapling_window_floor.unwrap_or(pruning_floor);
+
+        // Use `truncate_to_height_internal` to perform full truncation of data within the
+        // pruning window.
+        truncate_to_height_internal(
+            conn,
+            params,
+            #[cfg(feature = "transparent-inputs")]
+            gap_limits,
+            truncation_height,
+        )
+        .map_err(RewindError::DataSource)?;
     }
 
     // Overwrite the scan-queue range above the rewind target with a `Historic` rescan range,
@@ -4106,20 +4207,20 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     // those whose priority would dominate `Historic` even under a forced rescan
     // (`ChainTip`, `OpenAdjacent`, `FoundNote`, `Verify`); `Ignored` is the lowest priority
     // and cannot overwrite anything.
-    if let Some(t) = chain_tip {
-        if target_height < t {
-            let rescan_range = (target_height + 1)..(t + 1);
-            replace_queue_entries::<SqliteClientError>(
-                conn,
-                &rescan_range,
-                std::iter::once(ScanRange::from_parts(
-                    rescan_range.clone(),
-                    ScanPriority::Historic,
-                )),
-                true,
-            )
-            .map_err(RewindError::DataSource)?;
-        }
+    if let Some(t) = chain_tip
+        && target_height < t
+    {
+        let rescan_range = (target_height + 1)..(t + 1);
+        replace_queue_entries::<SqliteClientError>(
+            conn,
+            &rescan_range,
+            std::iter::once(ScanRange::from_parts(
+                rescan_range.clone(),
+                ScanPriority::Historic,
+            )),
+            true,
+        )
+        .map_err(RewindError::DataSource)?;
     }
 
     let new_sapling_tree_size: u64 = chain_state.final_sapling_tree().tree_size();
@@ -4199,6 +4300,8 @@ pub(crate) fn put_block(
     sapling_output_count: u32,
     #[cfg(feature = "orchard")] orchard_commitment_tree_size: u32,
     #[cfg(feature = "orchard")] orchard_action_count: u32,
+    #[cfg(feature = "orchard")] ironwood_commitment_tree_size: u32,
+    #[cfg(feature = "orchard")] ironwood_action_count: u32,
 ) -> Result<(), SqliteClientError> {
     let block_hash_data = conn
         .query_row(
@@ -4231,7 +4334,9 @@ pub(crate) fn put_block(
             sapling_output_count,
             sapling_tree,
             orchard_commitment_tree_size,
-            orchard_action_count
+            orchard_action_count,
+            ironwood_commitment_tree_size,
+            ironwood_action_count
         )
         VALUES (
             :height,
@@ -4241,7 +4346,9 @@ pub(crate) fn put_block(
             :sapling_output_count,
             x'00',
             :orchard_commitment_tree_size,
-            :orchard_action_count
+            :orchard_action_count,
+            :ironwood_commitment_tree_size,
+            :ironwood_action_count
         )
         ON CONFLICT (height) DO UPDATE
         SET hash = :hash,
@@ -4249,13 +4356,19 @@ pub(crate) fn put_block(
             sapling_commitment_tree_size = :sapling_commitment_tree_size,
             sapling_output_count = :sapling_output_count,
             orchard_commitment_tree_size = :orchard_commitment_tree_size,
-            orchard_action_count = :orchard_action_count",
+            orchard_action_count = :orchard_action_count,
+            ironwood_commitment_tree_size = :ironwood_commitment_tree_size,
+            ironwood_action_count = :ironwood_action_count",
     )?;
 
     #[cfg(not(feature = "orchard"))]
     let orchard_commitment_tree_size: Option<u32> = None;
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count: Option<u32> = None;
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_commitment_tree_size: Option<u32> = None;
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_action_count: Option<u32> = None;
 
     stmt_upsert_block.execute(named_params![
         ":height": u32::from(block_height),
@@ -4265,6 +4378,8 @@ pub(crate) fn put_block(
         ":sapling_output_count": sapling_output_count,
         ":orchard_commitment_tree_size": orchard_commitment_tree_size,
         ":orchard_action_count": orchard_action_count,
+        ":ironwood_commitment_tree_size": ironwood_commitment_tree_size,
+        ":ironwood_action_count": ironwood_action_count,
     ])?;
 
     // If we now have a block corresponding to a received transparent output that had not been
@@ -4524,15 +4639,15 @@ pub(crate) fn queue_transparent_input_retrieval<AccountId>(
     tx_ref: TxRef,
     d_tx: &DecryptedTransaction<Transaction, AccountId>,
 ) -> Result<(), SqliteClientError> {
-    if let Some(b) = d_tx.tx().transparent_bundle() {
-        if !b.is_coinbase() {
-            // queue the transparent inputs for enhancement
-            queue_tx_retrieval(
-                conn,
-                b.vin.iter().map(|txin| *txin.prevout().txid()),
-                Some(tx_ref),
-            )?;
-        }
+    if let Some(b) = d_tx.tx().transparent_bundle()
+        && !b.is_coinbase()
+    {
+        // queue the transparent inputs for enhancement
+        queue_tx_retrieval(
+            conn,
+            b.vin.iter().map(|txin| *txin.prevout().txid()),
+            Some(tx_ref),
+        )?;
     }
 
     Ok(())
@@ -4706,7 +4821,7 @@ fn recipient_params<P: consensus::Parameters>(
                 from_account_id,
                 external_address.as_ref().map(|a| a.encode()),
                 Some(to_account),
-                PoolType::Shielded(note.protocol()),
+                PoolType::Shielded(note.pool()),
             ))
         }
     }
@@ -4736,9 +4851,9 @@ fn flag_previously_received_change(
         .map_err(SqliteClientError::from)
     };
 
-    flag_received_change(ShieldedProtocol::Sapling)?;
+    flag_received_change(ShieldedPool::Sapling)?;
     #[cfg(feature = "orchard")]
-    flag_received_change(ShieldedProtocol::Orchard)?;
+    flag_received_change(ShieldedPool::Orchard)?;
 
     Ok(())
 }
@@ -4843,7 +4958,7 @@ pub(crate) fn put_sent_output<P: consensus::Parameters>(
 pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
-    spend_pool: ShieldedProtocol,
+    spend_pool: ShieldedPool,
     new_entries: &[(TxIndex, TxId, Vec<N>)],
 ) -> Result<(), SqliteClientError> {
     let mut stmt_select_tx_locators = conn.prepare_cached(
@@ -4932,7 +5047,7 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
 /// this nullifier is revealed, if any.
 pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     conn: &rusqlite::Transaction<'_>,
-    spend_pool: ShieldedProtocol,
+    spend_pool: ShieldedPool,
     nf: &N,
 ) -> Result<Option<TxRef>, SqliteClientError> {
     let mut stmt_select_locator = conn.prepare_cached(
@@ -4978,6 +5093,10 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
             vec![],
             #[cfg(feature = "orchard")]
             vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
+            #[cfg(feature = "orchard")]
+            vec![],
         ),
         height,
     )
@@ -5002,12 +5121,13 @@ pub(crate) fn prune_nullifier_map(
 
 pub(crate) fn get_block_range(
     conn: &rusqlite::Connection,
-    protocol: ShieldedProtocol,
+    protocol: ShieldedPool,
     commitment_tree_address: incrementalmerkletree::Address,
 ) -> Result<Option<Range<BlockHeight>>, SqliteClientError> {
     let prefix = match protocol {
-        ShieldedProtocol::Sapling => "sapling",
-        ShieldedProtocol::Orchard => "orchard",
+        ShieldedPool::Sapling => "sapling",
+        ShieldedPool::Orchard => "orchard",
+        ShieldedPool::Ironwood => "ironwood",
     };
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT MIN(height), MAX(height), MAX({prefix}_commitment_tree_size)
@@ -5130,7 +5250,7 @@ pub mod testing {
     use zcash_client_backend::data_api::testing::TransactionSummary;
     use zcash_primitives::transaction::TxId;
     use zcash_protocol::{
-        ShieldedProtocol,
+        ShieldedPool,
         consensus::BlockHeight,
         value::{ZatBalance, Zatoshis},
     };
@@ -5181,7 +5301,7 @@ pub mod testing {
     #[allow(dead_code)] // used only for tests that are flagged off by default
     pub(crate) fn get_checkpoint_history(
         conn: &rusqlite::Connection,
-        protocol: ShieldedProtocol,
+        protocol: ShieldedPool,
     ) -> Result<Vec<(BlockHeight, Option<Position>)>, SqliteClientError> {
         let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
 
@@ -5336,6 +5456,7 @@ mod tests {
             )],
             0,
             0,
+            0,
             false,
         );
         let (mid_height, _, _) =
@@ -5389,7 +5510,7 @@ mod tests {
             testing::{InitialChainState, pool::ShieldedPoolTester, sapling::SaplingPoolTester},
         };
         use zcash_protocol::{
-            ShieldedProtocol,
+            ShieldedPool,
             consensus::{NetworkUpgrade, Parameters},
         };
 
@@ -5439,6 +5560,13 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
 
+                // No Ironwood notes are involved in this test, so its chain state carries an
+
+                // empty Ironwood tree.
+
+                #[cfg(feature = "orchard")]
+                let ironwood_initial_tree = Frontier::empty();
+
                 InitialChainState {
                     chain_state: ChainState::new(
                         sapling_activation_height + initial_height_offset - 1,
@@ -5446,6 +5574,8 @@ mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        ironwood_initial_tree,
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -5472,6 +5602,7 @@ mod tests {
             )],
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            0,
             false,
         );
         for _ in 1..10 {
@@ -5494,7 +5625,7 @@ mod tests {
         let progress = super::subtree_scan_progress(
             st.wallet().conn(),
             st.network(),
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             sapling_activation_height,
             sapling_activation_height,
             Some(recover_until_height),
@@ -5535,7 +5666,7 @@ mod tests {
             testing::{InitialChainState, pool::ShieldedPoolTester, sapling::SaplingPoolTester},
         };
         use zcash_protocol::{
-            ShieldedProtocol,
+            ShieldedPool,
             consensus::{NetworkUpgrade, Parameters},
         };
 
@@ -5586,6 +5717,13 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
 
+                // No Ironwood notes are involved in this test, so its chain state carries an
+
+                // empty Ironwood tree.
+
+                #[cfg(feature = "orchard")]
+                let ironwood_initial_tree = Frontier::empty();
+
                 InitialChainState {
                     chain_state: ChainState::new(
                         sapling_activation_height + initial_height_offset - 1,
@@ -5593,6 +5731,8 @@ mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        ironwood_initial_tree,
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -5616,6 +5756,7 @@ mod tests {
             )],
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            0,
             false,
         );
         for _ in 1..10 {
@@ -5633,7 +5774,7 @@ mod tests {
         let progress = super::subtree_scan_progress(
             st.wallet().conn(),
             st.network(),
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             sapling_activation_height,
             sapling_activation_height,
             Some(recover_until_height),
@@ -5697,7 +5838,7 @@ mod tests {
             testing::{InitialChainState, pool::ShieldedPoolTester, sapling::SaplingPoolTester},
         };
         use zcash_protocol::{
-            ShieldedProtocol,
+            ShieldedPool,
             consensus::{NetworkUpgrade, Parameters},
         };
 
@@ -5750,6 +5891,13 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
 
+                // No Ironwood notes are involved in this test, so its chain state carries an
+
+                // empty Ironwood tree.
+
+                #[cfg(feature = "orchard")]
+                let ironwood_initial_tree = Frontier::empty();
+
                 InitialChainState {
                     chain_state: ChainState::new(
                         sapling_activation_height + initial_height_offset - 1,
@@ -5757,6 +5905,8 @@ mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        ironwood_initial_tree,
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -5780,6 +5930,7 @@ mod tests {
             )],
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            0,
             false,
         );
         for _ in 1..10 {
@@ -5804,7 +5955,7 @@ mod tests {
         let progress = super::subtree_scan_progress(
             st.wallet().conn(),
             st.network(),
-            ShieldedProtocol::Sapling,
+            ShieldedPool::Sapling,
             sapling_activation_height,
             sapling_activation_height,
             Some(recover_until_height),

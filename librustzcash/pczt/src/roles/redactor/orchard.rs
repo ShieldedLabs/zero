@@ -1,4 +1,4 @@
-use crate::orchard::{Action, Bundle};
+use crate::orchard::{Action, Bundle, EncCiphertext, MEMO_SIZE, MemoPlaintext};
 
 impl super::Redactor {
     /// Redacts the Orchard bundle with the given closure.
@@ -7,6 +7,14 @@ impl super::Redactor {
         F: FnOnce(OrchardRedactor<'_>),
     {
         f(OrchardRedactor(&mut self.pczt.orchard));
+        self
+    }
+
+    pub fn redact_ironwood_with<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(OrchardRedactor<'_>),
+    {
+        f(OrchardRedactor(&mut self.pczt.ironwood));
         self
     }
 }
@@ -44,6 +52,14 @@ impl OrchardRedactor<'_> {
     pub fn clear_bsk(&mut self) {
         self.0.bsk = None;
     }
+
+    /// Removes the bundle anchor.
+    ///
+    /// Parsed roles require the real anchor, so a receiver must restore it before
+    /// parsing this bundle.
+    pub fn clear_anchor(&mut self) {
+        self.0.anchor = None;
+    }
 }
 
 /// A Redactor for Orchard actions.
@@ -69,6 +85,15 @@ impl ActionRedactor<'_> {
                 f(action);
             }
         }
+    }
+
+    /// Removes the action's net value commitment.
+    ///
+    /// The receiver recomputes `cv_net` from the spend and output values and `rcv`.
+    pub fn clear_cv_net(&mut self) {
+        self.redact(|action| {
+            action.cv_net = None;
+        });
     }
 
     /// Removes the spend authorizing signature.
@@ -153,6 +178,34 @@ impl ActionRedactor<'_> {
     pub fn clear_spend_proprietary(&mut self) {
         self.redact(|action| {
             action.spend.proprietary.clear();
+        });
+    }
+
+    /// Replaces the output's encrypted note plaintext with a stripped memo
+    /// plaintext.
+    ///
+    /// The PCZT consumer can recompute
+    /// [`Output::enc_ciphertext`](crate::orchard::Output::enc_ciphertext) from
+    /// this memo, the output note fields, and the action's spend nullifier.
+    pub fn replace_enc_ciphertext_with_memo_plaintext(&mut self, memo: [u8; MEMO_SIZE]) {
+        self.redact(|action| {
+            action.output.enc_ciphertext =
+                EncCiphertext::MemoPlaintext(MemoPlaintext::from_memo(memo));
+        });
+    }
+
+    /// Replaces the output's encrypted note plaintext with its decrypted,
+    /// stripped memo plaintext, if decryption succeeds.
+    ///
+    /// Actions that already carry memo plaintext, lack required output note
+    /// fields, or fail decryption are left unchanged.
+    #[cfg(feature = "orchard")]
+    pub fn replace_enc_ciphertext_with_decrypted_memo_plaintext(
+        &mut self,
+        note_version: ::orchard::note::NoteVersion,
+    ) {
+        self.redact(|action| {
+            action.replace_enc_ciphertext_with_decrypted_memo_plaintext(note_version);
         });
     }
 
