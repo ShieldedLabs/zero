@@ -1786,6 +1786,38 @@ static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmou
     return builder.Build().value().ProveAndSign({}, uint256()).value();
 }
 
+// Helper: build a well-formed V6 Ironwood-format bundle. The v6 slots require the
+// V3 protocol version; the InsecureV1 bundles from BuildBundleWithOutput are a
+// V5-era format the v6 slots reject, and (Ironwood, InsecureV1) is not even a
+// valid builder pairing. The Ironwood pool permits cross-address transfers, so an
+// ordinary AddOutput suffices here.
+static OrchardBundle BuildV6IronwoodBundle() {
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    return builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
+}
+
+// Helper: build a well-formed V6 Orchard-format bundle. The Orchard pool under
+// protocol V3 (the V6Orchard slot) mandates the cross-address restriction, so an
+// ordinary AddOutput is rejected; the only non-empty content it can carry is a
+// wallet-controlled change output (paired with a fabricated spend authorized by
+// the spending key). This is the orchard-pool self-send shape.
+static OrchardBundle BuildV6OrchardBundle() {
+    RawHDSeed seed(32, 0);
+    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+    auto fvk = sk.ToFullViewingKey();
+    auto to = fvk.GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+    builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt);
+    return builder.Build().value().ProveAndSign({sk}, uint256S("bb")).value();
+}
+
 // [NU6.3 onward] valueBalanceOrchard MUST be nonnegative (ZIP 258 / audit fix
 // fcd92c1). A non-coinbase transaction whose Orchard bundle moves value into the
 // pool (negative valueBalanceOrchard) is rejected from NU6.3; a zero balance is
@@ -1914,6 +1946,125 @@ TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
     ss2 << tx;
     const std::vector<unsigned char> bytes2(ss2.begin(), ss2.end());
     EXPECT_EQ(bytes, bytes2);
+
+    RegtestDeactivateNU6point3();
+}
+
+// Runs the full v6 serialization round-trip assertion battery for one content
+// permutation: `orchard`/`ironwood` are the bundles to place in the respective
+// v6 slots (std::nullopt means leave that slot empty). The central guarantee is
+// cross-class byte equality — the CTransaction serializer and the
+// CMutableTransaction serializer must emit identical bytes for the same content,
+// since the two SerializationOp blocks are duplicated and could drift apart.
+static void CheckV6BundlePermutation(
+    std::optional<OrchardBundle> orchard,
+    std::optional<OrchardBundle> ironwood) {
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    if (orchard.has_value()) {
+        mtx.orchardBundle = orchard.value();
+    }
+    if (ironwood.has_value()) {
+        mtx.ironwoodBundle = ironwood.value();
+    }
+
+    // (1) Serialize the mutable transaction to bytesM.
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytesM(ss.begin(), ss.end());
+
+    // (2) Deserialize into a CTransaction. Its constructor runs UpdateHash, which
+    // reparses the bytes via librustzcash and rejects any non-canonical v6
+    // encoding — so a successful construction is itself a canonicality assertion.
+    CDataStream ssT(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx(deserialize, ssT);
+    EXPECT_EQ(tx.GetOrchardBundle().IsPresent(), orchard.has_value());
+    EXPECT_EQ(tx.GetIronwoodBundle().IsPresent(), ironwood.has_value());
+    EXPECT_EQ(tx.GetHash(), mtx.GetHash());
+    EXPECT_EQ(tx.GetAuthDigest(), mtx.GetAuthDigest());
+    EXPECT_EQ(tx.GetConsensusBranchId(), mtx.nConsensusBranchId);
+
+    // (3) Cross-class byte equality: re-serializing through the CTransaction path
+    // must reproduce the CMutableTransaction bytes exactly.
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytesT(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytesT, bytesM);
+
+    // (4) tx-bytes -> fresh CMutableTransaction and back, closing the loop
+    // mtx -> bytes -> tx -> bytes -> mtx.
+    CDataStream ssM2(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CMutableTransaction mtx2;
+    ssM2 >> mtx2;
+    CDataStream ss3(SER_NETWORK, PROTOCOL_VERSION);
+    ss3 << mtx2;
+    const std::vector<unsigned char> bytes2M(ss3.begin(), ss3.end());
+    EXPECT_EQ(bytes2M, bytesM);
+    EXPECT_EQ(mtx2.GetHash(), mtx.GetHash());
+
+    // (5) The converting constructor CMutableTransaction(const CTransaction&) must
+    // copy every bundle slot (including ironwood); otherwise this re-serialization
+    // would diverge from bytesM.
+    CMutableTransaction mtx3(tx);
+    CDataStream ss4(SER_NETWORK, PROTOCOL_VERSION);
+    ss4 << mtx3;
+    const std::vector<unsigned char> bytes3M(ss4.begin(), ss4.end());
+    EXPECT_EQ(bytes3M, bytesM);
+}
+
+// Exercises every v6 bundle-content permutation (empty/empty, orchard-only,
+// ironwood-only, both) through the full serialization round-trip battery,
+// asserting cross-class byte equality in each. The bundles are proven once per
+// pool and reused across permutations (proving is expensive).
+TEST(ChecktransactionTests, V6BundlePermutationsSerializationRoundTrip) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    const auto orchardBundle = BuildV6OrchardBundle();
+    const auto ironwoodBundle = BuildV6IronwoodBundle();
+
+    CheckV6BundlePermutation(std::nullopt, std::nullopt);      // A: empty / empty
+    CheckV6BundlePermutation(orchardBundle, std::nullopt);     // B: orchard only
+    CheckV6BundlePermutation(std::nullopt, ironwoodBundle);    // C: ironwood only
+    CheckV6BundlePermutation(orchardBundle, ironwoodBundle);   // D: both present
+
+    RegtestDeactivateNU6point3();
+}
+
+// v5 (ZIP 225) transactions have no ironwood slot on the wire. Setting
+// ironwoodBundle on a v5 mtx is silently dropped by the serializer (isZip229V6 is
+// false), not an error. This documents that "silently dropped" semantics: the
+// bytes carry no ironwood section, the reconstructed tx has no ironwood bundle,
+// and re-serialization is byte-identical.
+TEST(ChecktransactionTests, V5IgnoresIronwoodBundleSlot) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    const auto ironwoodBundle = BuildV6IronwoodBundle();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP225_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.ironwoodBundle = ironwoodBundle;
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytesM(ss.begin(), ss.end());
+
+    CDataStream ssT(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx(deserialize, ssT);
+    EXPECT_FALSE(tx.GetIronwoodBundle().IsPresent());
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent());
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytesT(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytesT, bytesM);
 
     RegtestDeactivateNU6point3();
 }
