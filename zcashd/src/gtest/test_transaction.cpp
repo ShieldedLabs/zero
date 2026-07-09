@@ -13,15 +13,15 @@
 
 #include <rust/ed25519.h>
 
-// Round-trips an empty v6 (ZIP 248) transaction through serialization. Constructing // @claude
+// Round-trips an empty v6 (ZIP 229) transaction through serialization. Constructing // @claude
 // the CTransaction exercises UpdateHash, whose librustzcash reparse rejects any // @claude
 // non-canonical v6 encoding — including a missing or malformed Ironwood slot — so // @claude
 // this doubles as a check that the C++ serializer emits the canonical v6 format. // @claude
 TEST(Transaction, V6EmptyBundlesRoundTrip) { // @claude
     CMutableTransaction mtx; // @claude
     mtx.fOverwintered = true; // @claude
-    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID; // @claude
-    mtx.nVersion = ZIP248_TX_VERSION; // @claude
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID; // @claude
+    mtx.nVersion = ZIP229_TX_VERSION; // @claude
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId; // @claude
 
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION); // @claude

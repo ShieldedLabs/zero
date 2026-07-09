@@ -61,17 +61,17 @@ static_assert(ZIP225_TX_VERSION >= ZIP225_MIN_TX_VERSION,
 static_assert(ZIP225_TX_VERSION <= ZIP225_MAX_TX_VERSION,
     "ZIP225 tx version must not be higher than maximum");
 
-// ZIP248 transaction version group id
-// (defined in section _ of the protocol spec) // @nomerge doc reference
-static constexpr uint32_t ZIP248_VERSION_GROUP_ID = 0xD884B698;
-static_assert(ZIP248_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
+// ZIP 229 transaction version group id
+// (defined in ZIP 229: Version 6 Transaction Format)
+static constexpr uint32_t ZIP229_VERSION_GROUP_ID = 0xD884B698;
+static_assert(ZIP229_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
 
-// ZIP248 transaction version
-static const int32_t ZIP248_TX_VERSION = 6;
-static_assert(ZIP248_TX_VERSION >= ZIP248_MIN_TX_VERSION,
-    "ZIP248 tx version must not be lower than minimum");
-static_assert(ZIP248_TX_VERSION <= ZIP248_MAX_TX_VERSION,
-    "ZIP248 tx version must not be higher than maximum");
+// ZIP 229 transaction version
+static const int32_t ZIP229_TX_VERSION = 6;
+static_assert(ZIP229_TX_VERSION >= ZIP229_MIN_TX_VERSION,
+    "ZIP 229 tx version must not be lower than minimum");
+static_assert(ZIP229_TX_VERSION <= ZIP229_MAX_TX_VERSION,
+    "ZIP 229 tx version must not be higher than maximum");
 
 // Future transaction version group id
 static constexpr uint32_t ZFUTURE_VERSION_GROUP_ID = 0xFFFFFFFF;
@@ -578,10 +578,10 @@ public:
             nVersionGroupId == ZIP225_VERSION_GROUP_ID &&
             nVersion == ZIP225_TX_VERSION;
 
-        bool isZip248V6 =
+        bool isZip229V6 =
             fOverwintered &&
-            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
-            nVersion == ZIP248_TX_VERSION;
+            nVersionGroupId == ZIP229_VERSION_GROUP_ID &&
+            nVersion == ZIP229_TX_VERSION;
 
         // It is not possible to make the transaction's serialized form vary on
         // a per-enabled-feature basis. The approach here is that all
@@ -593,11 +593,11 @@ public:
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
 
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip248V6 || isFuture)) {
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip229V6 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
-        if (isZip225V5 || isZip248V6) {
+        if (isZip225V5 || isZip229V6) {
             // Common Transaction Fields (plus version bytes above)
             uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
@@ -617,15 +617,15 @@ public:
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
-            orchard::BundleFormat orchardFormat = isZip248V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
+            orchard::BundleFormat orchardFormat = isZip229V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
             if (ser_action.ForRead()) {
                 orchardBundle.Unserialize(s, consensusBranchId, orchardFormat);
-                if (isZip248V6) {
+                if (isZip229V6) {
                     ironwoodBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V6Ironwood);
                 }
             } else {
                 orchardBundle.Serialize(s, orchardFormat);
-                if (isZip248V6) {
+                if (isZip229V6) {
                     ironwoodBundle.Serialize(s, orchard::BundleFormat::V6Ironwood);
                 }
             }
@@ -756,10 +756,10 @@ public:
     /**
      * Returns true if this transaction uses the v6 (ZIP 229) format.
      */
-    bool IsZip248V6() const {
+    bool IsZip229V6() const {
         return fOverwintered &&
-            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
-            nVersion == ZIP248_TX_VERSION;
+            nVersionGroupId == ZIP229_VERSION_GROUP_ID &&
+            nVersion == ZIP229_TX_VERSION;
     }
 
     /*
@@ -865,19 +865,19 @@ struct CMutableTransaction
             fOverwintered &&
             nVersionGroupId == ZIP225_VERSION_GROUP_ID &&
             nVersion == ZIP225_TX_VERSION;
-        bool isZip248V6 =
+        bool isZip229V6 =
             fOverwintered &&
-            nVersionGroupId == ZIP248_VERSION_GROUP_ID &&
-            nVersion == ZIP248_TX_VERSION;
+            nVersionGroupId == ZIP229_VERSION_GROUP_ID &&
+            nVersion == ZIP229_TX_VERSION;
         bool isFuture =
             fOverwintered &&
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip248V6 || isFuture)) {
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isZip229V6 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
-        if (isZip225V5 || isZip248V6) {
+        if (isZip225V5 || isZip229V6) {
             // Common Transaction Fields (plus version bytes above)
             uint32_t consensusBranchId;
             if (ser_action.ForRead()) {
@@ -897,15 +897,15 @@ struct CMutableTransaction
             // Sapling Transaction Fields
             READWRITE(saplingBundle);
 
-            orchard::BundleFormat orchardFormat = isZip248V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
+            orchard::BundleFormat orchardFormat = isZip229V6 ? orchard::BundleFormat::V6Orchard : orchard::BundleFormat::V5;
             if (ser_action.ForRead()) {
                 orchardBundle.Unserialize(s, consensusBranchId, orchardFormat);
-                if (isZip248V6) {
+                if (isZip229V6) {
                     ironwoodBundle.Unserialize(s, consensusBranchId, orchard::BundleFormat::V6Ironwood);
                 }
             } else {
                 orchardBundle.Serialize(s, orchardFormat);
-                if (isZip248V6) {
+                if (isZip229V6) {
                     ironwoodBundle.Serialize(s, orchard::BundleFormat::V6Ironwood);
                 }
             }

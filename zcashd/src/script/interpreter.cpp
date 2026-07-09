@@ -1190,7 +1190,7 @@ void PrecomputedTransactionData::SetPrecomputed(
 SigVersion SignatureHashVersion(const CTransaction& txTo)
 {
     if (txTo.fOverwintered) {
-        // Both the v5 (ZIP 225) and v6 (ZIP 229/ZIP 248) transaction formats use
+        // Both the v5 (ZIP 225) and v6 (ZIP 229) transaction formats use
         // the ZIP 244 signature digest; the v5/v6 differences (extra Ironwood
         // leaf, anchors moving to authorizing data, new personalizations) are
         // handled by the version-dispatching Rust digester, which reads the
@@ -1198,7 +1198,7 @@ SigVersion SignatureHashVersion(const CTransaction& txTo)
         // routed here would be signed with the pre-ZIP 244 (Overwinter) digest,
         // causing every shielded signature to fail.
         if (txTo.nVersionGroupId == ZIP225_VERSION_GROUP_ID ||
-            txTo.nVersionGroupId == ZIP248_VERSION_GROUP_ID) {
+            txTo.nVersionGroupId == ZIP229_VERSION_GROUP_ID) {
             return SIGVERSION_ZIP244;
         } else if (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID) {
             return SIGVERSION_SAPLING;
