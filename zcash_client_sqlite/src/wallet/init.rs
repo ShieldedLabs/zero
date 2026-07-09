@@ -257,6 +257,10 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         | SqliteClientError::HistoricalWitnessUnavailable { .. } => {
             unreachable!("we do not generate historical witnesses in migrations")
         }
+        #[cfg(feature = "transparent-inputs")]
+        SqliteClientError::FeeRuleError(_) => {
+            unreachable!("we don't use fee rules in migrations")
+        }
     }
 }
 
@@ -637,20 +641,18 @@ fn init_wallet_db_internal<
     // but unfortunately `schemer` does not currently expose its DAG of migrations. As a
     // consequence, the caller has to choose whether or not this check should be performed
     // based upon which migrations they're asking to apply.
-    if verify_seed_relevance {
-        if let Some(seed) = seed {
-            match wdb
-                .seed_relevance_to_derived_accounts(&seed)
-                .map_err(sqlite_client_error_to_wallet_migration_error)?
-            {
-                SeedRelevance::Relevant { .. } => (),
-                // Every seed is relevant to a wallet with no accounts; this is most likely a
-                // new wallet database being initialized for the first time.
-                SeedRelevance::NoAccounts => (),
-                // No seed is relevant to a wallet that only has imported accounts.
-                SeedRelevance::NotRelevant | SeedRelevance::NoDerivedAccounts => {
-                    return Err(WalletMigrationError::SeedNotRelevant.into());
-                }
+    if verify_seed_relevance && let Some(seed) = seed {
+        match wdb
+            .seed_relevance_to_derived_accounts(&seed)
+            .map_err(sqlite_client_error_to_wallet_migration_error)?
+        {
+            SeedRelevance::Relevant { .. } => (),
+            // Every seed is relevant to a wallet with no accounts; this is most likely a
+            // new wallet database being initialized for the first time.
+            SeedRelevance::NoAccounts => (),
+            // No seed is relevant to a wallet that only has imported accounts.
+            SeedRelevance::NotRelevant | SeedRelevance::NoDerivedAccounts => {
+                return Err(WalletMigrationError::SeedNotRelevant.into());
             }
         }
     }
@@ -790,18 +792,27 @@ mod tests {
             db::TABLE_ACCOUNTS,
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
+            db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
+            db::TABLE_IRONWOOD_RECEIVED_NOTES,
+            db::TABLE_IRONWOOD_TREE_CAP,
+            db::TABLE_IRONWOOD_TREE_CHECKPOINT_MARKS_REMOVED,
+            db::TABLE_IRONWOOD_TREE_CHECKPOINTS,
+            db::TABLE_IRONWOOD_TREE_RETAINED_CHECKPOINTS,
+            db::TABLE_IRONWOOD_TREE_SHARDS,
             db::TABLE_NULLIFIER_MAP,
             db::TABLE_ORCHARD_RECEIVED_NOTE_SPENDS,
             db::TABLE_ORCHARD_RECEIVED_NOTES,
             db::TABLE_ORCHARD_TREE_CAP,
             db::TABLE_ORCHARD_TREE_CHECKPOINT_MARKS_REMOVED,
             db::TABLE_ORCHARD_TREE_CHECKPOINTS,
+            db::TABLE_ORCHARD_TREE_RETAINED_CHECKPOINTS,
             db::TABLE_ORCHARD_TREE_SHARDS,
             db::TABLE_SAPLING_RECEIVED_NOTE_SPENDS,
             db::TABLE_SAPLING_RECEIVED_NOTES,
             db::TABLE_SAPLING_TREE_CAP,
             db::TABLE_SAPLING_TREE_CHECKPOINT_MARKS_REMOVED,
             db::TABLE_SAPLING_TREE_CHECKPOINTS,
+            db::TABLE_SAPLING_TREE_RETAINED_CHECKPOINTS,
             db::TABLE_SAPLING_TREE_SHARDS,
             db::TABLE_SCAN_QUEUE,
             db::TABLE_SCHEMERZ_MIGRATIONS,
@@ -832,9 +843,16 @@ mod tests {
             db::INDEX_ACCOUNTS_UUID,
             db::INDEX_HD_ACCOUNT,
             db::INDEX_ADDRESSES_ACCOUNTS,
+            db::INDEX_ADDRESSES_CACHED_TRANSPARENT_RECEIVER_ADDRESS,
             db::INDEX_ADDRESSES_INDICES,
             db::INDEX_ADDRESSES_PUBKEYS,
             db::INDEX_ADDRESSES_T_INDICES,
+            db::INDEX_IRONWOOD_RNS_NOTE,
+            db::INDEX_IRONWOOD_RNS_TX,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_ADDRESS,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_TX,
+            db::INDEX_IRONWOOD_RECEIVED_NOTES_WITNESS_STABILIZED,
             db::INDEX_NF_MAP_LOCATOR_IDX,
             db::INDEX_ORCHARD_RNS_NOTE,
             db::INDEX_ORCHARD_RNS_TX,
@@ -856,6 +874,7 @@ mod tests {
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ACCOUNT,
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_ADDRESS,
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_TX,
+            db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_VALUE_ZAT,
             db::INDEX_TRANSPARENT_SPEND_MAP_TX,
             db::INDEX_TRANSPARENT_SPEND_SEARCH_TX,
             db::INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX,
@@ -880,6 +899,9 @@ mod tests {
         let expected_views = vec![
             db::VIEW_ADDRESS_FIRST_USE.to_owned(),
             db::VIEW_ADDRESS_USES.to_owned(),
+            db::view_ironwood_shard_scan_ranges(st.network()),
+            db::view_ironwood_shard_unscanned_ranges(),
+            db::VIEW_IRONWOOD_SHARDS_SCAN_STATE.to_owned(),
             db::view_orchard_shard_scan_ranges(st.network()),
             db::view_orchard_shard_unscanned_ranges(),
             db::VIEW_ORCHARD_SHARDS_SCAN_STATE.to_owned(),
