@@ -25,8 +25,8 @@ TxVersionInfo CurrentTxVersionInfo(
         // as v6 with empty Orchard/Ironwood bundles, exactly as v5 did for Orchard.
         return {
             .fOverwintered =   true,
-            .nVersionGroupId = ZIP248_VERSION_GROUP_ID,
-            .nVersion =        ZIP248_TX_VERSION
+            .nVersionGroupId = ZIP229_VERSION_GROUP_ID,
+            .nVersion =        ZIP229_TX_VERSION
         };
     } else if (consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU5) && !requireV4) {
         return {

@@ -1281,8 +1281,8 @@ TEST(CoinsTests, IronwoodNullifierCache)
 
     CMutableTransaction mtx;
     mtx.fOverwintered = true;
-    mtx.nVersion = ZIP248_TX_VERSION;
-    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
 
     RawHDSeed seed(32, 0);

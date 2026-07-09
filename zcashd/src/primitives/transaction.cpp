@@ -393,7 +393,7 @@ std::string CTransaction::ToString() const
                 orchardBundle.GetValueBalance(),
                 orchardBundle.GetNumActions());
         }
-        if (nVersion >= ZIP248_TX_VERSION) { // @claude
+        if (nVersion >= ZIP229_TX_VERSION) { // @claude
             str += strprintf(", valueBalanceIronwood=%u, vIronwoodAction.size=%u", // @claude
                 ironwoodBundle.GetValueBalance(), // @claude
                 ironwoodBundle.GetNumActions()); // @claude

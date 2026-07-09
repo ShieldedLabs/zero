@@ -1674,15 +1674,15 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
     RegtestDeactivateNU5();
 }
 
-// A v6 (ZIP 248) transaction is contextually rejected while NU6.3 is not active,
+// A v6 (ZIP 229) transaction is contextually rejected while NU6.3 is not active,
 // even when it carries NU6.3's consensus branch id.
 TEST(ChecktransactionTests, V6TxRejectedBeforeNU6_3) {
     RegtestActivateNU6point2();
 
     CMutableTransaction mtx;
     mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP248_TX_VERSION;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
 
     CTransaction tx(mtx);
@@ -1693,14 +1693,14 @@ TEST(ChecktransactionTests, V6TxRejectedBeforeNU6_3) {
     RegtestDeactivateNU6point2();
 }
 
-// An empty v6 (ZIP 248) transaction is contextually valid once NU6.3 is active.
+// An empty v6 (ZIP 229) transaction is contextually valid once NU6.3 is active.
 TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
     RegtestActivateNU6point3();
 
     CMutableTransaction mtx;
     mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP248_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP248_TX_VERSION;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
 
     CTransaction tx(mtx);
@@ -1718,9 +1718,9 @@ TEST(ChecktransactionTests, ContextualCreateTxIsV6AtNU6_3) {
 
     CMutableTransaction mtx = CreateNewContextualCMutableTransaction(params, 1, false);
     EXPECT_TRUE(mtx.fOverwintered);
-    EXPECT_EQ(mtx.nVersionGroupId, ZIP248_VERSION_GROUP_ID);
-    EXPECT_EQ(mtx.nVersion, ZIP248_TX_VERSION);
-    EXPECT_TRUE(CTransaction(mtx).IsZip248V6());
+    EXPECT_EQ(mtx.nVersionGroupId, ZIP229_VERSION_GROUP_ID);
+    EXPECT_EQ(mtx.nVersion, ZIP229_TX_VERSION);
+    EXPECT_TRUE(CTransaction(mtx).IsZip229V6());
     ASSERT_TRUE(mtx.nConsensusBranchId.has_value());
     EXPECT_EQ(mtx.nConsensusBranchId.value(),
               (uint32_t)NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);

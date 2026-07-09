@@ -62,7 +62,7 @@ SPROUT_VERSION_GROUP_ID = 0x00000000
 OVERWINTER_VERSION_GROUP_ID = 0x03C48270
 SAPLING_VERSION_GROUP_ID = 0x892F2085
 ZIP225_VERSION_GROUP_ID = 0x26A7270A
-ZIP248_VERSION_GROUP_ID = 0xD884B698
+ZIP229_VERSION_GROUP_ID = 0xD884B698
 # No transaction format change in Blossom.
 
 MAX_INV_SZ = 50000
@@ -1038,7 +1038,7 @@ class CTransaction(object):
                        self.nVersionGroupId == ZIP225_VERSION_GROUP_ID and
                        self.nVersion == 5)
         isNu6V6 = (self.fOverwintered and
-            self.nVersionGroupId == ZIP248_VERSION_GROUP_ID and
+            self.nVersionGroupId == ZIP229_VERSION_GROUP_ID and
             self.nVersion == 6) # @todo: rest of the owl
 
         if isNu5V5:
@@ -1097,7 +1097,7 @@ class CTransaction(object):
                        self.nVersionGroupId == ZIP225_VERSION_GROUP_ID and
                        self.nVersion == 5)
         isNu6V6 = (self.fOverwintered and
-                       self.nVersionGroupId == ZIP248_VERSION_GROUP_ID and
+                       self.nVersionGroupId == ZIP229_VERSION_GROUP_ID and
                        self.nVersion == 6) # @todo: rest of the owl
 
         if isNu5V5:

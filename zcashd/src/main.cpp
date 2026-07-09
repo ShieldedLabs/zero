@@ -1143,7 +1143,7 @@ bool ContextualCheckTransaction(
         if (!futureActive) {
             if (!(tx.nVersionGroupId == SAPLING_VERSION_GROUP_ID ||
                   tx.nVersionGroupId == ZIP225_VERSION_GROUP_ID ||
-                  (nu6point3Active && tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID))) {
+                  (nu6point3Active && tx.nVersionGroupId == ZIP229_VERSION_GROUP_ID))) {
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
                     error("ContextualCheckTransaction(): invalid NU5 tx version"),
@@ -1212,19 +1212,19 @@ bool ContextualCheckTransaction(
         }
 
         // Reject transactions with invalid version
-        if (tx.nVersionGroupId == ZIP248_VERSION_GROUP_ID) {
-            if (tx.nVersion < ZIP248_MIN_TX_VERSION) {
+        if (tx.nVersionGroupId == ZIP229_VERSION_GROUP_ID) {
+            if (tx.nVersion < ZIP229_MIN_TX_VERSION) {
                 return state.DoS(
                     dosLevelConstricting,
-                    error("ContextualCheckTransaction(): ZIP248 version too low"),
-                    REJECT_INVALID, "bad-tx-zip248-version-too-low");
+                    error("ContextualCheckTransaction(): ZIP 229 version too low"),
+                    REJECT_INVALID, "bad-tx-zip229-version-too-low");
             }
 
-            if (tx.nVersion > ZIP248_MAX_TX_VERSION) {
+            if (tx.nVersion > ZIP229_MAX_TX_VERSION) {
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
-                    error("ContextualCheckTransaction(): ZIP248 version too high"),
-                    REJECT_INVALID, "bad-tx-zip248-version-too-high");
+                    error("ContextualCheckTransaction(): ZIP 229 version too high"),
+                    REJECT_INVALID, "bad-tx-zip229-version-too-high");
             }
 
             if (!tx.GetConsensusBranchId().has_value()) {
@@ -1252,7 +1252,7 @@ bool ContextualCheckTransaction(
             if (!(tx.vJoinSplit.empty())) {
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
-                    error("ContextualCheckTransaction(): Sprout JoinSplits not allowed in ZIP248 transactions"),
+                    error("ContextualCheckTransaction(): Sprout JoinSplits not allowed in ZIP 229 transactions"),
                     REJECT_INVALID, "bad-tx-has-joinsplits");
             }
         }
@@ -1438,7 +1438,7 @@ bool ContextualCheckTransaction(
             case ZIP225_VERSION_GROUP_ID:
                 // Allow V5 transactions while futureActive
                 break;
-            case ZIP248_VERSION_GROUP_ID:
+            case ZIP229_VERSION_GROUP_ID:
                 // Allow V6 transactions while futureActive
                 break;
             default:
@@ -1529,7 +1529,7 @@ bool ContextualCheckShieldedInputs(
         }
     }
 
-    const bool isV6 = tx.IsZip248V6();
+    const bool isV6 = tx.IsZip229V6();
 
     // Queue Sapling bundle to be batch-validated. This also checks some consensus rules.
     if (saplingAuth.has_value()) {
@@ -1639,7 +1639,7 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         if (tx.nVersionGroupId != OVERWINTER_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZIP225_VERSION_GROUP_ID &&
-                tx.nVersionGroupId != ZIP248_VERSION_GROUP_ID &&
+                tx.nVersionGroupId != ZIP229_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZFUTURE_VERSION_GROUP_ID) {
             return state.DoS(100, error("CheckTransaction(): unknown tx version group id"),
                     REJECT_INVALID, "bad-tx-version-group-id");
