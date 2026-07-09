@@ -294,7 +294,7 @@ async fn initialize<C: Chain>(
             }
         };
 
-        if steps::scan_blocks(
+        match steps::scan_blocks(
             chain_view,
             db_data,
             params,
@@ -302,13 +302,28 @@ async fn initialize<C: Chain>(
             &decryptor,
             shutdown_height,
         )
-        .await?
-        .is_break()
+        .await
         {
-            // The chain has already reached the consensus-divergence height during initial
-            // scanning. Stop here with the tip we have; `steady_state` will shut the wallet
-            // down rather than advance past the boundary.
-            break (current_tip, starting_boundary);
+            Ok(flow) => {
+                if flow.is_break() {
+                    // The chain has already reached the consensus-divergence height during
+                    // initial scanning. Stop here with the tip we have; `steady_state` will
+                    // shut the wallet down rather than advance past the boundary.
+                    break (current_tip, starting_boundary);
+                }
+            }
+            // A failed range scan must not abort wallet startup (see
+            // [`NON_RETRYABLE_ERROR_BACKOFF`]): warn, back off, and loop to re-derive the
+            // scan ranges against a fresh chain view.
+            Err(error) => {
+                warn!("Initial scan of {scan_range} failed; will retry: {error}");
+                time::sleep(if is_retryable(&error) {
+                    REORG_RETRY_BACKOFF
+                } else {
+                    NON_RETRYABLE_ERROR_BACKOFF
+                })
+                .await;
+            }
         }
     };
 
@@ -323,6 +338,18 @@ async fn initialize<C: Chain>(
 /// backend that is briefly unable to serve reads (still syncing its non-finalized state,
 /// or a reorg in progress) is not polled in a tight loop.
 const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// How long the initial-scan and history-recovery loops wait before retrying after a
+/// non-transient scan failure.
+///
+/// A single problematic item must not take the whole wallet down (one bad wallet-DB row
+/// previously crash-looped the node on every start): the sync loops warn and retry
+/// instead. Such failures are often healed by the data-requests task (e.g. a stored
+/// transaction whose mined height is not yet recorded fails re-parsing with
+/// `CorruptedData("Consensus branch ID not known, ...")` until a `GetStatus` request
+/// records its mined height), so retrying is meaningful, but the cause may persist for
+/// a while — back off much longer than the stale-view case to avoid a hot loop.
+const NON_RETRYABLE_ERROR_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Whether a sync error reflects a chain view that went stale mid-read — the captured
 /// snapshot referenced a non-finalized block that was reorged away — and so should be
@@ -675,7 +702,7 @@ async fn recover_history<C: Chain>(
             })
         }) {
             let chain_view = chain.snapshot().await.map_err(SyncError::Chain)?;
-            if steps::scan_blocks(
+            match steps::scan_blocks(
                 chain_view,
                 db_data,
                 params,
@@ -683,13 +710,29 @@ async fn recover_history<C: Chain>(
                 &decryptor,
                 shutdown_height,
             )
-            .await?
-            .is_break()
+            .await
             {
-                // Reached the consensus-divergence height. History recovery operates below
-                // the boundary in practice, so this is belt-and-suspenders; stop scanning
-                // this range and let the next loop re-evaluate.
-                break;
+                Ok(flow) => {
+                    if flow.is_break() {
+                        // Reached the consensus-divergence height. History recovery operates
+                        // below the boundary in practice, so this is belt-and-suspenders;
+                        // stop scanning this range and let the next loop re-evaluate.
+                        break;
+                    }
+                }
+                // A failed batch must not kill the history-recovery task (task exit shuts
+                // down the whole wallet; see [`NON_RETRYABLE_ERROR_BACKOFF`]): warn, back
+                // off, and re-derive the scan ranges.
+                Err(error) => {
+                    warn!("History recovery scan of {scan_range} failed; will retry: {error}");
+                    time::sleep(if is_retryable(&error) {
+                        REORG_RETRY_BACKOFF
+                    } else {
+                        NON_RETRYABLE_ERROR_BACKOFF
+                    })
+                    .await;
+                    break;
+                }
             }
 
             // If scanning these blocks caused a suggested range to be added that has a
@@ -814,18 +857,33 @@ async fn data_requests<C: Chain>(
         info!("{} transaction data requests to service", requests.len());
         for request in requests {
             match request {
+                // A failure to service one request must not kill this task (task exit shuts
+                // down the whole wallet). In particular, storing a transaction re-parses
+                // related stored transactions, and a row whose mined height is not yet
+                // recorded (and which carries no expiry) fails that re-parse with
+                // `CorruptedData("Consensus branch ID not known, ...")`. Skipping lets the
+                // loop reach the `GetStatus` request for the stale row, which records its
+                // mined height and heals the failure for the next pass; exiting instead
+                // made this a deterministic crash loop on every start.
                 TransactionDataRequest::GetStatus(txid) => {
                     if txid.is_null() {
                         continue;
                     }
 
                     info!("Getting status of {txid}");
-                    let status = chain_view
-                        .get_transaction_status(txid)
-                        .await
-                        .map_err(SyncError::Chain)?;
+                    let result = async {
+                        let status = chain_view
+                            .get_transaction_status(txid)
+                            .await
+                            .map_err(SyncError::Chain)?;
 
-                    db_data.set_transaction_status(txid, status)?;
+                        db_data.set_transaction_status(txid, status)?;
+                        Ok::<(), SyncError>(())
+                    }
+                    .await;
+                    if let Err(e) = result {
+                        warn!("Failed to service status request for {txid}; skipping: {e}");
+                    }
                 }
                 TransactionDataRequest::Enhancement(txid) => {
                     if txid.is_null() {
@@ -833,18 +891,32 @@ async fn data_requests<C: Chain>(
                     }
 
                     info!("Enhancing {txid}");
-                    if let Some(tx) = chain_view
-                        .get_transaction(txid)
-                        .await
-                        .map_err(SyncError::Chain)?
-                    {
-                        // TODO: Route individual-transaction scanning through the batch
-                        // decryptor (`Handle::queue_tx`) once a single-tx store path
-                        // exists. See zcash/zallet#477.
-                        decrypt_and_store_transaction(params, db_data, &tx.inner, tx.mined_height)?;
-                    } else {
-                        db_data
-                            .set_transaction_status(txid, TransactionStatus::TxidNotRecognized)?;
+                    let result = async {
+                        if let Some(tx) = chain_view
+                            .get_transaction(txid)
+                            .await
+                            .map_err(SyncError::Chain)?
+                        {
+                            // TODO: Route individual-transaction scanning through the batch
+                            // decryptor (`Handle::queue_tx`) once a single-tx store path
+                            // exists. See zcash/zallet#477.
+                            decrypt_and_store_transaction(
+                                params,
+                                db_data,
+                                &tx.inner,
+                                tx.mined_height,
+                            )?;
+                        } else {
+                            db_data.set_transaction_status(
+                                txid,
+                                TransactionStatus::TxidNotRecognized,
+                            )?;
+                        }
+                        Ok::<(), SyncError>(())
+                    }
+                    .await;
+                    if let Err(e) = result {
+                        warn!("Failed to service enhancement request for {txid}; skipping: {e}");
                     }
                 }
                 // With `spend-index`, spend detection uses `GetSpendingTx` (below) and any
