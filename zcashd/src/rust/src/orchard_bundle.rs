@@ -189,6 +189,16 @@ impl Bundle {
             .unwrap_or(false)
     }
 
+    /// Returns whether the bundle is present and the cross-address flag is set.
+    ///
+    /// This flag (ZIP 229 flags bit 2) is only representable in the Ironwood
+    /// pool; it is always false for an Orchard bundle.
+    pub(crate) fn enable_cross_address(&self) -> bool {
+        self.inner()
+            .map(|b| b.flags().cross_address_enabled())
+            .unwrap_or(false)
+    }
+
     /// Returns the value balance for this Orchard bundle.
     ///
     /// A transaction with no Orchard component has a value balance of zero.
