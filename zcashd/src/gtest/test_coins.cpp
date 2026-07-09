@@ -1313,3 +1313,55 @@ TEST(CoinsTests, IronwoodNullifierCache)
     cache2.SetNullifiers(tx, false);
     EXPECT_FALSE(cache2.GetNullifier(ironwoodNullifier, IRONWOOD));
 }
+
+// A transaction's Ironwood anchor and nullifiers are validated at the tx level by
+// CheckShieldedRequirements: an anchor absent from the view is rejected
+// (IronwoodUnknownAnchor), a known anchor with unspent nullifiers is satisfied,
+// and re-presenting an already-spent Ironwood nullifier is rejected
+// (IronwoodDuplicateNullifier). These are the per-pool anchor/nullifier
+// consensus rules (§3.4) as seen by ConnectBlock / AcceptToMemoryPool.
+TEST(CoinsTests, IronwoodShieldedRequirements)
+{
+    LoadProofParameters();
+
+    CCoinsViewTest base;
+    CCoinsViewCacheTest cache(&base);
+
+    RawHDSeed seed(32, 0);
+    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+        .ToFullViewingKey()
+        .GetChangeAddress();
+
+    auto buildTx = [&](const uint256& anchor) {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, anchor);
+        builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersion = ZIP229_TX_VERSION;
+        mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+        mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        mtx.ironwoodBundle = builder.Build().value().ProveAndSign({}, uint256()).value();
+        return mtx;
+    };
+
+    // Unknown anchor: a non-empty root not present in the view. (The builder
+    // normalizes a zero anchor to the empty-tree root, which *is* known, so use
+    // a distinct non-empty value.)
+    {
+        uint256 unknownAnchor = uint256S("00000000000000000000000000000000000000000000000000000000deadbeef");
+        CTransaction tx(buildTx(unknownAnchor));
+        EXPECT_TRUE(cache.CheckShieldedRequirements(tx) ==
+            tl::unexpected(UnsatisfiedShieldedReq::IronwoodUnknownAnchor));
+    }
+
+    // Known anchor (the empty-tree root) with an unspent nullifier: satisfied.
+    CTransaction knownTx(buildTx(IronwoodMerkleFrontier::empty_root()));
+    EXPECT_TRUE(cache.CheckShieldedRequirements(knownTx).has_value());
+
+    // Double spend: once the bundle's nullifier is spent in the view, the same
+    // transaction is rejected.
+    cache.SetNullifiers(knownTx, true);
+    EXPECT_TRUE(cache.CheckShieldedRequirements(knownTx) ==
+        tl::unexpected(UnsatisfiedShieldedReq::IronwoodDuplicateNullifier));
+}
