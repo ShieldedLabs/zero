@@ -77,6 +77,25 @@ bool orchard_builder_add_recipient(
     uint64_t value,
     const unsigned char* memo);
 
+/// Adds a wallet-controlled change output owned by `full_viewing_key`.
+///
+/// Unlike `orchard_builder_add_recipient`, this is permitted in bundles that
+/// disable cross-address transfers (such as the Orchard pool under protocol V3).
+/// The paired fabricated spend is authorized at proving time by the spending key
+/// matching `full_viewing_key`, which must be supplied to
+/// `orchard_unauthorized_bundle_prove_and_sign`.
+///
+/// `ovk` is a pointer to the outgoing viewing key to make this output recoverable
+/// by, or `null`. `memo` is a pointer to the 512-byte memo field encoding, or
+/// `null` for "no memo".
+bool orchard_builder_add_change_output(
+    OrchardBuilderPtr* ptr,
+    const OrchardFullViewingKeyPtr* full_viewing_key,
+    const unsigned char* ovk,
+    const OrchardRawAddressPtr* recipient,
+    uint64_t value,
+    const unsigned char* memo);
+
 /// Builds a bundle containing the given spent notes and recipients.
 ///
 /// Returns `null` if an error occurs.

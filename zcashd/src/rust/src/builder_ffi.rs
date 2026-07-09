@@ -157,6 +157,52 @@ pub extern "C" fn orchard_builder_add_recipient(
     }
 }
 
+/// Adds a wallet-controlled change output owned by `fvk`.
+///
+/// Unlike `orchard_builder_add_recipient` (which maps to `Builder::add_output`),
+/// this is permitted in bundles that disable cross-address transfers — notably the
+/// Orchard pool under protocol V3, where the consensus rules mandate the
+/// cross-address restriction. The builder pairs the change output with a
+/// fabricated wallet-controlled spend at `recipient`; its authorization is
+/// produced at proving time by the spending key matching `fvk`, so that key must
+/// be supplied to `orchard_unauthorized_bundle_prove_and_sign`.
+///
+/// `ovk` is a pointer to the outgoing viewing key to make this output recoverable
+/// by, or `null`. `memo` is a pointer to the 512-byte memo field encoding, or
+/// `null` for "no memo".
+#[no_mangle]
+pub extern "C" fn orchard_builder_add_change_output(
+    builder: *mut Builder,
+    fvk: *const FullViewingKey,
+    ovk: *const [u8; 32],
+    recipient: *const orchard::Address,
+    value: u64,
+    memo: *const [u8; 512],
+) -> bool {
+    let builder = unsafe { builder.as_mut() }.expect("Builder may not be null.");
+    let fvk = unsafe { fvk.as_ref() }.expect("Full viewing key may not be null.");
+    let ovk = unsafe { ovk.as_ref() }
+        .copied()
+        .map(OutgoingViewingKey::from);
+    let recipient = unsafe { recipient.as_ref() }.expect("Recipient may not be null.");
+    let value = NoteValue::from_raw(value);
+    let memo = unsafe { memo.as_ref() }.copied();
+
+    match builder.add_change_output(
+        fvk.clone(),
+        ovk,
+        *recipient,
+        value,
+        memo.unwrap_or(MemoBytes::empty().into_bytes()),
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to add Orchard change output: {}", e);
+            false
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn orchard_builder_free(builder: *mut Builder) {
     if !builder.is_null() {

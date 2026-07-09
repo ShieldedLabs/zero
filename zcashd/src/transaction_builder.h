@@ -122,6 +122,19 @@ public:
         CAmount value,
         const std::optional<libzcash::Memo>& memo);
 
+    /// Adds a wallet-controlled change output to `to`, owned by `fvk`.
+    ///
+    /// Unlike `AddOutput`, this is permitted in bundles that disable cross-address
+    /// transfers (such as the Orchard pool under protocol V3). The paired
+    /// fabricated spend is authorized by the spending key matching `fvk`, which
+    /// must be passed to `UnauthorizedBundle::ProveAndSign`.
+    void AddChangeOutput(
+        const libzcash::OrchardFullViewingKey& fvk,
+        const std::optional<uint256>& ovk,
+        const libzcash::OrchardRawAddress& to,
+        CAmount value,
+        const std::optional<libzcash::Memo>& memo);
+
     /// Returns `true` if any spends or outputs have been added to this builder. This can
     /// be used to avoid calling `Build()` and creating a dummy Orchard bundle.
     bool HasActions() {

@@ -122,6 +122,28 @@ void Builder::AddOutput(
     hasActions = true;
 }
 
+void Builder::AddChangeOutput(
+    const libzcash::OrchardFullViewingKey& fvk,
+    const std::optional<uint256>& ovk,
+    const libzcash::OrchardRawAddress& to,
+    CAmount value,
+    const std::optional<libzcash::Memo>& memo)
+{
+    if (!inner) {
+        throw std::logic_error("orchard::Builder has already been used");
+    }
+
+    orchard_builder_add_change_output(
+        inner.get(),
+        fvk.inner.get(),
+        ovk.has_value() ? ovk->begin() : nullptr,
+        to.inner.get(),
+        value,
+        memo.has_value() ? memo.value().ToBytes().data() : nullptr);
+
+    hasActions = true;
+}
+
 std::optional<UnauthorizedBundle> Builder::Build() {
     if (!inner) {
         throw std::logic_error("orchard::Builder has already been used");
