@@ -50,6 +50,8 @@ class CCoinsViewTest : public CCoinsView
     std::optional<libzcash::LatestSubtree> latestSaplingSubtree;
     std::vector<libzcash::SubtreeData> orchardSubtrees;
     std::optional<libzcash::LatestSubtree> latestOrchardSubtree;
+    std::vector<libzcash::SubtreeData> ironwoodSubtrees;
+    std::optional<libzcash::LatestSubtree> latestIronwoodSubtree;
 
     void BatchWriteSubtrees(
         std::optional<libzcash::LatestSubtree> &latestSubtree,
@@ -267,6 +269,17 @@ public:
                     }
                     return latestOrchardSubtree;
                 }
+            case IRONWOOD:
+                {
+                    if (memorydb) {
+                        assert(latestSubtreeDB.has_value() == latestIronwoodSubtree.has_value());
+                        if (latestSubtreeDB.has_value()) {
+                            assert(latestSubtreeDB->index == latestIronwoodSubtree->index);
+                            assert(latestSubtreeDB->nHeight == latestIronwoodSubtree->nHeight);
+                        }
+                    }
+                    return latestIronwoodSubtree;
+                }
             default:
                 throw std::runtime_error("Unknown shielded type");
         }
@@ -287,6 +300,9 @@ public:
                 break;
             case ORCHARD:
                 vecToUse = &orchardSubtrees;
+                break;
+            case IRONWOOD:
+                vecToUse = &ironwoodSubtrees;
                 break;
             default:
                 throw std::runtime_error("Unknown shielded type");
@@ -355,7 +371,8 @@ public:
                     CNullifiersMap& mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees)
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees)
     {
         for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end(); ) {
             if (it->second.flags & CCoinsCacheEntry::DIRTY) {
@@ -381,6 +398,7 @@ public:
 
         BatchWriteSubtrees(latestSaplingSubtree, saplingSubtrees, cacheSaplingSubtrees);
         BatchWriteSubtrees(latestOrchardSubtree, orchardSubtrees, cacheOrchardSubtrees);
+        BatchWriteSubtrees(latestIronwoodSubtree, ironwoodSubtrees, cacheIronwoodSubtrees);
 
         if (memorydb) {
             memorydb->BatchWrite(mapCoins,
@@ -399,7 +417,8 @@ public:
                                  mapIronwoodNullifiers,
                                  historyCacheMap,
                                  cacheSaplingSubtrees,
-                                 cacheOrchardSubtrees);
+                                 cacheOrchardSubtrees,
+                                 cacheIronwoodSubtrees);
         }
 
         if (!hashBlock.IsNull())

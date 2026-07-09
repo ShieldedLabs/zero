@@ -115,7 +115,8 @@ public:
                     CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees);
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees);
     bool GetStats(CCoinsStats &stats) const;
 };
 

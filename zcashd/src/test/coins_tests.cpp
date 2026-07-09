@@ -250,7 +250,8 @@ public:
                     CNullifiersMap& mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees)
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees)
     {
         for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end(); ) {
             if (it->second.flags & CCoinsCacheEntry::DIRTY) {
@@ -310,7 +311,8 @@ public:
                      memusage::DynamicUsage(cacheIronwoodNullifiers) +
                      memusage::DynamicUsage(historyCacheMap) +
                      memusage::DynamicUsage(cacheSaplingSubtrees) +
-                     memusage::DynamicUsage(cacheOrchardSubtrees);
+                     memusage::DynamicUsage(cacheOrchardSubtrees) +
+                     memusage::DynamicUsage(cacheIronwoodSubtrees);
         for (CCoinsMap::iterator it = cacheCoins.begin(); it != cacheCoins.end(); it++) {
             ret += it->second.coins.DynamicMemoryUsage();
         }

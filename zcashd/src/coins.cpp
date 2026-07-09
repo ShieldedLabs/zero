@@ -80,12 +80,13 @@ bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins,
                                   CNullifiersMap &mapIronwoodNullifiers,
                                   CHistoryCacheMap &historyCacheMap,
                                   SubtreeCache &cacheSaplingSubtrees,
-                                  SubtreeCache &cacheOrchardSubtrees) {
+                                  SubtreeCache &cacheOrchardSubtrees,
+                                  SubtreeCache &cacheIronwoodSubtrees) {
     return base->BatchWrite(mapCoins, hashBlock,
                             hashSproutAnchor, hashSaplingAnchor, hashOrchardAnchor, hashIronwoodAnchor,
                             mapSproutAnchors, mapSaplingAnchors, mapOrchardAnchors, mapIronwoodAnchors,
                             mapSproutNullifiers, mapSaplingNullifiers, mapOrchardNullifiers, mapIronwoodNullifiers,
-                            historyCacheMap, cacheSaplingSubtrees, cacheOrchardSubtrees);
+                            historyCacheMap, cacheSaplingSubtrees, cacheOrchardSubtrees, cacheIronwoodSubtrees);
 }
 bool CCoinsViewBacked::GetStats(CCoinsStats &stats) const { return base->GetStats(stats); }
 
@@ -111,6 +112,7 @@ size_t CCoinsViewCache::DynamicMemoryUsage() const {
            memusage::DynamicUsage(historyCacheMap) +
            memusage::DynamicUsage(cacheSaplingSubtrees) +
            memusage::DynamicUsage(cacheOrchardSubtrees) +
+           memusage::DynamicUsage(cacheIronwoodSubtrees) +
            cachedCoinsUsage;
 }
 
@@ -287,10 +289,9 @@ std::optional<libzcash::LatestSubtree> CCoinsViewCache::GetLatestSubtree(Shielde
             return cacheSaplingSubtrees.GetLatestSubtree(base);
         case ORCHARD:
             return cacheOrchardSubtrees.GetLatestSubtree(base);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.GetLatestSubtree(base);
         default:
-            // Ironwood subtree tracking for light clients is deferred; like SPROUT,
-            // it falls through to the fail-loud default rather than reporting an
-            // empty subtree set.
             throw std::runtime_error("GetLatestSubtree: unsupported shielded type");
     }
 }
@@ -304,10 +305,9 @@ std::optional<libzcash::SubtreeData> CCoinsViewCache::GetSubtreeData(
             return cacheSaplingSubtrees.GetSubtreeData(base, index);
         case ORCHARD:
             return cacheOrchardSubtrees.GetSubtreeData(base, index);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.GetSubtreeData(base, index);
         default:
-            // Ironwood subtree tracking for light clients is deferred; like SPROUT,
-            // it falls through to the fail-loud default rather than reporting an
-            // empty subtree set.
             throw std::runtime_error("GetSubtreeData: unsupported shielded type");
     }
 }
@@ -693,6 +693,8 @@ void CCoinsViewCache::PushSubtree(ShieldedType type, libzcash::SubtreeData subtr
             return cacheSaplingSubtrees.PushSubtree(base, subtree);
         case ORCHARD:
             return cacheOrchardSubtrees.PushSubtree(base, subtree);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.PushSubtree(base, subtree);
         default:
             throw std::runtime_error("PushSubtree: unsupported shielded type");
     }
@@ -705,6 +707,8 @@ void CCoinsViewCache::PopSubtree(ShieldedType type)
             return cacheSaplingSubtrees.PopSubtree(base);
         case ORCHARD:
             return cacheOrchardSubtrees.PopSubtree(base);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.PopSubtree(base);
         default:
             throw std::runtime_error("PopSubtree: unsupported shielded type");
     }
@@ -717,6 +721,8 @@ void CCoinsViewCache::ResetSubtrees(ShieldedType type)
             return cacheSaplingSubtrees.ResetSubtrees();
         case ORCHARD:
             return cacheOrchardSubtrees.ResetSubtrees();
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.ResetSubtrees();
         default:
             throw std::runtime_error("ResetSubtrees: unsupported shielded type");
     }
@@ -1011,7 +1017,8 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins,
                                  CNullifiersMap &mapIronwoodNullifiers,
                                  CHistoryCacheMap &historyCacheMapIn,
                                  SubtreeCache &cacheSaplingSubtreesIn,
-                                 SubtreeCache &cacheOrchardSubtreesIn) {
+                                 SubtreeCache &cacheOrchardSubtreesIn,
+                                 SubtreeCache &cacheIronwoodSubtreesIn) {
     assert(!hasModifier);
     for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end();) {
         if (it->second.flags & CCoinsCacheEntry::DIRTY) { // Ignore non-dirty entries (optimization).
@@ -1061,6 +1068,7 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins,
 
     cacheSaplingSubtrees.BatchWrite(base, cacheSaplingSubtreesIn);
     cacheOrchardSubtrees.BatchWrite(base, cacheOrchardSubtreesIn);
+    cacheIronwoodSubtrees.BatchWrite(base, cacheIronwoodSubtreesIn);
 
     hashSproutAnchor = hashSproutAnchorIn;
     hashSaplingAnchor = hashSaplingAnchorIn;
@@ -1075,6 +1083,7 @@ bool CCoinsViewCache::Flush() {
     // they have been initialized correctly
     cacheSaplingSubtrees.Initialize(base);
     cacheOrchardSubtrees.Initialize(base);
+    cacheIronwoodSubtrees.Initialize(base);
 
     bool fOk = base->BatchWrite(cacheCoins,
                                 hashBlock,
@@ -1092,7 +1101,8 @@ bool CCoinsViewCache::Flush() {
                                 cacheIronwoodNullifiers,
                                 historyCacheMap,
                                 cacheSaplingSubtrees,
-                                cacheOrchardSubtrees);
+                                cacheOrchardSubtrees,
+                                cacheIronwoodSubtrees);
     cacheCoins.clear();
     cacheSproutAnchors.clear();
     cacheSaplingAnchors.clear();
@@ -1105,6 +1115,7 @@ bool CCoinsViewCache::Flush() {
     historyCacheMap.clear();
     cacheSaplingSubtrees.clear();
     cacheOrchardSubtrees.clear();
+    cacheIronwoodSubtrees.clear();
     cachedCoinsUsage = 0;
     return fOk;
 }
