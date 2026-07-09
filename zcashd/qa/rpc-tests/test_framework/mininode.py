@@ -475,12 +475,20 @@ class OrchardAction(object):
 
 ORCHARD_FLAGS_ENABLE_SPENDS = 0b00000001
 ORCHARD_FLAGS_ENABLE_OUTPUTS = 0b00000010
+# Bit 2 (enableCrossAddress / ZIP 229) is only representable in the Ironwood
+# bundle slot of a v6 transaction; setting it in the Orchard slot is invalid.
+ORCHARD_FLAGS_ENABLE_CROSS_ADDRESS = 0b00000100
 
+# The same wrapper is used for both the Orchard slot and the (v6-only) Ironwood
+# slot; they share an identical wire format (the pool is chosen by position, not
+# by the encoding). The only distinction the encoding permits is the
+# cross-address flag bit, allowed only for Ironwood.
 class OrchardBundle(object):
     def __init__(self):
         self.actions = []
         self.enableSpends = False
         self.enableOutputs = False
+        self.enableCrossAddress = False
         self.valueBalance = 0
         self.anchor = None
         self.proofs = []
@@ -493,6 +501,7 @@ class OrchardBundle(object):
             flags = struct.unpack("B", f.read(1))[0]
             self.enableSpends = (flags & ORCHARD_FLAGS_ENABLE_SPENDS) != 0
             self.enableOutputs = (flags & ORCHARD_FLAGS_ENABLE_OUTPUTS) != 0
+            self.enableCrossAddress = (flags & ORCHARD_FLAGS_ENABLE_CROSS_ADDRESS) != 0
             self.valueBalance = struct.unpack("<q", f.read(8))[0]
             self.anchor = deser_uint256(f)
             self.proofs = deser_char_vector(f)
@@ -521,6 +530,8 @@ class OrchardBundle(object):
             ORCHARD_FLAGS_ENABLE_SPENDS if self.enableSpends else 0
         ) ^ (
             ORCHARD_FLAGS_ENABLE_OUTPUTS if self.enableOutputs else 0
+        ) ^ (
+            ORCHARD_FLAGS_ENABLE_CROSS_ADDRESS if self.enableCrossAddress else 0
         )
 
     def __repr__(self):
@@ -993,6 +1004,7 @@ class CTransaction(object):
             self.valueBalance = 0
             self.saplingBundle = SaplingBundle()
             self.orchardBundle = OrchardBundle()
+            self.ironwoodBundle = OrchardBundle()
             self.shieldedSpends = []
             self.shieldedOutputs = []
             self.vJoinSplit = []
@@ -1012,6 +1024,7 @@ class CTransaction(object):
             self.valueBalance = tx.valueBalance
             self.saplingBundle = copy.deepcopy(tx.saplingBundle)
             self.orchardBundle = copy.deepcopy(tx.orchardBundle)
+            self.ironwoodBundle = copy.deepcopy(tx.ironwoodBundle)
             self.shieldedSpends = copy.deepcopy(tx.shieldedSpends)
             self.shieldedOutputs = copy.deepcopy(tx.shieldedOutputs)
             self.vJoinSplit = copy.deepcopy(tx.vJoinSplit)
@@ -1039,9 +1052,9 @@ class CTransaction(object):
                        self.nVersion == 5)
         isNu6V6 = (self.fOverwintered and
             self.nVersionGroupId == ZIP229_VERSION_GROUP_ID and
-            self.nVersion == 6) # @todo: rest of the owl
+            self.nVersion == 6)
 
-        if isNu5V5:
+        if isNu5V5 or isNu6V6:
             # Common transaction fields
             self.nConsensusBranchId = struct.unpack("<I", f.read(4))[0]
             self.nLockTime = struct.unpack("<I", f.read(4))[0]
@@ -1055,9 +1068,15 @@ class CTransaction(object):
             self.saplingBundle = SaplingBundle()
             self.saplingBundle.deserialize(f)
 
-            # Orchard transaction fields
+            # Orchard transaction fields (Orchard slot)
             self.orchardBundle = OrchardBundle()
             self.orchardBundle.deserialize(f)
+
+            # Ironwood transaction fields (v6 only): a second Orchard-format
+            # bundle in its own slot, after the Orchard one.
+            if isNu6V6:
+                self.ironwoodBundle = OrchardBundle()
+                self.ironwoodBundle.deserialize(f)
 
             return
 
@@ -1100,7 +1119,7 @@ class CTransaction(object):
                        self.nVersionGroupId == ZIP229_VERSION_GROUP_ID and
                        self.nVersion == 6) # @todo: rest of the owl
 
-        if isNu5V5:
+        if isNu5V5 or isNu6V6:
             r = b""
 
             # Common transaction fields
@@ -1117,8 +1136,13 @@ class CTransaction(object):
             # Sapling transaction fields
             r += self.saplingBundle.serialize()
 
-            # Orchard transaction fields
+            # Orchard transaction fields (Orchard slot)
             r += self.orchardBundle.serialize()
+
+            # Ironwood transaction fields (v6 only): a second Orchard-format
+            # bundle in its own slot, after the Orchard one.
+            if isNu6V6:
+                r += self.ironwoodBundle.serialize()
 
             return r
 
