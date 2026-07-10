@@ -2,9 +2,11 @@
 #include <gmock/gmock.h>
 
 #include "main.h"
+#include "policy/policy.h"
 #include "primitives/transaction.h"
 #include "consensus/validation.h"
 #include "consensus/upgrades.h"
+#include "script/standard.h"
 #include "transaction_builder.h"
 #include "gtest/utils.h"
 #include "test/test_util.h"
@@ -1718,6 +1720,65 @@ TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
     EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 1, true));
 
     RegtestDeactivateNU6point3();
+}
+
+// IsStandardTx admits the v6 (ZIP 229) format once NU6.3 is active. Without
+// the NU6.3 branch in the policy ladder, every post-activation wallet-built
+// transaction (v6 is the default from NU6.3, §5.1a) would be rejected from
+// standardness-enforcing mempools as "nu5-version" — a full send/relay outage
+// on testnet, invisible on regtest where fRequireStandard is false (preflight
+// P1). v4/v5 stay standard; the pre-NU6.3 ladder is unchanged. // @claude
+TEST(ChecktransactionTests, V6IsStandardAtNU6_3) {
+    // Minimal standard transparent skeleton: push-only scriptSig, P2PKH
+    // output above the dust threshold. // @claude
+    CMutableTransaction skeleton;
+    skeleton.vin.resize(1);
+    skeleton.vin[0].scriptSig = CScript() << std::vector<unsigned char>(65, 0);
+    skeleton.vout.resize(1);
+    skeleton.vout[0].nValue = 90 * CENT;
+    skeleton.vout[0].scriptPubKey = GetScriptForDestination(CKeyID());
+
+    std::string reason;
+    RegtestActivateNU6point3();
+    {
+        // v6 is standard from NU6.3.
+        CMutableTransaction mtx(skeleton);
+        SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtx), reason, Params(), 1)) << reason;
+
+        // v5 and v4 remain standard (v5 wind-down; Sprout stays on v4).
+        CMutableTransaction mtxV5(skeleton);
+        mtxV5.fOverwintered = true;
+        mtxV5.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtxV5.nVersion = ZIP225_TX_VERSION;
+        mtxV5.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtxV5), reason, Params(), 1)) << reason;
+
+        CMutableTransaction mtxV4(skeleton);
+        mtxV4.fOverwintered = true;
+        mtxV4.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+        mtxV4.nVersion = SAPLING_TX_VERSION;
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtxV4), reason, Params(), 1)) << reason;
+
+        // v3 falls below the NU6.3 minimum.
+        CMutableTransaction mtxV3(skeleton);
+        mtxV3.fOverwintered = true;
+        mtxV3.nVersionGroupId = OVERWINTER_VERSION_GROUP_ID;
+        mtxV3.nVersion = OVERWINTER_TX_VERSION;
+        EXPECT_FALSE(IsStandardTx(CTransaction(mtxV3), reason, Params(), 1));
+        EXPECT_EQ(reason, "nu6.3-version");
+    }
+    RegtestDeactivateNU6point3();
+
+    // Before NU6.3 the NU5 rules still reject v6.
+    RegtestActivateNU6point2();
+    {
+        CMutableTransaction mtx(skeleton);
+        SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+        EXPECT_FALSE(IsStandardTx(CTransaction(mtx), reason, Params(), 1));
+        EXPECT_EQ(reason, "nu5-version");
+    }
+    RegtestDeactivateNU6point2();
 }
 
 // From NU6.3, CreateNewContextualCMutableTransaction defaults to the v6 (ZIP 229)
