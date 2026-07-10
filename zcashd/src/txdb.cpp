@@ -209,6 +209,19 @@ HistoryNode CCoinsViewDB::GetHistoryAt(uint32_t epochId, HistoryIndex index) con
             throw runtime_error("History data inconsistent (expected node not found) - reindex?");
         }
         std::copy(std::begin(tmpMmrNode), std::end(tmpMmrNode), mmrNode.begin());
+    } else if (libzcash::IsV2HistoryTree(epochId)) {
+        // Same situation as V1 above, one format generation later: V2-epoch (NU5..NU6.2)
+        // nodes serialized by NU6.3-unaware clients are 244 bytes, while this client
+        // writes the full (now 317-byte) array for every epoch. Reading the V2 length
+        // works for both: for records written by NU6.3-aware clients this is guaranteed
+        // to ignore only trailing zero bytes (the V2 layout never uses bytes past
+        // NODE_V2_SERIALIZED_LENGTH). Without this branch, upgrading a synced datadir
+        // in place would throw here on the first block connect. // @claude (review C3)
+        std::array<unsigned char, NODE_V2_SERIALIZED_LENGTH> tmpMmrNode;
+        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), tmpMmrNode)) {
+            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
+        }
+        std::copy(std::begin(tmpMmrNode), std::end(tmpMmrNode), mmrNode.begin());
     } else {
         if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), mmrNode)) {
             throw runtime_error("History data inconsistent (expected node not found) - reindex?");
