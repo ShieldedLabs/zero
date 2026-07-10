@@ -21,7 +21,8 @@ uint256 ProduceShieldedSignatureHash(
     const CTransaction& tx,
     const std::vector<CTxOut>& allPrevOutputs,
     const sapling::UnauthorizedBundle& saplingBundle,
-    const std::optional<orchard::UnauthorizedBundle>& orchardBundle)
+    const std::optional<orchard::UnauthorizedBundle>& orchardBundle,
+    const std::optional<orchard::UnauthorizedBundle>& ironwoodBundle)
 {
     CDataStream sTx(SER_NETWORK, PROTOCOL_VERSION);
     sTx << tx;
@@ -36,12 +37,23 @@ uint256 ProduceShieldedSignatureHash(
         orchardBundlePtr = nullptr;
     }
 
+    // The Ironwood slot is distinct from the Orchard slot on the signing side
+    // (review C1/S3); a null pointer signs an empty Ironwood slot, matching a
+    // transaction whose ironwoodBundle is absent. // @claude
+    const OrchardUnauthorizedBundlePtr* ironwoodBundlePtr;
+    if (ironwoodBundle.has_value()) {
+        ironwoodBundlePtr = ironwoodBundle->inner.get();
+    } else {
+        ironwoodBundlePtr = nullptr;
+    }
+
     auto dataToBeSigned = builder::shielded_signature_digest(
         consensusBranchId,
         {reinterpret_cast<const unsigned char*>(sTx.data()), sTx.size()},
         {reinterpret_cast<const unsigned char*>(sAllPrevOutputs.data()), sAllPrevOutputs.size()},
         saplingBundle,
-        orchardBundlePtr);
+        orchardBundlePtr,
+        ironwoodBundlePtr);
     return uint256::FromRawBytes(dataToBeSigned);
 }
 
@@ -614,12 +626,16 @@ TransactionBuilderResult TransactionBuilder::Build()
     try {
         if (mtx.fOverwintered) {
             // ProduceShieldedSignatureHash is only usable with v3+ transactions.
+            // TransactionBuilder does not construct Ironwood bundles yet
+            // (review S4, gated on the plan §10.1 wallet decision), so the
+            // Ironwood slot is always signed as empty here. // @claude
             dataToBeSigned = ProduceShieldedSignatureHash(
                 consensusBranchId,
                 mtx,
                 tIns,
                 *saplingBundle,
-                orchardBundle);
+                orchardBundle,
+                std::nullopt);
         } else {
             CScript scriptCode;
             const PrecomputedTransactionData txdata(mtx, tIns);

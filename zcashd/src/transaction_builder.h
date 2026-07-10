@@ -35,7 +35,8 @@ uint256 ProduceShieldedSignatureHash(
     const CTransaction& tx,
     const std::vector<CTxOut>& allPrevOutputs,
     const sapling::UnauthorizedBundle& saplingBundle,
-    const std::optional<orchard::UnauthorizedBundle>& orchardBundle);
+    const std::optional<orchard::UnauthorizedBundle>& orchardBundle,
+    const std::optional<orchard::UnauthorizedBundle>& ironwoodBundle);
 
 namespace orchard {
 
@@ -172,7 +173,8 @@ private:
         const CTransaction& tx,
         const std::vector<CTxOut>& allPrevOutputs,
         const sapling::UnauthorizedBundle& saplingBundle,
-        const std::optional<orchard::UnauthorizedBundle>& orchardBundle));
+        const std::optional<orchard::UnauthorizedBundle>& orchardBundle,
+        const std::optional<orchard::UnauthorizedBundle>& ironwoodBundle));
 
 public:
     // UnauthorizedBundle should never be copied

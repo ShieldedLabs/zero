@@ -2105,3 +2105,73 @@ TEST(ChecktransactionTests, CDiskBlockIndexRoundTripsIronwoodFields) {
         EXPECT_EQ(b.nIronwoodValue, 0);
     }
 }
+
+// Review C1: the signing-side and verifier-side sighashes must agree for a v6
+// transaction carrying an Orchard bundle. Before the fix,
+// shielded_signature_digest built its signing TransactionData via map_bundles,
+// which applies the same Orchard closure to the Ironwood slot — the signer
+// committed to a phantom clone of the Orchard bundle in the Ironwood slot
+// while every verifier computed the digest over the transaction's real (empty)
+// slot, invalidating all shielded signatures in any Orchard-carrying v6
+// transaction. This drives the exact TransactionBuilder signing flow (digest
+// over the partial tx + unauthorized bundle, then ProveAndSign with it) and
+// checks it against the verifier's own digest. // @claude
+TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+    {
+        auto chainparams = Params();
+        uint32_t consensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+
+        // A post-NU6.3 Orchard change-to-self bundle: the only constructible
+        // non-empty content for the (Orchard, V3) cross-address-restricted slot.
+        RawHDSeed seed(32, 0);
+        auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+        auto fvk = sk.ToFullViewingKey();
+        auto to = fvk.GetChangeAddress();
+        auto orchardBuilder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+        orchardBuilder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt);
+        auto unauthorized = orchardBuilder.Build();
+        ASSERT_TRUE(unauthorized.has_value());
+
+        // The partial v6 transaction: every shielded slot serializes empty.
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+        mtx.nVersion = ZIP229_TX_VERSION;
+        mtx.nConsensusBranchId = consensusBranchId;
+
+        // An empty Sapling bundle, as TransactionBuilder always carries one.
+        auto saplingAnchor = SaplingMerkleTree::empty_root().GetRawBytes();
+        auto saplingBuilder = sapling::new_builder(*chainparams.RustNetwork(), 1, saplingAnchor, false);
+        auto saplingBundle = sapling::build_bundle(std::move(saplingBuilder));
+
+        // Builder-side digest, exactly as TransactionBuilder computes it.
+        uint256 dataToBeSigned = ProduceShieldedSignatureHash(
+            consensusBranchId, CTransaction(mtx), {}, *saplingBundle,
+            unauthorized, std::nullopt);
+
+        auto authorized = unauthorized.value().ProveAndSign({sk}, dataToBeSigned);
+        ASSERT_TRUE(authorized.has_value());
+        mtx.orchardBundle = authorized.value();
+        CTransaction tx(mtx);
+
+        // Verifier-side digest, exactly as ContextualCheckShieldedInputs computes it.
+        const std::vector<CTxOut> noPrevOutputs;
+        const PrecomputedTransactionData txdata(tx, noPrevOutputs);
+        CScript scriptCode;
+        uint256 verifierSighash = SignatureHash(
+            scriptCode, tx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId, txdata);
+
+        EXPECT_EQ(dataToBeSigned, verifierSighash);
+
+        // The spend-auth and binding signatures made over the builder digest
+        // must batch-validate under the verifier digest.
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(tx.GetOrchardBundle().QueueAuthValidation(
+            *batch, verifierSighash, orchard::BundleFormat::V6Orchard));
+        EXPECT_TRUE(batch->validate());
+    }
+    RegtestDeactivateNU6point3();
+}
