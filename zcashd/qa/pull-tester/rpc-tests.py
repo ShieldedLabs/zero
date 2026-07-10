@@ -149,6 +149,7 @@ BASE_SCRIPTS= [
     'framework.py',
     'sapling_rewind_check.py',
     'feature_nu6_1.py',
+    'feature_nu6_3.py',
     'feature_zip221.py',
     'feature_zip239.py',
     'feature_zip244_blockcommitments.py',
