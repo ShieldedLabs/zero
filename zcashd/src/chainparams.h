@@ -73,6 +73,7 @@ public:
     CAmount ChainSupplyCheckpointSproutValue() const { return nChainSupplyCheckpointSproutValue; }
     CAmount ChainSupplyCheckpointSaplingValue() const { return nChainSupplyCheckpointSaplingValue; }
     CAmount ChainSupplyCheckpointOrchardValue() const { return nChainSupplyCheckpointOrchardValue; }
+    CAmount ChainSupplyCheckpointIronwoodValue() const { return nChainSupplyCheckpointIronwoodValue; }
     CAmount ChainSupplyCheckpointLockboxValue() const { return nChainSupplyCheckpointLockboxValue; }
     uint256 ChainSupplyCheckpointBlockHash() const { return hashChainSupplyCheckpointBlock; }
     /**
@@ -165,6 +166,7 @@ protected:
     CAmount nChainSupplyCheckpointSproutValue = 0;
     CAmount nChainSupplyCheckpointSaplingValue = 0;
     CAmount nChainSupplyCheckpointOrchardValue = 0;
+    CAmount nChainSupplyCheckpointIronwoodValue = 0;
     CAmount nChainSupplyCheckpointLockboxValue = 0;
     uint256 hashChainSupplyCheckpointBlock;
     bool fZIP209Enabled = false;
