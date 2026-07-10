@@ -181,12 +181,16 @@ public:
         uint256 dataToBeSigned;
         if (mtx.fOverwintered) {
             // ProduceShieldedSignatureHash is only usable with v3+ transactions.
+            // The shielded-coinbase path does not construct Ironwood bundles
+            // yet (review S5, gated on the plan §10.1 coinbase decision), so
+            // the Ironwood slot is always signed as empty here. // @claude
             dataToBeSigned = ProduceShieldedSignatureHash(
                 consensusBranchId,
                 mtx,
                 {},
                 *saplingBundle,
-                orchardBundle);
+                orchardBundle,
+                std::nullopt);
         } else {
             CScript scriptCode;
             PrecomputedTransactionData txdata(mtx, {});

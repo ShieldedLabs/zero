@@ -18,7 +18,7 @@ use tracing::error;
 use zcash_primitives::transaction::{
     sighash::{signature_hash, SignableInput},
     txid::TxIdDigester,
-    Authorization, Transaction, TransactionData,
+    Authorization, Transaction, TransactionData, TxVersion,
 };
 use zcash_protocol::{consensus::BranchId, memo::MemoBytes, value::ZatBalance};
 
@@ -315,6 +315,7 @@ pub(crate) fn shielded_signature_digest(
     all_prev_outputs: &[u8],
     sapling_bundle: &crate::sapling::SaplingUnauthorizedBundle,
     orchard_bundle: *const OrchardUnauthorizedBundlePtr,
+    ironwood_bundle: *const OrchardUnauthorizedBundlePtr,
 ) -> Result<[u8; 32], String> {
     // TODO: This is also parsing a transaction that may have partially-filled fields.
     // This doesn't matter for transparent components (the only such field would be the
@@ -333,13 +334,19 @@ pub(crate) fn shielded_signature_digest(
     let tx = Transaction::read(tx_bytes, consensus_branch_id)
         .map_err(|e| format!("Failed to parse transaction: {}", e))?;
     // This method should only be called with an in-progress transaction that contains no
-    // Sapling or Orchard component.
+    // Sapling, Orchard, or Ironwood component.
     assert!(tx.sapling_bundle().is_none());
     assert!(tx.orchard_bundle().is_none());
+    assert!(tx.ironwood_bundle().is_none());
 
     let f_transparent = MapTransparent::parse(all_prev_outputs, &tx)?;
     let orchard_bundle = unsafe {
         orchard_bundle
+            .cast::<Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>>()
+            .as_ref()
+    };
+    let ironwood_bundle = unsafe {
+        ironwood_bundle
             .cast::<Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>>()
             .as_ref()
     };
@@ -353,11 +360,45 @@ pub(crate) fn shielded_signature_digest(
         type OrchardAuth = InProgress<Unproven, Unauthorized>;
     }
 
-    let txdata: TransactionData<Signable> = tx.into_data().map_bundles(
-        |b| b.map(|b| b.map_authorization(f_transparent)),
-        |_| sapling_bundle.bundle.clone(),
-        |_| orchard_bundle.cloned(),
-    );
+    // Construct the signing-side TransactionData with each bundle in its own
+    // slot, explicitly. This must NOT go through `map_bundles`: that helper
+    // applies the same `f_orchard` closure to both the Orchard and Ironwood
+    // slots (they share a bundle type), so the previous
+    // `|_| orchard_bundle.cloned()` put a clone of the Orchard bundle in the
+    // Ironwood slot. The v6 sighash committed to that phantom bundle while
+    // every verifier computed it over the transaction's real (empty) Ironwood
+    // slot — making all shielded signatures in any Orchard-carrying v6
+    // transaction invalid. (Review C1.) // @claude
+    let tx_data = tx.into_data();
+    let transparent_bundle = tx_data
+        .transparent_bundle()
+        .cloned()
+        .map(|b| b.map_authorization(f_transparent));
+    let txdata: TransactionData<Signable> = if let Some(ironwood) = ironwood_bundle {
+        if tx_data.version() != TxVersion::V6 {
+            return Err("an Ironwood bundle can only be signed in a v6 transaction".into());
+        }
+        TransactionData::from_parts_v6(
+            tx_data.consensus_branch_id(),
+            tx_data.lock_time(),
+            tx_data.expiry_height(),
+            transparent_bundle,
+            sapling_bundle.bundle.clone(),
+            orchard_bundle.cloned(),
+            Some(ironwood.clone()),
+        )
+    } else {
+        TransactionData::from_parts(
+            tx_data.version(),
+            tx_data.consensus_branch_id(),
+            tx_data.lock_time(),
+            tx_data.expiry_height(),
+            transparent_bundle,
+            tx_data.sprout_bundle().cloned(),
+            sapling_bundle.bundle.clone(),
+            orchard_bundle.cloned(),
+        )
+    };
     let txid_parts = txdata.digest(TxIdDigester);
 
     let sighash = signature_hash(&txdata, &SignableInput::Shielded, &txid_parts);

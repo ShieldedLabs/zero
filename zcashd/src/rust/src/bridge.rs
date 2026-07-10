@@ -454,6 +454,7 @@ pub(crate) mod ffi {
             all_prev_outputs: &[u8],
             sapling_bundle: &SaplingUnauthorizedBundle,
             orchard_bundle: *const OrchardUnauthorizedBundlePtr,
+            ironwood_bundle: *const OrchardUnauthorizedBundlePtr,
         ) -> Result<[u8; 32]>;
     }
 
