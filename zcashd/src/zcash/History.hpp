@@ -12,6 +12,7 @@
 #include "librustzcash.h"
 
 #define NODE_V1_SERIALIZED_LENGTH 171
+#define NODE_V2_SERIALIZED_LENGTH 244
 #define NODE_SERIALIZED_LENGTH 317
 #define ENTRY_SERIALIZED_LENGTH (NODE_SERIALIZED_LENGTH + 9)
 
@@ -95,6 +96,9 @@ HistoryEntry LeafToEntry(const HistoryNode node);
 
 // Returns true if this epoch used the V1 history tree format.
 bool IsV1HistoryTree(uint32_t epochId);
+
+// Returns true if this epoch used the V2 history tree format.
+bool IsV2HistoryTree(uint32_t epochId);
 
 }
 

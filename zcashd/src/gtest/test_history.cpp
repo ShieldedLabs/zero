@@ -154,3 +154,37 @@ TEST(History, GarbageMemoryHash) {
     // Check history root and garbage history root are equal
     EXPECT_EQ(historyRoot, historyRootGarbage);
 }
+
+// The V1/V2/V3 history-node format partition drives GetHistoryAt's on-disk read
+// width (txdb.cpp): V1 epochs read 171-byte records, V2 epochs 244, V3 the full
+// NODE_SERIALIZED_LENGTH. It must match the Rust dispatch in history.rs
+// (Heartwood/Canopy -> V1; Nu5..Nu6_2 -> V2; everything later -> V3). A future
+// upgrade added to the wrong bucket (or neither) silently misreads or rejects
+// on-disk records from older clients. // @claude (review C3)
+TEST(History, NodeFormatPartitionMatchesEpochs) {
+    // V1: the pre-NU5 epochs (history trees exist from Heartwood).
+    for (auto idx : {Consensus::BASE_SPROUT, Consensus::UPGRADE_OVERWINTER,
+                     Consensus::UPGRADE_SAPLING, Consensus::UPGRADE_BLOSSOM,
+                     Consensus::UPGRADE_HEARTWOOD, Consensus::UPGRADE_CANOPY}) {
+        auto id = NetworkUpgradeInfo[idx].nBranchId;
+        EXPECT_TRUE(libzcash::IsV1HistoryTree(id)) << "upgrade idx " << idx;
+        EXPECT_FALSE(libzcash::IsV2HistoryTree(id)) << "upgrade idx " << idx;
+    }
+    // V2: NU5..NU6.2 (244-byte nodes with the Orchard fields).
+    for (auto idx : {Consensus::UPGRADE_NU5, Consensus::UPGRADE_NU6,
+                     Consensus::UPGRADE_NU6_1, Consensus::UPGRADE_NU6_2}) {
+        auto id = NetworkUpgradeInfo[idx].nBranchId;
+        EXPECT_FALSE(libzcash::IsV1HistoryTree(id)) << "upgrade idx " << idx;
+        EXPECT_TRUE(libzcash::IsV2HistoryTree(id)) << "upgrade idx " << idx;
+    }
+    // V3 (neither V1 nor V2): NU6.3 onward.
+    for (auto idx : {Consensus::UPGRADE_NU6_3, Consensus::UPGRADE_ZFUTURE}) {
+        auto id = NetworkUpgradeInfo[idx].nBranchId;
+        EXPECT_FALSE(libzcash::IsV1HistoryTree(id)) << "upgrade idx " << idx;
+        EXPECT_FALSE(libzcash::IsV2HistoryTree(id)) << "upgrade idx " << idx;
+    }
+    // The read widths the partition selects.
+    static_assert(NODE_V1_SERIALIZED_LENGTH == 171, "V1 history node width");
+    static_assert(NODE_V2_SERIALIZED_LENGTH == 244, "V2 history node width");
+    static_assert(NODE_SERIALIZED_LENGTH == 317, "V3 history node width");
+}
