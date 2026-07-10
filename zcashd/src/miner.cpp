@@ -234,7 +234,17 @@ public:
         // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
         uint256 ovk;
         auto miner_reward = SetFoundersRewardAndGetMinerValue(*saplingBuilder);
-        builder.AddOutput(ovk, to, miner_reward, std::nullopt);
+        // Review H1/H2: surface the builder's rejection instead of failing
+        // later with a generic error — from NU6.3 the (Orchard, V3) builder
+        // rejects every coinbase output under the cross-address restriction,
+        // so an Orchard/UA -mineraddress cannot produce block templates until
+        // the plan §10.1 shielded-coinbase decision lands. // @claude
+        if (!builder.AddOutput(ovk, to, miner_reward, std::nullopt)) {
+            throw std::runtime_error(
+                "Failed to add miner reward to the Orchard pool: the Orchard "
+                "pool rejects coinbase outputs from NU6.3. Use a transparent "
+                "or Sapling -mineraddress.");
+        }
 
         // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
         // dummy outputs, which violates coinbase rules requiring all shielded outputs to
@@ -247,7 +257,11 @@ public:
             .ToFullViewingKey()
             .ToIncomingViewingKey()
             .Address(0);
-        builder.AddOutput(ovk, dummyTo, 0, std::nullopt);
+        if (!builder.AddOutput(ovk, dummyTo, 0, std::nullopt)) {
+            throw std::runtime_error(
+                "Failed to add dummy coinbase output to the Orchard pool "
+                "(rejected by the builder; see the NU6.3 Orchard restrictions)");
+        }
 
         auto bundle = builder.Build();
         if (!bundle.has_value()) {

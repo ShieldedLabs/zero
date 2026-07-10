@@ -2175,3 +2175,38 @@ TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
     }
     RegtestDeactivateNU6point3();
 }
+
+// Review H1: the builder's output-rejection must be observable. From NU6.3 the
+// (Orchard, V3) pool rejects every AddOutput recipient under the cross-address
+// restriction — including the wallet's own address — while AddChangeOutput (the
+// deliberate change-to-self exception) succeeds for the same address. Before
+// the fix the C++ wrappers discarded the FFI result and recorded the action
+// anyway, so an Orchard spend's dropped payment/change silently became miner
+// fee. The Ironwood-V3 and Orchard-InsecureV1 rows pin the unrestricted
+// behavior. // @claude
+TEST(ChecktransactionTests, OrchardV3BuilderRejectsOutputsAndReportsIt) {
+    RawHDSeed seed(32, 0);
+    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+    auto fvk = sk.ToFullViewingKey();
+    auto to = fvk.GetChangeAddress();
+
+    // (Orchard, V3): every recipient rejected; change-to-self permitted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+        EXPECT_FALSE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+        EXPECT_TRUE(builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
+    }
+    // (Ironwood, V3): cross-address transfers permitted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    }
+    // (Orchard, InsecureV1): pre-NU6.3 semantics, outputs accepted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    }
+}
