@@ -1049,6 +1049,15 @@ void SelectParams(const std::string& network)
     SelectBaseParams(network);
     pCurrentParams = &Params(network);
 
+    // Enforce in every binary (not just gtests) that no upgrade carries a junk
+    // activation-height placeholder: anything other than NO_ACTIVATION_HEIGHT
+    // or a non-negative height reads as active-from-genesis in C++ while the
+    // Rust side treats it as never-activating (review C2). // @claude
+    for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
+        int h = pCurrentParams->GetConsensus().vUpgrades[idx].nActivationHeight;
+        assert(h == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || h >= 0);
+    }
+
     // Some python qa rpc tests need to enforce the coinbase consensus rule
     if (network == CBaseChainParams::REGTEST && mapArgs.count("-regtestshieldcoinbase")) {
         regTestParams.SetRegTestCoinbaseMustBeShielded();

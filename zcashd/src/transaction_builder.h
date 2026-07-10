@@ -114,14 +114,14 @@ public:
     ///
     /// Returns `false` if the given Merkle path does not have the required anchor
     /// for the given note.
-    bool AddSpend(orchard::SpendInfo spendInfo);
+    [[nodiscard]] bool AddSpend(orchard::SpendInfo spendInfo);
 
     /// Adds an address which will receive funds in this bundle.
     ///
     /// Returns `false` if the builder rejects the output (in particular, every
     /// recipient is rejected under the cross-address restriction of the
     /// (Orchard, V3) pool from NU6.3); no action is recorded in that case.
-    bool AddOutput(
+    [[nodiscard]] bool AddOutput(
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,
@@ -136,7 +136,7 @@ public:
     ///
     /// Returns `false` if the builder rejects the output; no action is recorded
     /// in that case.
-    bool AddChangeOutput(
+    [[nodiscard]] bool AddChangeOutput(
         const libzcash::OrchardFullViewingKey& fvk,
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
@@ -375,11 +375,17 @@ public:
 
     std::optional<uint256> GetOrchardAnchor() const;
 
-    bool AddOrchardSpend(
+    [[nodiscard]] bool AddOrchardSpend(
         libzcash::OrchardSpendingKey sk,
         orchard::SpendInfo spendInfo);
 
-    void AddOrchardOutput(
+    /// Adds an Orchard recipient output.
+    ///
+    /// Returns `false` if the underlying builder rejects the output — from
+    /// NU6.3 the (Orchard, V3) pool rejects every AddOutput recipient under
+    /// the cross-address restriction — and performs no value bookkeeping in
+    /// that case. Mirrors AddOrchardSpend's contract. // @claude
+    [[nodiscard]] bool AddOrchardOutput(
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,

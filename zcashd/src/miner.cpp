@@ -184,13 +184,21 @@ public:
             // The shielded-coinbase path does not construct Ironwood bundles
             // yet (review S5, gated on the plan §10.1 coinbase decision), so
             // the Ironwood slot is always signed as empty here. // @claude
-            dataToBeSigned = ProduceShieldedSignatureHash(
-                consensusBranchId,
-                mtx,
-                {},
-                *saplingBundle,
-                orchardBundle,
-                std::nullopt);
+            try {
+                dataToBeSigned = ProduceShieldedSignatureHash(
+                    consensusBranchId,
+                    mtx,
+                    {},
+                    *saplingBundle,
+                    orchardBundle,
+                    std::nullopt);
+            } catch (const rust::Error& e) {
+                // rust::Error is not a std::runtime_error; unconverted it would
+                // escape BitcoinMiner's catch set and std::terminate the
+                // process. // @claude
+                throw std::runtime_error(
+                    std::string("Failed to compute shielded signature hash: ") + e.what());
+            }
         } else {
             CScript scriptCode;
             PrecomputedTransactionData txdata(mtx, {});
@@ -257,10 +265,13 @@ public:
             .ToFullViewingKey()
             .ToIncomingViewingKey()
             .Address(0);
+        // The miner-reward AddOutput above succeeding proves the NU6.3
+        // restriction is not in force here, so a failure would indicate some
+        // other builder rejection. // @claude
         if (!builder.AddOutput(ovk, dummyTo, 0, std::nullopt)) {
             throw std::runtime_error(
                 "Failed to add dummy coinbase output to the Orchard pool "
-                "(rejected by the builder; see the NU6.3 Orchard restrictions)");
+                "(rejected by the builder)");
         }
 
         auto bundle = builder.Build();

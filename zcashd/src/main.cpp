@@ -5613,17 +5613,11 @@ bool FallbackChainSupplyCheckpoint(CBlockIndex *pindex, const CChainParams& chai
             pindex->GetBlockHash().ToString());
     }
 
-    // Verify that the checkpoint pool values sum to the total supply. All six
-    // pools participate (review H5): before this, the Ironwood pool had no
-    // accessor and was hardcoded to zero below, so the first post-NU6.3
-    // checkpoint would have tripped this assert on every node at startup with
-    // no way to express the real value. // @claude
-    assert(chainparams.ChainSupplyCheckpointTransparentValue()
-         + chainparams.ChainSupplyCheckpointSproutValue()
-         + chainparams.ChainSupplyCheckpointSaplingValue()
-         + chainparams.ChainSupplyCheckpointOrchardValue()
-         + chainparams.ChainSupplyCheckpointIronwoodValue()
-         + chainparams.ChainSupplyCheckpointLockboxValue()
+    // Invariant: the six per-pool checkpoint values must sum to the stated
+    // total supply. A checkpoint edit violating this aborts every node whose
+    // index reaches the checkpoint block, so it is also pinned at test time
+    // (Validation.ChainSupplyCheckpointPoolsSumToTotal). // @claude
+    assert(chainparams.ChainSupplyCheckpointPoolTotal()
         == chainparams.ChainSupplyCheckpointTotalSupply());
 
     // Helper: inject a checkpoint value if nullopt, or error if it mismatches.

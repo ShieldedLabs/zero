@@ -75,6 +75,17 @@ public:
     CAmount ChainSupplyCheckpointOrchardValue() const { return nChainSupplyCheckpointOrchardValue; }
     CAmount ChainSupplyCheckpointIronwoodValue() const { return nChainSupplyCheckpointIronwoodValue; }
     CAmount ChainSupplyCheckpointLockboxValue() const { return nChainSupplyCheckpointLockboxValue; }
+    //! Sum of all six per-pool checkpoint values; must equal
+    //! ChainSupplyCheckpointTotalSupply(). Single definition so the startup
+    //! assert and the tests cannot drift apart pool-by-pool. // @claude
+    CAmount ChainSupplyCheckpointPoolTotal() const {
+        return nChainSupplyCheckpointTransparentValue
+             + nChainSupplyCheckpointSproutValue
+             + nChainSupplyCheckpointSaplingValue
+             + nChainSupplyCheckpointOrchardValue
+             + nChainSupplyCheckpointIronwoodValue
+             + nChainSupplyCheckpointLockboxValue;
+    }
     uint256 ChainSupplyCheckpointBlockHash() const { return hashChainSupplyCheckpointBlock; }
     /**
      * When true, the turnstile checks defined by ZIP 209 are enforced in

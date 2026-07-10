@@ -219,26 +219,4 @@ HistoryEntry LeafToEntry(const HistoryNode node) {
     return result;
 }
 
-bool IsV1HistoryTree(uint32_t epochId) {
-    return (
-        epochId == NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_BLOSSOM].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_HEARTWOOD].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId
-    );
-}
-
-// V2 (ZIP 221 with Orchard fields, 244 bytes) covers the NU5..NU6.2 epochs;
-// NU6.3 onward is V3 (adds the Ironwood fields, 317 bytes).
-bool IsV2HistoryTree(uint32_t epochId) {
-    return (
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_NU6].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_NU6_1].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_NU6_2].nBranchId
-    );
-}
-
 }
