@@ -114,7 +114,7 @@ bool Builder::AddSpend(orchard::SpendInfo spendInfo)
     }
 }
 
-void Builder::AddOutput(
+bool Builder::AddOutput(
     const std::optional<uint256>& ovk,
     const libzcash::OrchardRawAddress& to,
     CAmount value,
@@ -124,17 +124,26 @@ void Builder::AddOutput(
         throw std::logic_error("orchard::Builder has already been used");
     }
 
-    orchard_builder_add_recipient(
+    // Propagate the FFI result (review H1): from NU6.3 the (Orchard, V3)
+    // builder rejects every recipient under the cross-address restriction, and
+    // silently pretending the output was added turns the dropped value into
+    // miner fee. Mirror AddSpend: report failure, and only record an action on
+    // success. // @claude
+    if (orchard_builder_add_recipient(
         inner.get(),
         ovk.has_value() ? ovk->begin() : nullptr,
         to.inner.get(),
         value,
-        memo.has_value() ? memo.value().ToBytes().data() : nullptr);
-
-    hasActions = true;
+        memo.has_value() ? memo.value().ToBytes().data() : nullptr))
+    {
+        hasActions = true;
+        return true;
+    } else {
+        return false;
+    }
 }
 
-void Builder::AddChangeOutput(
+bool Builder::AddChangeOutput(
     const libzcash::OrchardFullViewingKey& fvk,
     const std::optional<uint256>& ovk,
     const libzcash::OrchardRawAddress& to,
@@ -145,15 +154,21 @@ void Builder::AddChangeOutput(
         throw std::logic_error("orchard::Builder has already been used");
     }
 
-    orchard_builder_add_change_output(
+    // As AddOutput above: propagate the FFI result (review H1 pattern,
+    // §5.1b residual). // @claude
+    if (orchard_builder_add_change_output(
         inner.get(),
         fvk.inner.get(),
         ovk.has_value() ? ovk->begin() : nullptr,
         to.inner.get(),
         value,
-        memo.has_value() ? memo.value().ToBytes().data() : nullptr);
-
-    hasActions = true;
+        memo.has_value() ? memo.value().ToBytes().data() : nullptr))
+    {
+        hasActions = true;
+        return true;
+    } else {
+        return false;
+    }
 }
 
 std::optional<UnauthorizedBundle> Builder::Build() {
@@ -372,7 +387,17 @@ void TransactionBuilder::AddOrchardOutput(
         }
     }
 
-    orchardBuilder.value().AddOutput(ovk, to, value, memo);
+    // Review H1: the builder can reject the output — from NU6.3 the
+    // (Orchard, V3) pool rejects every recipient under the cross-address
+    // restriction. Failing loudly here (instead of proceeding with the value
+    // bookkeeping) is what prevents the dropped output's value from silently
+    // becoming miner fee. // @claude
+    if (!orchardBuilder.value().AddOutput(ovk, to, value, memo)) {
+        throw std::runtime_error(
+            "TransactionBuilder cannot add Orchard output: the Orchard pool "
+            "rejects new outputs from NU6.3 (cross-address transfers are "
+            "disabled; see the Orchard-to-Ironwood migration guidance)");
+    }
     valueBalanceOrchard -= value;
 }
 

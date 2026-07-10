@@ -117,7 +117,11 @@ public:
     bool AddSpend(orchard::SpendInfo spendInfo);
 
     /// Adds an address which will receive funds in this bundle.
-    void AddOutput(
+    ///
+    /// Returns `false` if the builder rejects the output (in particular, every
+    /// recipient is rejected under the cross-address restriction of the
+    /// (Orchard, V3) pool from NU6.3); no action is recorded in that case.
+    bool AddOutput(
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,
@@ -129,7 +133,10 @@ public:
     /// transfers (such as the Orchard pool under protocol V3). The paired
     /// fabricated spend is authorized by the spending key matching `fvk`, which
     /// must be passed to `UnauthorizedBundle::ProveAndSign`.
-    void AddChangeOutput(
+    ///
+    /// Returns `false` if the builder rejects the output; no action is recorded
+    /// in that case.
+    bool AddChangeOutput(
         const libzcash::OrchardFullViewingKey& fvk,
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
