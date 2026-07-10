@@ -30,22 +30,15 @@ uint256 ProduceShieldedSignatureHash(
     CDataStream sAllPrevOutputs(SER_NETWORK, PROTOCOL_VERSION);
     sAllPrevOutputs << allPrevOutputs;
 
-    const OrchardUnauthorizedBundlePtr* orchardBundlePtr;
-    if (orchardBundle.has_value()) {
-        orchardBundlePtr = orchardBundle->inner.get();
-    } else {
-        orchardBundlePtr = nullptr;
-    }
-
     // The Ironwood slot is distinct from the Orchard slot on the signing side
-    // (review C1/S3); a null pointer signs an empty Ironwood slot, matching a
-    // transaction whose ironwoodBundle is absent. // @claude
-    const OrchardUnauthorizedBundlePtr* ironwoodBundlePtr;
-    if (ironwoodBundle.has_value()) {
-        ironwoodBundlePtr = ironwoodBundle->inner.get();
-    } else {
-        ironwoodBundlePtr = nullptr;
-    }
+    // (review C1/S3); a null pointer signs an empty slot, matching a transaction
+    // whose corresponding bundle is absent. // @claude
+    auto bundlePtr = [](const std::optional<orchard::UnauthorizedBundle>& b)
+        -> const OrchardUnauthorizedBundlePtr* {
+        return b.has_value() ? b->inner.get() : nullptr;
+    };
+    const OrchardUnauthorizedBundlePtr* orchardBundlePtr = bundlePtr(orchardBundle);
+    const OrchardUnauthorizedBundlePtr* ironwoodBundlePtr = bundlePtr(ironwoodBundle);
 
     auto dataToBeSigned = builder::shielded_signature_digest(
         consensusBranchId,

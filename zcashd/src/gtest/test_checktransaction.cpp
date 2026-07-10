@@ -24,6 +24,23 @@ class UNSAFE_CTransaction : public CTransaction {
         UNSAFE_CTransaction(const CMutableTransaction &tx) : CTransaction(tx, true) {}
 };
 
+// The canonical Orchard account used across these Orchard/v6 fixtures: a seed of
+// 32 zero bytes, account 133. Centralised so the key, its fvk, and its change
+// address are derived one way. // @claude
+static libzcash::OrchardSpendingKey TestOrchardSpendingKey() {
+    RawHDSeed seed(32, 0);
+    return libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+}
+
+// Stamps the v6 (ZIP 229) header fields onto `mtx` for the given consensus
+// branch id. // @claude
+static void SetV6TxHeader(CMutableTransaction& mtx, uint32_t consensusBranchId) {
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nConsensusBranchId = consensusBranchId;
+}
+
 TEST(ChecktransactionTests, CheckVpubNotBothNonzero) {
     CMutableTransaction tx;
     tx.nVersion = 2;
@@ -1385,8 +1402,7 @@ TEST(ChecktransactionTests, InvalidOrchardShieldedCoinbase) {
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId;
 
     // Make it an invalid shielded coinbase, by creating an all-dummy Orchard bundle.
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     mtx.vin.resize(1);
@@ -1680,10 +1696,7 @@ TEST(ChecktransactionTests, V6TxRejectedBeforeNU6_3) {
     RegtestActivateNU6point2();
 
     CMutableTransaction mtx;
-    mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP229_TX_VERSION;
-    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
 
     CTransaction tx(mtx);
     MockCValidationState state;
@@ -1698,10 +1711,7 @@ TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
     RegtestActivateNU6point3();
 
     CMutableTransaction mtx;
-    mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP229_TX_VERSION;
-    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
 
     CTransaction tx(mtx);
     MockCValidationState state;
@@ -1740,8 +1750,7 @@ TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
     LoadProofParameters();
     RegtestActivateNU6point3();
 
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
 
@@ -1773,8 +1782,7 @@ TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
 // revision, which imposes no cross-address restriction, so an output to an
 // arbitrary recipient is constructible regardless of pool.
 static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmount outputValue) {
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     uint256 ovk;
@@ -1792,8 +1800,7 @@ static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmou
 // valid builder pairing. The Ironwood pool permits cross-address transfers, so an
 // ordinary AddOutput suffices here.
 static OrchardBundle BuildV6IronwoodBundle() {
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     auto builder = orchard::Builder(
@@ -1808,8 +1815,7 @@ static OrchardBundle BuildV6IronwoodBundle() {
 // wallet-controlled change output (paired with a fabricated spend authorized by
 // the spending key). This is the orchard-pool self-send shape.
 static OrchardBundle BuildV6OrchardBundle() {
-    RawHDSeed seed(32, 0);
-    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+    auto sk = TestOrchardSpendingKey();
     auto fvk = sk.ToFullViewingKey();
     auto to = fvk.GetChangeAddress();
     auto builder = orchard::Builder(
@@ -1877,8 +1883,7 @@ TEST(ChecktransactionTests, IronwoodCoinbaseRejectsSpends) {
     RegtestActivateNU6point3();
 
     // A non-coinbase Ironwood builder produces a bundle with spends enabled.
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     auto builder = orchard::Builder(
@@ -1889,10 +1894,7 @@ TEST(ChecktransactionTests, IronwoodCoinbaseRejectsSpends) {
 
     // Place it in an otherwise-valid coinbase transaction.
     CMutableTransaction mtx;
-    mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP229_TX_VERSION;
-    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
     mtx.vin.resize(1);
     mtx.vin[0].prevout.SetNull();
     mtx.vin[0].scriptSig << 123; // valid coinbase scriptSig length
@@ -1916,8 +1918,7 @@ TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
     LoadProofParameters();
     RegtestActivateNU6point3();
 
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     auto builder = orchard::Builder(
@@ -1926,10 +1927,7 @@ TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
     auto bundle = builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
 
     CMutableTransaction mtx;
-    mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP229_TX_VERSION;
-    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
     mtx.ironwoodBundle = bundle;
 
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -1960,10 +1958,7 @@ static void CheckV6BundlePermutation(
     std::optional<OrchardBundle> orchard,
     std::optional<OrchardBundle> ironwood) {
     CMutableTransaction mtx;
-    mtx.fOverwintered = true;
-    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-    mtx.nVersion = ZIP229_TX_VERSION;
-    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
     if (orchard.has_value()) {
         mtx.orchardBundle = orchard.value();
     }
@@ -2125,8 +2120,7 @@ TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
 
         // A post-NU6.3 Orchard change-to-self bundle: the only constructible
         // non-empty content for the (Orchard, V3) cross-address-restricted slot.
-        RawHDSeed seed(32, 0);
-        auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+        auto sk = TestOrchardSpendingKey();
         auto fvk = sk.ToFullViewingKey();
         auto to = fvk.GetChangeAddress();
         auto orchardBuilder = orchard::Builder(
@@ -2137,10 +2131,7 @@ TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
 
         // The partial v6 transaction: every shielded slot serializes empty.
         CMutableTransaction mtx;
-        mtx.fOverwintered = true;
-        mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
-        mtx.nVersion = ZIP229_TX_VERSION;
-        mtx.nConsensusBranchId = consensusBranchId;
+        SetV6TxHeader(mtx, consensusBranchId);
 
         // An empty Sapling bundle, as TransactionBuilder always carries one.
         auto saplingAnchor = SaplingMerkleTree::empty_root().GetRawBytes();
@@ -2185,8 +2176,7 @@ TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
 // fee. The Ironwood-V3 and Orchard-InsecureV1 rows pin the unrestricted
 // behavior. // @claude
 TEST(ChecktransactionTests, OrchardV3BuilderRejectsOutputsAndReportsIt) {
-    RawHDSeed seed(32, 0);
-    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+    auto sk = TestOrchardSpendingKey();
     auto fvk = sk.ToFullViewingKey();
     auto to = fvk.GetChangeAddress();
 
