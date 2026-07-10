@@ -1448,9 +1448,17 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 _("Invalid address for -mineraddress=<addr>: Unable to parse '%s' as a Zcash address.)"),
                 mapArgs["-mineraddress"]));
         }
-        if (!std::visit(ExtractMinerAddress(consensus, height), addr.value()).has_value()) {
+
+        auto minerAddress = std::visit(ExtractMinerAddress(consensus, height), addr.value());
+        if (!minerAddress.has_value()) {
             return InitError(strprintf(
                 _("Invalid address for -mineraddress=<addr>: '%s' (must be a Sapling or transparent P2PKH address, or a Unified Address containing a valid receiver for the most recent settled network upgrade.)"),
+                mapArgs["-mineraddress"]));
+        }
+        // @todo(judah): disable Orchard/Ironwood shielded miner addresses until support is added for ironwood txs
+        if (std::holds_alternative<libzcash::OrchardRawAddress>(minerAddress.value())) {
+            return InitError(strprintf(
+                _("Invalid address for -mineraddress=<addr>: '%s' is a shielded address. Orchard/Ironwood shielded mining addresses have been disabled for now. Use a transparent or Sapling -mineraddress; mined funds can be shielded afterwards (e.g. z_shieldcoinbase to a Sapling address)."),
                 mapArgs["-mineraddress"]));
         }
     }
