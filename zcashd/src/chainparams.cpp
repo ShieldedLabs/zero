@@ -416,6 +416,9 @@ public:
         nChainSupplyCheckpointSproutValue = 2562695744028;
         nChainSupplyCheckpointSaplingValue = 64691367655556;
         nChainSupplyCheckpointOrchardValue = 415200558417145;
+        // Zero because this checkpoint height predates NU6.3 activation; a
+        // post-NU6.3 checkpoint must carry the real Ironwood pool balance.
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 18750000;
         hashChainSupplyCheckpointBlock = uint256S("0000000000b98a7d8f390793fa113bf6755935f0c14ea817af07d2c16f2c3ef4");
 
@@ -794,6 +797,10 @@ public:
         nChainSupplyCheckpointSproutValue = 42832983037484;
         nChainSupplyCheckpointSaplingValue = 140562922195481;
         nChainSupplyCheckpointOrchardValue = 7522947905915;
+        // Zero because this checkpoint height (3,536,500) predates the NU6.3
+        // testnet activation (4,134,000); a post-NU6.3 checkpoint must carry
+        // the real Ironwood pool balance.
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 18750000;
         hashChainSupplyCheckpointBlock = uint256S("01b947c7556b23040dc6840e9d3e4c6d9478c67a87b9737a83be848729d6e0af");
 
@@ -1011,6 +1018,7 @@ public:
         nChainSupplyCheckpointSproutValue = 20000000000;
         nChainSupplyCheckpointSaplingValue = 0;
         nChainSupplyCheckpointOrchardValue = 0;
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 0;
         hashChainSupplyCheckpointBlock.SetNull();
     }
