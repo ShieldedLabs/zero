@@ -1055,11 +1055,20 @@ TransactionBuilderResult TransactionEffects::ApproveAndBuild(
                         r.memo);
             },
             [&](const libzcash::OrchardRawAddress& addr) {
-                builder.AddOrchardOutput(
+                // AddOrchardOutput reports failure instead of throwing (review
+                // H1 follow-up): from NU6.3 the Orchard pool rejects new
+                // outputs, and this arm must respect the surrounding
+                // TransactionBuilderResult contract like its siblings. // @claude
+                if (!builder.AddOrchardOutput(
                         r.isInternal ? internalOVK : externalOVK,
                         addr,
                         r.amount,
-                        r.memo);
+                        r.memo)) {
+                    result = TransactionBuilderResult(
+                        "Cannot create an Orchard output: from NU6.3 the Orchard "
+                        "pool no longer accepts new outputs (see the "
+                        "Orchard-to-Ironwood migration guidance).");
+                }
             },
         });
         if (result.has_value()) {

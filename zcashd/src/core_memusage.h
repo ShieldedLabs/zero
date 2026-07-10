@@ -37,6 +37,7 @@ static inline size_t RecursiveDynamicUsage(const CTransaction& tx) {
     mem += memusage::DynamicUsage(tx.vJoinSplit);
     mem += tx.GetSaplingBundle().RecursiveDynamicUsage();
     mem += tx.GetOrchardBundle().RecursiveDynamicUsage();
+    mem += tx.GetIronwoodBundle().RecursiveDynamicUsage(); // @claude
     return mem;
 }
 
@@ -51,6 +52,7 @@ static inline size_t RecursiveDynamicUsage(const CMutableTransaction& tx) {
     mem += memusage::DynamicUsage(tx.vJoinSplit);
     mem += tx.saplingBundle.RecursiveDynamicUsage();
     mem += tx.orchardBundle.RecursiveDynamicUsage();
+    mem += tx.ironwoodBundle.RecursiveDynamicUsage(); // @claude
     return mem;
 }
 

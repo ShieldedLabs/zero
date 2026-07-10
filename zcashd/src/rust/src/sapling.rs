@@ -28,7 +28,7 @@ use zcash_primitives::{
     transaction::{
         components::sapling as sapling_serialization,
         txid::{BlockTxCommitmentDigester, TxIdDigester},
-        Authorized, Transaction, TransactionDigest,
+        Authorized, Transaction, TransactionDigest, TxVersion,
     },
 };
 use zcash_protocol::{memo::MemoBytes, value::ZatBalance};
@@ -245,8 +245,12 @@ impl Bundle {
             .into()
     }
 
-    fn commitment<D: TransactionDigest<Authorized>>(&self, digester: D) -> D::SaplingDigest {
-        digester.digest_sapling(self.inner())
+    fn commitment<D: TransactionDigest<Authorized>>(
+        &self,
+        digester: D,
+        tx_version: zcash_primitives::transaction::TxVersion,
+    ) -> D::SaplingDigest {
+        digester.digest_sapling(tx_version, self.inner())
     }
 }
 
@@ -671,22 +675,38 @@ impl BatchValidator {
     /// and signatures from this bundle may have already been added to the batch even if
     /// it fails other consensus rules.
     ///
-    /// `sighash` must be for the transaction this bundle is within.
+    /// `sighash` must be for the transaction this bundle is within, and `is_v6` must
+    /// indicate that transaction's version (the v6 Sapling digests differ from v5, so
+    /// the version selects the bundle validity cache key).
     ///
     /// If this batch was configured to not cache the results, then if the bundle was in
     /// the global bundle validity cache, it will have been removed (and this method will
     /// return `true`).
     #[allow(clippy::boxed_local)]
-    pub(crate) fn check_bundle(&mut self, bundle: Box<Bundle>, sighash: [u8; 32]) -> bool {
+    pub(crate) fn check_bundle(
+        &mut self,
+        bundle: Box<Bundle>,
+        sighash: [u8; 32],
+        tx_is_v6: bool,
+    ) -> bool {
         match (&mut self.0, bundle.inner()) {
             (Some(inner), Some(_)) => {
                 let cache = sapling_bundle_validity_cache();
 
+                // The v6 Sapling digests differ from v5 (the anchor moves to the
+                // authorizing digest, with `_v6` personalizations), so the caller
+                // states which transaction format this bundle came from.
+                let tx_version = if tx_is_v6 {
+                    zcash_primitives::transaction::TxVersion::V6
+                } else {
+                    zcash_primitives::transaction::TxVersion::V5
+                };
+
                 // Compute the cache entry for this bundle.
                 let cache_entry = {
-                    let bundle_commitment = bundle.commitment(TxIdDigester).unwrap();
+                    let bundle_commitment = bundle.commitment(TxIdDigester, tx_version).unwrap();
                     let bundle_authorizing_commitment =
-                        bundle.commitment(BlockTxCommitmentDigester);
+                        bundle.commitment(BlockTxCommitmentDigester, tx_version);
                     cache.compute_entry(
                         bundle_commitment.as_bytes().try_into().unwrap(),
                         bundle_authorizing_commitment.as_bytes().try_into().unwrap(),

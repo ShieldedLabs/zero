@@ -52,6 +52,7 @@ CCoinsViewBacked::CCoinsViewBacked(CCoinsView *viewIn) : base(viewIn) { }
 bool CCoinsViewBacked::GetSproutAnchorAt(const uint256 &rt, SproutMerkleTree &tree) const { return base->GetSproutAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetSaplingAnchorAt(const uint256 &rt, SaplingMerkleTree &tree) const { return base->GetSaplingAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &tree) const { return base->GetOrchardAnchorAt(rt, tree); }
+bool CCoinsViewBacked::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const { return base->GetIronwoodAnchorAt(rt, tree); }
 bool CCoinsViewBacked::GetNullifier(const uint256 &nullifier, ShieldedType type) const { return base->GetNullifier(nullifier, type); }
 bool CCoinsViewBacked::GetCoins(const uint256 &txid, CCoins &coins) const { return base->GetCoins(txid, coins); }
 bool CCoinsViewBacked::HaveCoins(const uint256 &txid) const { return base->HaveCoins(txid); }
@@ -68,20 +69,24 @@ bool CCoinsViewBacked::BatchWrite(CCoinsMap &mapCoins,
                                   const uint256 &hashSproutAnchor,
                                   const uint256 &hashSaplingAnchor,
                                   const uint256 &hashOrchardAnchor,
+                                  const uint256 &hashIronwoodAnchor,
                                   CAnchorsSproutMap &mapSproutAnchors,
                                   CAnchorsSaplingMap &mapSaplingAnchors,
                                   CAnchorsOrchardMap &mapOrchardAnchors,
+                                  CAnchorsIronwoodMap &mapIronwoodAnchors,
                                   CNullifiersMap &mapSproutNullifiers,
                                   CNullifiersMap &mapSaplingNullifiers,
                                   CNullifiersMap &mapOrchardNullifiers,
+                                  CNullifiersMap &mapIronwoodNullifiers,
                                   CHistoryCacheMap &historyCacheMap,
                                   SubtreeCache &cacheSaplingSubtrees,
-                                  SubtreeCache &cacheOrchardSubtrees) {
+                                  SubtreeCache &cacheOrchardSubtrees,
+                                  SubtreeCache &cacheIronwoodSubtrees) {
     return base->BatchWrite(mapCoins, hashBlock,
-                            hashSproutAnchor, hashSaplingAnchor, hashOrchardAnchor,
-                            mapSproutAnchors, mapSaplingAnchors, mapOrchardAnchors,
-                            mapSproutNullifiers, mapSaplingNullifiers, mapOrchardNullifiers,
-                            historyCacheMap, cacheSaplingSubtrees, cacheOrchardSubtrees);
+                            hashSproutAnchor, hashSaplingAnchor, hashOrchardAnchor, hashIronwoodAnchor,
+                            mapSproutAnchors, mapSaplingAnchors, mapOrchardAnchors, mapIronwoodAnchors,
+                            mapSproutNullifiers, mapSaplingNullifiers, mapOrchardNullifiers, mapIronwoodNullifiers,
+                            historyCacheMap, cacheSaplingSubtrees, cacheOrchardSubtrees, cacheIronwoodSubtrees);
 }
 bool CCoinsViewBacked::GetStats(CCoinsStats &stats) const { return base->GetStats(stats); }
 
@@ -99,12 +104,15 @@ size_t CCoinsViewCache::DynamicMemoryUsage() const {
            memusage::DynamicUsage(cacheSproutAnchors) +
            memusage::DynamicUsage(cacheSaplingAnchors) +
            memusage::DynamicUsage(cacheOrchardAnchors) +
+           memusage::DynamicUsage(cacheIronwoodAnchors) +
            memusage::DynamicUsage(cacheSproutNullifiers) +
            memusage::DynamicUsage(cacheSaplingNullifiers) +
            memusage::DynamicUsage(cacheOrchardNullifiers) +
+           memusage::DynamicUsage(cacheIronwoodNullifiers) +
            memusage::DynamicUsage(historyCacheMap) +
            memusage::DynamicUsage(cacheSaplingSubtrees) +
            memusage::DynamicUsage(cacheOrchardSubtrees) +
+           memusage::DynamicUsage(cacheIronwoodSubtrees) +
            cachedCoinsUsage;
 }
 
@@ -196,6 +204,29 @@ bool CCoinsViewCache::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontie
     return true;
 }
 
+bool CCoinsViewCache::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+    CAnchorsIronwoodMap::const_iterator it = cacheIronwoodAnchors.find(rt);
+    if (it != cacheIronwoodAnchors.end()) {
+        if (it->second.entered) {
+            tree = it->second.tree;
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    if (!base->GetIronwoodAnchorAt(rt, tree)) {
+        return false;
+    }
+
+    CAnchorsIronwoodMap::iterator ret = cacheIronwoodAnchors.insert(std::make_pair(rt, CAnchorsIronwoodCacheEntry())).first;
+    ret->second.entered = true;
+    ret->second.tree = tree;
+    cachedCoinsUsage += ret->second.tree.DynamicMemoryUsage();
+
+    return true;
+}
+
 bool CCoinsViewCache::GetNullifier(const uint256 &nullifier, ShieldedType type) const {
     CNullifiersMap* cacheToUse;
     switch (type) {
@@ -207,6 +238,9 @@ bool CCoinsViewCache::GetNullifier(const uint256 &nullifier, ShieldedType type) 
             break;
         case ORCHARD:
             cacheToUse = &cacheOrchardNullifiers;
+            break;
+        case IRONWOOD:
+            cacheToUse = &cacheIronwoodNullifiers;
             break;
         default:
             throw std::runtime_error("Unknown shielded type");
@@ -255,6 +289,8 @@ std::optional<libzcash::LatestSubtree> CCoinsViewCache::GetLatestSubtree(Shielde
             return cacheSaplingSubtrees.GetLatestSubtree(base);
         case ORCHARD:
             return cacheOrchardSubtrees.GetLatestSubtree(base);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.GetLatestSubtree(base);
         default:
             throw std::runtime_error("GetLatestSubtree: unsupported shielded type");
     }
@@ -269,6 +305,8 @@ std::optional<libzcash::SubtreeData> CCoinsViewCache::GetSubtreeData(
             return cacheSaplingSubtrees.GetSubtreeData(base, index);
         case ORCHARD:
             return cacheOrchardSubtrees.GetSubtreeData(base, index);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.GetSubtreeData(base, index);
         default:
             throw std::runtime_error("GetSubtreeData: unsupported shielded type");
     }
@@ -338,6 +376,16 @@ template<> void CCoinsViewCache::PushAnchor(const OrchardMerkleFrontier &tree)
     );
 }
 
+template<> void CCoinsViewCache::PushAnchor(const IronwoodMerkleFrontier &tree)
+{
+    AbstractPushAnchor<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry>(
+        tree,
+        IRONWOOD,
+        cacheIronwoodAnchors,
+        hashIronwoodAnchor
+    );
+}
+
 template<>
 void CCoinsViewCache::BringBestAnchorIntoCache(
     const uint256 &currentRoot,
@@ -363,6 +411,15 @@ void CCoinsViewCache::BringBestAnchorIntoCache(
 )
 {
     assert(GetOrchardAnchorAt(currentRoot, tree));
+}
+
+template<>
+void CCoinsViewCache::BringBestAnchorIntoCache(
+    const uint256 &currentRoot,
+    IronwoodMerkleFrontier &tree
+)
+{
+    assert(GetIronwoodAnchorAt(currentRoot, tree));
 }
 
 void draftMMRNode(std::vector<uint32_t> &indices,
@@ -636,6 +693,8 @@ void CCoinsViewCache::PushSubtree(ShieldedType type, libzcash::SubtreeData subtr
             return cacheSaplingSubtrees.PushSubtree(base, subtree);
         case ORCHARD:
             return cacheOrchardSubtrees.PushSubtree(base, subtree);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.PushSubtree(base, subtree);
         default:
             throw std::runtime_error("PushSubtree: unsupported shielded type");
     }
@@ -648,6 +707,8 @@ void CCoinsViewCache::PopSubtree(ShieldedType type)
             return cacheSaplingSubtrees.PopSubtree(base);
         case ORCHARD:
             return cacheOrchardSubtrees.PopSubtree(base);
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.PopSubtree(base);
         default:
             throw std::runtime_error("PopSubtree: unsupported shielded type");
     }
@@ -660,6 +721,8 @@ void CCoinsViewCache::ResetSubtrees(ShieldedType type)
             return cacheSaplingSubtrees.ResetSubtrees();
         case ORCHARD:
             return cacheOrchardSubtrees.ResetSubtrees();
+        case IRONWOOD:
+            return cacheIronwoodSubtrees.ResetSubtrees();
         default:
             throw std::runtime_error("ResetSubtrees: unsupported shielded type");
     }
@@ -723,6 +786,14 @@ void CCoinsViewCache::PopAnchor(const uint256 &newrt, ShieldedType type) {
                 hashOrchardAnchor
             );
             break;
+        case IRONWOOD:
+            AbstractPopAnchor<IronwoodMerkleFrontier, CAnchorsIronwoodMap, CAnchorsIronwoodCacheEntry>(
+                newrt,
+                IRONWOOD,
+                cacheIronwoodAnchors,
+                hashIronwoodAnchor
+            );
+            break;
         default:
             throw std::runtime_error("Unknown shielded type");
     }
@@ -743,6 +814,11 @@ void CCoinsViewCache::SetNullifiers(const CTransaction& tx, bool spent) {
     }
     for (const uint256& nf : tx.GetOrchardBundle().GetNullifiers()) {
         std::pair<CNullifiersMap::iterator, bool> ret = cacheOrchardNullifiers.insert(std::make_pair(nf, CNullifiersCacheEntry()));
+        ret.first->second.entered = spent;
+        ret.first->second.flags |= CNullifiersCacheEntry::DIRTY;
+    }
+    for (const uint256& nf : tx.GetIronwoodBundle().GetNullifiers()) {
+        std::pair<CNullifiersMap::iterator, bool> ret = cacheIronwoodNullifiers.insert(std::make_pair(nf, CNullifiersCacheEntry()));
         ret.first->second.entered = spent;
         ret.first->second.flags |= CNullifiersCacheEntry::DIRTY;
     }
@@ -828,6 +904,11 @@ uint256 CCoinsViewCache::GetBestAnchor(ShieldedType type) const {
             if (hashOrchardAnchor.IsNull())
                 hashOrchardAnchor = base->GetBestAnchor(type);
             return hashOrchardAnchor;
+            break;
+        case IRONWOOD:
+            if (hashIronwoodAnchor.IsNull())
+                hashIronwoodAnchor = base->GetBestAnchor(type);
+            return hashIronwoodAnchor;
             break;
         default:
             throw std::runtime_error("Unknown shielded type");
@@ -925,15 +1006,19 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins,
                                  const uint256 &hashSproutAnchorIn,
                                  const uint256 &hashSaplingAnchorIn,
                                  const uint256 &hashOrchardAnchorIn,
+                                 const uint256 &hashIronwoodAnchorIn,
                                  CAnchorsSproutMap &mapSproutAnchors,
                                  CAnchorsSaplingMap &mapSaplingAnchors,
                                  CAnchorsOrchardMap &mapOrchardAnchors,
+                                 CAnchorsIronwoodMap &mapIronwoodAnchors,
                                  CNullifiersMap &mapSproutNullifiers,
                                  CNullifiersMap &mapSaplingNullifiers,
                                  CNullifiersMap &mapOrchardNullifiers,
+                                 CNullifiersMap &mapIronwoodNullifiers,
                                  CHistoryCacheMap &historyCacheMapIn,
                                  SubtreeCache &cacheSaplingSubtreesIn,
-                                 SubtreeCache &cacheOrchardSubtreesIn) {
+                                 SubtreeCache &cacheOrchardSubtreesIn,
+                                 SubtreeCache &cacheIronwoodSubtreesIn) {
     assert(!hasModifier);
     for (CCoinsMap::iterator it = mapCoins.begin(); it != mapCoins.end();) {
         if (it->second.flags & CCoinsCacheEntry::DIRTY) { // Ignore non-dirty entries (optimization).
@@ -972,19 +1057,23 @@ bool CCoinsViewCache::BatchWrite(CCoinsMap &mapCoins,
     ::BatchWriteAnchors<CAnchorsSproutMap, CAnchorsSproutMap::iterator, CAnchorsSproutCacheEntry>(mapSproutAnchors, cacheSproutAnchors, cachedCoinsUsage);
     ::BatchWriteAnchors<CAnchorsSaplingMap, CAnchorsSaplingMap::iterator, CAnchorsSaplingCacheEntry>(mapSaplingAnchors, cacheSaplingAnchors, cachedCoinsUsage);
     ::BatchWriteAnchors<CAnchorsOrchardMap, CAnchorsOrchardMap::iterator, CAnchorsOrchardCacheEntry>(mapOrchardAnchors, cacheOrchardAnchors, cachedCoinsUsage);
+    ::BatchWriteAnchors<CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry>(mapIronwoodAnchors, cacheIronwoodAnchors, cachedCoinsUsage);
 
     ::BatchWriteNullifiers(mapSproutNullifiers, cacheSproutNullifiers);
     ::BatchWriteNullifiers(mapSaplingNullifiers, cacheSaplingNullifiers);
     ::BatchWriteNullifiers(mapOrchardNullifiers, cacheOrchardNullifiers);
+    ::BatchWriteNullifiers(mapIronwoodNullifiers, cacheIronwoodNullifiers);
 
     ::BatchWriteHistory(historyCacheMap, historyCacheMapIn);
 
     cacheSaplingSubtrees.BatchWrite(base, cacheSaplingSubtreesIn);
     cacheOrchardSubtrees.BatchWrite(base, cacheOrchardSubtreesIn);
+    cacheIronwoodSubtrees.BatchWrite(base, cacheIronwoodSubtreesIn);
 
     hashSproutAnchor = hashSproutAnchorIn;
     hashSaplingAnchor = hashSaplingAnchorIn;
     hashOrchardAnchor = hashOrchardAnchorIn;
+    hashIronwoodAnchor = hashIronwoodAnchorIn;
     hashBlock = hashBlockIn;
     return true;
 }
@@ -994,31 +1083,39 @@ bool CCoinsViewCache::Flush() {
     // they have been initialized correctly
     cacheSaplingSubtrees.Initialize(base);
     cacheOrchardSubtrees.Initialize(base);
+    cacheIronwoodSubtrees.Initialize(base);
 
     bool fOk = base->BatchWrite(cacheCoins,
                                 hashBlock,
                                 hashSproutAnchor,
                                 hashSaplingAnchor,
                                 hashOrchardAnchor,
+                                hashIronwoodAnchor,
                                 cacheSproutAnchors,
                                 cacheSaplingAnchors,
                                 cacheOrchardAnchors,
+                                cacheIronwoodAnchors,
                                 cacheSproutNullifiers,
                                 cacheSaplingNullifiers,
                                 cacheOrchardNullifiers,
+                                cacheIronwoodNullifiers,
                                 historyCacheMap,
                                 cacheSaplingSubtrees,
-                                cacheOrchardSubtrees);
+                                cacheOrchardSubtrees,
+                                cacheIronwoodSubtrees);
     cacheCoins.clear();
     cacheSproutAnchors.clear();
     cacheSaplingAnchors.clear();
     cacheOrchardAnchors.clear();
+    cacheIronwoodAnchors.clear();
     cacheSproutNullifiers.clear();
     cacheSaplingNullifiers.clear();
     cacheOrchardNullifiers.clear();
+    cacheIronwoodNullifiers.clear();
     historyCacheMap.clear();
     cacheSaplingSubtrees.clear();
     cacheOrchardSubtrees.clear();
+    cacheIronwoodSubtrees.clear();
     cachedCoinsUsage = 0;
     return fOk;
 }
@@ -1152,6 +1249,32 @@ tl::expected<void, UnsatisfiedShieldedReq> CCoinsViewCache::CheckShieldedRequire
                 "txid", txid.c_str(),
                 "anchor", anchor.c_str());
             return tl::unexpected(UnsatisfiedShieldedReq::OrchardUnknownAnchor);
+        }
+    }
+
+    // The Orchard and Ironwood pools have separate, independent nullifier
+    // sets (ZIP 229); a nullifier only double-spends within its own pool.
+    for (const uint256 &nullifier : tx.GetIronwoodBundle().GetNullifiers()) {
+        if (GetNullifier(nullifier, IRONWOOD)) { // Prevent double spends
+            auto txid = tx.GetHash().ToString();
+            auto nf = nullifier.ToString();
+            TracingWarn("consensus", "Ironwood double-spend detected",
+                "txid", txid.c_str(),
+                "nf", nf.c_str());
+            return tl::unexpected(UnsatisfiedShieldedReq::IronwoodDuplicateNullifier);
+        }
+    }
+
+    std::optional<uint256> ironwoodRoot = tx.GetIronwoodBundle().GetAnchor();
+    if (ironwoodRoot) {
+        IronwoodMerkleFrontier tree;
+        if (!GetIronwoodAnchorAt(ironwoodRoot.value(), tree)) {
+            auto txid = tx.GetHash().ToString();
+            auto anchor = ironwoodRoot.value().ToString();
+            TracingWarn("consensus", "Transaction uses unknown Ironwood anchor",
+                "txid", txid.c_str(),
+                "anchor", anchor.c_str());
+            return tl::unexpected(UnsatisfiedShieldedReq::IronwoodUnknownAnchor);
         }
     }
 

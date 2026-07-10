@@ -2,8 +2,11 @@
 #include <gmock/gmock.h>
 
 #include "main.h"
+#include "policy/policy.h"
 #include "primitives/transaction.h"
 #include "consensus/validation.h"
+#include "consensus/upgrades.h"
+#include "script/standard.h"
 #include "transaction_builder.h"
 #include "gtest/utils.h"
 #include "test/test_util.h"
@@ -22,6 +25,23 @@ class UNSAFE_CTransaction : public CTransaction {
     public:
         UNSAFE_CTransaction(const CMutableTransaction &tx) : CTransaction(tx, true) {}
 };
+
+// The canonical Orchard account used across these Orchard/v6 fixtures: a seed of
+// 32 zero bytes, account 133. Centralised so the key, its fvk, and its change
+// address are derived one way. // @claude
+static libzcash::OrchardSpendingKey TestOrchardSpendingKey() {
+    RawHDSeed seed(32, 0);
+    return libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0);
+}
+
+// Stamps the v6 (ZIP 229) header fields onto `mtx` for the given consensus
+// branch id. // @claude
+static void SetV6TxHeader(CMutableTransaction& mtx, uint32_t consensusBranchId) {
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP229_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP229_TX_VERSION;
+    mtx.nConsensusBranchId = consensusBranchId;
+}
 
 TEST(ChecktransactionTests, CheckVpubNotBothNonzero) {
     CMutableTransaction tx;
@@ -1384,14 +1404,15 @@ TEST(ChecktransactionTests, InvalidOrchardShieldedCoinbase) {
     mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId;
 
     // Make it an invalid shielded coinbase, by creating an all-dummy Orchard bundle.
-    RawHDSeed seed(32, 0);
-    auto to = libzcash::OrchardSpendingKey::ForAccount(seed, 133, 0)
+    auto to = TestOrchardSpendingKey()
         .ToFullViewingKey()
         .GetChangeAddress();
     mtx.vin.resize(1);
     mtx.vin[0].prevout.SetNull();
-    auto builder = orchard::Builder(true, uint256());
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     mtx.orchardBundle = builder
         .Build().value()
         .ProveAndSign({}, uint256()).value();
@@ -1419,7 +1440,9 @@ TEST(ChecktransactionTests, NU5AcceptsOrchardShieldedCoinbase) {
     auto chainparams = Params();
 
     uint256 orchardAnchor;
-    auto builder = orchard::Builder(true, orchardAnchor);
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
 
     // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
     RawHDSeed rawSeed(32, 0);
@@ -1429,14 +1452,14 @@ TEST(ChecktransactionTests, NU5AcceptsOrchardShieldedCoinbase) {
         .ToIncomingViewingKey()
         .Address(0);
     uint256 ovk;
-    builder.AddOutput(ovk, to, CAmount(123456), std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, CAmount(123456), std::nullopt));
 
     // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
     // dummy outputs, which violates coinbase rules requiring all shielded outputs to
     // be recoverable. We manually add a dummy output to sidestep this issue.
     // TODO: If/when we have funding streams going to Orchard recipients, this dummy
     // output can be removed.
-    builder.AddOutput(ovk, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
 
     auto bundle = builder
         .Build().value()
@@ -1564,7 +1587,9 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
     auto chainparams = Params();
 
     uint256 orchardAnchor;
-    auto builder = orchard::Builder(true, orchardAnchor);
+    // NU5-era test: the historical insecure revision is the one in force here.
+    auto builder = orchard::Builder(
+        true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
 
     // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
     RawHDSeed rawSeed(32, 0);
@@ -1574,14 +1599,14 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
         .ToIncomingViewingKey()
         .Address(0);
     uint256 ovk;
-    builder.AddOutput(ovk, to, CAmount(1000), std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, CAmount(1000), std::nullopt));
 
     // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
     // dummy outputs, which violates coinbase rules requiring all shielded outputs to
     // be recoverable. We manually add a dummy output to sidestep this issue.
     // TODO: If/when we have funding streams going to Orchard recipients, this dummy
     // output can be removed.
-    builder.AddOutput(ovk, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
 
     auto bundle = builder
         .Build().value()
@@ -1665,4 +1690,574 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
     }
 
     RegtestDeactivateNU5();
+}
+
+// A v6 (ZIP 229) transaction is contextually rejected while NU6.3 is not active,
+// even when it carries NU6.3's consensus branch id.
+TEST(ChecktransactionTests, V6TxRejectedBeforeNU6_3) {
+    RegtestActivateNU6point2();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+
+    CTransaction tx(mtx);
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-nu5-tx-version-group-id", BodyCorruption::Default, "")).Times(1);
+    ContextualCheckTransaction(tx, state, Params(), 1, true);
+
+    RegtestDeactivateNU6point2();
+}
+
+// An empty v6 (ZIP 229) transaction is contextually valid once NU6.3 is active.
+TEST(ChecktransactionTests, V6TxAcceptedAtNU6_3) {
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+
+    CTransaction tx(mtx);
+    MockCValidationState state;
+    EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 1, true));
+
+    RegtestDeactivateNU6point3();
+}
+
+// IsStandardTx admits the v6 (ZIP 229) format once NU6.3 is active. Without
+// the NU6.3 branch in the policy ladder, every post-activation wallet-built
+// transaction (v6 is the default from NU6.3, §5.1a) would be rejected from
+// standardness-enforcing mempools as "nu5-version" — a full send/relay outage
+// on testnet, invisible on regtest where fRequireStandard is false (preflight
+// P1). v4/v5 stay standard; the pre-NU6.3 ladder is unchanged. // @claude
+TEST(ChecktransactionTests, V6IsStandardAtNU6_3) {
+    // Minimal standard transparent skeleton: push-only scriptSig, P2PKH
+    // output above the dust threshold. // @claude
+    CMutableTransaction skeleton;
+    skeleton.vin.resize(1);
+    skeleton.vin[0].scriptSig = CScript() << std::vector<unsigned char>(65, 0);
+    skeleton.vout.resize(1);
+    skeleton.vout[0].nValue = 90 * CENT;
+    skeleton.vout[0].scriptPubKey = GetScriptForDestination(CKeyID());
+
+    std::string reason;
+    RegtestActivateNU6point3();
+    {
+        // v6 is standard from NU6.3.
+        CMutableTransaction mtx(skeleton);
+        SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtx), reason, Params(), 1)) << reason;
+
+        // v5 and v4 remain standard (v5 wind-down; Sprout stays on v4).
+        CMutableTransaction mtxV5(skeleton);
+        mtxV5.fOverwintered = true;
+        mtxV5.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtxV5.nVersion = ZIP225_TX_VERSION;
+        mtxV5.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtxV5), reason, Params(), 1)) << reason;
+
+        CMutableTransaction mtxV4(skeleton);
+        mtxV4.fOverwintered = true;
+        mtxV4.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+        mtxV4.nVersion = SAPLING_TX_VERSION;
+        EXPECT_TRUE(IsStandardTx(CTransaction(mtxV4), reason, Params(), 1)) << reason;
+
+        // v3 falls below the NU6.3 minimum.
+        CMutableTransaction mtxV3(skeleton);
+        mtxV3.fOverwintered = true;
+        mtxV3.nVersionGroupId = OVERWINTER_VERSION_GROUP_ID;
+        mtxV3.nVersion = OVERWINTER_TX_VERSION;
+        EXPECT_FALSE(IsStandardTx(CTransaction(mtxV3), reason, Params(), 1));
+        EXPECT_EQ(reason, "nu6.3-version");
+    }
+    RegtestDeactivateNU6point3();
+
+    // Before NU6.3 the NU5 rules still reject v6.
+    RegtestActivateNU6point2();
+    {
+        CMutableTransaction mtx(skeleton);
+        SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+        EXPECT_FALSE(IsStandardTx(CTransaction(mtx), reason, Params(), 1));
+        EXPECT_EQ(reason, "nu5-version");
+    }
+    RegtestDeactivateNU6point2();
+}
+
+// From NU6.3, CreateNewContextualCMutableTransaction defaults to the v6 (ZIP 229)
+// format so newly-built transactions carry the Ironwood bundle slot (§5.1a). A v6
+// tx must also carry nConsensusBranchId (it is >= ZIP225) so that it can be signed.
+TEST(ChecktransactionTests, ContextualCreateTxIsV6AtNU6_3) {
+    const Consensus::Params& params = RegtestActivateNU6point3();
+
+    CMutableTransaction mtx = CreateNewContextualCMutableTransaction(params, 1, false);
+    EXPECT_TRUE(mtx.fOverwintered);
+    EXPECT_EQ(mtx.nVersionGroupId, ZIP229_VERSION_GROUP_ID);
+    EXPECT_EQ(mtx.nVersion, ZIP229_TX_VERSION);
+    EXPECT_TRUE(CTransaction(mtx).IsZip229V6());
+    ASSERT_TRUE(mtx.nConsensusBranchId.has_value());
+    EXPECT_EQ(mtx.nConsensusBranchId.value(),
+              (uint32_t)NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+
+    // requireV4 still forces the Sapling (v4) format even when NU6.3 is active.
+    CMutableTransaction mtxV4 = CreateNewContextualCMutableTransaction(params, 1, true);
+    EXPECT_EQ(mtxV4.nVersion, SAPLING_TX_VERSION);
+    EXPECT_EQ(mtxV4.nVersionGroupId, SAPLING_VERSION_GROUP_ID);
+
+    RegtestDeactivateNU6point3();
+}
+
+// An Ironwood bundle's proof, spend-auth signatures, and binding signature validate
+// as a batch under the PostNu6_3 verifying key; the same bundle queued under a
+// different sighash must fail signature validation.
+TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+
+    uint256 orchardAnchor;
+    uint256 sighash = uint256S("aa");
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, orchardAnchor);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    auto bundle = builder.Build().value().ProveAndSign({}, sighash).value();
+
+    {
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(bundle.QueueAuthValidation(*batch, sighash, orchard::BundleFormat::V6Ironwood));
+        EXPECT_TRUE(batch->validate());
+    }
+
+    {
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(bundle.QueueAuthValidation(*batch, uint256S("bb"), orchard::BundleFormat::V6Ironwood));
+        EXPECT_FALSE(batch->validate());
+    }
+
+    RegtestDeactivateNU6point3();
+}
+
+// Helper: build a valid Orchard-format bundle in the given pool whose net value
+// balance is `-outputValue` (an output funded from the transparent pool, i.e.
+// value moving INTO the shielded pool). Built with the historical insecure
+// revision, which imposes no cross-address restriction, so an output to an
+// arbitrary recipient is constructible regardless of pool.
+static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmount outputValue) {
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    uint256 ovk;
+    auto builder = orchard::Builder(
+        true, {pool, orchard::ProtocolVersion::InsecureV1}, uint256());
+    EXPECT_TRUE(builder.AddOutput(ovk, to, outputValue, std::nullopt));
+    // orchard::Builder pads to two Actions; the second is a zero-value dummy.
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
+    return builder.Build().value().ProveAndSign({}, uint256()).value();
+}
+
+// Helper: build a well-formed V6 Ironwood-format bundle. The v6 slots require the
+// V3 protocol version; the InsecureV1 bundles from BuildBundleWithOutput are a
+// V5-era format the v6 slots reject, and (Ironwood, InsecureV1) is not even a
+// valid builder pairing. The Ironwood pool permits cross-address transfers, so an
+// ordinary AddOutput suffices here.
+static OrchardBundle BuildV6IronwoodBundle() {
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    return builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
+}
+
+// Helper: build a well-formed V6 Orchard-format bundle. The Orchard pool under
+// protocol V3 (the V6Orchard slot) mandates the cross-address restriction, so an
+// ordinary AddOutput is rejected; the only non-empty content it can carry is a
+// wallet-controlled change output (paired with a fabricated spend authorized by
+// the spending key). This is the orchard-pool self-send shape.
+static OrchardBundle BuildV6OrchardBundle() {
+    auto sk = TestOrchardSpendingKey();
+    auto fvk = sk.ToFullViewingKey();
+    auto to = fvk.GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+    EXPECT_TRUE(builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
+    return builder.Build().value().ProveAndSign({sk}, uint256S("bb")).value();
+}
+
+// [NU6.3 onward] valueBalanceOrchard MUST be nonnegative (ZIP 258 / audit fix
+// fcd92c1). A non-coinbase transaction whose Orchard bundle moves value into the
+// pool (negative valueBalanceOrchard) is rejected from NU6.3; a zero balance is
+// accepted. Applies to both v5 and v6; tested here on v5.
+TEST(ChecktransactionTests, OrchardNegativeValueBalanceRejectedFromNU6_3) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // Reject case: negative valueBalanceOrchard.
+    {
+        auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, CAmount(1000));
+        ASSERT_LT(bundle.GetValueBalance(), 0);
+
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtx.nVersion = ZIP225_TX_VERSION;
+        mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        mtx.vin.resize(1);
+        mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0); // non-null => not a coinbase
+        mtx.orchardBundle = bundle;
+
+        CTransaction tx(mtx);
+        ASSERT_FALSE(tx.IsCoinBase());
+
+        MockCValidationState state;
+        EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-orchard-negative-valuebalance", BodyCorruption::Default, "")).Times(1);
+        ContextualCheckTransaction(tx, state, Params(), 10, true);
+    }
+
+    // Accept case: zero valueBalanceOrchard passes the nonnegativity rule.
+    {
+        auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, CAmount(0));
+        ASSERT_EQ(bundle.GetValueBalance(), 0);
+
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        mtx.nVersion = ZIP225_TX_VERSION;
+        mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+        mtx.vin.resize(1);
+        mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0);
+        mtx.orchardBundle = bundle;
+
+        CTransaction tx(mtx);
+        MockCValidationState state;
+        EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 10, true));
+    }
+
+    RegtestDeactivateNU6point3();
+}
+
+// A coinbase transaction must not have spend-enabled Ironwood actions
+// (CheckTransactionWithoutProofVerification, non-contextual).
+TEST(ChecktransactionTests, IronwoodCoinbaseRejectsSpends) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // A non-coinbase Ironwood builder produces a bundle with spends enabled.
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    auto bundle = builder.Build().value().ProveAndSign({}, uint256()).value();
+    ASSERT_TRUE(bundle.SpendsEnabled());
+
+    // Place it in an otherwise-valid coinbase transaction.
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout.SetNull();
+    mtx.vin[0].scriptSig << 123; // valid coinbase scriptSig length
+    mtx.ironwoodBundle = bundle;
+
+    CTransaction tx(mtx);
+    ASSERT_TRUE(tx.IsCoinBase());
+
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-has-ironwood-spend", BodyCorruption::Default, "")).Times(1);
+    CheckTransactionWithoutProofVerification(tx, state);
+
+    RegtestDeactivateNU6point3();
+}
+
+// A v6 transaction carrying a non-empty Ironwood bundle round-trips through
+// serialization: constructing the CTransaction reparses the bytes via
+// librustzcash (rejecting any non-canonical v6 encoding), and re-serialization
+// is byte-identical. Complements V6EmptyBundlesRoundTrip.
+TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    auto bundle = builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = bundle;
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytes(ss.begin(), ss.end());
+
+    CTransaction tx(deserialize, ss);
+    EXPECT_TRUE(tx.GetIronwoodBundle().IsPresent());
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent());
+    EXPECT_EQ(tx.GetHash(), mtx.GetHash());
+    EXPECT_EQ(tx.GetAuthDigest(), mtx.GetAuthDigest());
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytes2(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytes, bytes2);
+
+    RegtestDeactivateNU6point3();
+}
+
+// Runs the full v6 serialization round-trip assertion battery for one content
+// permutation: `orchard`/`ironwood` are the bundles to place in the respective
+// v6 slots (std::nullopt means leave that slot empty). The central guarantee is
+// cross-class byte equality — the CTransaction serializer and the
+// CMutableTransaction serializer must emit identical bytes for the same content,
+// since the two SerializationOp blocks are duplicated and could drift apart.
+static void CheckV6BundlePermutation(
+    std::optional<OrchardBundle> orchard,
+    std::optional<OrchardBundle> ironwood) {
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    if (orchard.has_value()) {
+        mtx.orchardBundle = orchard.value();
+    }
+    if (ironwood.has_value()) {
+        mtx.ironwoodBundle = ironwood.value();
+    }
+
+    // (1) Serialize the mutable transaction to bytesM.
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytesM(ss.begin(), ss.end());
+
+    // (2) Deserialize into a CTransaction. Its constructor runs UpdateHash, which
+    // reparses the bytes via librustzcash and rejects any non-canonical v6
+    // encoding — so a successful construction is itself a canonicality assertion.
+    CDataStream ssT(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx(deserialize, ssT);
+    EXPECT_EQ(tx.GetOrchardBundle().IsPresent(), orchard.has_value());
+    EXPECT_EQ(tx.GetIronwoodBundle().IsPresent(), ironwood.has_value());
+    EXPECT_EQ(tx.GetHash(), mtx.GetHash());
+    EXPECT_EQ(tx.GetAuthDigest(), mtx.GetAuthDigest());
+    EXPECT_EQ(tx.GetConsensusBranchId(), mtx.nConsensusBranchId);
+
+    // (3) Cross-class byte equality: re-serializing through the CTransaction path
+    // must reproduce the CMutableTransaction bytes exactly.
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytesT(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytesT, bytesM);
+
+    // (4) tx-bytes -> fresh CMutableTransaction and back, closing the loop
+    // mtx -> bytes -> tx -> bytes -> mtx.
+    CDataStream ssM2(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CMutableTransaction mtx2;
+    ssM2 >> mtx2;
+    CDataStream ss3(SER_NETWORK, PROTOCOL_VERSION);
+    ss3 << mtx2;
+    const std::vector<unsigned char> bytes2M(ss3.begin(), ss3.end());
+    EXPECT_EQ(bytes2M, bytesM);
+    EXPECT_EQ(mtx2.GetHash(), mtx.GetHash());
+
+    // (5) The converting constructor CMutableTransaction(const CTransaction&) must
+    // copy every bundle slot (including ironwood); otherwise this re-serialization
+    // would diverge from bytesM.
+    CMutableTransaction mtx3(tx);
+    CDataStream ss4(SER_NETWORK, PROTOCOL_VERSION);
+    ss4 << mtx3;
+    const std::vector<unsigned char> bytes3M(ss4.begin(), ss4.end());
+    EXPECT_EQ(bytes3M, bytesM);
+}
+
+// Exercises every v6 bundle-content permutation (empty/empty, orchard-only,
+// ironwood-only, both) through the full serialization round-trip battery,
+// asserting cross-class byte equality in each. The bundles are proven once per
+// pool and reused across permutations (proving is expensive).
+TEST(ChecktransactionTests, V6BundlePermutationsSerializationRoundTrip) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    const auto orchardBundle = BuildV6OrchardBundle();
+    const auto ironwoodBundle = BuildV6IronwoodBundle();
+
+    CheckV6BundlePermutation(std::nullopt, std::nullopt);      // A: empty / empty
+    CheckV6BundlePermutation(orchardBundle, std::nullopt);     // B: orchard only
+    CheckV6BundlePermutation(std::nullopt, ironwoodBundle);    // C: ironwood only
+    CheckV6BundlePermutation(orchardBundle, ironwoodBundle);   // D: both present
+
+    RegtestDeactivateNU6point3();
+}
+
+// v5 (ZIP 225) transactions have no ironwood slot on the wire. Setting
+// ironwoodBundle on a v5 mtx is silently dropped by the serializer (isZip229V6 is
+// false), not an error. This documents that "silently dropped" semantics: the
+// bytes carry no ironwood section, the reconstructed tx has no ironwood bundle,
+// and re-serialization is byte-identical.
+TEST(ChecktransactionTests, V5IgnoresIronwoodBundleSlot) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    const auto ironwoodBundle = BuildV6IronwoodBundle();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP225_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.ironwoodBundle = ironwoodBundle;
+
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    const std::vector<unsigned char> bytesM(ss.begin(), ss.end());
+
+    CDataStream ssT(bytesM, SER_NETWORK, PROTOCOL_VERSION);
+    CTransaction tx(deserialize, ssT);
+    EXPECT_FALSE(tx.GetIronwoodBundle().IsPresent());
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent());
+
+    CDataStream ss2(SER_NETWORK, PROTOCOL_VERSION);
+    ss2 << tx;
+    const std::vector<unsigned char> bytesT(ss2.begin(), ss2.end());
+    EXPECT_EQ(bytesT, bytesM);
+
+    RegtestDeactivateNU6point3();
+}
+
+// CDiskBlockIndex serializes the NU6.3 Ironwood fields (hashFinalIronwoodRoot,
+// nIronwoodValue) only when the write-time client version is >= NU6_3_DATA_VERSION.
+// This checks both directions: the fields round-trip when the gate is open, and
+// are correctly skipped (left at their null/zero defaults) when it is not — the
+// per-version gating the whole *_DATA_VERSION mechanism relies on.
+TEST(ChecktransactionTests, CDiskBlockIndexRoundTripsIronwoodFields) {
+    const uint256 ironwoodRoot = uint256S("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const CAmount ironwoodValue = 123456789;
+
+    CDiskBlockIndex a;
+    a.nStatus = 0; // no HAVE_DATA/UNDO/ACTIVATES_UPGRADE conditional fields
+    a.nVersion = 4;
+    a.hashFinalIronwoodRoot = ironwoodRoot;
+    a.nIronwoodValue = ironwoodValue;
+
+    // Gate open: written at NU6.3-aware version, the fields round-trip.
+    {
+        CDataStream ss(SER_DISK, NU6_3_DATA_VERSION);
+        ss << a;
+        CDiskBlockIndex b;
+        ss >> b;
+        EXPECT_EQ(b.hashFinalIronwoodRoot, ironwoodRoot);
+        EXPECT_EQ(b.nIronwoodValue, ironwoodValue);
+    }
+
+    // Gate closed: written at an NU6-era version (before NU6.3), the Ironwood
+    // fields are not serialized, so on read they remain at their defaults.
+    {
+        CDataStream ss(SER_DISK, NU6_DATA_VERSION);
+        ss << a;
+        CDiskBlockIndex b;
+        ss >> b; // must not overrun / throw
+        EXPECT_TRUE(b.hashFinalIronwoodRoot.IsNull());
+        EXPECT_EQ(b.nIronwoodValue, 0);
+    }
+}
+
+// Review C1: the signing-side and verifier-side sighashes must agree for a v6
+// transaction carrying an Orchard bundle. Before the fix,
+// shielded_signature_digest built its signing TransactionData via map_bundles,
+// which applies the same Orchard closure to the Ironwood slot — the signer
+// committed to a phantom clone of the Orchard bundle in the Ironwood slot
+// while every verifier computed the digest over the transaction's real (empty)
+// slot, invalidating all shielded signatures in any Orchard-carrying v6
+// transaction. This drives the exact TransactionBuilder signing flow (digest
+// over the partial tx + unauthorized bundle, then ProveAndSign with it) and
+// checks it against the verifier's own digest. // @claude
+TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+    {
+        auto chainparams = Params();
+        uint32_t consensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+
+        // A post-NU6.3 Orchard change-to-self bundle: the only constructible
+        // non-empty content for the (Orchard, V3) cross-address-restricted slot.
+        auto sk = TestOrchardSpendingKey();
+        auto fvk = sk.ToFullViewingKey();
+        auto to = fvk.GetChangeAddress();
+        auto orchardBuilder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+        EXPECT_TRUE(orchardBuilder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
+        auto unauthorized = orchardBuilder.Build();
+        ASSERT_TRUE(unauthorized.has_value());
+
+        // The partial v6 transaction: every shielded slot serializes empty.
+        CMutableTransaction mtx;
+        SetV6TxHeader(mtx, consensusBranchId);
+
+        // An empty Sapling bundle, as TransactionBuilder always carries one.
+        auto saplingAnchor = SaplingMerkleTree::empty_root().GetRawBytes();
+        auto saplingBuilder = sapling::new_builder(*chainparams.RustNetwork(), 1, saplingAnchor, false);
+        auto saplingBundle = sapling::build_bundle(std::move(saplingBuilder));
+
+        // Builder-side digest, exactly as TransactionBuilder computes it.
+        uint256 dataToBeSigned = ProduceShieldedSignatureHash(
+            consensusBranchId, CTransaction(mtx), {}, *saplingBundle,
+            unauthorized, std::nullopt);
+
+        auto authorized = unauthorized.value().ProveAndSign({sk}, dataToBeSigned);
+        ASSERT_TRUE(authorized.has_value());
+        mtx.orchardBundle = authorized.value();
+        CTransaction tx(mtx);
+
+        // Verifier-side digest, exactly as ContextualCheckShieldedInputs computes it.
+        const std::vector<CTxOut> noPrevOutputs;
+        const PrecomputedTransactionData txdata(tx, noPrevOutputs);
+        CScript scriptCode;
+        uint256 verifierSighash = SignatureHash(
+            scriptCode, tx, NOT_AN_INPUT, SIGHASH_ALL, 0, consensusBranchId, txdata);
+
+        EXPECT_EQ(dataToBeSigned, verifierSighash);
+
+        // The spend-auth and binding signatures made over the builder digest
+        // must batch-validate under the verifier digest.
+        auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+        EXPECT_TRUE(tx.GetOrchardBundle().QueueAuthValidation(
+            *batch, verifierSighash, orchard::BundleFormat::V6Orchard));
+        EXPECT_TRUE(batch->validate());
+    }
+    RegtestDeactivateNU6point3();
+}
+
+// Review H1: the builder's output-rejection must be observable. From NU6.3 the
+// (Orchard, V3) pool rejects every AddOutput recipient under the cross-address
+// restriction — including the wallet's own address — while AddChangeOutput (the
+// deliberate change-to-self exception) succeeds for the same address. Before
+// the fix the C++ wrappers discarded the FFI result and recorded the action
+// anyway, so an Orchard spend's dropped payment/change silently became miner
+// fee. The Ironwood-V3 and Orchard-InsecureV1 rows pin the unrestricted
+// behavior. // @claude
+TEST(ChecktransactionTests, OrchardV3BuilderRejectsOutputsAndReportsIt) {
+    auto sk = TestOrchardSpendingKey();
+    auto fvk = sk.ToFullViewingKey();
+    auto to = fvk.GetChangeAddress();
+
+    // (Orchard, V3): every recipient rejected; change-to-self permitted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
+        EXPECT_FALSE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+        EXPECT_TRUE(builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
+    }
+    // (Ironwood, V3): cross-address transfers permitted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    }
+    // (Orchard, InsecureV1): pre-NU6.3 semantics, outputs accepted.
+    {
+        auto builder = orchard::Builder(
+            false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
+    }
 }

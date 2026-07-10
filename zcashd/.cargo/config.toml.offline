@@ -1,3 +1,10 @@
+# rust-analyzer (and any bare `cargo` invocation) reads these rustflags so the
+# NU6.3 feature gate is active in the editor. The zcashd make build sets RUSTFLAGS
+# in the environment, which takes precedence over this and supplies the same cfg
+# via ZCASH_UNSTABLE (see src/Makefile.am), so the two stay in sync.
+[build]
+rustflags = ['--cfg', 'zcash_unstable="nu6.3"', '--check-cfg', 'cfg(zcash_unstable, values("nu6.3", "nu7"))']
+
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 

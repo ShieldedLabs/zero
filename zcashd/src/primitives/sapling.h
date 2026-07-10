@@ -99,15 +99,17 @@ public:
     /// and signatures from this bundle may have already been added to the batch even if
     /// it fails other consensus rules.
     ///
-    /// `sighash` must be for the transaction this bundle is within.
+    /// `sighash` must be for the transaction this bundle is within, and `isV6` must
+    /// indicate that transaction's version (the v6 Sapling digests differ from v5, so
+    /// the version selects the bundle validity cache key).
     ///
     /// If this batch was configured to not cache the results, then if the bundle was in
     /// the global bundle validity cache, it will have been removed (and this method will
     /// return `true`).
     bool QueueAuthValidation(
-        sapling::BatchValidator& batch, const uint256& sighash) const
+        sapling::BatchValidator& batch, const uint256& sighash, bool txIsV6) const
     {
-        return batch.check_bundle(inner->box_clone(), sighash.GetRawBytes());
+        return batch.check_bundle(inner->box_clone(), sighash.GetRawBytes(), txIsV6);
     }
 
     const size_t GetSpendsCount() const {

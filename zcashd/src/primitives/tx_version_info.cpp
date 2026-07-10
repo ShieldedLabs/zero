@@ -19,6 +19,15 @@ TxVersionInfo CurrentTxVersionInfo(
             .nVersionGroupId = ZFUTURE_VERSION_GROUP_ID,
             .nVersion =        ZFUTURE_TX_VERSION
         };
+    } else if (consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_3) && !requireV4) {
+        // From NU6.3, the v6 (ZIP 229) format is current: it carries the Ironwood
+        // bundle slot alongside Orchard. Non-Ironwood transactions still serialize
+        // as v6 with empty Orchard/Ironwood bundles, exactly as v5 did for Orchard.
+        return {
+            .fOverwintered =   true,
+            .nVersionGroupId = ZIP229_VERSION_GROUP_ID,
+            .nVersion =        ZIP229_TX_VERSION
+        };
     } else if (consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU5) && !requireV4) {
         return {
             .fOverwintered =   true,

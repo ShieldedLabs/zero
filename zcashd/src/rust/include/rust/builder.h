@@ -10,6 +10,17 @@
 #include "rust/transaction.h"
 
 #ifdef __cplusplus
+// Do NOT include "rust/bridge.h" here: the generated bridge.h includes THIS
+// header (to obtain the Orchard*Ptr C typedefs below) before it declares the
+// `orchard` cxx types, so including it back would form a cycle in which each
+// header uses a type the other hasn't declared yet. Forward-declare the two
+// cxx structs we reference; they are only used by value in declarations, which
+// does not require a complete type.
+namespace orchard {
+struct BundleVersion;
+struct Flags;
+}
+
 extern "C" {
 #endif
 
@@ -34,15 +45,11 @@ void orchard_spend_info_free(OrchardSpendInfoPtr* ptr);
 /// Construct a new Orchard transaction builder.
 ///
 /// If `anchor` is `null`, the root of the empty Orchard commitment tree is used.
-///
-/// `use_fixed_circuit_for_proving` selects the circuit version to build the bundle's proof
-/// against: the fixed (NU6.2-onward) circuit, or the historical (insecure) circuit. It is
-/// recorded on the bundle and reused when its proof is created, and should be computed via
-/// `CChainParams::UseFixedCircuitForProving`.
 OrchardBuilderPtr* orchard_builder_new(
     bool coinbase,
-    const unsigned char* anchor,
-    bool use_fixed_circuit_for_proving);
+    orchard::BundleVersion bundle_version,
+    orchard::Flags flags,
+    const unsigned char* anchor);
 
 /// Frees an Orchard builder returned from `orchard_builder_new`.
 void orchard_builder_free(OrchardBuilderPtr* ptr);
@@ -65,6 +72,25 @@ bool orchard_builder_add_spend(
 /// `memo` is a pointer to the 512-byte memo field encoding, or `null` for "no memo".
 bool orchard_builder_add_recipient(
     OrchardBuilderPtr* ptr,
+    const unsigned char* ovk,
+    const OrchardRawAddressPtr* recipient,
+    uint64_t value,
+    const unsigned char* memo);
+
+/// Adds a wallet-controlled change output owned by `full_viewing_key`.
+///
+/// Unlike `orchard_builder_add_recipient`, this is permitted in bundles that
+/// disable cross-address transfers (such as the Orchard pool under protocol V3).
+/// The paired fabricated spend is authorized at proving time by the spending key
+/// matching `full_viewing_key`, which must be supplied to
+/// `orchard_unauthorized_bundle_prove_and_sign`.
+///
+/// `ovk` is a pointer to the outgoing viewing key to make this output recoverable
+/// by, or `null`. `memo` is a pointer to the 512-byte memo field encoding, or
+/// `null` for "no memo".
+bool orchard_builder_add_change_output(
+    OrchardBuilderPtr* ptr,
+    const OrchardFullViewingKeyPtr* full_viewing_key,
     const unsigned char* ovk,
     const OrchardRawAddressPtr* recipient,
     uint64_t value,

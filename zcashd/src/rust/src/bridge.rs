@@ -82,6 +82,7 @@ pub(crate) mod ffi {
             nu6: i32,
             nu6_1: i32,
             nu6_2: i32,
+            #[cfg(zcash_unstable = "nu6.3")] nu6_3: i32,
         ) -> Result<Box<Network>>;
     }
 
@@ -260,6 +261,7 @@ pub(crate) mod ffi {
             self: &mut SaplingBatchValidator,
             bundle: Box<SaplingBundle>,
             sighash: [u8; 32],
+            tx_is_v6: bool,
         ) -> bool;
         fn validate(self: &mut SaplingBatchValidator) -> bool;
     }
@@ -288,8 +290,16 @@ pub(crate) mod ffi {
         unsafe fn from_raw_box(bundle: *mut OrchardBundlePtr) -> Box<Bundle>;
         fn box_clone(self: &Bundle) -> Box<Bundle>;
         #[rust_name = "parse_orchard_bundle"]
-        fn parse(stream: &mut CppStream<'_>) -> Result<Box<Bundle>>;
-        fn serialize(self: &Bundle, stream: &mut CppStream<'_>) -> Result<()>;
+        fn parse(
+            stream: &mut CppStream<'_>,
+            consensus_branch_id: u32,
+            format: BundleFormat,
+        ) -> Result<Box<Bundle>>;
+        fn serialize(
+            self: &Bundle,
+            stream: &mut CppStream<'_>,
+            format: BundleFormat,
+        ) -> Result<()>;
         fn as_ptr(self: &Bundle) -> *const OrchardBundlePtr;
         fn recursive_dynamic_usage(self: &Bundle) -> usize;
         fn is_present(self: &Bundle) -> bool;
@@ -297,6 +307,7 @@ pub(crate) mod ffi {
         fn num_actions(self: &Bundle) -> usize;
         fn enable_spends(self: &Bundle) -> bool;
         fn enable_outputs(self: &Bundle) -> bool;
+        fn enable_cross_address(self: &Bundle) -> bool;
         fn value_balance_zat(self: &Bundle) -> i64;
         fn anchor(self: &Bundle) -> [u8; 32];
         fn proof(self: &Bundle) -> Vec<u8>;
@@ -306,15 +317,104 @@ pub(crate) mod ffi {
     }
 
     #[namespace = "orchard"]
+    pub enum BundleFormat {
+        /// The single Orchard bundle of a v5 (ZIP 225) transaction.
+        V5,
+        /// The Orchard bundle of a v6 (ZIP 229) transaction.
+        V6Orchard,
+        /// The Ironwood bundle of a v6 (ZIP 229) transaction.
+        V6Ironwood,
+    }
+
+    #[namespace = "orchard"]
+    #[cxx_name = "OrchardValuePool"]
+    pub enum ValuePool {
+        /// The Orchard value pool.
+        Orchard,
+        /// The Ironwood value pool.
+        Ironwood,
+    }
+
+    #[namespace = "orchard"]
+    pub enum ProtocolVersion {
+        /// The original version of the protocol, used in Zcash prior to NU6.2, only instantiated for
+        /// the Orchard value pool.
+        ///
+        /// Uses the historical unsound Orchard circuit. Cross-address transfers are permitted and
+        /// notes use the V2 plaintext format. Used to reconstruct the historical verifying key and to
+        /// parse/verify historical bundles, not to build new ones.
+        InsecureV1,
+        /// The version of the Orchard protocol used in Zcash for NU6.2, only instantiated for the
+        /// Orchard value pool.
+        ///
+        /// Uses the post-NU6.2 fixed Orchard circuit. Cross-address transfers are permitted and notes
+        /// use the V2 plaintext format.
+        V2,
+        /// The version of the Orchard protocol used in Zcash NU6.3, instantiated for both the Orchard
+        /// and Ironwood value pools.
+        ///
+        /// Uses the post-NU6.3 circuit for both the Orchard and Ironwood value pools.
+        ///
+        /// For transactional bundles affecting the [`ValuePool::Orchard`] value pool,
+        /// `enableCrossAddress = 0` is required by consensus, so cross-address transfers are
+        /// prohibited and Orchard actions are disallowed in coinbase. Notes use V2 plaintexts.
+        ///
+        /// For transactional bundles affecting the [`ValuePool::Ironwood`] value pool, cross-address
+        /// transfers are permitted and notes use V3 plaintexts.
+        V3,
+    }
+
+    #[namespace = "orchard"]
+    pub struct BundleVersion {
+        value_pool: ValuePool,
+        protocol_version: ProtocolVersion,
+    }
+
+    #[namespace = "orchard"]
+    pub struct Flags {
+        /// Flag denoting whether Orchard spends are enabled in the transaction.
+        ///
+        /// If `false`, spent notes within [`Action`]s in the transaction's [`Bundle`] are
+        /// guaranteed to be dummy notes. If `true`, the spent notes may be either real or
+        /// dummy notes.
+        spends_enabled: bool,
+        /// Flag denoting whether Orchard outputs are enabled in the transaction.
+        ///
+        /// If `false`, created notes within [`Action`]s in the transaction's [`Bundle`] are
+        /// guaranteed to be dummy notes. If `true`, the created notes may be either real or
+        /// dummy notes.
+        outputs_enabled: bool,
+        /// Flag denoting whether Orchard spends and outputs may use different expanded
+        /// receivers.
+        ///
+        /// If `false`, every action's output is constrained to be addressed to the same
+        /// expanded receiver as the note it spends; proving and verification must reject the
+        /// bundle unless they use a circuit key that supports the restriction.
+        cross_address_enabled: bool,
+    }
+
+    #[namespace = "orchard"]
+    enum OrchardCircuitVersion {
+        PostNu6_3,
+        FixedPostNu6_2,
+        InsecurePreNu6_2,
+    }
+
+    #[namespace = "orchard"]
     extern "Rust" {
         #[cxx_name = "BatchValidator"]
         type OrchardBatchValidator;
         #[cxx_name = "init_batch_validator"]
         fn orchard_batch_validation_init(
             cache_store: bool,
-            nu6_2_active: bool,
+            circuit_version: OrchardCircuitVersion,
         ) -> Box<OrchardBatchValidator>;
-        fn add_bundle(self: &mut OrchardBatchValidator, bundle: Box<Bundle>, sighash: [u8; 32]);
+        fn add_bundle(
+            self: &mut OrchardBatchValidator,
+            bundle: Box<Bundle>,
+            sighash: [u8; 32],
+            format: BundleFormat,
+        ) -> bool;
         fn validate(self: &mut OrchardBatchValidator) -> bool;
     }
 
@@ -354,6 +454,7 @@ pub(crate) mod ffi {
             all_prev_outputs: &[u8],
             sapling_bundle: &SaplingUnauthorizedBundle,
             orchard_bundle: *const OrchardUnauthorizedBundlePtr,
+            ironwood_bundle: *const OrchardUnauthorizedBundlePtr,
         ) -> Result<[u8; 32]>;
     }
 

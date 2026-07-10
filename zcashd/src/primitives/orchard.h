@@ -66,18 +66,18 @@ public:
     }
 
     template<typename Stream>
-    void Serialize(Stream& s) const {
+    void Serialize(Stream& s, orchard::BundleFormat format) const {
         try {
-            inner->serialize(*ToRustStream(s));
+            inner->serialize(*ToRustStream(s), format);
         } catch (const std::exception& e) {
             throw std::ios_base::failure(e.what());
         }
     }
 
     template<typename Stream>
-    void Unserialize(Stream& s) {
+    void Unserialize(Stream& s, uint32_t consensusBranchId, orchard::BundleFormat format) {
         try {
-            inner = orchard_bundle::parse(*ToRustStream(s));
+            inner = orchard_bundle::parse(*ToRustStream(s), consensusBranchId, format);
         } catch (const std::exception& e) {
             throw std::ios_base::failure(e.what());
         }
@@ -93,13 +93,20 @@ public:
         return inner->value_balance_zat();
     }
 
-    /// Queues this bundle's authorization for validation.
+    /// Queues this bundle's authorization (proof, spend-auth signatures, and
+    /// binding signature) for validation.
     ///
-    /// `sighash` must be for the transaction this bundle is within.
-    void QueueAuthValidation(
-        orchard::BatchValidator& batch, const uint256& sighash) const
-    {
-        batch.add_bundle(inner->box_clone(), sighash.GetRawBytes());
+    /// `sighash` must be for the transaction this bundle is within, and `format`
+    /// the slot the bundle occupies in it.
+    ///
+    /// Returns `false` if the bundle cannot be valid in the batch's epoch; the
+    /// transaction must then be rejected.
+    bool QueueAuthValidation(
+        orchard::BatchValidator& batch,
+        const uint256& sighash,
+        orchard::BundleFormat format
+    ) const {
+        return batch.add_bundle(inner->box_clone(), sighash.GetRawBytes(), format);
     }
 
     const size_t GetNumActions() const {

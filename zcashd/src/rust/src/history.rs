@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 
-use zcash_history::{Entry as MMREntry, Tree as MMRTree, Version, V1, V2};
+use zcash_history::{Entry as MMREntry, Tree as MMRTree, Version, V1, V2, V3};
 use zcash_protocol::consensus::BranchId;
 
 #[cxx::bridge]
@@ -22,11 +22,11 @@ mod ffi {
             // Indices of provided tree nodes, length of p_len
             indices: &[u32],
             // Provided tree nodes data, length of p_len
-            nodes: &[[u8; 253]], // zcash_history::MAX_ENTRY_SIZE
+            nodes: &[[u8; 326]], // zcash_history::MAX_ENTRY_SIZE
             // New node
-            new_node_bytes: &[u8; 244], // zcash_history::MAX_NODE_DATA_SIZE
+            new_node_bytes: &[u8; 317], // zcash_history::MAX_NODE_DATA_SIZE
             // Return buffer for appended leaves, should be pre-allocated of ceiling(log2(t_len)) length
-            buf_ret: &mut [[u8; 244]], // zcash_history::MAX_NODE_DATA_SIZE
+            buf_ret: &mut [[u8; 317]], // zcash_history::MAX_NODE_DATA_SIZE
         ) -> Result<Effect>;
 
         fn remove(
@@ -37,24 +37,31 @@ mod ffi {
             // Indices of provided tree nodes, length of p_len+e_len
             indices: &[u32],
             // Provided tree nodes data, length of p_len+e_len
-            nodes: &[[u8; 253]], // zcash_history::MAX_ENTRY_SIZE
+            nodes: &[[u8; 326]], // zcash_history::MAX_ENTRY_SIZE
             // Peaks count
             p_len: usize,
         ) -> Result<Effect>;
 
-        fn hash_node(cbranch: u32, node_bytes: &[u8; 244]) -> Result<[u8; 32]>;
+        fn hash_node(cbranch: u32, node_bytes: &[u8; 317]) -> Result<[u8; 32]>;
     }
 }
 
 /// Switch the tree version on the epoch it is for.
-fn dispatch<S, T>(cbranch: u32, input: S, v1: impl FnOnce(S) -> T, v2: impl FnOnce(S) -> T) -> T {
+fn dispatch<S, T>(
+    cbranch: u32,
+    input: S,
+    v1: impl FnOnce(S) -> T,
+    v2: impl FnOnce(S) -> T,
+    v3: impl FnOnce(S) -> T,
+) -> T {
     match BranchId::try_from(cbranch).unwrap() {
         BranchId::Sprout
         | BranchId::Overwinter
         | BranchId::Sapling
         | BranchId::Heartwood
         | BranchId::Canopy => v1(input),
-        _ => v2(input),
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2 => v2(input),
+        _ => v3(input),
     }
 }
 
@@ -111,6 +118,7 @@ pub(crate) fn append(
         buf_ret,
         |buf_ret| append_inner::<V1>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
         |buf_ret| append_inner::<V2>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
+        |buf_ret| append_inner::<V3>(cbranch, t_len, indices, nodes, new_node_bytes, buf_ret),
     )
 }
 
@@ -184,6 +192,7 @@ pub(crate) fn remove(
         (),
         |()| remove_inner::<V1>(cbranch, t_len, indices, nodes, p_len),
         |()| remove_inner::<V2>(cbranch, t_len, indices, nodes, p_len),
+        |()| remove_inner::<V3>(cbranch, t_len, indices, nodes, p_len),
     )
 }
 
@@ -227,6 +236,7 @@ fn hash_node(
         (),
         |()| hash_node_inner::<V1>(cbranch, node_bytes),
         |()| hash_node_inner::<V2>(cbranch, node_bytes),
+        |()| hash_node_inner::<V3>(cbranch, node_bytes),
     )
 }
 

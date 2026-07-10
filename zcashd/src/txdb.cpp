@@ -26,9 +26,11 @@ using namespace std;
 static const char DB_SPROUT_ANCHOR = 'A';
 static const char DB_SAPLING_ANCHOR = 'Z';
 static const char DB_ORCHARD_ANCHOR = 'Y';
+static const char DB_IRONWOOD_ANCHOR = 'I';
 static const char DB_NULLIFIER = 's';
 static const char DB_SAPLING_NULLIFIER = 'S';
 static const char DB_ORCHARD_NULLIFIER = 'O';
+static const char DB_IRONWOOD_NULLIFIER = 'N';
 static const char DB_COINS = 'c';
 static const char DB_BLOCK_FILES = 'f';
 static const char DB_TXINDEX = 't';
@@ -38,6 +40,7 @@ static const char DB_BEST_BLOCK = 'B';
 static const char DB_BEST_SPROUT_ANCHOR = 'a';
 static const char DB_BEST_SAPLING_ANCHOR = 'z';
 static const char DB_BEST_ORCHARD_ANCHOR = 'y';
+static const char DB_BEST_IRONWOOD_ANCHOR = 'i';
 static const char DB_FLAG = 'F';
 static const char DB_REINDEX_FLAG = 'R';
 static const char DB_LAST_BLOCK = 'l';
@@ -99,6 +102,18 @@ bool CCoinsViewDB::GetOrchardAnchorAt(const uint256 &rt, OrchardMerkleFrontier &
     return read;
 }
 
+bool CCoinsViewDB::GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+    if (rt == IronwoodMerkleFrontier::empty_root()) {
+        IronwoodMerkleFrontier new_tree;
+        tree = new_tree;
+        return true;
+    }
+
+    bool read = db.Read(make_pair(DB_IRONWOOD_ANCHOR, rt), tree);
+
+    return read;
+}
+
 bool CCoinsViewDB::GetNullifier(const uint256 &nf, ShieldedType type) const {
     bool spent = false;
     char dbChar;
@@ -111,6 +126,9 @@ bool CCoinsViewDB::GetNullifier(const uint256 &nf, ShieldedType type) const {
             break;
         case ORCHARD:
             dbChar = DB_ORCHARD_NULLIFIER;
+            break;
+        case IRONWOOD:
+            dbChar = DB_IRONWOOD_NULLIFIER;
             break;
         default:
             throw runtime_error("Unknown shielded type");
@@ -149,6 +167,10 @@ uint256 CCoinsViewDB::GetBestAnchor(ShieldedType type) const {
             if (!db.Read(DB_BEST_ORCHARD_ANCHOR, hashBestAnchor))
                 return OrchardMerkleFrontier::empty_root();
             break;
+        case IRONWOOD:
+            if (!db.Read(DB_BEST_IRONWOOD_ANCHOR, hashBestAnchor))
+                return IronwoodMerkleFrontier::empty_root();
+            break;
         default:
             throw runtime_error("Unknown shielded type");
     }
@@ -173,25 +195,25 @@ HistoryNode CCoinsViewDB::GetHistoryAt(uint32_t epochId, HistoryIndex index) con
         throw runtime_error("History data inconsistent - reindex?");
     }
 
-    if (libzcash::IsV1HistoryTree(epochId)) {
-        // History nodes serialized by `zcashd` versions that were unaware of NU5, used
-        // the previous shorter maximum serialized length. Because we stored this as an
-        // array, we can't just read the current (longer) maximum serialized length, as
-        // it will result in an exception for those older nodes.
-        //
-        // Instead, we always read an array of the older length. This works as expected
-        // for V1 nodes serialized by older clients, while for V1 nodes serialized by
-        // NU5-aware clients this is guaranteed to ignore only trailing zero bytes.
-        std::array<unsigned char, NODE_V1_SERIALIZED_LENGTH> tmpMmrNode;
-        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), tmpMmrNode)) {
-            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
-        }
-        std::copy(std::begin(tmpMmrNode), std::end(tmpMmrNode), mmrNode.begin());
-    } else {
-        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), mmrNode)) {
-            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
-        }
+    // History node records have grown across upgrades (V1: 171 bytes, V2: 244,
+    // V3: 317): a client contemporary with an epoch wrote that epoch's exact
+    // width, while later clients always write today's full array with the tail
+    // zero-padded. Read the raw record and accept ANY valid historical width,
+    // zero-padding into the full-width node — byte-identical to what a current
+    // client writes, and the per-version parser (dispatched by epoch on the
+    // Rust side, the single format authority) never reads past its version's
+    // length. Keeping the read width-agnostic means a future format bump
+    // cannot re-create the in-place-upgrade abort this replaced: an
+    // epoch-keyed width ladder here had to be extended by hand at every bump,
+    // and a missed arm threw on the first block connect (review C3). // @claude
+    std::string raw;
+    if (!db.ReadRaw(make_pair(DB_MMR_NODE, make_pair(epochId, index)), raw)) {
+        throw runtime_error("History data inconsistent (expected node not found) - reindex?");
     }
+    if (raw.size() < NODE_V1_SERIALIZED_LENGTH || raw.size() > NODE_SERIALIZED_LENGTH) {
+        throw runtime_error("History data inconsistent (unexpected node size) - reindex?");
+    }
+    std::copy(raw.begin(), raw.end(), mmrNode.begin());
 
     return mmrNode;
 }
@@ -345,17 +367,22 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
                               const uint256 &hashSproutAnchor,
                               const uint256 &hashSaplingAnchor,
                               const uint256 &hashOrchardAnchor,
+                              const uint256 &hashIronwoodAnchor,
                               CAnchorsSproutMap &mapSproutAnchors,
                               CAnchorsSaplingMap &mapSaplingAnchors,
                               CAnchorsOrchardMap &mapOrchardAnchors,
+                              CAnchorsIronwoodMap &mapIronwoodAnchors,
                               CNullifiersMap &mapSproutNullifiers,
                               CNullifiersMap &mapSaplingNullifiers,
                               CNullifiersMap &mapOrchardNullifiers,
+                              CNullifiersMap &mapIronwoodNullifiers,
                               CHistoryCacheMap &historyCacheMap,
                               SubtreeCache &cacheSaplingSubtrees,
-                              SubtreeCache &cacheOrchardSubtrees) {
+                              SubtreeCache &cacheOrchardSubtrees,
+                              SubtreeCache &cacheIronwoodSubtrees) {
     auto latestSaplingSubtree = GetLatestSubtree(SAPLING);
     auto latestOrchardSubtree = GetLatestSubtree(ORCHARD);
+    auto latestIronwoodSubtree = GetLatestSubtree(IRONWOOD);
 
     CDBBatch batch(db);
     size_t count = 0;
@@ -375,18 +402,22 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
     ::BatchWriteAnchors<CAnchorsSproutMap, CAnchorsSproutMap::iterator, CAnchorsSproutCacheEntry, SproutMerkleTree>(batch, mapSproutAnchors, DB_SPROUT_ANCHOR);
     ::BatchWriteAnchors<CAnchorsSaplingMap, CAnchorsSaplingMap::iterator, CAnchorsSaplingCacheEntry, SaplingMerkleTree>(batch, mapSaplingAnchors, DB_SAPLING_ANCHOR);
     ::BatchWriteAnchors<CAnchorsOrchardMap, CAnchorsOrchardMap::iterator, CAnchorsOrchardCacheEntry, OrchardMerkleFrontier>(batch, mapOrchardAnchors, DB_ORCHARD_ANCHOR);
+    ::BatchWriteAnchors<CAnchorsIronwoodMap, CAnchorsIronwoodMap::iterator, CAnchorsIronwoodCacheEntry, IronwoodMerkleFrontier>(batch, mapIronwoodAnchors, DB_IRONWOOD_ANCHOR);
 
     ::BatchWriteNullifiers(batch, mapSproutNullifiers, DB_NULLIFIER);
     ::BatchWriteNullifiers(batch, mapSaplingNullifiers, DB_SAPLING_NULLIFIER);
     ::BatchWriteNullifiers(batch, mapOrchardNullifiers, DB_ORCHARD_NULLIFIER);
+    ::BatchWriteNullifiers(batch, mapIronwoodNullifiers, DB_IRONWOOD_NULLIFIER);
 
     ::BatchWriteHistory(batch, historyCacheMap);
 
     assert(cacheSaplingSubtrees.initialized);
     assert(cacheOrchardSubtrees.initialized);
+    assert(cacheIronwoodSubtrees.initialized);
 
     WriteSubtrees(batch, SAPLING, latestSaplingSubtree, cacheSaplingSubtrees.parentLatestSubtree, cacheSaplingSubtrees.newSubtrees);
     WriteSubtrees(batch, ORCHARD, latestOrchardSubtree, cacheOrchardSubtrees.parentLatestSubtree, cacheOrchardSubtrees.newSubtrees);
+    WriteSubtrees(batch, IRONWOOD, latestIronwoodSubtree, cacheIronwoodSubtrees.parentLatestSubtree, cacheIronwoodSubtrees.newSubtrees);
 
     if (!hashBlock.IsNull())
         batch.Write(DB_BEST_BLOCK, hashBlock);
@@ -396,6 +427,8 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins,
         batch.Write(DB_BEST_SAPLING_ANCHOR, hashSaplingAnchor);
     if (!hashOrchardAnchor.IsNull())
         batch.Write(DB_BEST_ORCHARD_ANCHOR, hashOrchardAnchor);
+    if (!hashIronwoodAnchor.IsNull())
+        batch.Write(DB_BEST_IRONWOOD_ANCHOR, hashIronwoodAnchor);
 
     LogPrint("coindb", "Committing %u changed transactions (out of %u) to coin database...\n", (unsigned int)changed, (unsigned int)count);
     return db.WriteBatch(batch);
@@ -718,8 +751,10 @@ bool CBlockTreeDB::LoadBlockIndexGuts(
                 pindexNew->nSproutValue   = diskindex.nSproutValue;
                 pindexNew->nSaplingValue  = diskindex.nSaplingValue;
                 pindexNew->nOrchardValue  = diskindex.nOrchardValue;
+                pindexNew->nIronwoodValue = diskindex.nIronwoodValue;
                 pindexNew->hashFinalSaplingRoot = diskindex.hashFinalSaplingRoot;
                 pindexNew->hashFinalOrchardRoot = diskindex.hashFinalOrchardRoot;
+                pindexNew->hashFinalIronwoodRoot = diskindex.hashFinalIronwoodRoot;
                 pindexNew->hashChainHistoryRoot = diskindex.hashChainHistoryRoot;
                 pindexNew->hashAuthDataRoot = diskindex.hashAuthDataRoot;
 

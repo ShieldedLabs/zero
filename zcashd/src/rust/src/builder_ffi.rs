@@ -18,29 +18,17 @@ use tracing::error;
 use zcash_primitives::transaction::{
     sighash::{signature_hash, SignableInput},
     txid::TxIdDigester,
-    Authorization, Transaction, TransactionData,
+    Authorization, Transaction, TransactionData, TxVersion,
 };
 use zcash_protocol::{consensus::BranchId, memo::MemoBytes, value::ZatBalance};
 
 use crate::{
-    bridge::ffi::OrchardUnauthorizedBundlePtr,
+    bridge::ffi::{self, OrchardUnauthorizedBundlePtr},
     transaction_ffi::{MapTransparent, TransparentAuth},
-    ORCHARD_PK, ORCHARD_PK_INSECURE,
+    ORCHARD_PK_INSECURE, ORCHARD_PK_NU6_2, ORCHARD_PK_NU6_3,
 };
 
 use orchard::circuit::OrchardCircuitVersion;
-
-// Maps the caller's "use the fixed circuit?" decision (C++ `CChainParams::UseFixedCircuitForProving`) to
-// an Orchard circuit version. `true` selects the fixed (NU6.2-onward) circuit; `false` selects
-// the historical insecure circuit, which the caller only chooses pre-NU6.2 on regtest, so that
-// tests can reconstruct pre-NU6.2 Orchard history.
-fn circuit_version_for(use_fixed_circuit_for_proving: bool) -> OrchardCircuitVersion {
-    if use_fixed_circuit_for_proving {
-        OrchardCircuitVersion::FixedPostNu6_2
-    } else {
-        OrchardCircuitVersion::InsecurePreNu6_2
-    }
-}
 
 pub struct OrchardSpendInfo {
     fvk: FullViewingKey,
@@ -68,25 +56,55 @@ pub extern "C" fn orchard_spend_info_free(spend_info: *mut OrchardSpendInfo) {
 #[no_mangle]
 pub extern "C" fn orchard_builder_new(
     coinbase: bool,
+    bundle_version: ffi::BundleVersion,
+    flags: ffi::Flags,
     anchor: *const [u8; 32],
-    use_fixed_circuit_for_proving: bool,
 ) -> *mut Builder {
     let bundle_type = if coinbase {
         BundleType::Coinbase
     } else {
         BundleType::DEFAULT
     };
+    let cross_address_bit =
+        flags.cross_address_enabled && bundle_version.protocol_version == ffi::ProtocolVersion::V3;
+    let bundle_version = match (bundle_version.value_pool, bundle_version.protocol_version) {
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::InsecureV1) => {
+            orchard::bundle::BundleVersion::orchard_insecure_v1()
+        }
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::V2) => {
+            orchard::bundle::BundleVersion::orchard_v2()
+        }
+        (ffi::ValuePool::Orchard, ffi::ProtocolVersion::V3) => {
+            orchard::bundle::BundleVersion::orchard_v3()
+        }
+        (ffi::ValuePool::Ironwood, ffi::ProtocolVersion::V3) => {
+            orchard::bundle::BundleVersion::ironwood_v3()
+        }
+        _ => panic!("invalid Orchard bundle version"),
+    };
+    let flags = orchard::bundle::Flags::from_byte(
+        (flags.spends_enabled as u8)
+            | ((flags.outputs_enabled as u8) << 1)
+            | ((cross_address_bit as u8) << 2),
+        bundle_version,
+    )
+    .expect("invalid Orchard bundle flags");
     let anchor = unsafe { anchor.as_ref() }
         .map(|a| orchard::Anchor::from_bytes(*a).unwrap())
         .unwrap_or_else(|| MerkleHashOrchard::empty_root(32.into()).into());
     // The builder stamps this circuit version onto each action's circuit; the proving key
     // passed to `orchard_unauthorized_bundle_prove_and_sign` must match.
-    Box::into_raw(Box::new(Builder::new_for_version(
-        bundle_type,
-        anchor,
-        circuit_version_for(use_fixed_circuit_for_proving),
-    )))
+    Box::into_raw(Box::new(
+        Builder::new(bundle_type, bundle_version, flags, anchor)
+            .expect("failed to build orchard bundle"), /* @nocommit: infallible? + errors */
+    ))
 }
+// orchard_builder_new_nu6_3(
+//     coinbase: bool,
+//     anchor: *const [u8; 32],
+// ) -> *mut Builder {
+//     orchard_builder_new(coinbase, anchor, orchard::BundleProtocol::)
+// }
 
 #[no_mangle]
 pub extern "C" fn orchard_builder_add_spend(
@@ -134,6 +152,52 @@ pub extern "C" fn orchard_builder_add_recipient(
         Ok(()) => true,
         Err(e) => {
             error!("Failed to add Orchard recipient: {}", e);
+            false
+        }
+    }
+}
+
+/// Adds a wallet-controlled change output owned by `fvk`.
+///
+/// Unlike `orchard_builder_add_recipient` (which maps to `Builder::add_output`),
+/// this is permitted in bundles that disable cross-address transfers — notably the
+/// Orchard pool under protocol V3, where the consensus rules mandate the
+/// cross-address restriction. The builder pairs the change output with a
+/// fabricated wallet-controlled spend at `recipient`; its authorization is
+/// produced at proving time by the spending key matching `fvk`, so that key must
+/// be supplied to `orchard_unauthorized_bundle_prove_and_sign`.
+///
+/// `ovk` is a pointer to the outgoing viewing key to make this output recoverable
+/// by, or `null`. `memo` is a pointer to the 512-byte memo field encoding, or
+/// `null` for "no memo".
+#[no_mangle]
+pub extern "C" fn orchard_builder_add_change_output(
+    builder: *mut Builder,
+    fvk: *const FullViewingKey,
+    ovk: *const [u8; 32],
+    recipient: *const orchard::Address,
+    value: u64,
+    memo: *const [u8; 512],
+) -> bool {
+    let builder = unsafe { builder.as_mut() }.expect("Builder may not be null.");
+    let fvk = unsafe { fvk.as_ref() }.expect("Full viewing key may not be null.");
+    let ovk = unsafe { ovk.as_ref() }
+        .copied()
+        .map(OutgoingViewingKey::from);
+    let recipient = unsafe { recipient.as_ref() }.expect("Recipient may not be null.");
+    let value = NoteValue::from_raw(value);
+    let memo = unsafe { memo.as_ref() }.copied();
+
+    match builder.add_change_output(
+        fvk.clone(),
+        ovk,
+        *recipient,
+        value,
+        memo.unwrap_or(MemoBytes::empty().into_bytes()),
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            error!("Failed to add Orchard change output: {}", e);
             false
         }
     }
@@ -203,15 +267,24 @@ pub extern "C" fn orchard_unauthorized_bundle_prove_and_sign(
 
     let mut rng = OsRng;
     // Prove against the key for the circuit version the bundle was built for (chosen in
-    // `orchard_builder_new`), which the bundle carries: the fixed circuit (`ORCHARD_PK`), or
-    // the historical insecure circuit (`ORCHARD_PK_INSECURE`, reached only pre-NU6.2 on
-    // regtest). Reading the version from the bundle keeps it the single source of truth, so the
+    // `orchard_builder_new`), which the bundle carries:
+    // - the Nu6.3 ironwood circuit (`ORCHARD_PK_NU6_3`)
+    // - the Nu6.2 fixed circuit (`ORCHARD_PK_NU6_2`)
+    // - the historical insecure circuit (`ORCHARD_PK_INSECURE`, reached only pre-NU6.2 on
+    // regtest).
+    // Reading the version from the bundle keeps it the single source of truth, so the
     // proving key cannot disagree with the circuit the actions were built against.
     let proof = match bundle.circuit_version() {
-        OrchardCircuitVersion::FixedPostNu6_2 => bundle.create_proof(
-            ORCHARD_PK
+        OrchardCircuitVersion::PostNu6_3 => bundle.create_proof(
+            ORCHARD_PK_NU6_3
                 .get()
-                .expect("Parameters not loaded: ORCHARD_PK should have been initialized"),
+                .expect("Parameters not loaded: ORCHARD_PK_NU6_3 should have been initialized"),
+            &mut rng,
+        ),
+        OrchardCircuitVersion::FixedPostNu6_2 => bundle.create_proof(
+            ORCHARD_PK_NU6_2
+                .get()
+                .expect("Parameters not loaded: ORCHARD_PK_NU6_2 should have been initialized"),
             &mut rng,
         ),
         OrchardCircuitVersion::InsecurePreNu6_2 => {
@@ -242,6 +315,7 @@ pub(crate) fn shielded_signature_digest(
     all_prev_outputs: &[u8],
     sapling_bundle: &crate::sapling::SaplingUnauthorizedBundle,
     orchard_bundle: *const OrchardUnauthorizedBundlePtr,
+    ironwood_bundle: *const OrchardUnauthorizedBundlePtr,
 ) -> Result<[u8; 32], String> {
     // TODO: This is also parsing a transaction that may have partially-filled fields.
     // This doesn't matter for transparent components (the only such field would be the
@@ -260,13 +334,19 @@ pub(crate) fn shielded_signature_digest(
     let tx = Transaction::read(tx_bytes, consensus_branch_id)
         .map_err(|e| format!("Failed to parse transaction: {}", e))?;
     // This method should only be called with an in-progress transaction that contains no
-    // Sapling or Orchard component.
+    // Sapling, Orchard, or Ironwood component.
     assert!(tx.sapling_bundle().is_none());
     assert!(tx.orchard_bundle().is_none());
+    assert!(tx.ironwood_bundle().is_none());
 
     let f_transparent = MapTransparent::parse(all_prev_outputs, &tx)?;
     let orchard_bundle = unsafe {
         orchard_bundle
+            .cast::<Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>>()
+            .as_ref()
+    };
+    let ironwood_bundle = unsafe {
+        ironwood_bundle
             .cast::<Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>>()
             .as_ref()
     };
@@ -280,11 +360,45 @@ pub(crate) fn shielded_signature_digest(
         type OrchardAuth = InProgress<Unproven, Unauthorized>;
     }
 
-    let txdata: TransactionData<Signable> = tx.into_data().map_bundles(
-        |b| b.map(|b| b.map_authorization(f_transparent)),
-        |_| sapling_bundle.bundle.clone(),
-        |_| orchard_bundle.cloned(),
-    );
+    // Construct the signing-side TransactionData with each bundle in its own
+    // slot, explicitly. This must NOT go through `map_bundles`: that helper
+    // applies the same `f_orchard` closure to both the Orchard and Ironwood
+    // slots (they share a bundle type), so the previous
+    // `|_| orchard_bundle.cloned()` put a clone of the Orchard bundle in the
+    // Ironwood slot. The v6 sighash committed to that phantom bundle while
+    // every verifier computed it over the transaction's real (empty) Ironwood
+    // slot — making all shielded signatures in any Orchard-carrying v6
+    // transaction invalid. (Review C1.) // @claude
+    let tx_data = tx.into_data();
+    let transparent_bundle = tx_data
+        .transparent_bundle()
+        .cloned()
+        .map(|b| b.map_authorization(f_transparent));
+    let txdata: TransactionData<Signable> = if let Some(ironwood) = ironwood_bundle {
+        if tx_data.version() != TxVersion::V6 {
+            return Err("an Ironwood bundle can only be signed in a v6 transaction".into());
+        }
+        TransactionData::from_parts_v6(
+            tx_data.consensus_branch_id(),
+            tx_data.lock_time(),
+            tx_data.expiry_height(),
+            transparent_bundle,
+            sapling_bundle.bundle.clone(),
+            orchard_bundle.cloned(),
+            Some(ironwood.clone()),
+        )
+    } else {
+        TransactionData::from_parts(
+            tx_data.version(),
+            tx_data.consensus_branch_id(),
+            tx_data.lock_time(),
+            tx_data.expiry_height(),
+            transparent_bundle,
+            tx_data.sprout_bundle().cloned(),
+            sapling_bundle.bundle.clone(),
+            orchard_bundle.cloned(),
+        )
+    };
     let txid_parts = txdata.digest(TxIdDigester);
 
     let sighash = signature_hash(&txdata, &SignableInput::Shielded, &txid_parts);

@@ -830,7 +830,7 @@ TEST(WalletTests, GetConflictedOrchardNotes) {
     // Generate a bundle containing output note A.
     auto builder = TransactionBuilder(Params(), 1, orchardAnchor, SaplingMerkleTree::empty_root(), &keystore);
     builder.AddTransparentInput(COutPoint(uint256(), 0), scriptPubKey, 5000);
-    builder.AddOrchardOutput(std::nullopt, recipient, 4000, {});
+    EXPECT_TRUE(builder.AddOrchardOutput(std::nullopt, recipient, 4000, {}));
     auto maybeTx = builder.Build();
     EXPECT_TRUE(maybeTx.IsTx());
     if (maybeTx.IsError()) {
@@ -888,7 +888,7 @@ TEST(WalletTests, GetConflictedOrchardNotes) {
     // The wallet checkpointed this single block at height 0, so the anchor (the
     // tree root after that block) is at absolute height 0.
     auto noteToSpend = std::move(wallet.GetOrchardSpendInfo(orchardEntries, orchardTree.root(), 0)[0]);
-    builder2.AddOrchardSpend(std::move(noteToSpend.first), std::move(noteToSpend.second));
+    EXPECT_TRUE(builder2.AddOrchardSpend(std::move(noteToSpend.first), std::move(noteToSpend.second)));
     auto maybeTx2 = builder2.Build();
     EXPECT_TRUE(maybeTx2.IsTx());
     if (maybeTx2.IsError()) {
@@ -901,7 +901,7 @@ TEST(WalletTests, GetConflictedOrchardNotes) {
     // Generate conflicting tx to spend note A
     auto noteToSpend2 = std::move(wallet.GetOrchardSpendInfo(orchardEntries, orchardTree.root(), 0)[0]);
     auto builder3 = TransactionBuilder(Params(), 2, orchardTree.root(), SaplingMerkleTree::empty_root());
-    builder3.AddOrchardSpend(std::move(noteToSpend2.first), std::move(noteToSpend2.second));
+    EXPECT_TRUE(builder3.AddOrchardSpend(std::move(noteToSpend2.first), std::move(noteToSpend2.second)));
     auto maybeTx3 = builder3.Build();
     EXPECT_TRUE(maybeTx3.IsTx());
     if (maybeTx3.IsError()) {

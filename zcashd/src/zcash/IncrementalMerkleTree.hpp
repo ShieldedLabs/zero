@@ -411,6 +411,15 @@ public:
     }
 };
 
+// The Ironwood pool (NU6.3) uses the same Sinsemilla note commitment tree
+// construction as Orchard (the pinned orchard crate has no Ironwood-specific
+// tree type), so this shares the Rust implementation. The distinct C++ type
+// exists so that the per-pool template dispatch (`CCoinsViewCache::PushAnchor`
+// and friends) can distinguish the Ironwood pool from the Orchard pool.
+class IronwoodMerkleFrontier : public OrchardMerkleFrontier
+{
+};
+
 class OrchardMerkleFrontierLegacySer {
 private:
     const OrchardMerkleFrontier& frontier;
