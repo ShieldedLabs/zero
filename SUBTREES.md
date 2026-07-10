@@ -1,6 +1,6 @@
 # Subtrees
 
-Zero vendors its six upstream components as **git subtrees**, one per top-level
+Zero vendors its seven upstream components as **git subtrees**, one per top-level
 directory. Our changes ("our versions") live directly in this repo, and we can
 still pull upstream updates or split changes back out when useful.
 
@@ -14,6 +14,7 @@ still pull upstream updates or split changes back out when useful.
 | `zallet/` | https://github.com/zcash/wallet.git           | `main`   | `up-zallet` |
 | `orchard/`| https://github.com/zcash/orchard.git          | `feat/ironwood` | `up-orchard` |
 | `librustzcash/` | https://github.com/zcash/librustzcash.git | `main` | `up-librustzcash` |
+| `lightwalletd/` | https://github.com/zcash/lightwalletd.git | `master` | `up-lightwalletd` |
 
 Notes:
 - **zaino** tracks `dev` (its active default), not `stable`.
@@ -27,6 +28,10 @@ Notes:
   `zcash_client_backend`, `zcash_keys`, `zip32`, and friends) that the Z3 stack
   (zaino, zallet) builds on. Tracks `main`; pin to a release tag once one covers
   what we need.
+- **lightwalletd** is the original Go light client server (Zaino serves the same
+  protocol in the Z3 stack). Vendored as the platform for private-lookup (PIR)
+  experimentation. Upstream cuts release tags, but `master` was 167 commits ahead
+  of the newest tag (v0.4.9) at import; pin to a tag once one covers what we need.
 
 ## Why subtrees (not submodules)
 
@@ -45,6 +50,7 @@ git remote add up-zaino  https://github.com/zingolabs/zaino.git
 git remote add up-zallet https://github.com/zcash/wallet.git
 git remote add up-orchard https://github.com/zcash/orchard.git
 git remote add up-librustzcash https://github.com/zcash/librustzcash.git
+git remote add up-lightwalletd https://github.com/zcash/lightwalletd.git
 ```
 
 ## Pull upstream updates

@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for c in zcashd zebra zaino zallet orchard librustzcash; do
+          for c in zcashd zebra zaino zallet orchard librustzcash lightwalletd; do
             git archive --format=zip --prefix="${c}/" \
               -o "dist/${c}-${TAG}.zip" "HEAD:${c}"
           done
@@ -162,7 +162,7 @@ jobs:
             echo
             echo "One ZIP per vendored component (tracked source at the released commit):"
             echo
-            for c in zcashd zebra zaino zallet orchard librustzcash; do
+            for c in zcashd zebra zaino zallet orchard librustzcash lightwalletd; do
               echo "- \`${c}-${TAG}.zip\`"
             done
             echo

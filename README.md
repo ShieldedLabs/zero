@@ -23,7 +23,7 @@ successfully as the network prepares for Ironwood and future upgrades.
 
 Operators preparing for Ironwood, and for support beyond it, need practical
 options: documentation, migration assistance, and reliable software. Zero
-provides that support across six vendored components, each a git subtree from
+provides that support across seven vendored components, each a git subtree from
 its canonical upstream:
 
 | Component | Directory | Upstream                     | Role |
@@ -34,6 +34,7 @@ its canonical upstream:
 | Zallet    | `zallet/` | zcash/wallet                 | Wallet |
 | Orchard   | `orchard/`| zcash/orchard                | Shielded protocol crate (Ironwood) |
 | librustzcash | `librustzcash/` | zcash/librustzcash    | Core Rust crates (zcash_primitives, zcash_client_backend, ...) |
+| lightwalletd | `lightwalletd/` | zcash/lightwalletd    | Light client server (Go); private-lookup (PIR) development platform |
 
 Many exchanges, mining pools, and wallet providers depend on `zcashd`-based
 infrastructure today, and the Ironwood timeline is aggressive, so we provide a
@@ -62,6 +63,7 @@ following that component's own README:
 ```sh
 cd zebra  && cargo build --release   # likewise zaino/, zallet/, orchard/, librustzcash/
 cd zcashd && ./zcutil/build.sh -j"$(nproc)"
+cd lightwalletd && make              # Go toolchain; binary lands in ./lightwalletd
 ```
 
 ## Usage
@@ -96,7 +98,7 @@ This is a triage waiting room. Once admitted, say only that you have a report; t
 team moves you into a private group with the relevant people to disclose the
 details, then removes you from the waiting room. Each component repeats this
 contact in its own `SECURITY.md` (zcashd, Zebra) or README (Zaino, Zallet,
-Orchard, librustzcash).
+lightwalletd, Orchard, librustzcash).
 
 Please do not open public issues for security-sensitive reports.
 
@@ -106,7 +108,7 @@ Please do not open public issues for security-sensitive reports.
 
 ## Contributing
 
-Zero vendors six upstreams, so the central discipline is keeping our divergence
+Zero vendors seven upstreams, so the central discipline is keeping our divergence
 small, explicit, and classified. Read [MAINTENANCE.md](MAINTENANCE.md) for the
 full policy; the commit convention is the part you touch every day.
 
@@ -114,7 +116,7 @@ One question decides how to tag a commit: **does it touch a vendored repo?**
 
 ```mermaid
 flowchart TD
-    A([A change to commit]) --> B{"Does it touch a vendored repo?<br/>zcashd / zebra / zaino / zallet / orchard / librustzcash"}
+    A([A change to commit]) --> B{"Does it touch a vendored repo?<br/>zcashd / zebra / zaino / zallet / orchard / librustzcash / lightwalletd"}
     B -->|No| C["Regular commit<br/>doc: / skill: / feat: / fix: ..."]
     B -->|Yes| D{"Will this change go upstream?"}
     D -->|"No (permanent)"| E["[zero] type: ..."]
@@ -142,8 +144,8 @@ This makes our delta greppable in both directions, with no ledger to maintain.
 Scope the query to the vendored dirs so it stays accurate even if a marker is
 ever misapplied to a root-file commit:
 
-- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet orchard librustzcash` - permanent divergence
-- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet orchard librustzcash` - outstanding carries
+- `git log --grep='^\[zero\]' -- zcashd zebra zaino zallet orchard librustzcash lightwalletd` - permanent divergence
+- `git log --grep='upstream-pending' -- zcashd zebra zaino zallet orchard librustzcash lightwalletd` - outstanding carries
 
 The commit body carries the rationale.
 
@@ -158,4 +160,5 @@ projects.
 
 Each vendored component remains under its upstream license (Apache-2.0 and/or
 MIT); see the `LICENSE*` files within `zcashd/`, `zebra/`, `zaino/`, `zallet/`,
-`orchard/`, and `librustzcash/`. Zero-specific files are © Shielded Labs.
+`orchard/`, `librustzcash/`, and `lightwalletd/`. Zero-specific files are
+© Shielded Labs.

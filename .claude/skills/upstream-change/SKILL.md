@@ -1,6 +1,6 @@
 ---
 name: upstream-change
-description: Prepare an upstream PR from Zero changes to one component (zcashd|zebra|zaino|zallet|orchard|librustzcash). Splits the prefix history or extracts the relevant commits, rebases onto fresh upstream, reformats to the project's CONTRIBUTING style, runs upstream tests, and drafts the PR. Use when asked to upstream/contribute/send a fix back to upstream.
+description: Prepare an upstream PR from Zero changes to one component (zcashd|zebra|zaino|zallet|orchard|librustzcash|lightwalletd). Splits the prefix history or extracts the relevant commits, rebases onto fresh upstream, reformats to the project's CONTRIBUTING style, runs upstream tests, and drafts the PR. Use when asked to upstream/contribute/send a fix back to upstream.
 ---
 
 # upstream-change
@@ -12,7 +12,7 @@ a `[zero]`/`[upstream-pending]` fix upstream.
 
 ## Inputs
 
-- **component**: zcashd | zebra | zaino | zallet | orchard | librustzcash
+- **component**: zcashd | zebra | zaino | zallet | orchard | librustzcash | lightwalletd
 - **commit range or SHAs**: the in-tree commit(s) to upstream (must be the change
   you want; confirm scope with the user).
 
@@ -26,6 +26,7 @@ a `[zero]`/`[upstream-pending]` fix upstream.
 | zallet    | `zallet/` | zcash/wallet                  | `main`       | CONTRIBUTING.md / AGENTS.md |
 | orchard   | `orchard/`| zcash/orchard                 | `feat/ironwood` | README.md (no CONTRIBUTING) |
 | librustzcash | `librustzcash/` | zcash/librustzcash      | `main`       | CONTRIBUTING.md |
+| lightwalletd | `lightwalletd/` | zcash/lightwalletd      | `master`     | CONTRIBUTING.md |
 
 ## Per-component contribution gates
 

@@ -1,0 +1,99 @@
+---
+version: '2'
+
+services:
+  lightwalletd:
+    build: .
+    env_file:
+      - .env
+    #entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    command:
+      - --grpc-bind-addr=0.0.0.0:$LWD_GRPC_PORT
+      - --http-bind-addr=0.0.0.0:$LWD_HTTP_PORT
+      - --zcash-conf-path=$ZCASHD_CONF_PATH
+      - --log-file=/dev/stdout
+      - --log-level=7
+    ports:
+      - "127.0.0.1:$LWD_GRPC_PORT:$LWD_GRPC_PORT"
+      - "127.0.0.1:$LWD_HTTP_PORT:$LWD_HTTP_PORT"      
+    volumes:
+      - ./docker/:/srv/lightwalletd
+      - lightwalletd_cache:/var/lib/lightwalletd
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+  zcashd:
+    image: electriccoinco/zcashd:latest
+    volumes:
+      - $ZCASHD_DATADIR:/srv/zcashd/.zcash
+      - $ZCASHD_PARMDIR:/srv/zcashd/.zcash-params
+    env_file:
+      - .env
+    mem_limit: 4G
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+  zcashd_exporter:
+    image: electriccoinco/zcashd_exporter:latest
+    environment:
+      - ZCASHD_RPCUSER=$ZCASHD_RPCUSER
+      - ZCASHD_RPCPASSWORD=$ZCASHD_RPCPASSWORD
+    command:
+      - --rpc.host=zcashd
+      - --rpc.port=$ZCASHD_RPCPORT
+      - --rpc.user=$ZCASHD_RPCUSER
+      - --rpc.password=$ZCASHD_RPCPASSWORD
+    ports:
+      - "127.0.0.1:9100:9100"
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+  grafana:
+    image: grafana/grafana:6.4.3
+    entrypoint:
+      - bash
+      - -c
+      - grafana-cli plugins install grafana-piechart-panel && /run.sh
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./docker/grafana/provisioning/:/etc/grafana/provisioning/
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+  prometheus:
+    image: prom/prometheus:v2.13.1
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./docker/prometheus/config.yml:/etc/prometheus/prometheus.yml
+      - promethus_data:/promethus_data
+    mem_limit: 2G
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+  loki:
+    image: grafana/loki:master
+    ports:
+      - "127.0.0.1:3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    logging:
+      driver: loki
+      options:
+        loki-url: 'http://localhost:3100/api/prom/push'
+
+volumes:
+  promethus_data:
+  lightwalletd_cache:
