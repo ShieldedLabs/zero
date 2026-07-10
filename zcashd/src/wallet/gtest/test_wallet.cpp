@@ -830,7 +830,7 @@ TEST(WalletTests, GetConflictedOrchardNotes) {
     // Generate a bundle containing output note A.
     auto builder = TransactionBuilder(Params(), 1, orchardAnchor, SaplingMerkleTree::empty_root(), &keystore);
     builder.AddTransparentInput(COutPoint(uint256(), 0), scriptPubKey, 5000);
-    builder.AddOrchardOutput(std::nullopt, recipient, 4000, {});
+    EXPECT_TRUE(builder.AddOrchardOutput(std::nullopt, recipient, 4000, {}));
     auto maybeTx = builder.Build();
     EXPECT_TRUE(maybeTx.IsTx());
     if (maybeTx.IsError()) {

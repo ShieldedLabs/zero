@@ -111,7 +111,8 @@ template<> void AppendRandomLeaf(OrchardMerkleFrontier &tree) {
     // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    bool addedOutput = builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    assert(addedOutput);
     auto bundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
     tree.AppendBundle(bundle);
 }

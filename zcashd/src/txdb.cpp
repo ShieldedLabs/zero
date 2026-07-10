@@ -195,38 +195,25 @@ HistoryNode CCoinsViewDB::GetHistoryAt(uint32_t epochId, HistoryIndex index) con
         throw runtime_error("History data inconsistent - reindex?");
     }
 
-    if (libzcash::IsV1HistoryTree(epochId)) {
-        // History nodes serialized by `zcashd` versions that were unaware of NU5, used
-        // the previous shorter maximum serialized length. Because we stored this as an
-        // array, we can't just read the current (longer) maximum serialized length, as
-        // it will result in an exception for those older nodes.
-        //
-        // Instead, we always read an array of the older length. This works as expected
-        // for V1 nodes serialized by older clients, while for V1 nodes serialized by
-        // NU5-aware clients this is guaranteed to ignore only trailing zero bytes.
-        std::array<unsigned char, NODE_V1_SERIALIZED_LENGTH> tmpMmrNode;
-        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), tmpMmrNode)) {
-            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
-        }
-        std::copy(std::begin(tmpMmrNode), std::end(tmpMmrNode), mmrNode.begin());
-    } else if (libzcash::IsV2HistoryTree(epochId)) {
-        // Same situation as V1 above, one format generation later: V2-epoch (NU5..NU6.2)
-        // nodes serialized by NU6.3-unaware clients are 244 bytes, while this client
-        // writes the full (now 317-byte) array for every epoch. Reading the V2 length
-        // works for both: for records written by NU6.3-aware clients this is guaranteed
-        // to ignore only trailing zero bytes (the V2 layout never uses bytes past
-        // NODE_V2_SERIALIZED_LENGTH). Without this branch, upgrading a synced datadir
-        // in place would throw here on the first block connect. // @claude (review C3)
-        std::array<unsigned char, NODE_V2_SERIALIZED_LENGTH> tmpMmrNode;
-        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), tmpMmrNode)) {
-            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
-        }
-        std::copy(std::begin(tmpMmrNode), std::end(tmpMmrNode), mmrNode.begin());
-    } else {
-        if (!db.Read(make_pair(DB_MMR_NODE, make_pair(epochId, index)), mmrNode)) {
-            throw runtime_error("History data inconsistent (expected node not found) - reindex?");
-        }
+    // History node records have grown across upgrades (V1: 171 bytes, V2: 244,
+    // V3: 317): a client contemporary with an epoch wrote that epoch's exact
+    // width, while later clients always write today's full array with the tail
+    // zero-padded. Read the raw record and accept ANY valid historical width,
+    // zero-padding into the full-width node — byte-identical to what a current
+    // client writes, and the per-version parser (dispatched by epoch on the
+    // Rust side, the single format authority) never reads past its version's
+    // length. Keeping the read width-agnostic means a future format bump
+    // cannot re-create the in-place-upgrade abort this replaced: an
+    // epoch-keyed width ladder here had to be extended by hand at every bump,
+    // and a missed arm threw on the first block connect (review C3). // @claude
+    std::string raw;
+    if (!db.ReadRaw(make_pair(DB_MMR_NODE, make_pair(epochId, index)), raw)) {
+        throw runtime_error("History data inconsistent (expected node not found) - reindex?");
     }
+    if (raw.size() < NODE_V1_SERIALIZED_LENGTH || raw.size() > NODE_SERIALIZED_LENGTH) {
+        throw runtime_error("History data inconsistent (unexpected node size) - reindex?");
+    }
+    std::copy(raw.begin(), raw.end(), mmrNode.begin());
 
     return mmrNode;
 }

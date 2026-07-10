@@ -1394,7 +1394,7 @@ TEST(ChecktransactionTests, InvalidOrchardShieldedCoinbase) {
     // NU5-era test: the historical insecure revision is the one in force here.
     auto builder = orchard::Builder(
         true, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     mtx.orchardBundle = builder
         .Build().value()
         .ProveAndSign({}, uint256()).value();
@@ -1434,14 +1434,14 @@ TEST(ChecktransactionTests, NU5AcceptsOrchardShieldedCoinbase) {
         .ToIncomingViewingKey()
         .Address(0);
     uint256 ovk;
-    builder.AddOutput(ovk, to, CAmount(123456), std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, CAmount(123456), std::nullopt));
 
     // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
     // dummy outputs, which violates coinbase rules requiring all shielded outputs to
     // be recoverable. We manually add a dummy output to sidestep this issue.
     // TODO: If/when we have funding streams going to Orchard recipients, this dummy
     // output can be removed.
-    builder.AddOutput(ovk, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
 
     auto bundle = builder
         .Build().value()
@@ -1581,14 +1581,14 @@ TEST(ChecktransactionTests, NU5EnforcesOrchardRulesOnShieldedCoinbase) {
         .ToIncomingViewingKey()
         .Address(0);
     uint256 ovk;
-    builder.AddOutput(ovk, to, CAmount(1000), std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, CAmount(1000), std::nullopt));
 
     // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
     // dummy outputs, which violates coinbase rules requiring all shielded outputs to
     // be recoverable. We manually add a dummy output to sidestep this issue.
     // TODO: If/when we have funding streams going to Orchard recipients, this dummy
     // output can be removed.
-    builder.AddOutput(ovk, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
 
     auto bundle = builder
         .Build().value()
@@ -1749,7 +1749,7 @@ TEST(ChecktransactionTests, IronwoodBundleBatchValidates) {
     uint256 sighash = uint256S("aa");
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, orchardAnchor);
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     auto bundle = builder.Build().value().ProveAndSign({}, sighash).value();
 
     {
@@ -1780,9 +1780,9 @@ static OrchardBundle BuildBundleWithOutput(orchard::OrchardValuePool pool, CAmou
     uint256 ovk;
     auto builder = orchard::Builder(
         true, {pool, orchard::ProtocolVersion::InsecureV1}, uint256());
-    builder.AddOutput(ovk, to, outputValue, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, outputValue, std::nullopt));
     // orchard::Builder pads to two Actions; the second is a zero-value dummy.
-    builder.AddOutput(ovk, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(ovk, to, 0, std::nullopt));
     return builder.Build().value().ProveAndSign({}, uint256()).value();
 }
 
@@ -1798,7 +1798,7 @@ static OrchardBundle BuildV6IronwoodBundle() {
         .GetChangeAddress();
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     return builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
 }
 
@@ -1814,7 +1814,7 @@ static OrchardBundle BuildV6OrchardBundle() {
     auto to = fvk.GetChangeAddress();
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
-    builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
     return builder.Build().value().ProveAndSign({sk}, uint256S("bb")).value();
 }
 
@@ -1883,7 +1883,7 @@ TEST(ChecktransactionTests, IronwoodCoinbaseRejectsSpends) {
         .GetChangeAddress();
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     auto bundle = builder.Build().value().ProveAndSign({}, uint256()).value();
     ASSERT_TRUE(bundle.SpendsEnabled());
 
@@ -1922,7 +1922,7 @@ TEST(ChecktransactionTests, V6NonEmptyIronwoodBundleRoundTrip) {
         .GetChangeAddress();
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     auto bundle = builder.Build().value().ProveAndSign({}, uint256S("aa")).value();
 
     CMutableTransaction mtx;
@@ -2131,7 +2131,7 @@ TEST(ChecktransactionTests, V6OrchardSigningSighashMatchesVerifier) {
         auto to = fvk.GetChangeAddress();
         auto orchardBuilder = orchard::Builder(
             false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::V3}, uint256());
-        orchardBuilder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt);
+        EXPECT_TRUE(orchardBuilder.AddChangeOutput(fvk, std::nullopt, to, 0, std::nullopt));
         auto unauthorized = orchardBuilder.Build();
         ASSERT_TRUE(unauthorized.has_value());
 

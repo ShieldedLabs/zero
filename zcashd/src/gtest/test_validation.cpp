@@ -766,12 +766,7 @@ TEST(Validation, ChainSupplyCheckpointPoolsSumToTotal) {
         const CChainParams& params = Params();
 
         EXPECT_EQ(
-            params.ChainSupplyCheckpointTransparentValue()
-          + params.ChainSupplyCheckpointSproutValue()
-          + params.ChainSupplyCheckpointSaplingValue()
-          + params.ChainSupplyCheckpointOrchardValue()
-          + params.ChainSupplyCheckpointIronwoodValue()
-          + params.ChainSupplyCheckpointLockboxValue(),
+            params.ChainSupplyCheckpointPoolTotal(),
             params.ChainSupplyCheckpointTotalSupply())
             << "network " << network;
 

@@ -515,7 +515,7 @@ public:
         // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
         auto builder = orchard::Builder(
             false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
-        builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
         mutableTxV5.orchardBundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
         orchardNullifier = mutableTxV5.orchardBundle.GetNullifiers().at(0);
 
@@ -1312,7 +1312,7 @@ TEST(CoinsTests, IronwoodNullifierCache)
     uint256 dataToBeSigned;
     auto builder = orchard::Builder(
         false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, ironwoodAnchor);
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     mtx.ironwoodBundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
     uint256 ironwoodNullifier = mtx.ironwoodBundle.GetNullifiers().at(0);
     CTransaction tx(mtx);
@@ -1354,7 +1354,7 @@ TEST(CoinsTests, IronwoodShieldedRequirements)
     auto buildTx = [&](const uint256& anchor) {
         auto builder = orchard::Builder(
             false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, anchor);
-        builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+        EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
         CMutableTransaction mtx;
         mtx.fOverwintered = true;
         mtx.nVersion = ZIP229_TX_VERSION;

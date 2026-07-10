@@ -94,12 +94,6 @@ HistoryEntry NodeToEntry(const HistoryNode node, uint32_t left, uint32_t right);
 // Convert history node to leaf node (end nodes without children)
 HistoryEntry LeafToEntry(const HistoryNode node);
 
-// Returns true if this epoch used the V1 history tree format.
-bool IsV1HistoryTree(uint32_t epochId);
-
-// Returns true if this epoch used the V2 history tree format.
-bool IsV2HistoryTree(uint32_t epochId);
-
 }
 
 typedef libzcash::HistoryCache HistoryCache;

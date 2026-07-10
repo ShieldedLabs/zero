@@ -35,7 +35,7 @@ CTransaction FakeOrchardTx(const OrchardSpendingKey& sk, libzcash::diversifier_i
     auto builder = TransactionBuilder(Params(), 1, orchardAnchor, SaplingMerkleTree::empty_root(), &keystore);
     builder.SetFee(10000);
     builder.AddTransparentInput(COutPoint(uint256S("1234"), 0), scriptPubKey, 50000);
-    builder.AddOrchardOutput(std::nullopt, recipient, 40000, std::nullopt);
+    EXPECT_TRUE(builder.AddOrchardOutput(std::nullopt, recipient, 40000, std::nullopt));
 
     auto maybeTx = builder.Build();
     EXPECT_TRUE(maybeTx.IsTx());
@@ -195,7 +195,7 @@ void BuildOrchardSpend(CTransaction& outTx) {
     // 0.0004 z-ZEC in, 0.00025 z-ZEC out, default fee, 0.00014 z-ZEC change
     auto builder = TransactionBuilder(Params(), 2, tree.root(), SaplingMerkleTree::empty_root());
     ASSERT_TRUE(builder.AddOrchardSpend(sk, std::move(spendInfo[0].second)));
-    builder.AddOrchardOutput(std::nullopt, recipient, 25000, std::nullopt);
+    EXPECT_TRUE(builder.AddOrchardOutput(std::nullopt, recipient, 25000, std::nullopt));
     auto maybeTx = builder.Build();
     ASSERT_TRUE(maybeTx.IsTx());
 
