@@ -147,7 +147,13 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 3364600;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160;
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 0xCCCCCCCC; // @nomerge: Nu6.3 activation height
+        // @nomerge: NU6.3 mainnet activation height TBD (ZIP 258 still lists it as TBD).
+        // Parked at NO_ACTIVATION_HEIGHT like ZFUTURE: any other placeholder is a live
+        // height — the previous 0xCCCCCCCC overflowed the signed int to a negative
+        // value, making a mainnet build treat NU6.3 as active from genesis (and the
+        // Rust side, which maps negatives to "never activates", disagree with C++).
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

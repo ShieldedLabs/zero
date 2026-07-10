@@ -200,3 +200,36 @@ TEST_F(UpgradesTest, NextActivationHeight) {
     EXPECT_EQ(NextActivationHeight(nActivationHeight + 1, params), std::nullopt);
     EXPECT_EQ(NextActivationHeight(1000000, params), std::nullopt);
 }
+
+// Unscheduled upgrades must be parked at NO_ACTIVATION_HEIGHT on every network.
+// Any other "placeholder" literal is a live height: the previous mainnet
+// NU6.3 placeholder (0xCCCCCCCC) overflowed the signed int field to a negative
+// value, which NetworkUpgradeState treats as active-from-genesis (only
+// NO_ACTIVATION_HEIGHT is special-cased) while the Rust side maps negatives to
+// "never activates" — the two halves of one binary disagreeing about mainnet.
+// This pins the invariant for every upgrade on every network: an activation
+// height is NO_ACTIVATION_HEIGHT or a sane non-negative height, and mainnet
+// NU6.3 in particular is not yet active anywhere. // @claude (review C2)
+TEST_F(UpgradesTest, NoOverflowingActivationHeightPlaceholders) {
+    for (auto network : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
+        SelectParams(network);
+        const Consensus::Params& params = Params().GetConsensus();
+        for (int i = Consensus::BASE_SPROUT; i < Consensus::MAX_NETWORK_UPGRADES; i++) {
+            auto h = params.vUpgrades[i].nActivationHeight;
+            EXPECT_TRUE(h == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || h >= 0)
+                << "network " << network << " upgrade idx " << i << " height " << h;
+        }
+    }
+
+    SelectParams(CBaseChainParams::MAIN);
+    const Consensus::Params& mainParams = Params().GetConsensus();
+    // Parked (NO_ACTIVATION_HEIGHT) reads as DISABLED — matching the Rust side's
+    // "never activates" for unscheduled upgrades — and in particular not ACTIVE.
+    EXPECT_EQ(
+        NetworkUpgradeState(0, mainParams, Consensus::UPGRADE_NU6_3),
+        UPGRADE_DISABLED);
+    EXPECT_FALSE(mainParams.NetworkUpgradeActive(0, Consensus::UPGRADE_NU6_3));
+
+    // Revert to the default for other tests.
+    SelectParams(CBaseChainParams::REGTEST);
+}
