@@ -532,6 +532,16 @@ public:
         return false;
     }
 
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+        // The benchmark blocks predate NU6.3, so only the empty tree exists.
+        if (rt == IronwoodMerkleFrontier::empty_root()) {
+            IronwoodMerkleFrontier emptyTree;
+            tree = emptyTree;
+            return true;
+        }
+        return false;
+    }
+
     bool GetNullifier(const uint256 &nf, ShieldedType type) const {
         return false;
     }
@@ -556,6 +566,8 @@ public:
                 return saplingTrees[0].root();
             case ORCHARD:
                 return orchardTrees[0].root();
+            case IRONWOOD:
+                return IronwoodMerkleFrontier::empty_root();
             default:
                 throw std::runtime_error("Unknown shielded type");
         }
@@ -575,15 +587,19 @@ public:
                     const uint256 &hashSproutAnchor,
                     const uint256 &hashSaplingAnchor,
                     const uint256 &hashOrchardAnchor,
+                    const uint256 &hashIronwoodAnchor,
                     CAnchorsSproutMap &mapSproutAnchors,
                     CAnchorsSaplingMap &mapSaplingAnchors,
                     CAnchorsOrchardMap &mapOrchardAnchors,
+                    CAnchorsIronwoodMap &mapIronwoodAnchors,
                     CNullifiersMap &mapSproutNullifiers,
                     CNullifiersMap &mapSaplingNullifiers,
                     CNullifiersMap &mapOrchardNullifiers,
+                    CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees) {
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees) {
         return false;
     }
 

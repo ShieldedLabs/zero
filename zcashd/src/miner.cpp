@@ -181,12 +181,24 @@ public:
         uint256 dataToBeSigned;
         if (mtx.fOverwintered) {
             // ProduceShieldedSignatureHash is only usable with v3+ transactions.
-            dataToBeSigned = ProduceShieldedSignatureHash(
-                consensusBranchId,
-                mtx,
-                {},
-                *saplingBundle,
-                orchardBundle);
+            // The shielded-coinbase path does not construct Ironwood bundles
+            // yet (review S5, gated on the plan §10.1 coinbase decision), so
+            // the Ironwood slot is always signed as empty here. // @claude
+            try {
+                dataToBeSigned = ProduceShieldedSignatureHash(
+                    consensusBranchId,
+                    mtx,
+                    {},
+                    *saplingBundle,
+                    orchardBundle,
+                    std::nullopt);
+            } catch (const rust::Error& e) {
+                // rust::Error is not a std::runtime_error; unconverted it would
+                // escape BitcoinMiner's catch set and std::terminate the
+                // process. // @claude
+                throw std::runtime_error(
+                    std::string("Failed to compute shielded signature hash: ") + e.what());
+            }
         } else {
             CScript scriptCode;
             PrecomputedTransactionData txdata(mtx, {});
@@ -219,14 +231,28 @@ public:
         // means the Orchard anchor is unconstrained, so we set it to the empty
         // tree root via a null (all zeroes) uint256.
         uint256 orchardAnchor;
-        // Choose the Orchard circuit to prove against (see CChainParams::UseFixedCircuitForProving).
-        bool useFixedCircuitForProving = chainparams.UseFixedCircuitForProving(nHeight);
-        auto builder = orchard::Builder(true, orchardAnchor, useFixedCircuitForProving);
+        // TODO: from NU6.3, coinbase must carry no Orchard actions (the Orchard pool
+        // prohibits the cross-address transfers that coinbase outputs require);
+        // shielded coinbase must move to the Ironwood pool.
+        auto builder = orchard::Builder(
+            true,
+            {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersionForHeight(chainparams, nHeight)},
+            orchardAnchor);
 
         // Shielded coinbase outputs must be recoverable with an all-zeroes ovk.
         uint256 ovk;
         auto miner_reward = SetFoundersRewardAndGetMinerValue(*saplingBuilder);
-        builder.AddOutput(ovk, to, miner_reward, std::nullopt);
+        // Review H1/H2: surface the builder's rejection instead of failing
+        // later with a generic error — from NU6.3 the (Orchard, V3) builder
+        // rejects every coinbase output under the cross-address restriction,
+        // so an Orchard/UA -mineraddress cannot produce block templates until
+        // the plan §10.1 shielded-coinbase decision lands. // @claude
+        if (!builder.AddOutput(ovk, to, miner_reward, std::nullopt)) {
+            throw std::runtime_error(
+                "Failed to add miner reward to the Orchard pool: the Orchard "
+                "pool rejects coinbase outputs from NU6.3. Use a transparent "
+                "or Sapling -mineraddress.");
+        }
 
         // orchard::Builder pads to two Actions, but does so using a "no OVK" policy for
         // dummy outputs, which violates coinbase rules requiring all shielded outputs to
@@ -239,7 +265,14 @@ public:
             .ToFullViewingKey()
             .ToIncomingViewingKey()
             .Address(0);
-        builder.AddOutput(ovk, dummyTo, 0, std::nullopt);
+        // The miner-reward AddOutput above succeeding proves the NU6.3
+        // restriction is not in force here, so a failure would indicate some
+        // other builder rejection. // @claude
+        if (!builder.AddOutput(ovk, dummyTo, 0, std::nullopt)) {
+            throw std::runtime_error(
+                "Failed to add dummy coinbase output to the Orchard pool "
+                "(rejected by the builder)");
+        }
 
         auto bundle = builder.Build();
         if (!bundle.has_value()) {

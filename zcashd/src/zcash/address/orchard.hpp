@@ -192,6 +192,7 @@ private:
 
     friend class OrchardSpendingKey;
     friend class ::OrchardWallet;
+    friend class ::orchard::Builder;
 public:
     OrchardFullViewingKey(OrchardFullViewingKey&& key) : inner(std::move(key.inner)) {}
 

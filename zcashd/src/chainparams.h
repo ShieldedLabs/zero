@@ -47,19 +47,6 @@ class CChainParams: public KeyConstants
 public:
     const Consensus::Params& GetConsensus() const { return consensus; }
 
-    /// Whether a transaction built for `nHeight` should be proved against the fixed
-    /// (NU6.2-onward) Orchard circuit rather than the historical (insecure) one.
-    ///
-    /// On testnet and regtest, it follows NU6.2 activation (on regtest so that tests can
-    /// reconstruct pre-NU6.2 Orchard history; on testnet because the emergency soft fork
-    /// to disable Orchard will not activate until NU6.2). On mainnet, the fixed Orchard
-    /// circuit is used unconditionally: we know that the emergency soft fork has already
-    /// activated on mainnet, and this makes it easier to reason about the behaviour during
-    /// sync or when eclipsed.
-    bool UseFixedCircuitForProving(int nHeight) const {
-        return NetworkIDString() == CBaseChainParams::MAIN ||
-               GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_2);
-    }
     const rust::Box<consensus::Network> RustNetwork() const {
         return consensus::network(
             NetworkIDString(),
@@ -71,7 +58,8 @@ public:
             consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight,
             consensus.vUpgrades[Consensus::UPGRADE_NU6].nActivationHeight,
             consensus.vUpgrades[Consensus::UPGRADE_NU6_1].nActivationHeight,
-            consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight);
+            consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight,
+            consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight);
     }
     const CMessageHeader::MessageStartChars& MessageStart() const { return pchMessageStart; }
     int GetDefaultPort() const { return nDefaultPort; }
@@ -85,7 +73,19 @@ public:
     CAmount ChainSupplyCheckpointSproutValue() const { return nChainSupplyCheckpointSproutValue; }
     CAmount ChainSupplyCheckpointSaplingValue() const { return nChainSupplyCheckpointSaplingValue; }
     CAmount ChainSupplyCheckpointOrchardValue() const { return nChainSupplyCheckpointOrchardValue; }
+    CAmount ChainSupplyCheckpointIronwoodValue() const { return nChainSupplyCheckpointIronwoodValue; }
     CAmount ChainSupplyCheckpointLockboxValue() const { return nChainSupplyCheckpointLockboxValue; }
+    //! Sum of all six per-pool checkpoint values; must equal
+    //! ChainSupplyCheckpointTotalSupply(). Single definition so the startup
+    //! assert and the tests cannot drift apart pool-by-pool. // @claude
+    CAmount ChainSupplyCheckpointPoolTotal() const {
+        return nChainSupplyCheckpointTransparentValue
+             + nChainSupplyCheckpointSproutValue
+             + nChainSupplyCheckpointSaplingValue
+             + nChainSupplyCheckpointOrchardValue
+             + nChainSupplyCheckpointIronwoodValue
+             + nChainSupplyCheckpointLockboxValue;
+    }
     uint256 ChainSupplyCheckpointBlockHash() const { return hashChainSupplyCheckpointBlock; }
     /**
      * When true, the turnstile checks defined by ZIP 209 are enforced in
@@ -177,6 +177,7 @@ protected:
     CAmount nChainSupplyCheckpointSproutValue = 0;
     CAmount nChainSupplyCheckpointSaplingValue = 0;
     CAmount nChainSupplyCheckpointOrchardValue = 0;
+    CAmount nChainSupplyCheckpointIronwoodValue = 0;
     CAmount nChainSupplyCheckpointLockboxValue = 0;
     uint256 hashChainSupplyCheckpointBlock;
     bool fZIP209Enabled = false;

@@ -176,24 +176,40 @@ public:
     template <typename K, typename V>
     bool Read(const K& key, V& value) const
     {
-        CDataStream ssKey(SER_DISK, CLIENT_VERSION);
-        ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
-        ssKey << key;
-        leveldb::Slice slKey(ssKey.data(), ssKey.size());
-
         std::string strValue;
-        leveldb::Status status = pdb->Get(readoptions, slKey, &strValue);
-        if (!status.ok()) {
-            if (status.IsNotFound())
-                return false;
-            LogPrintf("LevelDB read failure: %s\n", status.ToString());
-            dbwrapper_private::HandleError(status);
+        if (!ReadRaw(key, strValue)) {
+            return false;
         }
         try {
             CDataStream ssValue(strValue.data(), strValue.data() + strValue.size(), SER_DISK, CLIENT_VERSION);
             ssValue >> value;
         } catch (const std::exception&) {
             return false;
+        }
+        return true;
+    }
+
+    /**
+     * Reads the raw serialized bytes stored under `key`, without deserializing
+     * them into a fixed-width type. For record formats whose width has grown
+     * across client versions (e.g. ZIP 221 history nodes), this lets the
+     * caller accept any historical width instead of demanding today's exact
+     * size. // @claude (review C3 follow-up)
+     */
+    template <typename K>
+    bool ReadRaw(const K& key, std::string& value) const
+    {
+        CDataStream ssKey(SER_DISK, CLIENT_VERSION);
+        ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
+        ssKey << key;
+        leveldb::Slice slKey(ssKey.data(), ssKey.size());
+
+        leveldb::Status status = pdb->Get(readoptions, slKey, &value);
+        if (!status.ok()) {
+            if (status.IsNotFound())
+                return false;
+            LogPrintf("LevelDB read failure: %s\n", status.ToString());
+            dbwrapper_private::HandleError(status);
         }
         return true;
     }

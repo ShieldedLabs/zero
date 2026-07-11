@@ -146,6 +146,14 @@ public:
         consensus.nTemporaryOrchardDisablingSoftForkHeight = 3363426;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 3364600;
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160;
+        // @nomerge: NU6.3 mainnet activation height TBD (ZIP 258 still lists it as TBD).
+        // Parked at NO_ACTIVATION_HEIGHT like ZFUTURE: any other placeholder is a live
+        // height — the previous 0xCCCCCCCC overflowed the signed int to a negative
+        // value, making a mainnet build treat NU6.3 as active from genesis (and the
+        // Rust side, which maps negatives to "never activates", disagree with C++).
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -408,6 +416,9 @@ public:
         nChainSupplyCheckpointSproutValue = 2562695744028;
         nChainSupplyCheckpointSaplingValue = 64691367655556;
         nChainSupplyCheckpointOrchardValue = 415200558417145;
+        // Zero because this checkpoint height predates NU6.3 activation; a
+        // post-NU6.3 checkpoint must carry the real Ironwood pool balance.
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 18750000;
         hashChainSupplyCheckpointBlock = uint256S("0000000000b98a7d8f390793fa113bf6755935f0c14ea817af07d2c16f2c3ef4");
 
@@ -534,6 +545,8 @@ public:
         consensus.nTemporaryOrchardDisablingSoftForkHeight = 4048500;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 4052000;
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160; // @nomerge: Nu6.3 protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 4134000;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -784,6 +797,10 @@ public:
         nChainSupplyCheckpointSproutValue = 42832983037484;
         nChainSupplyCheckpointSaplingValue = 140562922195481;
         nChainSupplyCheckpointOrchardValue = 7522947905915;
+        // Zero because this checkpoint height (3,536,500) predates the NU6.3
+        // testnet activation (4,134,000); a post-NU6.3 checkpoint must carry
+        // the real Ironwood pool balance.
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 18750000;
         hashChainSupplyCheckpointBlock = uint256S("01b947c7556b23040dc6840e9d3e4c6d9478c67a87b9737a83be848729d6e0af");
 
@@ -870,6 +887,9 @@ public:
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160; // @nomerge: Nu6.3 protocol version
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
@@ -998,6 +1018,7 @@ public:
         nChainSupplyCheckpointSproutValue = 20000000000;
         nChainSupplyCheckpointSaplingValue = 0;
         nChainSupplyCheckpointOrchardValue = 0;
+        nChainSupplyCheckpointIronwoodValue = 0;
         nChainSupplyCheckpointLockboxValue = 0;
         hashChainSupplyCheckpointBlock.SetNull();
     }
@@ -1027,6 +1048,15 @@ void SelectParams(const std::string& network)
 {
     SelectBaseParams(network);
     pCurrentParams = &Params(network);
+
+    // Enforce in every binary (not just gtests) that no upgrade carries a junk
+    // activation-height placeholder: anything other than NO_ACTIVATION_HEIGHT
+    // or a non-negative height reads as active-from-genesis in C++ while the
+    // Rust side treats it as never-activating (review C2). // @claude
+    for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
+        int h = pCurrentParams->GetConsensus().vUpgrades[idx].nActivationHeight;
+        assert(h == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || h >= 0);
+    }
 
     // Some python qa rpc tests need to enforce the coinbase consensus rule
     if (network == CBaseChainParams::REGTEST && mapArgs.count("-regtestshieldcoinbase")) {

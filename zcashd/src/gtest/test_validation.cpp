@@ -51,6 +51,10 @@ public:
         return false;
     }
 
+    bool GetIronwoodAnchorAt(const uint256 &rt, IronwoodMerkleFrontier &tree) const {
+        return false;
+    }
+
     bool GetNullifier(const uint256 &nf, ShieldedType type) const {
         return false;
     }
@@ -117,15 +121,19 @@ public:
                     const uint256 &hashSproutAnchor,
                     const uint256 &hashSaplingAnchor,
                     const uint256 &hashOrchardAnchor,
+                    const uint256 &hashIronwoodAnchor,
                     CAnchorsSproutMap &mapSproutAnchors,
                     CAnchorsSaplingMap &mapSaplingAnchors,
                     CAnchorsOrchardMap &mapOrchardAnchors,
+                    CAnchorsIronwoodMap &mapIronwoodAnchors,
                     CNullifiersMap &mapSproutNullifiers,
                     CNullifiersMap &mapSaplingNullifiers,
                     CNullifiersMap &mapOrchardNullifiers,
+                    CNullifiersMap &mapIronwoodNullifiers,
                     CHistoryCacheMap &historyCacheMap,
                     SubtreeCache &cacheSaplingSubtrees,
-                    SubtreeCache &cacheOrchardSubtrees) {
+                    SubtreeCache &cacheOrchardSubtrees,
+                    SubtreeCache &cacheIronwoodSubtrees) {
         return false;
     }
 
@@ -136,8 +144,13 @@ public:
 
 class MockCValidationState : public CValidationState {
 public:
+    // NB: this class must be token-identical to the `MockCValidationState` in
+    // the other gtest files. All of them share one linkage-deduplicated vtable
+    // (same class name in the global namespace across TUs), so a signature that
+    // fails to override `CValidationState::DoS` here (e.g. taking the reject
+    // reason by value) silently breaks the mocks in *other* test files.
     MOCK_METHOD6(DoS, bool(int level, bool ret,
-             unsigned int chRejectCodeIn, const std::string strRejectReasonIn,
+             unsigned int chRejectCodeIn, const std::string &strRejectReasonIn,
              BodyCorruption bodyCorruption,
              const std::string &strDebugMessageIn));
     MOCK_METHOD4(Invalid, bool(bool ret,
@@ -606,6 +619,7 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     const CAmount cpSproutValue = chainparams.ChainSupplyCheckpointSproutValue();
     const CAmount cpSaplingValue = chainparams.ChainSupplyCheckpointSaplingValue();
     const CAmount cpOrchardValue = chainparams.ChainSupplyCheckpointOrchardValue();
+    const CAmount cpIronwoodValue = chainparams.ChainSupplyCheckpointIronwoodValue();
     const CAmount cpLockboxValue = chainparams.ChainSupplyCheckpointLockboxValue();
 
     CBlockHeader header;
@@ -621,6 +635,7 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     EXPECT_FALSE(beforeCheckpoint.nChainSproutValue.has_value());
     EXPECT_FALSE(beforeCheckpoint.nChainSaplingValue.has_value());
     EXPECT_FALSE(beforeCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_FALSE(beforeCheckpoint.nChainIronwoodValue.has_value());
     EXPECT_FALSE(beforeCheckpoint.nChainLockboxValue.has_value());
 
     // At the checkpoint height with the correct hash, values are injected.
@@ -634,6 +649,7 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     EXPECT_FALSE(atCheckpoint.nChainSproutValue.has_value());
     EXPECT_FALSE(atCheckpoint.nChainSaplingValue.has_value());
     EXPECT_FALSE(atCheckpoint.nChainOrchardValue.has_value());
+    EXPECT_FALSE(atCheckpoint.nChainIronwoodValue.has_value());
     EXPECT_FALSE(atCheckpoint.nChainLockboxValue.has_value());
 
     FallbackChainSupplyCheckpoint(&atCheckpoint, chainparams);
@@ -648,6 +664,8 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     EXPECT_EQ(atCheckpoint.nChainSaplingValue.value(), cpSaplingValue);
     ASSERT_TRUE(atCheckpoint.nChainOrchardValue.has_value());
     EXPECT_EQ(atCheckpoint.nChainOrchardValue.value(), cpOrchardValue);
+    ASSERT_TRUE(atCheckpoint.nChainIronwoodValue.has_value());
+    EXPECT_EQ(atCheckpoint.nChainIronwoodValue.value(), cpIronwoodValue);
     ASSERT_TRUE(atCheckpoint.nChainLockboxValue.has_value());
     EXPECT_EQ(atCheckpoint.nChainLockboxValue.value(), cpLockboxValue);
 
@@ -659,6 +677,7 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     EXPECT_EQ(atCheckpoint.nChainSproutValue.value(), cpSproutValue);
     EXPECT_EQ(atCheckpoint.nChainSaplingValue.value(), cpSaplingValue);
     EXPECT_EQ(atCheckpoint.nChainOrchardValue.value(), cpOrchardValue);
+    EXPECT_EQ(atCheckpoint.nChainIronwoodValue.value(), cpIronwoodValue);
     EXPECT_EQ(atCheckpoint.nChainLockboxValue.value(), cpLockboxValue);
 
     // If values are set but WRONG, the fallback should return false
@@ -732,6 +751,35 @@ TEST(Validation, FallbackChainSupplyCheckpoint) {
     EXPECT_FALSE(afterCheckpoint.nChainSaplingValue.has_value());
     EXPECT_FALSE(afterCheckpoint.nChainOrchardValue.has_value());
     EXPECT_FALSE(afterCheckpoint.nChainLockboxValue.has_value());
+}
+
+// Review H5: the checkpoint pool values (all six pools, incl. Ironwood) must
+// sum to the checkpoint total supply on every network. This is the same
+// invariant FallbackChainSupplyCheckpoint asserts at node startup — a bad
+// checkpoint edit that violates it aborts every node whose index reaches the
+// checkpoint block, so pin it at test time. Also pins that Ironwood is zero
+// while the checkpoint height predates NU6.3 activation on that network.
+// // @claude
+TEST(Validation, ChainSupplyCheckpointPoolsSumToTotal) {
+    for (auto network : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
+        SelectParams(network);
+        const CChainParams& params = Params();
+
+        EXPECT_EQ(
+            params.ChainSupplyCheckpointPoolTotal(),
+            params.ChainSupplyCheckpointTotalSupply())
+            << "network " << network;
+
+        auto nu6_3 = params.GetConsensus().GetActivationHeight(Consensus::UPGRADE_NU6_3);
+        if (!nu6_3.has_value() || params.ChainSupplyCheckpointHeight() < nu6_3.value()) {
+            EXPECT_EQ(params.ChainSupplyCheckpointIronwoodValue(), 0)
+                << "network " << network
+                << ": pre-NU6.3 checkpoint must have a zero Ironwood balance";
+        }
+    }
+
+    // Revert to the default for other tests.
+    SelectParams(CBaseChainParams::REGTEST);
 }
 
 // Unit test for GHSA-78pp-mc9g-g4mw: a block whose aggregate per-pool value

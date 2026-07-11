@@ -1,17 +1,19 @@
-use std::{mem, ptr};
+use std::{convert::TryFrom, mem, ptr};
 
 use group::{Group as _, GroupEncoding as _};
 use memuse::DynamicUsage;
 use orchard::{
-    bundle::{Authorized, ProofSizeEnforcement},
+    bundle::{Authorized, BundleVersion},
     keys::OutgoingViewingKey,
-    note_encryption::OrchardDomain,
+    note::NoteVersion,
+    note_encryption::{IronwoodDomain, OrchardDomain},
     primitives::redpallas::{Signature, SpendAuth},
+    ValuePool,
 };
 use pasta_curves::pallas;
 use zcash_note_encryption::try_output_recovery_with_ovk;
 use zcash_primitives::transaction::components::orchard as orchard_serialization;
-use zcash_protocol::value::ZatBalance;
+use zcash_protocol::{consensus::BranchId, value::ZatBalance};
 
 use crate::{bridge::ffi, streams::CppStream};
 
@@ -64,9 +66,27 @@ pub(crate) unsafe fn orchard_bundle_from_raw_box(
     Bundle::from_raw_box(bundle)
 }
 
-/// Parses an authorized Orchard bundle from the given stream.
-pub(crate) fn parse_orchard_bundle(reader: &mut CppStream<'_>) -> Result<Box<Bundle>, String> {
-    Bundle::parse(reader)
+pub(crate) fn parse_orchard_bundle(
+    reader: &mut CppStream<'_>,
+    consensus_branch_id: u32,
+    format: ffi::BundleFormat,
+) -> Result<Box<Bundle>, String> {
+    let branch_id = BranchId::try_from(consensus_branch_id)
+        .map_err(|_| format!("unknown consensus branch id {:#010x}", consensus_branch_id))?;
+    let result = match format {
+        ffi::BundleFormat::V5 => orchard_serialization::read_v5_bundle(reader, branch_id),
+        ffi::BundleFormat::V6Orchard => {
+            orchard_serialization::read_v6_bundle(reader, branch_id, ValuePool::Orchard)
+        }
+        ffi::BundleFormat::V6Ironwood => {
+            orchard_serialization::read_v6_bundle(reader, branch_id, ValuePool::Ironwood)
+        }
+        _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
+    };
+    match result {
+        Ok(parsed) => Ok(Box::new(Bundle(parsed))),
+        Err(e) => Err(format!("Failed to parse Orchard-protocol bundle: {}", e)),
+    }
 }
 
 impl Bundle {
@@ -84,29 +104,34 @@ impl Bundle {
         Box::new(self.clone())
     }
 
-    /// Parses an authorized Orchard bundle from the given stream.
-    pub(crate) fn parse(reader: &mut CppStream<'_>) -> Result<Box<Self>, String> {
-        // This standalone bundle parse is deliberately lenient about the proof size
-        // (ProofSizeEnforcement::Unenforced): it has no transaction context (and hence no
-        // consensus branch id), and a node must be able to parse Orchard bundles from earlier
-        // epochs whose proofs predate the canonical-size rule.
-        //
-        // The canonical-proof-size consensus rule is instead enforced when a whole transaction
-        // is parsed (see `zcash_transaction_digests` / `Transaction::read`), where the proof
-        // size is checked against the transaction's own consensus branch id (Strict for NU6.2
-        // onward). That parse is reached for every transaction via CTransaction::UpdateHash.
-        match orchard_serialization::read_v5_bundle(reader, ProofSizeEnforcement::Unenforced) {
-            Ok(parsed) => Ok(Box::new(Bundle(parsed))),
-            Err(e) => Err(format!("Failed to parse Orchard bundle: {}", e)),
-        }
-    }
+    pub(crate) fn serialize(
+        &self,
+        writer: &mut CppStream<'_>,
+        format: ffi::BundleFormat,
+    ) -> Result<(), String> {
+        match format {
+            ffi::BundleFormat::V5 => orchard_serialization::write_v5_bundle(self.inner(), writer),
+            ffi::BundleFormat::V6Orchard | ffi::BundleFormat::V6Ironwood => {
+                let expected = if format == ffi::BundleFormat::V6Orchard {
+                    BundleVersion::orchard_v3()
+                } else {
+                    BundleVersion::ironwood_v3()
+                };
 
-    /// Serializes an authorized Orchard bundle to the given stream.
-    ///
-    /// If `bundle == None`, this serializes `nActionsOrchard = 0`.
-    pub(crate) fn serialize(&self, writer: &mut CppStream<'_>) -> Result<(), String> {
-        orchard_serialization::write_v5_bundle(self.inner(), writer)
-            .map_err(|e| format!("Failed to serialize Orchard bundle: {}", e))
+                if let Some(bundle) = self.inner() {
+                    if bundle.bundle_version() != expected {
+                        return Err(format!(
+                            "bundle version {:?} does not match the requested v6 slot",
+                            bundle.bundle_version()
+                        ));
+                    }
+                }
+
+                orchard_serialization::write_v6_bundle(self.inner(), writer)
+            }
+            _ => return Err(format!("invalid Orchard bundle format {}", format.repr)),
+        }
+        .map_err(|e| format!("Failed to serialize Orchard-protocol bundle: {}", e))
     }
 
     pub(crate) fn inner(&self) -> Option<&orchard::Bundle<Authorized, ZatBalance>> {
@@ -161,6 +186,16 @@ impl Bundle {
     pub(crate) fn enable_outputs(&self) -> bool {
         self.inner()
             .map(|b| b.flags().outputs_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Returns whether the bundle is present and the cross-address flag is set.
+    ///
+    /// This flag (ZIP 229 flags bit 2) is only representable in the Ironwood
+    /// pool; it is always false for an Orchard bundle.
+    pub(crate) fn enable_cross_address(&self) -> bool {
+        self.inner()
+            .map(|b| b.flags().cross_address_enabled())
             .unwrap_or(false)
     }
 
@@ -248,16 +283,30 @@ impl Bundle {
     /// transaction.
     pub(crate) fn coinbase_outputs_are_valid(&self) -> bool {
         if let Some(bundle) = self.inner() {
+            // Recovery must use the note-encryption domain matching the
+            // bundle's pool: Orchard notes use V2 plaintexts, Ironwood notes
+            // use V3 plaintexts (ZIP 2005). Recovery mechanics are otherwise
+            // identical.
+            let note_version = bundle.bundle_version().note_version();
+            let ovk = OutgoingViewingKey::from([0u8; 32]);
             for act in bundle.actions() {
-                if try_output_recovery_with_ovk(
-                    &OrchardDomain::for_action(act),
-                    &OutgoingViewingKey::from([0u8; 32]),
-                    act,
-                    act.cv_net(),
-                    &act.encrypted_note().out_ciphertext,
-                )
-                .is_none()
-                {
+                let recovered = match note_version {
+                    NoteVersion::V2 => try_output_recovery_with_ovk(
+                        &OrchardDomain::for_action(act),
+                        &ovk,
+                        act,
+                        act.cv_net(),
+                        &act.encrypted_note().out_ciphertext,
+                    ),
+                    NoteVersion::V3 => try_output_recovery_with_ovk(
+                        &IronwoodDomain::for_action(act),
+                        &ovk,
+                        act,
+                        act.cv_net(),
+                        &act.encrypted_note().out_ciphertext,
+                    ),
+                };
+                if recovered.is_none() {
                     return false;
                 }
             }

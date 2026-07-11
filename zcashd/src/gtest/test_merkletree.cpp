@@ -21,6 +21,7 @@
 #include "version.h"
 #include "serialize.h"
 #include "streams.h"
+#include "consensus/upgrades.h"
 
 #include "zcash/IncrementalMerkleTree.hpp"
 #include "zcash/util.h"
@@ -305,7 +306,7 @@ TEST(orchardMerkleTree, appendBundle) {
     for (int i = 0; i < 10; i++) {
         CDataStream ssBundleData(merkle_roots_orchard[i].bundle, SER_NETWORK, PROTOCOL_VERSION);
         OrchardBundle b;
-        ssBundleData >> b;
+        b.Unserialize(ssBundleData, NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId, orchard::BundleFormat::V5);
         newTree.AppendBundle(b);
 
         uint256 anchor(merkle_roots_orchard[i].anchor);

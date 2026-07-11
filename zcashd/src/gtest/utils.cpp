@@ -107,8 +107,17 @@ template<> void AppendRandomLeaf(OrchardMerkleFrontier &tree) {
     uint256 orchardAnchor;
     uint256 dataToBeSigned;
     // TODO: Create bundle.
-    auto builder = orchard::Builder(false, orchardAnchor);
-    builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    // Any bundle version works here (only the tree root matters); the historical
+    // insecure version keeps this off the heavyweight NU6.2/NU6.3 proving keys.
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, orchardAnchor);
+    bool addedOutput = builder.AddOutput(std::nullopt, to, 0, std::nullopt);
+    assert(addedOutput);
     auto bundle = builder.Build().value().ProveAndSign({}, dataToBeSigned).value();
     tree.AppendBundle(bundle);
+}
+template<> void AppendRandomLeaf(IronwoodMerkleFrontier &tree) {
+    // The Ironwood frontier shares the Orchard tree machinery; only the root
+    // needs to change, so appending an Orchard bundle suffices.
+    AppendRandomLeaf<OrchardMerkleFrontier>(tree);
 }

@@ -35,7 +35,8 @@ uint256 ProduceShieldedSignatureHash(
     const CTransaction& tx,
     const std::vector<CTxOut>& allPrevOutputs,
     const sapling::UnauthorizedBundle& saplingBundle,
-    const std::optional<orchard::UnauthorizedBundle>& orchardBundle);
+    const std::optional<orchard::UnauthorizedBundle>& orchardBundle,
+    const std::optional<orchard::UnauthorizedBundle>& ironwoodBundle);
 
 namespace orchard {
 
@@ -91,10 +92,11 @@ private:
     Builder() : inner(nullptr, orchard_builder_free), hasActions(false) { }
 
 public:
-    // `useFixedCircuitForProving` selects the circuit version to prove against (the fixed circuit, else
-    // the historical insecure one). The bundle records it and reuses it in ProveAndSign. Compute
-    // it with `CChainParams::UseFixedCircuitForProving`; the default (true) is correct for non-test callers.
-    Builder(bool coinbase, uint256 anchor, bool useFixedCircuitForProving = true);
+    // `bundle_version` fully determines the circuit: the builder stamps it on the
+    // bundle, and proving reads the circuit version back from the bundle itself (see
+    // `orchard_unauthorized_bundle_prove_and_sign`). Construct it from the value pool
+    // being spent/paid and `orchard::ProtocolVersionForHeight`.
+    Builder(bool coinbase, orchard::BundleVersion bundle_version, uint256 anchor);
 
     // Builder should never be copied
     Builder(const Builder&) = delete;
@@ -112,10 +114,30 @@ public:
     ///
     /// Returns `false` if the given Merkle path does not have the required anchor
     /// for the given note.
-    bool AddSpend(orchard::SpendInfo spendInfo);
+    [[nodiscard]] bool AddSpend(orchard::SpendInfo spendInfo);
 
     /// Adds an address which will receive funds in this bundle.
-    void AddOutput(
+    ///
+    /// Returns `false` if the builder rejects the output (in particular, every
+    /// recipient is rejected under the cross-address restriction of the
+    /// (Orchard, V3) pool from NU6.3); no action is recorded in that case.
+    [[nodiscard]] bool AddOutput(
+        const std::optional<uint256>& ovk,
+        const libzcash::OrchardRawAddress& to,
+        CAmount value,
+        const std::optional<libzcash::Memo>& memo);
+
+    /// Adds a wallet-controlled change output to `to`, owned by `fvk`.
+    ///
+    /// Unlike `AddOutput`, this is permitted in bundles that disable cross-address
+    /// transfers (such as the Orchard pool under protocol V3). The paired
+    /// fabricated spend is authorized by the spending key matching `fvk`, which
+    /// must be passed to `UnauthorizedBundle::ProveAndSign`.
+    ///
+    /// Returns `false` if the builder rejects the output; no action is recorded
+    /// in that case.
+    [[nodiscard]] bool AddChangeOutput(
+        const libzcash::OrchardFullViewingKey& fvk,
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,
@@ -158,7 +180,8 @@ private:
         const CTransaction& tx,
         const std::vector<CTxOut>& allPrevOutputs,
         const sapling::UnauthorizedBundle& saplingBundle,
-        const std::optional<orchard::UnauthorizedBundle>& orchardBundle));
+        const std::optional<orchard::UnauthorizedBundle>& orchardBundle,
+        const std::optional<orchard::UnauthorizedBundle>& ironwoodBundle));
 
 public:
     // UnauthorizedBundle should never be copied
@@ -184,6 +207,16 @@ public:
     std::optional<OrchardBundle> ProveAndSign(
         const std::vector<libzcash::OrchardSpendingKey>& keys, uint256 sighash);
 };
+
+/// Returns the Orchard protocol revision in force for a transaction built at the
+/// given height: V3 from NU6.3, V2 from NU6.2, or, before NU6.2 on test networks,
+/// the historical insecure revision so that tests can reconstruct pre-NU6.2 Orchard
+/// history.
+///
+/// The caller combines this with its choice of value pool to form a
+/// `BundleVersion`. Note that only (Orchard, any) and (Ironwood, V3) are valid
+/// combinations; the FFI rejects the rest.
+ProtocolVersion ProtocolVersionForHeight(const CChainParams& chainparams, int nHeight);
 
 } // namespace orchard
 
@@ -342,11 +375,17 @@ public:
 
     std::optional<uint256> GetOrchardAnchor() const;
 
-    bool AddOrchardSpend(
+    [[nodiscard]] bool AddOrchardSpend(
         libzcash::OrchardSpendingKey sk,
         orchard::SpendInfo spendInfo);
 
-    void AddOrchardOutput(
+    /// Adds an Orchard recipient output.
+    ///
+    /// Returns `false` if the underlying builder rejects the output — from
+    /// NU6.3 the (Orchard, V3) pool rejects every AddOutput recipient under
+    /// the cross-address restriction — and performs no value bookkeeping in
+    /// that case. Mirrors AddOrchardSpend's contract. // @claude
+    [[nodiscard]] bool AddOrchardOutput(
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,

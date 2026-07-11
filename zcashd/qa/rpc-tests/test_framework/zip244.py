@@ -46,18 +46,21 @@ def transparent_scripts_digest(tx):
 
 # Sapling
 
-def sapling_digest(saplingBundle):
+def sapling_digest(saplingBundle, v6=False):
     digest = blake2b(digest_size=32, person=b'ZTxIdSaplingHash')
 
     if len(saplingBundle.spends) + len(saplingBundle.outputs) > 0:
-        digest.update(sapling_spends_digest(saplingBundle))
+        digest.update(sapling_spends_digest(saplingBundle, v6))
         digest.update(sapling_outputs_digest(saplingBundle))
         digest.update(struct.pack('<q', saplingBundle.valueBalance))
 
     return digest.digest()
 
-def sapling_auth_digest(saplingBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxAuthSapliHash')
+def sapling_auth_digest(saplingBundle, v6=False):
+    # Under v6 (ZIP 229) the Sapling anchor moves from the (per-spend) txid
+    # digest into the authorizing digest, as a single anchor after the sigs.
+    person = b'ZTxAuthSapliH_v6' if v6 else b'ZTxAuthSapliHash'
+    digest = blake2b(digest_size=32, person=person)
 
     if len(saplingBundle.spends) + len(saplingBundle.outputs) > 0:
         for desc in saplingBundle.spends:
@@ -67,17 +70,19 @@ def sapling_auth_digest(saplingBundle):
         for desc in saplingBundle.outputs:
             digest.update(desc.zkproof.serialize())
         digest.update(saplingBundle.bindingSig.serialize())
+        if v6 and len(saplingBundle.spends) > 0:
+            digest.update(ser_uint256(saplingBundle.anchor))
 
     return digest.digest()
 
 # - Spends
 
-def sapling_spends_digest(saplingBundle):
+def sapling_spends_digest(saplingBundle, v6=False):
     digest = blake2b(digest_size=32, person=b'ZTxIdSSpendsHash')
 
     if len(saplingBundle.spends) > 0:
         digest.update(sapling_spends_compact_digest(saplingBundle))
-        digest.update(sapling_spends_noncompact_digest(saplingBundle))
+        digest.update(sapling_spends_noncompact_digest(saplingBundle, v6))
 
     return digest.digest()
 
@@ -87,11 +92,14 @@ def sapling_spends_compact_digest(saplingBundle):
         digest.update(ser_uint256(desc.nullifier))
     return digest.digest()
 
-def sapling_spends_noncompact_digest(saplingBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxIdSSpendNHash')
+def sapling_spends_noncompact_digest(saplingBundle, v6=False):
+    # v6 drops the per-spend anchor (it moves to the auth digest).
+    person = b'ZTxIdSSpendNH_v6' if v6 else b'ZTxIdSSpendNHash'
+    digest = blake2b(digest_size=32, person=person)
     for desc in saplingBundle.spends:
         digest.update(ser_uint256(desc.cv))
-        digest.update(ser_uint256(saplingBundle.anchor))
+        if not v6:
+            digest.update(ser_uint256(saplingBundle.anchor))
         digest.update(ser_uint256(desc.rk))
     return digest.digest()
 
@@ -129,52 +137,97 @@ def sapling_outputs_noncompact_digest(saplingBundle):
         digest.update(desc.outCiphertext)
     return digest.digest()
 
-# Orchard
+# Orchard / Ironwood
+#
+# Both the Orchard pool and the (v6-only) Ironwood pool use the identical
+# Orchard-format bundle digest; they differ only by their 16-byte BLAKE2b
+# personalizations and by whether the anchor lives in the txid digest (v5
+# Orchard) or the auth digest (all v6 pools). A personalization set captures
+# these differences so one implementation serves all three cases.
 
-def orchard_digest(orchardBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxIdOrchardHash')
+class _OrchardPers(object):
+    def __init__(self, bundle, compact, memos, noncompact, auth,
+                 anchor_in_txid, anchor_in_auth):
+        self.bundle = bundle
+        self.compact = compact
+        self.memos = memos
+        self.noncompact = noncompact
+        self.auth = auth
+        self.anchor_in_txid = anchor_in_txid
+        self.anchor_in_auth = anchor_in_auth
 
-    if len(orchardBundle.actions) > 0:
-        digest.update(orchard_actions_compact_digest(orchardBundle))
-        digest.update(orchard_actions_memos_digest(orchardBundle))
-        digest.update(orchard_actions_noncompact_digest(orchardBundle))
-        digest.update(struct.pack('B', orchardBundle.flags()))
-        digest.update(struct.pack('<q', orchardBundle.valueBalance))
-        digest.update(ser_uint256(orchardBundle.anchor))
+# v6 reuses the v5 Orchard *action-level* personalizations (only the bundle and
+# auth strings gain the `_v6` suffix); Ironwood uses fresh `_v6` strings at
+# every level. Getting these wrong silently corrupts every v6 txid.
+ORCHARD_V5 = _OrchardPers(
+    b'ZTxIdOrchardHash', b'ZTxIdOrcActCHash', b'ZTxIdOrcActMHash',
+    b'ZTxIdOrcActNHash', b'ZTxAuthOrchaHash', True, False)
+ORCHARD_V6 = _OrchardPers(
+    b'ZTxIdOrchardH_v6', b'ZTxIdOrcActCHash', b'ZTxIdOrcActMHash',
+    b'ZTxIdOrcActNHash', b'ZTxAuthOrchaH_v6', False, True)
+IRONWOOD_V6 = _OrchardPers(
+    b'ZTxIdIronwd_H_v6', b'ZTxIdIrnActCH_v6', b'ZTxIdIrnActMH_v6',
+    b'ZTxIdIrnActNH_v6', b'ZTxAuthIrnwdH_v6', False, True)
+
+def _orchard_style_digest(bundle, pers):
+    digest = blake2b(digest_size=32, person=pers.bundle)
+
+    if len(bundle.actions) > 0:
+        digest.update(_orchard_actions_compact_digest(bundle, pers))
+        digest.update(_orchard_actions_memos_digest(bundle, pers))
+        digest.update(_orchard_actions_noncompact_digest(bundle, pers))
+        digest.update(struct.pack('B', bundle.flags()))
+        digest.update(struct.pack('<q', bundle.valueBalance))
+        if pers.anchor_in_txid:
+            digest.update(ser_uint256(bundle.anchor))
 
     return digest.digest()
 
-def orchard_auth_digest(orchardBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxAuthOrchaHash')
+def _orchard_style_auth_digest(bundle, pers):
+    digest = blake2b(digest_size=32, person=pers.auth)
 
-    if len(orchardBundle.actions) > 0:
-        digest.update(bytes(orchardBundle.proofs))
-        for desc in orchardBundle.actions:
+    if len(bundle.actions) > 0:
+        digest.update(bytes(bundle.proofs))
+        for desc in bundle.actions:
             digest.update(desc.spendAuthSig.serialize())
-        digest.update(orchardBundle.bindingSig.serialize())
+        digest.update(bundle.bindingSig.serialize())
+        if pers.anchor_in_auth:
+            digest.update(ser_uint256(bundle.anchor))
 
     return digest.digest()
+
+def orchard_digest(orchardBundle, v6=False):
+    return _orchard_style_digest(orchardBundle, ORCHARD_V6 if v6 else ORCHARD_V5)
+
+def orchard_auth_digest(orchardBundle, v6=False):
+    return _orchard_style_auth_digest(orchardBundle, ORCHARD_V6 if v6 else ORCHARD_V5)
+
+def ironwood_digest(ironwoodBundle):
+    return _orchard_style_digest(ironwoodBundle, IRONWOOD_V6)
+
+def ironwood_auth_digest(ironwoodBundle):
+    return _orchard_style_auth_digest(ironwoodBundle, IRONWOOD_V6)
 
 # - Actions
 
-def orchard_actions_compact_digest(orchardBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxIdOrcActCHash')
-    for desc in orchardBundle.actions:
+def _orchard_actions_compact_digest(bundle, pers):
+    digest = blake2b(digest_size=32, person=pers.compact)
+    for desc in bundle.actions:
         digest.update(ser_uint256(desc.nullifier))
         digest.update(ser_uint256(desc.cmx))
         digest.update(ser_uint256(desc.ephemeralKey))
         digest.update(desc.encCiphertext[:52])
     return digest.digest()
 
-def orchard_actions_memos_digest(orchardBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxIdOrcActMHash')
-    for desc in orchardBundle.actions:
+def _orchard_actions_memos_digest(bundle, pers):
+    digest = blake2b(digest_size=32, person=pers.memos)
+    for desc in bundle.actions:
         digest.update(desc.encCiphertext[52:564])
     return digest.digest()
 
-def orchard_actions_noncompact_digest(orchardBundle):
-    digest = blake2b(digest_size=32, person=b'ZTxIdOrcActNHash')
-    for desc in orchardBundle.actions:
+def _orchard_actions_noncompact_digest(bundle, pers):
+    digest = blake2b(digest_size=32, person=pers.noncompact)
+    for desc in bundle.actions:
         digest.update(ser_uint256(desc.cv))
         digest.update(ser_uint256(desc.rk))
         digest.update(desc.encCiphertext[564:])
@@ -194,7 +247,13 @@ def header_digest(tx):
 
     return digest.digest()
 
+# A v6 (ZIP 229) transaction adds an Ironwood leaf to the txid/auth trees and
+# moves the shielded anchors from effecting into authorizing data.
+def is_v6(tx):
+    return tx.nVersion == 6
+
 def txid_digest(tx):
+    v6 = is_v6(tx)
     digest = blake2b(
         digest_size=32,
         person=b'ZcashTxHash_' + struct.pack('<I', tx.nConsensusBranchId),
@@ -202,28 +261,37 @@ def txid_digest(tx):
 
     digest.update(header_digest(tx))
     digest.update(transparent_digest(tx))
-    digest.update(sapling_digest(tx.saplingBundle))
-    digest.update(orchard_digest(tx.orchardBundle))
+    digest.update(sapling_digest(tx.saplingBundle, v6))
+    digest.update(orchard_digest(tx.orchardBundle, v6))
+    if v6:
+        digest.update(ironwood_digest(tx.ironwoodBundle))
 
     return digest.digest()
 
 # Authorizing Data Commitment
 
 def auth_digest(tx):
+    v6 = is_v6(tx)
     digest = blake2b(
         digest_size=32,
         person=b'ZTxAuthHash_' + struct.pack('<I', tx.nConsensusBranchId),
     )
 
     digest.update(transparent_scripts_digest(tx))
-    digest.update(sapling_auth_digest(tx.saplingBundle))
-    digest.update(orchard_auth_digest(tx.orchardBundle))
+    digest.update(sapling_auth_digest(tx.saplingBundle, v6))
+    digest.update(orchard_auth_digest(tx.orchardBundle, v6))
+    if v6:
+        digest.update(ironwood_auth_digest(tx.ironwoodBundle))
 
     return digest.digest()
 
 # Signatures
 
 def signature_digest(tx, nHashType, txin):
+    # v6 sighash reuses to_hash_v6: the same five-leaf tree as the txid, with
+    # only the transparent leaf replaced by the per-input sig digest. The
+    # transparent sig-digest logic and its personalizations are unchanged v5->v6.
+    v6 = is_v6(tx)
     digest = blake2b(
         digest_size=32,
         person=b'ZcashTxHash_' + struct.pack('<I', tx.nConsensusBranchId),
@@ -231,8 +299,10 @@ def signature_digest(tx, nHashType, txin):
 
     digest.update(header_digest(tx))
     digest.update(transparent_sig_digest(tx, nHashType, txin))
-    digest.update(sapling_digest(tx.saplingBundle))
-    digest.update(orchard_digest(tx.orchardBundle))
+    digest.update(sapling_digest(tx.saplingBundle, v6))
+    digest.update(orchard_digest(tx.orchardBundle, v6))
+    if v6:
+        digest.update(ironwood_digest(tx.ironwoodBundle))
 
     return digest.digest()
 
