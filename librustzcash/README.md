@@ -216,6 +216,19 @@ graph TB
 
 These libraries are under development and have not been fully reviewed.
 
+## Security Vulnerability Disclosure
+
+For the Zero distribution of librustzcash, maintained by Shielded Labs, report
+security vulnerabilities through the Shielded Labs security disclosure group on
+Signal:
+
+https://signal.group/#CjQKICZtmwnx-qJlNzqu9ACZno_s9hMZhELfjod-KBGXVXxUEhA-p8Ai5BgwAVVllZvDV6tb
+
+This group is a triage waiting room staffed by the Shielded Labs security team.
+After you are admitted, say only that you have a report; do not post details
+there. We will move you into a private group with the relevant people, where you
+disclose the vulnerability, and then remove you from the waiting room.
+
 ## License
 
 All code in this workspace is licensed under either of
