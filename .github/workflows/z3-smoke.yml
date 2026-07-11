@@ -72,18 +72,18 @@ jobs:
             build_args: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Needed to push the GHCR build cache; pulls of the public cache refs
       # are anonymous. On fork PRs the token is read-only, but those runs
       # don't write to the registry (see cache-to below).
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -113,7 +113,7 @@ jobs:
       # (read-only token on forks), so they write the ephemeral GHA cache
       # instead; every run reads both, so PR builds still start warm.
       - name: Build (cache only)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -137,12 +137,12 @@ jobs:
         working-directory: deploy/z3-stack
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Resolve zaino RUST_VERSION
         id: zaino_args
@@ -156,7 +156,7 @@ jobs:
       # Rebuilds are cache hits from the build job; load the images locally
       # under the :smoke tag that ZERO_IMAGE_TAG points the compose file at.
       - name: Load zebra image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: zebra
           file: zebra/docker/Dockerfile
@@ -171,7 +171,7 @@ jobs:
             type=gha,scope=zero-zebra
 
       - name: Load zaino image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: zaino
           file: zaino/Dockerfile
@@ -187,7 +187,7 @@ jobs:
             type=gha,scope=zero-zaino
 
       - name: Load zallet image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: zallet
           file: zallet/Dockerfile
