@@ -81,7 +81,7 @@ Examples:
 | Stopgap fix awaiting upstream PR        | yes, temporary        | `[upstream-pending #42] fix: ...`                       |
 | New maintenance doc                     | no                    | `doc: ...`                                              |
 | New skill                               | no                    | `skill: ...`                                            |
-| Subtree import/merge                    | yes, auto             | (git's own message, left untouched)                     |
+| Merge commits (subtree, PR, sync)       | yes, auto             | (git's own message, no marker; if the merge resolved conflicts, note the resolution in the body) |
 
 The git log **is** the ledger, queryable in both directions:
 
@@ -95,6 +95,16 @@ authoritative, not the prefix alone. The real delta is "commits that both carry
 the marker **and** touch a vendored dir," so a stray marker on a root-file commit
 (e.g. a mislabeled `.gitignore` change) drops out automatically. The query stays
 pristine without anyone having to police prefixes or rewrite history.
+
+Merge commits (subtree imports and pulls, PR merges, sync merges of
+`origin/main`) never take a marker: they join histories rather than introduce
+delta, and the ledger queries are unaffected because `git log` traverses both
+parents, finding the marked commits inside the merged branch. The one hazard is
+a merge that resolves conflicts, since the resolution is real content living in
+an unmarked commit the ledger cannot see (pathspec'd `git log` even simplifies
+merges away unless given `--full-history`). Keep merges content-free where
+possible; when a merge must resolve conflicts against the `[zero]` delta, apply
+the "ours wins" default below and state the resolution in the merge body.
 
 There is no separate file to maintain. Write a clear commit body and the delta
 documents itself.
