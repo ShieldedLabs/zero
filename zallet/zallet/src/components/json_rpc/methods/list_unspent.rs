@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 
 use documented::Documented;
@@ -8,7 +9,7 @@ use jsonrpsee::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use transparent::keys::TransparentKeyScope;
+use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
@@ -19,7 +20,7 @@ use zcash_client_backend::{
     fees::{orchard::InputView as _, sapling::InputView as _},
     wallet::NoteId,
 };
-use zcash_keys::address::Address;
+use zcash_keys::address::{Address, Receiver};
 use zcash_protocol::ShieldedPool;
 use zip32::Scope;
 
@@ -139,6 +140,26 @@ pub(crate) fn call(
         })
         .collect::<Result<Vec<Address>, _>>()?;
 
+    // The transparent receivers named by the address filter. `Address::Tex` re-encodes a
+    // P2PKH receiver, and a unified address may carry a transparent receiver alongside
+    // its shielded ones. Empty when no filter was provided (or the filter names no
+    // transparent receivers, in which case no transparent output can match it).
+    let transparent_filter: HashSet<TransparentAddress> = addresses
+        .iter()
+        .flat_map(|addr| match addr {
+            Address::Transparent(t) => vec![*t],
+            Address::Tex(data) => vec![TransparentAddress::PublicKeyHash(*data)],
+            _ => addr
+                .as_understood_unified_receivers()
+                .into_iter()
+                .filter_map(|r| match r {
+                    Receiver::Transparent(t) => Some(t),
+                    _ => None,
+                })
+                .collect(),
+        })
+        .collect();
+
     let target_height = match as_of_height.map_or_else(
         || {
             wallet.chain_height().map_err(|e| {
@@ -180,7 +201,7 @@ pub(crate) fn call(
 
         let is_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
 
-        let utxos = wallet
+        let mut utxos = wallet
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| {
                 RpcError::owned(
@@ -190,6 +211,9 @@ pub(crate) fn call(
                 )
             })?
             .iter()
+            // When an address filter was provided, only its transparent receivers are
+            // queried (a filter naming no transparent receivers matches no UTXOs).
+            .filter(|(addr, _)| addresses.is_empty() || transparent_filter.contains(addr))
             .try_fold(vec![], |mut acc, (addr, _)| {
                 let mut outputs = wallet
                     .get_spendable_transparent_outputs(
@@ -209,6 +233,10 @@ pub(crate) fn call(
                 acc.append(&mut outputs);
                 Ok::<_, RpcError>(acc)
             })?;
+
+        if !addresses.is_empty() {
+            utxos.retain(|u| transparent_filter.contains(u.recipient_address()));
+        }
 
         for utxo in utxos {
             let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
@@ -336,9 +364,7 @@ pub(crate) fn call(
                 addr.as_understood_unified_receivers()
                     .iter()
                     .any(|r| match r {
-                        zcash_keys::address::Receiver::Orchard(address) => {
-                            address == &n.note().recipient()
-                        }
+                        Receiver::Orchard(address) => address == &n.note().recipient(),
                         _ => false,
                     })
             })
