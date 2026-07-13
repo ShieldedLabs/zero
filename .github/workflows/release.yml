@@ -23,6 +23,26 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Refuse to release a pre-release zebra
+        # Zebra's end-of-support check gives release candidates a 10-day fuse
+        # (EOS_PANIC_AFTER in zebrad/src/components/sync/end_of_support.rs):
+        # every image built from an -rc/-alpha/-beta zebra subtree stops
+        # starting when mainnet passes the fuse height. Releases v6-v8 shipped
+        # a 6.0.0-rc.0 zebra and all expired simultaneously at height
+        # 3,410,520 (2026-07-13), taking operator deployments down. Only
+        # release from a final zebra version.
+        run: |
+          set -euo pipefail
+          zebra_version=$(sed -n 's/^version = "\(.*\)"/\1/p' zebra/zebrad/Cargo.toml | head -1)
+          echo "zebra/zebrad version: ${zebra_version}"
+          if [[ "$zebra_version" == *-* ]]; then
+            echo "::error::zebra/zebrad is a pre-release (${zebra_version});" \
+              "its end-of-support fuse is days, not months. Update the zebra" \
+              "subtree to a final release before cutting a Zero release."
+            exit 1
+          fi
       - name: Determine version
         id: ver
         env:
