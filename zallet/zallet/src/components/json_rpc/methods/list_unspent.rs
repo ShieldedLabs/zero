@@ -9,7 +9,7 @@ use jsonrpsee::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use transparent::{address::TransparentAddress, keys::TransparentKeyScope};
+use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
@@ -21,6 +21,7 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::address::{Address, Receiver};
+use zcash_primitives::transaction::fees::zip317;
 use zcash_protocol::ShieldedPool;
 use zip32::Scope;
 
@@ -234,6 +235,62 @@ pub(crate) fn call(
                 Ok::<_, RpcError>(acc)
             })?;
 
+        // `get_spendable_transparent_outputs` is a coin-selection query: it excludes
+        // outputs at or below the ZIP 317 marginal fee, which cost more to spend than
+        // they are worth. RPC enumeration must list them regardless, so gather the
+        // sub-marginal-fee candidates directly and admit each through the per-outpoint
+        // spendability check, which applies the same unspent/unexpired/maturity rules
+        // but no economic floor. Remove this two-step once the upstream query exposes
+        // its minimum value as a parameter.
+        let dust_candidates: Vec<OutPoint> = wallet
+            .with_raw(|conn, _| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT t.txid, u.output_index
+                     FROM transparent_received_outputs u
+                     JOIN transactions t ON t.id_tx = u.transaction_id
+                     JOIN accounts a ON a.id = u.account_id
+                     WHERE a.uuid = :account_uuid
+                     AND u.value_zat <= :marginal_fee",
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::named_params![
+                        ":account_uuid": account_id.expose_uuid(),
+                        ":marginal_fee": u64::from(zip317::MARGINAL_FEE),
+                    ],
+                    |row| {
+                        let txid: [u8; 32] = row.get(0)?;
+                        let n: u32 = row.get(1)?;
+                        Ok(OutPoint::new(txid, n))
+                    },
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|e| {
+                RpcError::owned(
+                    LegacyCode::Database.into(),
+                    "uneconomic transparent output enumeration failed",
+                    Some(format!("{e}")),
+                )
+            })?;
+        for outpoint in dust_candidates {
+            if let Some(utxo) = wallet
+                .get_unspent_transparent_output(&outpoint, target_height)
+                .map_err(|e| {
+                    RpcError::owned(
+                        LegacyCode::Database.into(),
+                        "WalletDb::get_unspent_transparent_output failed",
+                        Some(format!("{e}")),
+                    )
+                })?
+            {
+                // The batched query applies `confirmations_policy`; the per-outpoint
+                // check does not, so enforce the caller's minconf here.
+                let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
+                if confirmations >= minconf {
+                    utxos.push(utxo);
+                }
+            }
+        }
         if !addresses.is_empty() {
             utxos.retain(|u| transparent_filter.contains(u.recipient_address()));
         }
