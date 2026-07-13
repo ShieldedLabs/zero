@@ -319,9 +319,13 @@ pub(crate) fn call(
         };
 
         for note in notes.sapling().iter().filter(|n| {
-            addresses
-                .iter()
-                .all(|addr| addr.to_sapling_address() == Some(n.note().recipient()))
+            // An empty filter matches everything; otherwise a note need only match one
+            // of the provided addresses (`all` would reject every note as soon as two
+            // addresses were given).
+            addresses.is_empty()
+                || addresses
+                    .iter()
+                    .any(|addr| addr.to_sapling_address() == Some(n.note().recipient()))
         }) {
             let tx_mined_height = get_mined_height(*note.txid())?;
             let confirmations = tx_mined_height
@@ -360,14 +364,16 @@ pub(crate) fn call(
         }
 
         for note in notes.orchard().iter().filter(|n| {
-            addresses.iter().all(|addr| {
-                addr.as_understood_unified_receivers()
-                    .iter()
-                    .any(|r| match r {
-                        Receiver::Orchard(address) => address == &n.note().recipient(),
-                        _ => false,
-                    })
-            })
+            // Same `any` semantics as the Sapling filter above.
+            addresses.is_empty()
+                || addresses.iter().any(|addr| {
+                    addr.as_understood_unified_receivers()
+                        .iter()
+                        .any(|r| match r {
+                            Receiver::Orchard(address) => address == &n.note().recipient(),
+                            _ => false,
+                        })
+                })
         }) {
             let tx_mined_height = get_mined_height(*note.txid())?;
             let confirmations = tx_mined_height
