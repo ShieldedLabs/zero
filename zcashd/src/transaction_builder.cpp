@@ -380,6 +380,43 @@ bool TransactionBuilder::AddOrchardOutput(
     return true;
 }
 
+bool TransactionBuilder::EnableIronwood(const uint256& ironwoodAnchor)
+{
+    // The Ironwood slot only exists on the v6 (ZIP 229) wire format, which the
+    // ctor selects when NU6.3 is active at nHeight (and no earlier format was
+    // forced); a v6 build height also guarantees ProtocolVersionForHeight is
+    // V3, the only valid (Ironwood, *) builder pairing. // @claude
+    if (mtx.nVersion < ZIP229_TX_VERSION) {
+        return false;
+    }
+    ironwoodBuilder = orchard::Builder(
+        false,
+        {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3},
+        ironwoodAnchor);
+    return true;
+}
+
+bool TransactionBuilder::AddIronwoodOutput(
+    const std::optional<uint256>& ovk,
+    const libzcash::OrchardRawAddress& to,
+    CAmount value,
+    const std::optional<libzcash::Memo>& memo)
+{
+    if (!ironwoodBuilder.has_value()) {
+        throw std::runtime_error("TransactionBuilder cannot add Ironwood output without EnableIronwood()");
+    }
+
+    // Same contract as AddOrchardOutput: no value bookkeeping on rejection.
+    // (The Ironwood pool permits cross-address transfers, so arbitrary
+    // recipients are accepted; a rejection here indicates an invalid value
+    // or a builder-internal failure.) // @claude
+    if (!ironwoodBuilder.value().AddOutput(ovk, to, value, memo)) {
+        return false;
+    }
+    valueBalanceIronwood -= value;
+    return true;
+}
+
 void TransactionBuilder::AddSaplingSpend(
     libzcash::SaplingExtendedSpendingKey extsk,
     libzcash::SaplingNote note,
@@ -525,7 +562,7 @@ TransactionBuilderResult TransactionBuilder::Build()
     //
 
     // Valid change
-    CAmount change = valueBalanceSapling + valueBalanceOrchard - fee;
+    CAmount change = valueBalanceSapling + valueBalanceOrchard + valueBalanceIronwood - fee;
     for (auto jsInput : jsInputs) {
         change += jsInput.note.value();
     }
@@ -618,6 +655,20 @@ TransactionBuilderResult TransactionBuilder::Build()
     }
 
     //
+    // Ironwood
+    //
+
+    std::optional<orchard::UnauthorizedBundle> ironwoodBundle;
+    if (ironwoodBuilder.has_value() && ironwoodBuilder->HasActions()) {
+        auto bundle = ironwoodBuilder->Build();
+        if (bundle.has_value()) {
+            ironwoodBundle = std::move(bundle);
+        } else {
+            return TransactionBuilderResult("Failed to build Ironwood bundle");
+        }
+    }
+
+    //
     // Sapling spends and outputs
     //
 
@@ -656,16 +707,13 @@ TransactionBuilderResult TransactionBuilder::Build()
     try {
         if (mtx.fOverwintered) {
             // ProduceShieldedSignatureHash is only usable with v3+ transactions.
-            // TransactionBuilder does not construct Ironwood bundles yet
-            // (review S4, gated on the plan §10.1 wallet decision), so the
-            // Ironwood slot is always signed as empty here. // @claude
             dataToBeSigned = ProduceShieldedSignatureHash(
                 consensusBranchId,
                 mtx,
                 tIns,
                 *saplingBundle,
                 orchardBundle,
-                std::nullopt);
+                ironwoodBundle);
         } else {
             CScript scriptCode;
             const PrecomputedTransactionData txdata(mtx, tIns);
@@ -691,6 +739,18 @@ TransactionBuilderResult TransactionBuilder::Build()
             mtx.orchardBundle = authorizedBundle.value();
         } else {
             return TransactionBuilderResult("Failed to create Orchard proof or signatures");
+        }
+    }
+
+    if (ironwoodBundle.has_value()) {
+        // Output-only for now: AddIronwoodOutput is the only entry point, so
+        // every spend in the bundle is a dummy and no spending keys are
+        // needed for the spend-auth signatures (review S4). // @claude
+        auto authorizedBundle = ironwoodBundle.value().ProveAndSign({}, dataToBeSigned);
+        if (authorizedBundle.has_value()) {
+            mtx.ironwoodBundle = authorizedBundle.value();
+        } else {
+            return TransactionBuilderResult("Failed to create Ironwood proof or signatures");
         }
     }
 
@@ -742,6 +802,10 @@ void TransactionBuilder::CheckOrSetUsingSprout()
 {
     if (orchardBuilder.has_value()) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Can't use Sprout with a v5 transaction.");
+    } else if (ironwoodBuilder.has_value()) {
+        // Downgrading the format here would silently drop the Ironwood slot
+        // (pre-v6 serializations have no Ironwood section). // @claude
+        throw JSONRPCError(RPC_WALLET_ERROR, "Can't use Sprout with a v6 transaction.");
     } else {
         // Switch if necessary to a Sprout-supporting transaction format.
         auto txVersionInfo = CurrentTxVersionInfo(consensusParams, nHeight, true);

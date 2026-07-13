@@ -14,6 +14,7 @@ extern bool fExperimentalDeveloperSetPoolSizeZero;
 extern bool fExperimentalPaymentDisclosure;
 extern bool fExperimentalInsightExplorer;
 extern bool fExperimentalLightWalletd;
+extern bool fExperimentalIronwoodOrigination;
 
 std::optional<std::string> InitExperimentalMode();
 std::vector<std::string> GetExperimentalFeatures();

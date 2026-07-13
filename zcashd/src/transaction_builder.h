@@ -278,6 +278,10 @@ private:
     std::optional<uint256> orchardAnchor;
     std::optional<orchard::Builder> orchardBuilder;
     CAmount valueBalanceOrchard = 0;
+    // Ironwood is opt-in via EnableIronwood(); unlike Orchard there is no ctor
+    // path, so existing callers are untouched (review S4). // @claude
+    std::optional<orchard::Builder> ironwoodBuilder;
+    CAmount valueBalanceIronwood = 0;
     uint256 saplingAnchor;
     rust::Box<sapling::Builder> saplingBuilder;
     CAmount valueBalanceSapling = 0;
@@ -324,6 +328,8 @@ public:
         orchardAnchor(std::move(builder.orchardAnchor)),
         orchardBuilder(std::move(builder.orchardBuilder)),
         valueBalanceOrchard(std::move(builder.valueBalanceOrchard)),
+        ironwoodBuilder(std::move(builder.ironwoodBuilder)),
+        valueBalanceIronwood(std::move(builder.valueBalanceIronwood)),
         saplingAnchor(std::move(builder.saplingAnchor)),
         saplingBuilder(std::move(builder.saplingBuilder)),
         valueBalanceSapling(std::move(builder.valueBalanceSapling)),
@@ -350,6 +356,8 @@ public:
             orchardAnchor = std::move(builder.orchardAnchor);
             orchardBuilder = std::move(builder.orchardBuilder);
             valueBalanceOrchard = std::move(builder.valueBalanceOrchard);
+            ironwoodBuilder = std::move(builder.ironwoodBuilder);
+            valueBalanceIronwood = std::move(builder.valueBalanceIronwood);
             saplingAnchor = std::move(builder.saplingAnchor);
             saplingBuilder = std::move(builder.saplingBuilder);
             valueBalanceSapling = std::move(builder.valueBalanceSapling);
@@ -386,6 +394,27 @@ public:
     /// the cross-address restriction — and performs no value bookkeeping in
     /// that case. Mirrors AddOrchardSpend's contract. // @claude
     [[nodiscard]] bool AddOrchardOutput(
+        const std::optional<uint256>& ovk,
+        const libzcash::OrchardRawAddress& to,
+        CAmount value,
+        const std::optional<libzcash::Memo>& memo);
+
+    /// Enables the Ironwood pool for this transaction (review S4). The anchor
+    /// must be an Ironwood anchor known to the chain (e.g. the current best
+    /// anchor); output-only bundles still commit to it on the wire.
+    ///
+    /// Returns `false` — and Ironwood stays disabled — unless the builder is
+    /// constructing a v6 (ZIP 229) transaction, i.e. NU6.3 is active at the
+    /// build height and no earlier format was forced. // @claude
+    [[nodiscard]] bool EnableIronwood(const uint256& ironwoodAnchor);
+
+    /// Adds an Ironwood recipient output. Requires EnableIronwood().
+    ///
+    /// The Ironwood pool permits cross-address transfers, so unlike the
+    /// (Orchard, V3) pool arbitrary recipients are accepted; `false` means
+    /// the underlying builder rejected the output (no value bookkeeping is
+    /// performed in that case). // @claude
+    [[nodiscard]] bool AddIronwoodOutput(
         const std::optional<uint256>& ovk,
         const libzcash::OrchardRawAddress& to,
         CAmount value,

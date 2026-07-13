@@ -30,6 +30,7 @@
 #include "walletdb.h"
 #include "primitives/transaction.h"
 #include "zcbenchmarks.h"
+#include "zip317.h" // @claude for the z_shieldtoironwood default fee
 #include "script/interpreter.h"
 #include "zcash/Zcash.h"
 #include "zcash/Address.hpp"
@@ -5401,6 +5402,126 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
 }
 
 
+// Test-only Ironwood origination (review S4 / plan UC1): shields one wallet
+// UTXO to a freshly-generated Ironwood address and echoes the recovery
+// material in the result. This is deliberately not wallet support — the note
+// is neither tracked nor spendable by this node; its purpose is to exercise
+// the Ironwood pool's consensus path (proof verification, commitment tree,
+// nullifiers, value pool) on a live network. // @claude
+UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw runtime_error(
+            "z_shieldtoironwood \"txid\" n ( fee )\n"
+            "\nEXPERIMENTAL, TEST-ONLY (requires -experimentalfeatures -ironwoodorigination).\n"
+            "\nShields a single transparent wallet UTXO to a freshly-generated Ironwood\n"
+            "address. The destination spending key is NOT stored: its recovery mnemonic is\n"
+            "returned in the result and the shielded funds are unspendable until Ironwood\n"
+            "wallet support exists somewhere. Intended for exercising the Ironwood pool on\n"
+            "test networks; do not use with funds you are not prepared to strand.\n"
+            "\nArguments:\n"
+            "1. \"txid\"  (string, required) The id of the transaction holding the UTXO to shield.\n"
+            "2. n         (numeric, required) The output index of the UTXO to shield.\n"
+            "3. fee       (numeric, optional, default=ZIP 317 conventional fee) The fee in " + CURRENCY_UNIT + "; the rest of the UTXO's value is shielded.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"txid\": \"txid\",                (string) The id of the broadcast v6 transaction\n"
+            "  \"shielded\": x.xxx,             (numeric) The value shielded into the Ironwood pool\n"
+            "  \"fee\": x.xxx,                  (numeric) The fee paid\n"
+            "  \"recoveryMnemonic\": \"words\",   (string) Mnemonic seed for the destination key — SAVE THIS\n"
+            "  \"recoveryAccount\": 0,          (numeric) ZIP 32 account of the destination key under that seed\n"
+            "  \"recoveryDiversifierIndex\": 0  (numeric) Diversifier index of the destination address\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("z_shieldtoironwood", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\" 0")
+            + HelpExampleRpc("z_shieldtoironwood", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\", 0")
+        );
+
+    if (!fExperimentalIronwoodOrigination) {
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND,
+            "Error: z_shieldtoironwood is disabled. "
+            "Run zcashd with '-experimentalfeatures -ironwoodorigination' to enable it.");
+    }
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    uint256 hash = ParseHashV(params[0], "parameter 1");
+    int nOut = params[1].get_int();
+    if (nOut < 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Output index must be non-negative");
+    // ZIP 317 conventional fee for this transaction's fixed shape: one
+    // transparent input, no transparent outputs, and an Ironwood bundle
+    // padded to two actions -> 3 logical actions.
+    CAmount fee = params.size() > 2 ? AmountFromValue(params[2]) : CalculateConventionalFee(3);
+    if (fee < 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be non-negative");
+
+    // The UTXO to shield, from this wallet.
+    auto it = pwalletMain->mapWallet.find(hash);
+    if (it == pwalletMain->mapWallet.end())
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in wallet");
+    const CWalletTx& wtx = it->second;
+    if ((size_t) nOut >= wtx.vout.size())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Output index out of range");
+    if (pwalletMain->IsSpent(hash, nOut, std::nullopt))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is already spent");
+    const CTxOut& utxo = wtx.vout[nOut];
+    CAmount amount = utxo.nValue - fee;
+    if (amount <= 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO value does not cover the fee");
+
+    int nextBlockHeight = chainActive.Height() + 1;
+
+    // Freshly-generated destination; the mnemonic in the result is the only
+    // copy of this key material.
+    auto coinType = Params().BIP44CoinType();
+    auto seed = MnemonicSeed::Random(coinType);
+    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, coinType, 0);
+    auto fvk = sk.ToFullViewingKey();
+    libzcash::diversifier_index_t j(0);
+    auto recipient = fvk.ToIncomingViewingKey().Address(j);
+
+    // Anchors: the Orchard anchor selects the current (v6-capable) tx format
+    // in the builder ctor; the Ironwood bundle commits to the chain's best
+    // Ironwood anchor so the on-chain anchor check passes.
+    uint256 orchardAnchor = pcoinsTip->GetBestAnchor(ORCHARD);
+    uint256 saplingAnchor = pcoinsTip->GetBestAnchor(SAPLING);
+    uint256 ironwoodAnchor = pcoinsTip->GetBestAnchor(IRONWOOD);
+
+    auto builder = TransactionBuilder(
+        Params(), nextBlockHeight, orchardAnchor, saplingAnchor, pwalletMain);
+    builder.SetFee(fee);
+    if (!builder.EnableIronwood(ironwoodAnchor))
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+            "Could not enable Ironwood: NU6.3 is not active at the next block height");
+    builder.AddTransparentInput(COutPoint(hash, nOut), utxo.scriptPubKey, utxo.nValue);
+    if (!builder.AddIronwoodOutput(fvk.ToExternalOutgoingViewingKey(), recipient, amount, std::nullopt))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add Ironwood output");
+
+    auto buildResult = builder.Build();
+    if (buildResult.IsError())
+        throw JSONRPCError(RPC_WALLET_ERROR, buildResult.GetError());
+    CTransaction tx = buildResult.GetTxOrThrow();
+
+    // Commit through the wallet (marking the input spent) and relay. There is
+    // no UA involved, so no recipient mappings are recorded.
+    std::vector<RecipientMapping> recipientMappings;
+    SendTransaction(tx, recipientMappings, std::nullopt, false);
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("txid", tx.GetHash().GetHex());
+    result.pushKV("shielded", ValueFromAmount(amount));
+    result.pushKV("fee", ValueFromAmount(fee));
+    result.pushKV("recoveryMnemonic", std::string(seed.GetMnemonic().c_str()));
+    result.pushKV("recoveryAccount", 0);
+    result.pushKV("recoveryDiversifierIndex", 0);
+    return result;
+}
+
+
 #define MERGE_TO_ADDRESS_DEFAULT_TRANSPARENT_LIMIT 50
 #define MERGE_TO_ADDRESS_DEFAULT_SPROUT_LIMIT 20
 #define MERGE_TO_ADDRESS_DEFAULT_SAPLING_LIMIT 200
@@ -6033,6 +6154,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "z_setmigration",           &z_setmigration,           false },
     { "wallet",             "z_getmigrationstatus",     &z_getmigrationstatus,     false },
     { "wallet",             "z_shieldcoinbase",         &z_shieldcoinbase,         false },
+    { "wallet",             "z_shieldtoironwood",       &z_shieldtoironwood,       false },
     { "wallet",             "z_getoperationstatus",     &z_getoperationstatus,     true  },
     { "wallet",             "z_getoperationresult",     &z_getoperationresult,     true  },
     { "wallet",             "z_listoperationids",       &z_listoperationids,       true  },
