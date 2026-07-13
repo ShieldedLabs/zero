@@ -172,9 +172,9 @@ impl From<UpdateError> for SyncError {
             UpdateError::FinalizedStateCorruption => SyncError::CannotReadFinalizedState(
                 FinalisedStateError::Custom("mystery update failure".to_string()),
             ),
-            UpdateError::DatabaseHole => {
-                SyncError::ReorgFailure(String::from("could not determine best chain"))
-            }
+            UpdateError::DatabaseHole(source) => SyncError::ReorgFailure(format!(
+                "could not determine best chain: {source}"
+            )),
             UpdateError::ValidatorConnectionError(e) => SyncError::ValidatorConnectionError(
                 NodeConnectionError::UnrecoverableError(Box::new(MissingBlockError(e.to_string()))),
             ),
@@ -717,7 +717,7 @@ impl<Source: BlockchainSource> NonFinalizedState<Source> {
             .expect("empty snapshot impossible");
         self.handle_reorg(&mut new_snapshot, best_block, 0)
             .await
-            .map_err(|_e| UpdateError::DatabaseHole)?;
+            .map_err(|e| UpdateError::DatabaseHole(e.to_string()))?;
 
         // Need to get best hash at some point in this process
         let stored = self
@@ -933,8 +933,9 @@ pub enum UpdateError {
     /// state. A full rebuild is likely needed
     FinalizedStateCorruption,
 
-    /// A block in the snapshot is missing
-    DatabaseHole,
+    /// A block in the snapshot is missing. Carries the underlying reorg-walk
+    /// error so operators see the actual failure, not a generic label.
+    DatabaseHole(String),
 
     /// Failed to connect to the backing validator
     ValidatorConnectionError(Box<dyn std::error::Error>),
