@@ -50,7 +50,9 @@ use crate::{
         mining::{ZEBRA_COINBASE_MARKER, ZEBRA_COINBASE_SEPARATOR},
     },
     methods::types::{
-        default_roots::DefaultRoots, long_poll::LongPollId, transaction::TransactionTemplate,
+        default_roots::DefaultRoots,
+        long_poll::LongPollId,
+        transaction::{preload_sapling_prover, TransactionTemplate},
     },
     server::error::OkOrError,
     SubmitBlockChannel,
@@ -659,8 +661,16 @@ where
         sync_status: SyncStatus,
         mined_block_sender: Option<mpsc::Sender<(block::Hash, block::Height)>>,
     ) -> Self {
+        let miner_params = MinerParams::new(net, conf).ok();
+
+        // On mining nodes, build the Sapling prover now (off the async runtime) so the
+        // first `getblocktemplate` request doesn't pay the ~1-2s parameter-loading cost.
+        if miner_params.is_some() {
+            preload_sapling_prover();
+        }
+
         Self {
-            miner_params: MinerParams::new(net, conf).ok(),
+            miner_params,
             block_verifier_router,
             sync_status,
             mined_block_sender: mined_block_sender

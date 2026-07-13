@@ -1,6 +1,6 @@
 //! Transaction-related types.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::methods::arrayhex;
 use chrono::{DateTime, Utc};
@@ -123,6 +123,35 @@ impl From<VerifiedUnminedTx> for TransactionTemplate<NonNegative> {
     }
 }
 
+/// Returns a process-wide cached Sapling transaction prover.
+///
+/// Constructing a [`LocalTxProver`] deserializes the ~50 MB bundled Sapling Groth16
+/// parameters, which takes ~1-2 seconds. A coinbase transaction is built at least once
+/// per chain tip change (see [`TransactionTemplate::new_coinbase`] and `CoinbaseCache`),
+/// so building the prover once and reusing it avoids stalling those requests — and the
+/// async worker thread they run on — on repeated parameter loads. `get_or_init` blocks
+/// concurrent callers, so the prover is only ever constructed once per process.
+fn cached_sapling_prover() -> &'static LocalTxProver {
+    static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
+    PROVER.get_or_init(LocalTxProver::bundled)
+}
+
+/// Eagerly builds the cached Sapling prover ([`cached_sapling_prover`]) on a blocking thread.
+///
+/// Call this once at startup on mining nodes so the first `getblocktemplate` request
+/// doesn't pay the ~1-2s parameter-loading cost. It's a no-op after the first call
+/// (the prover is memoized). Runs on the blocking pool so it never stalls the async
+/// runtime; falls back to a synchronous build if no Tokio runtime is available.
+pub fn preload_sapling_prover() {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(|| {
+            let _ = cached_sapling_prover();
+        });
+    } else {
+        let _ = cached_sapling_prover();
+    }
+}
+
 impl TransactionTemplate<NegativeOrZero> {
     /// Constructs a transaction template for a coinbase transaction.
     pub fn new_coinbase(
@@ -240,14 +269,14 @@ impl TransactionTemplate<NegativeOrZero> {
             builder.add_transparent_output(&fs_addr, fs_amount)?;
         }
 
-        let sapling_prover = LocalTxProver::bundled();
+        let sapling_prover = cached_sapling_prover();
         let build_result = builder.build(
             &Default::default(),
             Default::default(),
             Default::default(),
             OsRng,
-            &sapling_prover,
-            &sapling_prover,
+            sapling_prover,
+            sapling_prover,
             &FeeRule::non_standard(Zatoshis::ZERO),
         )?;
 
