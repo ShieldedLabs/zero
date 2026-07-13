@@ -242,27 +242,61 @@ pub(crate) fn call(
         // spendability check, which applies the same unspent/unexpired/maturity rules
         // but no economic floor. Remove this two-step once the upstream query exposes
         // its minimum value as a parameter.
+        //
+        // The candidate query must stay cheap on exchange-scale wallets (hundreds of
+        // thousands of addresses, unbounded dust): it is scoped to the filter
+        // addresses when a filter was provided, and rows whose spending transaction is
+        // already mined are screened out here (a mined spend is final, so this cannot
+        // exclude a live UTXO). Everything else still goes through the full
+        // per-outpoint check. An early version swept every candidate in the account
+        // through that per-outpoint query, which stalled the RPC for minutes on large
+        // wallets.
+        let filter_strings: Vec<String> = transparent_filter
+            .iter()
+            .map(|t| t.encode(wallet.params()))
+            .collect();
         let dust_candidates: Vec<OutPoint> = wallet
             .with_raw(|conn, _| {
-                let mut stmt = conn.prepare_cached(
+                let address_clause = if filter_strings.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " AND ad.cached_transparent_receiver_address IN ({})",
+                        std::iter::repeat("?")
+                            .take(filter_strings.len())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let mut stmt = conn.prepare(&format!(
                     "SELECT t.txid, u.output_index
                      FROM transparent_received_outputs u
                      JOIN transactions t ON t.id_tx = u.transaction_id
                      JOIN accounts a ON a.id = u.account_id
-                     WHERE a.uuid = :account_uuid
-                     AND u.value_zat <= :marginal_fee",
-                )?;
-                let rows = stmt.query_map(
-                    rusqlite::named_params![
-                        ":account_uuid": account_id.expose_uuid(),
-                        ":marginal_fee": u64::from(zip317::MARGINAL_FEE),
-                    ],
-                    |row| {
-                        let txid: [u8; 32] = row.get(0)?;
-                        let n: u32 = row.get(1)?;
-                        Ok(OutPoint::new(txid, n))
-                    },
-                )?;
+                     JOIN addresses ad ON ad.id = u.address_id
+                     WHERE a.uuid = ?
+                     AND u.value_zat <= ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM transparent_received_output_spends s
+                         JOIN transactions stx ON stx.id_tx = s.transaction_id
+                         WHERE s.transparent_received_output_id = u.id
+                         AND stx.mined_height IS NOT NULL
+                     ){address_clause}"
+                ))?;
+                let account_uuid = account_id.expose_uuid();
+                let marginal_fee = u64::from(zip317::MARGINAL_FEE);
+                let params: Vec<&dyn rusqlite::ToSql> = [
+                    &account_uuid as &dyn rusqlite::ToSql,
+                    &marginal_fee as &dyn rusqlite::ToSql,
+                ]
+                .into_iter()
+                .chain(filter_strings.iter().map(|s| s as &dyn rusqlite::ToSql))
+                .collect();
+                let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                    let txid: [u8; 32] = row.get(0)?;
+                    let n: u32 = row.get(1)?;
+                    Ok(OutPoint::new(txid, n))
+                })?;
                 rows.collect::<Result<Vec<_>, _>>()
             })
             .map_err(|e| {
