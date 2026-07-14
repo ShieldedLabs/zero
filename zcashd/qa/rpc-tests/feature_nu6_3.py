@@ -7,7 +7,10 @@
 # §8.3 gaps: activation boundary, v6 origination (wallet, miner, and a
 # python-built tx exercising the §8.2 codec against a live node), the Ironwood
 # RPC surface, a getblocktemplate proposal + submitblock round-trip, the §10.1
-# -mineraddress gate, Sapling shielded coinbase post-activation, and -reindex
+# -mineraddress gate, Sapling shielded coinbase post-activation, the S4
+# z_shieldtoironwood flow (a non-empty Ironwood bundle: pool/tree/treestate
+# accounting, P2P relay to a node without the origination flag, and the python
+# codec's Ironwood action digests against a live transaction), and -reindex
 # survival of the v6/Ironwood chain state.
 
 from decimal import Decimal
@@ -84,9 +87,12 @@ class Nu6_3Test(BitcoinTestFramework):
         ]
 
     def setup_network(self, split=False):
+        # Only node 0 opts into Ironwood origination: node 1 accepting its
+        # transactions and blocks shows consensus does not depend on the flag.
         self.nodes = start_nodes(
             self.num_nodes, self.options.tmpdir,
-            extra_args=[self.base_args()] * self.num_nodes)
+            extra_args=[self.base_args() + ['-ironwoodorigination'],
+                        self.base_args()])
         connect_nodes_bi(self.nodes, 0, 1)
         self.is_network_split = False
         self.sync_all()
@@ -226,6 +232,66 @@ class Nu6_3Test(BitcoinTestFramework):
         assert_equal(confirmed['version'], 6)
         assert confirmed['confirmations'] >= 1
 
+        # --- S4: shield transparent funds into the Ironwood pool --------------
+        print("Shielding transparent funds into the Ironwood pool")
+
+        # The RPC is double-gated; node 1 runs without -ironwoodorigination.
+        try:
+            node1.z_shieldtoironwood('00' * 32, 0)
+            raise AssertionError("z_shieldtoironwood succeeded without -ironwoodorigination")
+        except JSONRPCException as e:
+            assert 'disabled' in e.error['message'], e.error['message']
+
+        utxo = next(u for u in node0.listunspent() if u['spendable'] and u['amount'] >= 1)
+        conventional_fee = Decimal('0.00015')  # ZIP 317: 3 logical actions
+        result = node0.z_shieldtoironwood(utxo['txid'], utxo['vout'])
+        shield_txid = result['txid']
+        assert_equal(result['fee'], conventional_fee)
+        assert_equal(result['shielded'], utxo['amount'] - conventional_fee)
+        # The recovery key material exists only in this response, by design.
+        assert_equal(len(result['recoveryMnemonic'].split()), 24)
+        shielded_zat = int((utxo['amount'] - conventional_fee) * COIN)
+
+        # The transaction carries a real Ironwood bundle (one output, padded to
+        # two actions) and an empty Orchard slot.
+        raw = node0.getrawtransaction(shield_txid, 1)
+        assert_equal(raw['version'], 6)
+        assert_equal(raw['versiongroupid'], V6_GROUP_ID)
+        assert_equal(raw['orchard']['actions'], [])
+        ironwood = raw['ironwood']
+        assert_equal(len(ironwood['actions']), 2)
+        assert_equal(ironwood['valueBalanceZat'], -shielded_zat)
+        assert_equal(ironwood['flags']['enableCrossAddress'], True)
+
+        # First live verification of the python codec's non-empty Ironwood
+        # action digests (§8.2 ported them before any Ironwood builder
+        # existed): parse the node's bytes, re-serialize byte-identically, and
+        # reproduce the node's txid through the v6 digest tree.
+        parsed = CTransaction()
+        parsed.deserialize(BytesIO(bytes.fromhex(raw['hex'])))
+        assert_equal(parsed.serialize().hex(), raw['hex'])
+        parsed.calc_sha256()
+        assert_equal(parsed.hash, shield_txid)
+
+        # The v6-with-Ironwood-bundle transaction relays over P2P: node 1
+        # (no origination flag) accepts it into its mempool, then the block.
+        self.sync_all()
+        assert shield_txid in node1.getrawmempool()
+        node0.generate(1)
+        self.sync_all()
+
+        # Both nodes agree on the pool value, tree size, and non-empty root.
+        for node in self.nodes:
+            blk = node.getblock(node.getbestblockhash())
+            pool = blk['valuePools'][-1]
+            assert_equal(pool['id'], 'ironwood')
+            assert_equal(pool['valueDeltaZat'], shielded_zat)
+            assert_equal(pool['chainValueZat'], shielded_zat)
+            assert_equal(blk['trees']['ironwood']['size'], 2)
+            ts = node.z_gettreestate(str(-1))
+            root = ts['ironwood']['commitments']['finalRoot']
+            assert root not in (IRONWOOD_TREE_EMPTY_ROOT, NULL_FIELD), root
+
         # --- getblocktemplate proposal + submitblock round-trip (§5.4) -------
         print("Round-tripping a getblocktemplate block through submitblock")
         tmpl = node0.getblocktemplate()
@@ -283,7 +349,9 @@ class Nu6_3Test(BitcoinTestFramework):
         while node0.getbestblockhash() != best:
             assert time.time() < deadline, "reindex did not reach the previous tip"
             time.sleep(1)
-        # The replay reproduced the identical Ironwood tree state.
+        # The replay reproduced the identical Ironwood tree state — including
+        # the non-empty commitments from the z_shieldtoironwood transaction,
+        # replayed without the origination flag (validation is unconditional).
         assert_equal(node0.z_gettreestate(str(-1)), best_treestate)
         connect_nodes_bi(self.nodes, 0, 1)
         self.sync_all()
