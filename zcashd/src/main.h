@@ -60,8 +60,12 @@ class PrecomputedTransactionData;
 
 struct CNodeStateStats;
 
-/** Maximum reorg length we will accept before we shut down and alert the user. */
-static const unsigned int MAX_REORG_LENGTH = COINBASE_MATURITY - 1;
+/** Maximum reorg length we will accept before we shut down and alert the user.
+ *  Must stay in sync with Zebra's rollback window (MAX_BLOCK_REORG_HEIGHT,
+ *  1000 since Zebra 5.2.0): a zcashd peered behind Zebra cannot follow the
+ *  network through any reorg deeper than its own window, and halts until a
+ *  full -reindex. Historically COINBASE_MATURITY - 1. */
+static const unsigned int MAX_REORG_LENGTH = 1000;
 /** Default for DEFAULT_WHITELISTRELAY. */
 static const bool DEFAULT_WHITELISTRELAY = true;
 /** Default for DEFAULT_WHITELISTFORCERELAY. */

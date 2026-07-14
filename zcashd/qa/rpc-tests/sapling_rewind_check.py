@@ -15,7 +15,7 @@ the Blossom activation; height then, the network is split and each branch of
 the network produces blocks into the range of the upgraded protocol.
 
 The node that is not aware of Blossom activation is advanced beyond the maximum
-reorg length of 99 blocks, then that node is shut down. When the node is
+reorg length of 1000 blocks, then that node is shut down. When the node is
 restarted with knowledge of the network activation height the checks on startup
 identify a need to reorg to come into agreement with the rest of the network.
 However, since the rollback required is greater than the maximum reorg length,
@@ -40,6 +40,10 @@ logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO, str
 
 HAS_SAPLING = [nuparams(OVERWINTER_BRANCH_ID, 10), nuparams(SAPLING_BRANCH_ID, 15)]
 NO_SAPLING = [nuparams(OVERWINTER_BRANCH_ID, 10), nuparams(SAPLING_BRANCH_ID, 150)]
+
+# One past MAX_REORG_LENGTH in src/main.h; the required rewind equals the
+# number of blocks the lagging node mines past the last point of agreement.
+REWIND_LENGTH = 1001
 
 class SaplingRewindTest(BitcoinTestFramework):
     def __init__(self):
@@ -82,8 +86,8 @@ class SaplingRewindTest(BitcoinTestFramework):
         self.nodes[0].generate(50) 
         expected = self.nodes[0].getbestblockhash()
 
-        # generate blocks into sapling beyond the maximum rewind length (99 blocks)
-        self.nodes[2].generate(120) 
+        # generate blocks into sapling beyond the maximum rewind length (1000 blocks)
+        self.nodes[2].generate(REWIND_LENGTH)
         self.sync_all()
 
         assert_true(expected != self.nodes[2].getbestblockhash(), "Split chains have not diverged!")
@@ -98,7 +102,7 @@ class SaplingRewindTest(BitcoinTestFramework):
 
         # expect an exception; the node will refuse to fully start because its last point of
         # agreement with the rest of the network was prior to the network upgrade activation
-        assert_start_raises_init_error(2, self.options.tmpdir, HAS_SAPLING, "roll back 120")
+        assert_start_raises_init_error(2, self.options.tmpdir, HAS_SAPLING, "roll back %d" % REWIND_LENGTH)
 
         # restart the node with -reindex to allow the test to complete gracefully,
         # otherwise the node shutdown call in test cleanup will throw an error since

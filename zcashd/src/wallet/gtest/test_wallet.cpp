@@ -1755,8 +1755,14 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
 
     auto sk = libzcash::SproutSpendingKey::random();
     wallet.AddSproutSpendingKey(sk);
+    // Notes the wallet does not own still advance the trees, so the chain can
+    // outgrow the witness cache without the wallet's cached state (and this
+    // test's runtime) growing quadratically in WITNESS_CACHE_SIZE.
+    auto foreignSk = libzcash::SproutSpendingKey::random();
 
-    // Generate a chain
+    // Generate a chain long enough to saturate the witness cache; only the
+    // first few blocks pay the wallet.
+    size_t numNoteBlocks = 5;
     size_t numBlocks = WITNESS_CACHE_SIZE + 10;
     blocks.resize(numBlocks);
     indices.resize(numBlocks);
@@ -1764,14 +1770,20 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
         indices[i].nHeight = i;
         auto oldSproutRoot = frontiers.sprout.root();
         auto oldSaplingRoot = frontiers.sapling.root();
-        auto outpts = CreateValidBlock(wallet, sk, indices[i], blocks[i], frontiers);
+        if (i < numNoteBlocks) {
+            auto outpts = CreateValidBlock(wallet, sk, indices[i], blocks[i], frontiers);
+            sproutNotes.push_back(outpts.first);
+            saplingNotes.push_back(outpts.second);
+        } else {
+            auto wtx = GetValidSproutReceive(foreignSk, 50, true);
+            blocks[i].vtx.push_back(wtx);
+            wallet.IncrementNoteWitnesses(Params().GetConsensus(), &(indices[i]), &(blocks[i]), frontiers, true, false);
+        }
         EXPECT_NE(oldSproutRoot, frontiers.sprout.root());
         EXPECT_NE(oldSaplingRoot, frontiers.sapling.root());
-        sproutNotes.push_back(outpts.first);
-        saplingNotes.push_back(outpts.second);
 
         auto anchors = GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, 1, sproutWitnesses, saplingWitnesses);
-        for (size_t j = 0; j <= i; j++) {
+        for (size_t j = 0; j < sproutNotes.size(); j++) {
             EXPECT_TRUE((bool) sproutWitnesses[j]);
             EXPECT_TRUE((bool) saplingWitnesses[j]);
         }
@@ -1786,7 +1798,7 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
         wallet.IncrementNoteWitnesses(Params().GetConsensus(), &(indices[i]), &(blocks[i]), riFrontiers, true, false);
 
         auto anchors = GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, 1, sproutWitnesses, saplingWitnesses);
-        for (size_t j = 0; j < numBlocks; j++) {
+        for (size_t j = 0; j < sproutNotes.size(); j++) {
             EXPECT_TRUE((bool) sproutWitnesses[j]);
             EXPECT_TRUE((bool) saplingWitnesses[j]);
         }
@@ -1800,7 +1812,7 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
                 wallet.DecrementNoteWitnesses(Params().GetConsensus(), &(indices[i]));
 
                 auto anchors = GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, 1, sproutWitnesses, saplingWitnesses);
-                for (size_t j = 0; j < numBlocks; j++) {
+                for (size_t j = 0; j < sproutNotes.size(); j++) {
                     EXPECT_TRUE((bool) sproutWitnesses[j]);
                     EXPECT_TRUE((bool) saplingWitnesses[j]);
                 }
@@ -1812,7 +1824,7 @@ TEST(WalletTests, CachedWitnessesCleanIndex) {
             {
                 wallet.IncrementNoteWitnesses(Params().GetConsensus(), &(indices[i]), &(blocks[i]), riPrevFrontiers, true, false);
                 auto anchors = GetWitnessesAndAnchors(wallet, sproutNotes, saplingNotes, 1, sproutWitnesses, saplingWitnesses);
-                for (size_t j = 0; j < numBlocks; j++) {
+                for (size_t j = 0; j < sproutNotes.size(); j++) {
                     EXPECT_TRUE((bool) sproutWitnesses[j]);
                     EXPECT_TRUE((bool) saplingWitnesses[j]);
                 }
