@@ -1,0 +1,75 @@
+name: Z3 regtest wallet tests
+
+# Deterministic wallet-behavior regression tests (qa/regtest-harness/):
+# zebrad (regtest, internal miner) + zallet (zaino backend) as plain
+# processes, driven through the stateful wallet scenarios that have failed in
+# production and that z3-smoke's fresh-wallet liveness checks structurally
+# cannot exercise: dust-value listing, per-address filtering, multi-address
+# union, the filtered-listing dust-sweep hang, and poisoned-row containment
+# and self-healing. See qa/regtest-harness/README.md for the scenario <->
+# incident map.
+#
+# No network access beyond crates.io for the builds: regtest dials no peers.
+
+on:
+  pull_request:
+    paths:
+      - "zallet/**"
+      - "zaino/packages/**"
+      - "librustzcash/**"
+      - "qa/regtest-harness/**"
+      - ".github/workflows/z3-regtest.yml"
+  workflow_dispatch:
+  schedule:
+    # Weekly, offset from z3-smoke's Monday 06:17 so their failure signals
+    # stay distinguishable.
+    - cron: "47 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  regtest:
+    runs-on: ubuntu-latest
+    # First uncached run builds two large Rust workspaces (~40 min); cached
+    # runs are dominated by mining (~10 min).
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # rustup resolves each workspace's own rust-toolchain.toml on first use.
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zebra -> target
+            zallet -> target
+
+      - name: Build zebrad (internal miner)
+        working-directory: zebra
+        run: cargo build -p zebrad --features internal-miner
+
+      - name: Build zallet (zaino backend)
+        working-directory: zallet
+        run: cargo build -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import
+
+      - name: Run the harness
+        env:
+          # Stable path so the failure artifact can find it.
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-regtest
+        run: qa/regtest-harness/run.sh
+
+      - name: Upload workdir on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: z3-regtest-workdir
+          path: |
+            ${{ runner.temp }}/z3-regtest/*.log
+            ${{ runner.temp }}/z3-regtest/*.toml
+            ${{ runner.temp }}/z3-regtest/zallet-data/wallet.db
+          if-no-files-found: ignore
+          retention-days: 7
