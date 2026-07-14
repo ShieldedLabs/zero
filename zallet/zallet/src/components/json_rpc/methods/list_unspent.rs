@@ -127,6 +127,16 @@ pub(crate) fn call(
     let as_of_height = parse_as_of_height(as_of_height)?;
     let minconf = parse_minconf(minconf, 1, as_of_height)?;
 
+    // zcashd parity: an inverted confirmation window is a parameter error, not an
+    // empty result.
+    if maxconf.is_some_and(|c| c < minconf) {
+        return Err(RpcError::owned(
+            LegacyCode::InvalidParameter.into(),
+            "Maximum number of confirmations must be greater or equal to the minimum number of confirmations",
+            None::<String>,
+        ));
+    }
+
     let confirmations_policy = match NonZeroU32::new(minconf) {
         Some(c) => ConfirmationsPolicy::new_symmetrical(c, false),
         None => ConfirmationsPolicy::new_symmetrical(NonZeroU32::new(1).unwrap(), true),
@@ -449,6 +459,12 @@ pub(crate) fn call(
 
         for utxo in utxos {
             let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
+
+            // skip outputs that have too many confirmations according to maxconf,
+            // matching the shielded arms (minconf is already enforced above).
+            if maxconf.iter().any(|c| confirmations > *c) {
+                continue;
+            }
 
             let metadata = wallet
                 .get_transparent_address_metadata(account_id, utxo.recipient_address())

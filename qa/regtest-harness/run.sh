@@ -420,6 +420,15 @@ rows = [u for u in json.load(sys.stdin)["result"] if u["pool"] == "transparent"]
 print(sum(1 for u in rows if not u["is_watch_only"]))' || true)
   assert "baseline: imported-address UTXOs flagged watch-only ($not_watch_only unflagged)" \
     [ "$not_watch_only" = "0" ]
+  # The youngest mature coinbase output has exactly 100 confirmations at the
+  # frozen tip, so maxconf=99 must exclude every transparent UTXO (regression:
+  # maxconf was only enforced for shielded notes).
+  count=$(transparent_utxos '[1, 99]' | count_lines) || true
+  assert "baseline: maxconf=99 excludes all mature coinbase UTXOs (got $count)" \
+    [ "$count" = "0" ]
+  err=$(wallet_rpc z_listunspent '[5, 1]' || true)
+  assert "baseline: inverted minconf/maxconf window is a clean error" \
+    contains "$err" "Maximum number of confirmations"
   assert "baseline: getwalletstatus answers within ${RPC_CALL_TIMEOUT}s" \
     wallet_rpc getwalletstatus
   err=$(wallet_rpc z_listunspent '[1, 9999999, true, ["not-an-address"]]' || true)
