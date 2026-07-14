@@ -77,6 +77,8 @@ define $(package)_stage_cmds
   cp -P bin/llvm-strip $($(package)_staging_prefix_dir)/bin && \
   (test ! -f include/x86_64-unknown-linux-gnu/c++/v1/__config_site || \
    cp include/x86_64-unknown-linux-gnu/c++/v1/__config_site include/c++/v1/__config_site) && \
+  (test ! -f include/aarch64-unknown-linux-gnu/c++/v1/__config_site || \
+   cp include/aarch64-unknown-linux-gnu/c++/v1/__config_site include/c++/v1/__config_site) && \
   mv include/ $($(package)_staging_prefix_dir) && \
   mv lib/ $($(package)_staging_prefix_dir) && \
   mv libexec/ $($(package)_staging_prefix_dir)
