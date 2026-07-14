@@ -227,15 +227,21 @@ jobs:
             sleep 5
           done
 
+      # Every RPC probe below carries a PER-CALL timeout on top of its retry
+      # deadline. The deadline alone only bounds retries: a probe that HANGS
+      # (the production z_listunspent hang was exactly this class) would never
+      # return to the deadline check and would burn the 60-minute job timeout
+      # as an unattributed failure. With per-call timeouts, a hang becomes a
+      # failed probe within seconds and the step that caught it is named.
       - name: Zaino serves lightwalletd gRPC
         run: |
           set -euxo pipefail
           # Plain grep (not -q): -q closes the pipe on match, and under
           # pipefail the resulting SIGPIPE would read as failure.
           deadline=$((SECONDS + 180))
-          until docker run --rm --network z3-stack_default \
+          until timeout 20 docker run --rm --network z3-stack_default \
               -v "$GITHUB_WORKSPACE/zaino/packages/zaino-proto/lightwallet-protocol/walletrpc:/protos:ro" \
-              fullstorydev/grpcurl -plaintext -import-path /protos -proto service.proto \
+              fullstorydev/grpcurl -plaintext -max-time 15 -import-path /protos -proto service.proto \
               zaino:8137 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo \
               | grep chainName; do
             [ "$SECONDS" -lt "$deadline" ] || { echo "::error::zaino gRPC never answered"; exit 1; }
@@ -246,7 +252,7 @@ jobs:
         run: |
           set -euxo pipefail
           deadline=$((SECONDS + 180))
-          until docker compose exec -T zallet zallet \
+          until timeout 20 docker compose exec -T zallet zallet \
               --datadir /var/lib/zallet --config /etc/zallet/zallet.toml \
               rpc getwalletstatus | grep node_tip; do
             [ "$SECONDS" -lt "$deadline" ] || { echo "::error::zallet RPC never reported node_tip"; exit 1; }
@@ -265,11 +271,46 @@ jobs:
           # encoding": a positive proof the real implementation is present,
           # with no wallet-account state involved.
           # (`zallet rpc` parses each param as JSON, hence the quoted strings.)
-          out=$(docker compose exec -T zallet zallet \
+          out=$(timeout 20 docker compose exec -T zallet zallet \
               --datadir /var/lib/zallet --config /etc/zallet/zallet.toml \
               rpc z_importaddress '"00000000-0000-0000-0000-000000000000"' '"zz"' 2>&1) || true
           echo "$out"
           echo "$out" | grep "Invalid hex encoding"
+
+      - name: z_listunspent honors its contract (import, filter, latency)
+        run: |
+          set -euxo pipefail
+          # Pin the wallet-RPC behavior classes that shipped as production
+          # incidents: a real watch-only import must succeed, filtered and
+          # unfiltered z_listunspent must answer promptly with well-formed
+          # results (the v11 dust sweep hung for ~10 minutes on a filtered
+          # call), and a bad filter address must be a clean error. The wallet
+          # is fresh and the chain unsynced, so results are structurally
+          # empty; the contract under test is shape and latency, not content.
+          # Public test constant (regtest/testnet-derived pubkey; the mainnet
+          # encoding of its address is derived by the wallet on import).
+          pubkey="0220f133a0751f6a70ce2dc506da68891b827296a0b13fb7883ceea25f7926f5d5"
+          zallet_rpc() {
+            timeout 20 docker compose exec -T zallet zallet \
+              --datadir /var/lib/zallet --config /etc/zallet/zallet.toml rpc "$@"
+          }
+          account=""
+          deadline=$((SECONDS + 120))
+          until account=$(zallet_rpc z_getnewaccount '"smoke"' | python3 -c 'import json,sys; print(json.load(sys.stdin)["account_uuid"])'); do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::z_getnewaccount never succeeded"; exit 1; }
+            sleep 5
+          done
+          imported=$(zallet_rpc z_importaddress "\"$account\"" "\"$pubkey\"" false)
+          echo "$imported"
+          address=$(echo "$imported" | python3 -c 'import json,sys; print(json.load(sys.stdin)["address"])')
+          # Unfiltered and filtered listings: valid JSON arrays, promptly.
+          zallet_rpc z_listunspent | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
+          zallet_rpc z_listunspent 1 9999999 true "[\"$address\"]" \
+            | python3 -c 'import json,sys; assert json.load(sys.stdin) == []'
+          # A malformed filter address must be a clean parameter error.
+          out=$(zallet_rpc z_listunspent 1 9999999 true '["not-an-address"]' 2>&1) || true
+          echo "$out"
+          echo "$out" | grep "Not a valid Zcash address"
 
       - name: No crash-loops, no accidental exposure
         run: |
