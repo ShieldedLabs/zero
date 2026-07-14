@@ -206,7 +206,7 @@ pub(crate) fn call(
             // This would be a race condition between this and account deletion.
             .ok_or(RpcErrorCode::InternalError)?;
 
-        let is_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
+        let account_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
 
         let receivers = wallet
             .get_transparent_receivers(account_id, true, true)
@@ -406,10 +406,51 @@ pub(crate) fn call(
             utxos.retain(|u| transparent_filter.contains(u.recipient_address()));
         }
 
+        // Standalone addresses whose spending key is in the keystore: a zcashd
+        // wallet migration stores legacy transparent keys there and registers the
+        // pubkeys as standalone rows, so (unlike `z_importaddress` imports) those
+        // addresses ARE spendable despite having no derivation scope. Key presence
+        // is checked without decryption, so a locked wallet answers the same way.
+        // (The keystore tables are part of the wallet database's unconditional
+        // migration set, so this query is valid on wallets that never migrated.)
+        let keyed_standalone: HashSet<TransparentAddress> = wallet
+            .with_raw(|conn, _| {
+                let mut stmt = conn.prepare(
+                    "SELECT a.cached_transparent_receiver_address
+                     FROM ext_zallet_keystore_standalone_transparent_keys ztk
+                     JOIN addresses a ON ztk.pubkey = a.imported_transparent_receiver_pubkey
+                     JOIN accounts acct ON acct.id = a.account_id
+                     WHERE acct.uuid = :account_uuid",
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::named_params! {":account_uuid": account_uuid},
+                    |row| row.get::<_, String>(0),
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|e| {
+                RpcError::owned(
+                    LegacyCode::Database.into(),
+                    "keystore standalone-key enumeration failed",
+                    Some(format!("{e}")),
+                )
+            })?
+            .into_iter()
+            .map(|s| {
+                TransparentAddress::decode(wallet.params(), &s).map_err(|e| {
+                    RpcError::owned(
+                        LegacyCode::Database.into(),
+                        "corrupt wallet database",
+                        Some(format!("undecodable keystore address {s}: {e}")),
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
         for utxo in utxos {
             let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
 
-            let wallet_internal = wallet
+            let metadata = wallet
                 .get_transparent_address_metadata(account_id, utxo.recipient_address())
                 .map_err(|e| {
                     RpcError::owned(
@@ -417,8 +458,22 @@ pub(crate) fn call(
                         "WalletDb::get_transparent_address_metadata failed",
                         Some(format!("{e}")),
                     )
-                })?
+                })?;
+
+            let wallet_internal = metadata
+                .as_ref()
                 .is_some_and(|m| m.scope() == Some(TransparentKeyScope::INTERNAL));
+
+            // The wallet holds no spending key for a standalone imported address
+            // (`z_importaddress`/`z_importpubkey`), so its outputs are watch-only
+            // even inside a spending account. A missing derivation scope identifies
+            // standalone rows (every derived scope, external, internal, and
+            // ephemeral TEX intermediates, is spendable with the account's key),
+            // except that a migrated zcashd wallet holds real spending keys for
+            // some standalone rows: those are carved back out via the keystore set.
+            let is_watch_only = account_watch_only
+                || (metadata.as_ref().and_then(|m| m.scope()).is_none()
+                    && !keyed_standalone.contains(utxo.recipient_address()));
 
             unspent_outputs.push(UnspentOutput {
                 txid: utxo.outpoint().txid().to_string(),
@@ -519,7 +574,7 @@ pub(crate) fn call(
                 pool: "sapling".into(),
                 outindex: note.output_index().into(),
                 confirmations,
-                is_watch_only,
+                is_watch_only: account_watch_only,
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!is_internal).then(|| note.note().recipient().encode(wallet.params())),
@@ -567,7 +622,7 @@ pub(crate) fn call(
                 pool: "orchard".into(),
                 outindex: note.output_index().into(),
                 confirmations,
-                is_watch_only,
+                is_watch_only: account_watch_only,
                 account_uuid: account_id.expose_uuid().to_string(),
                 // TODO: Ensure we generate the same kind of shielded address as `zcashd`.
                 address: (!wallet_internal).then(|| {

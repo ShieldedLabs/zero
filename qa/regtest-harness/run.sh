@@ -402,7 +402,7 @@ EOF
 }
 
 scenario_baseline() {
-  local t0 t1 count err
+  local t0 t1 count err not_watch_only
   t0=$SECONDS
   count=$(transparent_utxos | count_lines) || true
   t1=$((SECONDS - t0))
@@ -410,6 +410,16 @@ scenario_baseline() {
     [ "$count" = "$MATURE_TOTAL" ]
   assert "baseline: unfiltered listing answered promptly (${t1}s)" \
     [ "$t1" -le 10 ]
+  # Every transparent UTXO here landed on a standalone imported pubkey the
+  # wallet cannot spend from, so each row must be flagged watch-only even
+  # though the account itself holds spending keys (Binance report: imported
+  # addresses came back is_watch_only=false because the flag was account-level).
+  not_watch_only=$(wallet_rpc z_listunspent | python3 -c '
+import json, sys
+rows = [u for u in json.load(sys.stdin)["result"] if u["pool"] == "transparent"]
+print(sum(1 for u in rows if not u["is_watch_only"]))' || true)
+  assert "baseline: imported-address UTXOs flagged watch-only ($not_watch_only unflagged)" \
+    [ "$not_watch_only" = "0" ]
   assert "baseline: getwalletstatus answers within ${RPC_CALL_TIMEOUT}s" \
     wallet_rpc getwalletstatus
   err=$(wallet_rpc z_listunspent '[1, 9999999, true, ["not-an-address"]]' || true)
