@@ -9,7 +9,11 @@ use jsonrpsee::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
+use transparent::{
+    address::{Script, TransparentAddress},
+    bundle::{OutPoint, TxOut},
+    keys::TransparentKeyScope,
+};
 use zcash_client_backend::{
     address::UnifiedAddress,
     data_api::{
@@ -18,11 +22,13 @@ use zcash_client_backend::{
     },
     encoding::AddressCodec,
     fees::{orchard::InputView as _, sapling::InputView as _},
-    wallet::NoteId,
+    wallet::{NoteId, WalletTransparentOutput},
 };
+use zcash_client_sqlite::AccountUuid;
 use zcash_keys::address::{Address, Receiver};
 use zcash_primitives::transaction::fees::zip317;
-use zcash_protocol::ShieldedPool;
+use zcash_protocol::{ShieldedPool, consensus::BlockHeight, value::Zatoshis};
+use zcash_script::script;
 use zip32::Scope;
 
 use crate::components::{
@@ -202,7 +208,7 @@ pub(crate) fn call(
 
         let is_watch_only = !matches!(account.purpose(), AccountPurpose::Spending { .. });
 
-        let mut utxos = wallet
+        let receivers = wallet
             .get_transparent_receivers(account_id, true, true)
             .map_err(|e| {
                 RpcError::owned(
@@ -210,119 +216,190 @@ pub(crate) fn call(
                     "WalletDb::get_transparent_receivers failed",
                     Some(format!("{e}")),
                 )
-            })?
-            .iter()
-            // When an address filter was provided, only its transparent receivers are
-            // queried (a filter naming no transparent receivers matches no UTXOs).
-            .filter(|(addr, _)| addresses.is_empty() || transparent_filter.contains(addr))
-            .try_fold(vec![], |mut acc, (addr, _)| {
-                let mut outputs = wallet
-                    .get_spendable_transparent_outputs(
-                        addr,
-                        target_height,
-                        confirmations_policy,
-                        CoinbaseFilter::AllTransparentOutputs,
-                    )
-                    .map_err(|e| {
-                        RpcError::owned(
-                            LegacyCode::Database.into(),
-                            "WalletDb::get_spendable_transparent_outputs failed",
-                            Some(format!("{e}")),
-                        )
-                    })?;
-
-                acc.append(&mut outputs);
-                Ok::<_, RpcError>(acc)
             })?;
 
-        // `get_spendable_transparent_outputs` is a coin-selection query: it excludes
-        // outputs at or below the ZIP 317 marginal fee, which cost more to spend than
-        // they are worth. RPC enumeration must list them regardless, so gather the
-        // sub-marginal-fee candidates directly and admit each through the per-outpoint
-        // spendability check, which applies the same unspent/unexpired/maturity rules
-        // but no economic floor. Remove this two-step once the upstream query exposes
-        // its minimum value as a parameter.
+        // One batched query for all (matching) receivers: querying per receiver was
+        // one SQLite round-trip per imported address, which is minutes of wall clock
+        // on an exchange-scale wallet.
+        let query_addrs: Vec<TransparentAddress> = receivers
+            .keys()
+            // When an address filter was provided, only its transparent receivers are
+            // queried (a filter naming no transparent receivers matches no UTXOs).
+            .filter(|addr| addresses.is_empty() || transparent_filter.contains(addr))
+            .copied()
+            .collect();
+        let mut utxos = wallet
+            .get_spendable_transparent_outputs_for_addresses(
+                &query_addrs,
+                target_height,
+                confirmations_policy,
+                CoinbaseFilter::AllTransparentOutputs,
+            )
+            .map_err(|e| {
+                RpcError::owned(
+                    LegacyCode::Database.into(),
+                    "WalletDb::get_spendable_transparent_outputs_for_addresses failed",
+                    Some(format!("{e}")),
+                )
+            })?;
+
+        // `get_spendable_transparent_outputs*` are coin-selection queries: they
+        // exclude outputs at or below the ZIP 317 marginal fee, which cost more to
+        // spend than they are worth. RPC enumeration must list them regardless, so
+        // gather them with a single query that mirrors the spendability conditions
+        // of `InputSource::get_unspent_transparent_output` (transaction mined or
+        // definitely unexpired; output unspent by any mined-or-unexpired
+        // transaction; the likely-spent wallet-internal ephemeral heuristic) with
+        // the value floor inverted. Semantic parity with the per-outpoint check is
+        // pinned by qa/regtest-harness (dust and hang-guard scenarios). Remove once
+        // the upstream query exposes its minimum value as a parameter.
         //
-        // The candidate query must stay cheap on exchange-scale wallets (hundreds of
-        // thousands of addresses, unbounded dust): it is scoped to the filter
-        // addresses when a filter was provided, and rows whose spending transaction is
-        // already mined are screened out here (a mined spend is final, so this cannot
-        // exclude a live UTXO). Everything else still goes through the full
-        // per-outpoint check. An early version swept every candidate in the account
-        // through that per-outpoint query, which stalled the RPC for minutes on large
-        // wallets.
+        // An earlier version admitted candidates through the per-outpoint check one
+        // query at a time, which cost ~30ms per dust output: a six-minute listing on
+        // a wallet holding ~10k dust UTXOs.
         let filter_strings: Vec<String> = transparent_filter
             .iter()
             .map(|t| t.encode(wallet.params()))
             .collect();
-        let dust_candidates: Vec<OutPoint> = wallet
-            .with_raw(|conn, _| {
-                let address_clause = if filter_strings.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " AND ad.cached_transparent_receiver_address IN ({})",
-                        std::iter::repeat("?")
-                            .take(filter_strings.len())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT t.txid, u.output_index
+        let account_uuid = account_id.expose_uuid();
+        let marginal_fee = u64::from(zip317::MARGINAL_FEE);
+        let target_height_u32 = u32::from(target_height);
+        // A filter that names no transparent receiver can match no transparent
+        // output, so skip the sweep rather than scanning every dust row in the
+        // account only for the retain below to discard the lot.
+        let sweep_dust = addresses.is_empty() || !transparent_filter.is_empty();
+        type DustRow = ([u8; 32], u32, Vec<u8>, i64, uuid::Uuid, Option<u32>);
+        let dust_rows: Vec<DustRow> = if !sweep_dust {
+            vec![]
+        } else {
+            wallet
+                .with_raw(|conn, _| {
+                    // The filter binds as one carray pointer (`rarray`, loaded on every
+                    // pooled connection) rather than one SQL variable per address, which
+                    // would hit SQLITE_MAX_VARIABLE_NUMBER at exchange-scale filters.
+                    let filter_values: std::rc::Rc<Vec<rusqlite::types::Value>> = std::rc::Rc::new(
+                        filter_strings
+                            .iter()
+                            .cloned()
+                            .map(rusqlite::types::Value::from)
+                            .collect(),
+                    );
+                    let address_clause = if filter_strings.is_empty() {
+                        ""
+                    } else {
+                        " AND ad.cached_transparent_receiver_address IN rarray(:addresses)"
+                    };
+                    // Clause bodies mirror zcash_client_sqlite's
+                    // `get_wallet_transparent_output` (tx_unexpired_condition,
+                    // spent_utxos_clause, excluding_wallet_internal_ephemeral_outputs);
+                    // 40 below is DEFAULT_TX_EXPIRY_DELTA and 2 is KeyScope::Ephemeral's
+                    // encoding.
+                    let mut stmt = conn.prepare(&format!(
+                        "SELECT t.txid, u.output_index, u.script, u.value_zat,
+                            a.uuid AS account_uuid, t.mined_height
                      FROM transparent_received_outputs u
                      JOIN transactions t ON t.id_tx = u.transaction_id
                      JOIN accounts a ON a.id = u.account_id
                      JOIN addresses ad ON ad.id = u.address_id
-                     WHERE a.uuid = ?
-                     AND u.value_zat <= ?
-                     AND NOT EXISTS (
-                         SELECT 1 FROM transparent_received_output_spends s
+                     WHERE a.uuid = :account_uuid
+                     AND u.value_zat <= :marginal_fee
+                     AND (
+                         t.mined_height < :target_height
+                         OR t.expiry_height = 0
+                         OR t.expiry_height >= :target_height
+                         OR (
+                             t.expiry_height IS NULL
+                             AND t.min_observed_height + 40 >= :target_height
+                         )
+                     )
+                     AND u.id NOT IN (
+                         SELECT s.transparent_received_output_id
+                         FROM transparent_received_output_spends s
                          JOIN transactions stx ON stx.id_tx = s.transaction_id
-                         WHERE s.transparent_received_output_id = u.id
-                         AND stx.mined_height IS NOT NULL
+                         WHERE stx.mined_height < :target_height
+                         OR stx.expiry_height = 0
+                         OR stx.expiry_height >= :target_height
+                         OR (
+                             stx.expiry_height IS NULL
+                             AND stx.min_observed_height + 40 >= :target_height
+                         )
+                     )
+                     AND (
+                         ad.key_scope != 2
+                         OR t.id_tx NOT IN (
+                             SELECT transaction_id
+                             FROM v_received_output_spends
+                             WHERE v_received_output_spends.account_id = a.id
+                         )
+                         OR u.max_observed_unspent_height > t.expiry_height
                      ){address_clause}"
-                ))?;
-                let account_uuid = account_id.expose_uuid();
-                let marginal_fee = u64::from(zip317::MARGINAL_FEE);
-                let params: Vec<&dyn rusqlite::ToSql> = [
-                    &account_uuid as &dyn rusqlite::ToSql,
-                    &marginal_fee as &dyn rusqlite::ToSql,
-                ]
-                .into_iter()
-                .chain(filter_strings.iter().map(|s| s as &dyn rusqlite::ToSql))
-                .collect();
-                let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-                    let txid: [u8; 32] = row.get(0)?;
-                    let n: u32 = row.get(1)?;
-                    Ok(OutPoint::new(txid, n))
-                })?;
-                rows.collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(|e| {
-                RpcError::owned(
-                    LegacyCode::Database.into(),
-                    "uneconomic transparent output enumeration failed",
-                    Some(format!("{e}")),
-                )
-            })?;
-        for outpoint in dust_candidates {
-            if let Some(utxo) = wallet
-                .get_unspent_transparent_output(&outpoint, target_height)
+                    ))?;
+                    let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+                        (":account_uuid", &account_uuid),
+                        (":marginal_fee", &marginal_fee),
+                        (":target_height", &target_height_u32),
+                    ];
+                    if !filter_strings.is_empty() {
+                        params.push((":addresses", &filter_values));
+                    }
+                    let rows = stmt.query_map(&params[..], |row| {
+                        let txid: [u8; 32] = row.get(0)?;
+                        let n: u32 = row.get(1)?;
+                        let script: Vec<u8> = row.get(2)?;
+                        let value: i64 = row.get(3)?;
+                        let uuid: uuid::Uuid = row.get(4)?;
+                        let mined_height: Option<u32> = row.get(5)?;
+                        Ok((txid, n, script, value, uuid, mined_height))
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                })
                 .map_err(|e| {
                     RpcError::owned(
                         LegacyCode::Database.into(),
-                        "WalletDb::get_unspent_transparent_output failed",
+                        "uneconomic transparent output enumeration failed",
                         Some(format!("{e}")),
                     )
                 })?
-            {
-                // The batched query applies `confirmations_policy`; the per-outpoint
-                // check does not, so enforce the caller's minconf here.
-                let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
-                if confirmations >= minconf {
-                    utxos.push(utxo);
-                }
+        };
+        for (txid, n, script, value, uuid, mined_height) in dust_rows {
+            let outpoint = OutPoint::new(txid, n);
+            // A row failing either conversion below is database corruption; surface
+            // it as an error, matching the per-outpoint path this query mirrors
+            // (`SqliteClientError::CorruptedData`), rather than silently omitting a
+            // UTXO from the listing.
+            let value = Zatoshis::from_nonnegative_i64(value).map_err(|_| {
+                RpcError::owned(
+                    LegacyCode::Database.into(),
+                    "corrupt wallet database",
+                    Some(format!("invalid value for UTXO {}:{n}", outpoint.txid())),
+                )
+            })?;
+            // Key scope and funding account are not read by this RPC's response
+            // construction; the address metadata lookup below supplies the
+            // wallet-internal flag.
+            let utxo = WalletTransparentOutput::from_parts(
+                outpoint,
+                TxOut::new(value, Script(script::Code(script))),
+                mined_height.map(BlockHeight::from),
+                Some(AccountUuid::from_uuid(uuid)),
+                None,
+                None,
+            )
+            .ok_or_else(|| {
+                RpcError::owned(
+                    LegacyCode::Database.into(),
+                    "corrupt wallet database",
+                    Some(format!(
+                        "script of UTXO {}:{n} is not P2PKH or P2SH",
+                        OutPoint::new(txid, n).txid()
+                    )),
+                )
+            })?;
+            // The batched queries apply `confirmations_policy`; the dust query does
+            // not, so enforce the caller's minconf here.
+            let confirmations = utxo.mined_height().map(|h| target_height - h).unwrap_or(0);
+            if confirmations >= minconf {
+                utxos.push(utxo);
             }
         }
         if !addresses.is_empty() {
