@@ -46,10 +46,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use tokio::{sync::Notify, time};
 #[cfg(not(feature = "spend-index"))]
-use zcash_client_backend::data_api::{
-    CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
-    wallet::{ConfirmationsPolicy, TargetHeight},
-};
+use zcash_client_backend::data_api::TransactionsInvolvingAddress;
 use zcash_client_backend::{
     data_api::{
         TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite, scanning::ScanPriority,
@@ -59,6 +56,8 @@ use zcash_client_backend::{
     sync::decryptor,
 };
 use zcash_client_sqlite::AccountUuid;
+#[cfg(not(feature = "spend-index"))]
+use zcash_client_sqlite::error::SqliteClientError;
 use zcash_primitives::block::BlockHash;
 #[cfg(not(feature = "spend-index"))]
 use zcash_protocol::TxId;
@@ -775,10 +774,21 @@ fn address_request_bounds(
 ///
 /// Cheap path first: diff the wallet's tracked unspent outputs at the address against the chain's
 /// current unspent set. Only if one of ours is missing (i.e. actually spent on chain) is the
-/// potentially-large address transaction history fetched and ingested to record the spend. The
-/// address is then recorded as checked so the request is not re-issued for the same range. (For
-/// requests with no tracked outputs at the address — e.g. ephemeral-address discovery — this just
-/// advances the watermark; full-block scanning covers those receipts.)
+/// address transaction history fetched and ingested to record the spend. The address is then
+/// recorded as checked so the request is not re-issued for the same range. (For requests with no
+/// tracked outputs at the address — e.g. ephemeral-address discovery — this just advances the
+/// watermark; full-block scanning covers those receipts.)
+///
+/// The fetch MUST NOT be limited to the request's own block range. Requests are generated one
+/// per tracked output, each windowed from that output's own observed-unspent watermark, but
+/// completing ANY request raises the watermark of EVERY unspent output at the address
+/// (`update_observed_unspent_heights`). Fetching only the serviced window let a newer output's
+/// near-tip request advance an older output's watermark past its not-yet-fetched spend, after
+/// which no future window could ever cover that spend: the output stayed listed as unspent
+/// forever (production incident: exchange hot wallet accumulating spent UTXOs overnight). The
+/// spending transactions can be mined anywhere from the oldest missing output's funding height
+/// to the chain tip, so that is the range fetched; this also self-heals wallets poisoned by the
+/// old behavior on their first pass.
 #[cfg(not(feature = "spend-index"))]
 async fn service_address_request<V: ChainView>(
     chain_view: &V,
@@ -800,20 +810,49 @@ async fn service_address_request<V: ChainView>(
         .map_err(SyncError::Chain)?
         .into_iter()
         .collect();
-    let our_outputs = db_data.get_spendable_transparent_outputs(
-        &address,
-        TargetHeight::from(view_tip + 1),
-        ConfirmationsPolicy::MIN,
-        CoinbaseFilter::AllTransparentOutputs,
-    )?;
-    let any_spent = our_outputs.iter().any(|output| {
-        let outpoint = output.outpoint();
-        !chain_unspent.contains(&(*outpoint.txid(), outpoint.n()))
-    });
+    // The wallet's tracked, mined, spend-unrecorded outputs at this address. This is a raw
+    // query rather than `get_spendable_transparent_outputs` because that is a coin-selection
+    // API: its ZIP 317 marginal-fee floor would hide dust outputs from this diff, leaving an
+    // externally spent dust output undetectable forever. Unmined receipts are excluded: they
+    // cannot have a mined spend, and `get_address_unspent_outpoints` never lists them, so
+    // they would read as permanently "missing" and re-trigger the history fetch every pass.
+    let addr_str = zcash_keys::encoding::AddressCodec::encode(&address, params);
+    let tracked_unspent: Vec<([u8; 32], u32, u32)> = db_data
+        .with_raw(|conn, _| {
+            let mut stmt = conn.prepare(
+                "SELECT t.txid, tro.output_index, t.mined_height
+             FROM transparent_received_outputs tro
+             JOIN transactions t ON t.id_tx = tro.transaction_id
+             JOIN addresses a ON a.id = tro.address_id
+             WHERE a.cached_transparent_receiver_address = :address
+             AND t.mined_height IS NOT NULL
+             AND tro.id NOT IN (
+                 SELECT transparent_received_output_id
+                 FROM transparent_received_output_spends
+             )",
+            )?;
+            let rows = stmt.query_map(rusqlite::named_params! {":address": addr_str}, |row| {
+                Ok((
+                    row.get::<_, [u8; 32]>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| SyncError::from(SqliteClientError::from(e)))?;
+    // Mined outputs the chain's unspent set no longer contains: spent on chain, spend not yet
+    // recorded by the wallet.
+    let oldest_missing = tracked_unspent
+        .iter()
+        .filter(|(txid, n, _)| !chain_unspent.contains(&(TxId::from_bytes(*txid), *n)))
+        .map(|(_, _, mined_height)| BlockHeight::from_u32(*mined_height))
+        .min();
 
-    if any_spent {
+    if let Some(oldest_missing) = oldest_missing {
+        let fetch_range = std::cmp::min(oldest_missing, range.start)..(view_tip + 1);
         let txids = chain_view
-            .get_address_tx_ids(&address, range)
+            .get_address_tx_ids(&address, fetch_range)
             .await
             .map_err(SyncError::Chain)?;
         for txid in txids {

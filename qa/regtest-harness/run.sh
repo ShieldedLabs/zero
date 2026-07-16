@@ -52,6 +52,9 @@ ADDR_B="tmVb46GXKmsy4iogqVYaR5ZcmdNr4cXaU3V"
 # Syntactically valid regtest address that is never imported: filter queries
 # naming it must return empty results, proving no cross-address leakage.
 ADDR_UNRELATED="tmJGRY2ME1HZqWbg8wKVQYo6tTrC5WJ9ENv"
+# Fixed seed for the spend-poison scenario's signer + recovery wallets (a
+# standard BIP-39 test vector; regtest funds only).
+MNEMONIC_POISON="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
 
 ZEBRA_RPC_PORT="${ZEBRA_RPC_PORT:-18232}"
 ZALLET_RPC_PORT="${ZALLET_RPC_PORT:-28232}"
@@ -166,6 +169,13 @@ wallet_db() {
   sqlite3 -cmd '.timeout 5000' "$WORKDIR/zallet-data/wallet.db" "$@"
 }
 
+# Same, against an alternate zallet datadir (scenarios that run their own
+# wallet lifecycles).
+wallet_db_at() {
+  local datadir="$1"; shift
+  sqlite3 -cmd '.timeout 5000' "$datadir/wallet.db" "$@"
+}
+
 zebra_height() {
   zebra_rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])'
 }
@@ -219,9 +229,9 @@ stop_zebra() {
 }
 
 start_zallet() {
-  local logfile="$1"
+  local logfile="$1" datadir="${2:-$WORKDIR/zallet-data}"
   RUST_LOG="${ZALLET_RUST_LOG:-info}" \
-    "$ZALLET_BIN" -d "$WORKDIR/zallet-data" -c "$WORKDIR/zallet.toml" start \
+    "$ZALLET_BIN" -d "$datadir" -c "$WORKDIR/zallet.toml" start \
     >> "$WORKDIR/$logfile" 2>&1 &
   ZALLET_PID=$!
   wait_until "zallet RPC answering" wallet_rpc getwalletstatus
@@ -265,7 +275,82 @@ mine_to() {
   start_zebra "zebra-serve.log"
 }
 
+# mine_with_tx <address> <target-height> <rawtx-hex> <txid>: like mine_to,
+# but resubmits the given raw transaction as soon as the mining node's RPC
+# answers (a zebra restart empties the mempool, so a transaction submitted
+# before the restart would otherwise never be mined). Does not stop until the
+# transaction is MINED (not merely accepted: a block template built before
+# acceptance would leave it in the mempool for the next restart to wipe) AND
+# the target height is reached.
+mine_with_tx() {
+  local address="$1" target="$2" rawtx="$3" txid="$4"
+  stop_zebra
+  write_zebra_config "$address" true
+  start_zebra "zebra-mine.log"
+  local sent="" mined="" resp submitted_txid tx_height
+  local deadline=$((SECONDS + 1800))
+  until [ -n "$mined" ] && [ "$(zebra_height 2>/dev/null || echo 0)" -ge "$target" ]; do
+    if [ -z "$sent" ]; then
+      resp=$(zebra_rpc sendrawtransaction "[\"$rawtx\"]" 2>/dev/null) || resp=""
+      submitted_txid=$(printf '%s' "$resp" | json_field "['result']" 2>/dev/null) || submitted_txid=""
+      if printf '%s' "$submitted_txid" | grep -Eiq '^[0-9a-f]{64}$'; then
+        sent=1
+      fi
+    elif [ -z "$mined" ]; then
+      tx_height=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
+        | json_field "['result'].get('height', -1)" 2>/dev/null) || tx_height=-1
+      if [ "${tx_height:--1}" -ge 0 ]; then
+        mined=1
+      fi
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "::error::mining to height $target with tx inclusion timed out (sent: ${sent:-no}, mined: ${mined:-no})" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+  stop_zebra
+  write_zebra_config "$address" false
+  start_zebra "zebra-serve.log"
+}
+
 json_field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
+
+# zallet_prompt <input-line> <cmd> [args...]: run a command that insists on
+# prompting through /dev/tty (rpassword-based zallet subcommands such as
+# import-mnemonic), feeding it one line through a pseudo-terminal. Plain
+# stdin pipes fail with "Device not configured" because rpassword opens the
+# controlling terminal directly.
+zallet_prompt() {
+  local input="$1"; shift
+  ZALLET_PROMPT_INPUT="$input" python3 - "$@" <<'PYEOF'
+import os, pty, select, sys, time
+
+args = sys.argv[1:]
+data = (os.environ["ZALLET_PROMPT_INPUT"] + "\n").encode()
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(args[0], args)
+deadline = time.time() + 120
+wrote = False
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 1)
+    if fd not in r:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    sys.stdout.buffer.write(chunk)
+    if not wrote:
+        os.write(fd, data)
+        wrote = True
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+PYEOF
+}
 
 fully_synced() {
   local want="$1"
@@ -565,6 +650,277 @@ scenario_poison_heal() {
   assert "poison-heal: wallet RPC still serving" wallet_rpc getwalletstatus
 }
 
+# External-spend watermark poisoning (the production hot-wallet incident):
+# spend-check requests are generated one per output, but completing any one
+# raises the observed-unspent watermark for EVERY output at the address. A
+# newer receipt's near-tip request could therefore mark an older output's
+# not-yet-fetched spend range as checked, leaving the spent output listed as
+# unspent forever. The repro builds a real on-chain EXTERNAL spend: a signer
+# wallet (fixed mnemonic, its own datadir) shields a matured coinbase from a
+# derived transparent address INTO THE MAIN WALLET's account (a different
+# seed: if the spend paid the poison seed, the recovery below would decrypt
+# it during scanning and record the spend through the enhancement path,
+# bypassing the spend-search code under test). Newer coinbases then land on
+# the same address, the signer is destroyed, and a fresh recovery of the
+# poison seed must discover a spend it cannot decrypt and did not create.
+# Receipt ingestion and spend-search servicing each only run at startup or on
+# tip change, so the flow restarts zallet deliberately: once to ingest
+# receipts (which queues the spend-search requests), once more to service
+# those requests. Runs LAST: it extends the chain, invalidating the
+# mature-count math of earlier scenarios.
+scenario_spend_poison() {
+  # The shielding target, captured while the main wallet is still up.
+  local ua_main
+  ua_main=$(wallet_rpc z_listaccounts | python3 -c '
+import json, sys
+for acct in json.load(sys.stdin)["result"]:
+    for a in acct.get("addresses", []):
+        if a.get("ua"):
+            print(a["ua"])
+            raise SystemExit
+') || true
+  stop_zallet
+  local signer_dir="$WORKDIR/zallet-signer" fresh_dir="$WORKDIR/zallet-fresh"
+  local resp seedfp addr_c opid opstatus
+  local x_tip x_count s_height b_tip b_count poison_tip
+  if [ -z "$ua_main" ]; then
+    fail "spend-poison: could not capture the main wallet's shielded address"
+    start_zallet "zallet.log"
+    return
+  fi
+
+  # Signer wallet: fixed mnemonic, default account, derived addresses. Every
+  # init step is fail-soft: a broken scenario must report red, not abort the
+  # whole harness under errexit.
+  mkdir -p "$signer_dir"
+  {
+    "$ZALLET_BIN" -d "$signer_dir" -c "$WORKDIR/zallet.toml" generate-encryption-identity \
+      && "$ZALLET_BIN" -d "$signer_dir" -c "$WORKDIR/zallet.toml" init-wallet-encryption \
+      && zallet_prompt "$MNEMONIC_POISON" "$ZALLET_BIN" -d "$signer_dir" -c "$WORKDIR/zallet.toml" import-mnemonic \
+      && "$ZALLET_BIN" -d "$signer_dir" -c "$WORKDIR/zallet.toml" regtest generate-account-and-miner-address
+  } > "$WORKDIR/signer-init.log" 2>&1 || {
+    fail "spend-poison: signer wallet init failed (see signer-init.log)"
+    start_zallet "zallet.log"
+    return
+  }
+
+  start_zallet "zallet-signer.log" "$signer_dir"
+  seedfp=$(wallet_rpc z_listaccounts | json_field "['result'][0]['seedfp']") || true
+  stop_zallet
+  addr_c=$(wallet_db_at "$signer_dir" \
+    "SELECT cached_transparent_receiver_address FROM addresses
+     WHERE key_scope = 0 AND cached_transparent_receiver_address IS NOT NULL
+     ORDER BY id LIMIT 1;") || true
+  if [ -z "$addr_c" ] || [ -z "$seedfp" ]; then
+    fail "spend-poison: signer wallet setup failed (addr='$addr_c' seedfp='$seedfp')"
+    start_zallet "zallet.log"
+    return
+  fi
+
+  # X coinbases: mined to the derived address, then 100 elsewhere so X matures
+  # and the eventual spend height sits beyond X's first 41-block check window.
+  mine_to "$addr_c" $((TIP + 1))
+  x_tip=$(zebra_height)
+  x_count=$((x_tip - TIP))
+  # +105, not +100: zebra can drop a non-finalized block across the serve
+  # restart, and the shielding below needs every X coinbase safely mature.
+  mine_to "$ADDR_B" $((x_tip + 105))
+
+  # Signer: sync, then restart once so the startup sweep ingests the coinbase
+  # receipts (receipts are written by the enhancement pass, which runs only at
+  # startup or on tip change, and this chain is frozen).
+  start_zallet "zallet-signer.log" "$signer_dir"
+  local signer_tip signer_restarted="" sync_deadline
+  signer_tip=$(zebra_height)
+  # The embedded chain index has a startup window where historic block-range
+  # fetches can hang (pre-existing zaino readiness defect, see
+  # zaino-issue-readiness.md); one restart clears it, so allow exactly one.
+  sync_deadline=$((SECONDS + signer_tip * 3))
+  until fully_synced "$signer_tip" > /dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$sync_deadline" ]; then
+      if [ -z "$signer_restarted" ]; then
+        signer_restarted=1
+        log "signer sync stalled (embedded-index startup race); restarting signer once"
+        stop_zallet
+        start_zallet "zallet-signer.log" "$signer_dir"
+        sync_deadline=$((SECONDS + signer_tip * 3))
+      else
+        fail "spend-poison: signer never synced"
+        stop_zallet; start_zallet "zallet.log"; return
+      fi
+    fi
+    sleep 1
+  done
+  stop_zallet
+  start_zallet "zallet-signer.log" "$signer_dir"
+  signer_receipts() {
+    [ "$(wallet_db_at "$signer_dir" "SELECT COUNT(*) FROM transparent_received_outputs;" 2>/dev/null)" = "$x_count" ]
+  }
+  WAIT_TIMEOUT=180 wait_until "signer ingested $x_count coinbase receipts" signer_receipts || {
+    fail "spend-poison: signer never ingested its coinbase receipts"
+    stop_zallet; start_zallet "zallet.log"; return
+  }
+
+  # Spend X externally (from the poison seed's point of view): shield every
+  # matured coinbase on the derived address into the MAIN wallet's account.
+  opid=$(wallet_rpc z_shieldcoinbase "[\"$addr_c\", \"$ua_main\"]" 60 | json_field "['result']['opid']") || true
+  opstatus=""
+  if [ -n "$opid" ]; then
+    local op_deadline=$((SECONDS + 120))
+    while [ "$SECONDS" -lt "$op_deadline" ]; do
+      opstatus=$(wallet_rpc z_getoperationstatus "[[\"$opid\"]]" | json_field "['result'][0]['status']") || true
+      case "$opstatus" in success|failed) break ;; esac
+      sleep 2
+    done
+  fi
+  local shield_txid="" shield_rawtx=""
+  if [ "$opstatus" = "success" ]; then
+    shield_txid=$(wallet_rpc z_getoperationresult "[[\"$opid\"]]" | json_field "['result'][0]['result']['txid']") || true
+    # Capture the raw bytes from the mempool: the mining restart below wipes
+    # the mempool, so the transaction must be resubmitted after it.
+    if [ -n "$shield_txid" ]; then
+      shield_rawtx=$(zebra_rpc getrawtransaction "[\"$shield_txid\", 0]" | json_field "['result']") || true
+    fi
+  fi
+  stop_zallet
+  if [ "$opstatus" != "success" ] || [ -z "$shield_rawtx" ] || [ "$shield_rawtx" = "None" ]; then
+    fail "spend-poison: shielding tx not built/captured (status: ${opstatus:-none}, txid: ${shield_txid:-none})"
+    start_zallet "zallet.log"
+    return
+  fi
+
+  # Mine the shielding tx (spend height S), then land newer coinbases on the
+  # same address above S, then mature them.
+  mine_with_tx "$ADDR_B" $(( $(zebra_height) + 1 )) "$shield_rawtx" "$shield_txid"
+  s_height=$(zebra_height)
+  mine_to "$addr_c" $((s_height + 3))
+  b_tip=$(zebra_height)
+  b_count=$((b_tip - s_height))
+  # +110: same drop-across-restart hazard; the newest B coinbase must stay
+  # clear of the 100-confirmation maturity boundary the listing assert needs.
+  mine_to "$ADDR_B" $((b_tip + 110))
+  poison_tip=$(zebra_height)
+  rm -rf "$signer_dir"
+
+  # Sanity: the chain itself agrees X is spent (only the B coinbases remain).
+  local chain_unspent
+  chain_unspent=$(zebra_rpc getaddressutxos "[{\"addresses\": [\"$addr_c\"]}]" \
+    | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))') || true
+  assert "spend-poison: chain shows only the $b_count newer coinbases unspent (got $chain_unspent)" \
+    [ "$chain_unspent" = "$b_count" ]
+
+  # Fresh recovery of the poison seed: it must discover the spend it never made.
+  mkdir -p "$fresh_dir"
+  {
+    "$ZALLET_BIN" -d "$fresh_dir" -c "$WORKDIR/zallet.toml" generate-encryption-identity \
+      && "$ZALLET_BIN" -d "$fresh_dir" -c "$WORKDIR/zallet.toml" init-wallet-encryption \
+      && zallet_prompt "$MNEMONIC_POISON" "$ZALLET_BIN" -d "$fresh_dir" -c "$WORKDIR/zallet.toml" import-mnemonic
+  } > "$WORKDIR/fresh-init.log" 2>&1 || {
+    fail "spend-poison: fresh wallet init failed (see fresh-init.log)"
+    start_zallet "zallet.log"
+    return
+  }
+
+  start_zallet "zallet-fresh.log" "$fresh_dir"
+  # The embedded chain index reports a bogus tip (0 / finalized floor) until
+  # its first sync completes, and historic block-range fetches made in that
+  # window can hang outright (observed: Historic(1..N) wedged for 30+
+  # minutes). Recovering the account queues exactly such fetches, so wait for
+  # the index to report the real tip first.
+  node_tip_ready() {
+    [ "$(wallet_rpc getwalletstatus | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$poison_tip" ]
+  }
+  WAIT_TIMEOUT=180 wait_until "fresh wallet's node view at $poison_tip" node_tip_ready || {
+    fail "spend-poison: fresh wallet chain view never warmed"
+    stop_zallet; start_zallet "zallet.log"; return
+  }
+  # A fresh wallet answers RPC before its chain view has warmed up and
+  # rejects account recovery with -28 until then; retry that case only.
+  local rec_deadline=$((SECONDS + 120))
+  resp="(not attempted)"
+  while [ "$SECONDS" -lt "$rec_deadline" ]; do
+    resp=$(wallet_rpc z_recoveraccounts "[[{\"name\": \"recovered\", \"seedfp\": \"$seedfp\", \"zip32_account_index\": 0, \"birthday_height\": 1}]]" 60) || resp="(rpc failure)"
+    contains "$resp" '"account_uuid"' && break
+    contains "$resp" '"code":-28' || break
+    sleep 3
+  done
+  contains "$resp" '"account_uuid"' || {
+    fail "spend-poison: z_recoveraccounts failed: $resp"
+    stop_zallet; start_zallet "zallet.log"; return
+  }
+  local fresh_restarted=""
+  sync_deadline=$((SECONDS + poison_tip * 5))
+  until fully_synced "$poison_tip" > /dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$sync_deadline" ]; then
+      if [ -z "$fresh_restarted" ]; then
+        fresh_restarted=1
+        log "recovery sync stalled (embedded-index startup race); restarting once"
+        stop_zallet
+        start_zallet "zallet-fresh.log" "$fresh_dir"
+        sync_deadline=$((SECONDS + poison_tip * 5))
+      else
+        fail "spend-poison: recovery never synced"
+        stop_zallet; start_zallet "zallet.log"; return
+      fi
+    fi
+    sleep 1
+  done
+
+  # Restart 1: the startup sweep's enhancement pass writes the receipt rows
+  # for the derived address and, as it stores them, queues the spend-search
+  # requests for the next pass.
+  stop_zallet
+  start_zallet "zallet-fresh.log" "$fresh_dir"
+  fresh_tracked() {
+    [ "$(wallet_db_at "$fresh_dir" \
+      "SELECT COUNT(*) FROM transparent_received_outputs tro
+       JOIN addresses a ON a.id = tro.address_id
+       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$((x_count + b_count))" ]
+  }
+  WAIT_TIMEOUT=180 wait_until "recovery ingested $((x_count + b_count)) receipts" fresh_tracked || true
+  local tracked spent
+  tracked=$(wallet_db_at "$fresh_dir" \
+    "SELECT COUNT(*) FROM transparent_received_outputs tro
+     JOIN addresses a ON a.id = tro.address_id
+     WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null) || true
+  assert "spend-poison: recovery tracked all $((x_count + b_count)) coinbases on the derived address (got $tracked)" \
+    [ "$tracked" = "$((x_count + b_count))" ]
+
+  # Restart 2: a fresh startup sweep whose request batch now contains the
+  # queued spend-search requests; this pass must discover the external spend.
+  stop_zallet
+  start_zallet "zallet-fresh.log" "$fresh_dir"
+  spend_recorded() {
+    [ "$(wallet_db_at "$fresh_dir" \
+      "SELECT COUNT(*) FROM transparent_received_output_spends s
+       JOIN transparent_received_outputs tro ON tro.id = s.transparent_received_output_id
+       JOIN addresses a ON a.id = tro.address_id
+       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$x_count" ]
+  }
+  WAIT_TIMEOUT=180 wait_until "external spend of $x_count outputs recorded" spend_recorded || true
+  spent=$(wallet_db_at "$fresh_dir" \
+    "SELECT COUNT(*) FROM transparent_received_output_spends s
+     JOIN transparent_received_outputs tro ON tro.id = s.transparent_received_output_id
+     JOIN addresses a ON a.id = tro.address_id
+     WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null) || true
+  assert "spend-poison: external spend recorded for all $x_count shielded coinbases (got $spent)" \
+    [ "$spent" = "$x_count" ]
+
+  # RPC-level contract: the spent outputs are gone, the newer matured ones list.
+  local listed
+  listed=$(wallet_rpc z_listunspent "[1, 9999999, true, [\"$addr_c\"]]" 60 | python3 -c '
+import json, sys
+rows = [u for u in json.load(sys.stdin)["result"] if u["pool"] == "transparent"]
+print(len(rows))') || true
+  assert "spend-poison: z_listunspent shows exactly the $b_count unspent coinbases (got $listed)" \
+    [ "$listed" = "$b_count" ]
+
+  # Restore the main wallet for any scenario that might follow.
+  stop_zallet
+  rm -rf "$fresh_dir"
+  start_zallet "zallet.log"
+}
+
 run_scenario() {
   local name="$1"
   if [ -n "$ONLY" ] && ! contains ",$ONLY," ",$name,"; then
@@ -589,6 +945,7 @@ main() {
   run_scenario union
   run_scenario hang-guard
   run_scenario poison-heal
+  run_scenario spend-poison
 
   log "=== results: $PASSES passed, $FAILURES failed ==="
   [ "$FAILURES" = 0 ]

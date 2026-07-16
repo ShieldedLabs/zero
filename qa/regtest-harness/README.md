@@ -14,6 +14,7 @@ Every scenario is a regression guard for a specific production incident:
 | Scenario | Guards against | Incident |
 |---|---|---|
 | `baseline` | listunspent contract, imported-address watch-only flag, response latency, clean errors | RPC hang class, `is_watch_only` account-level regression |
+| `spend-poison` | an on-chain spend the wallet did not create is discovered and recorded (signer wallet shields a coinbase, fresh seed recovery must see the spend) | hot-wallet false-unspent accumulation: address-scoped spend-check watermark skipping unfetched spend heights |
 | `dust` | sub-marginal-fee (≤5000 zat) UTXOs omitted from `z_listunspent` | zcash/zallet#594 |
 | `filter` | `addresses` filter ignored for transparent outputs; cross-address leakage | zcash/zallet#595 |
 | `union` | multi-address filters matching nothing (`all` vs `any`) | zcash/zallet#596 |
