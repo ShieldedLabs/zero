@@ -209,7 +209,7 @@ TEST_F(UpgradesTest, NextActivationHeight) {
 // "never activates" — the two halves of one binary disagreeing about mainnet.
 // This pins the invariant for every upgrade on every network: an activation
 // height is NO_ACTIVATION_HEIGHT or a sane non-negative height, and mainnet
-// NU6.3 in particular is not yet active anywhere. // @claude (review C2)
+// NU6.3 activates at exactly the ZIP 258 / Zebra v6.0.0 height. // @claude (review C2)
 TEST_F(UpgradesTest, NoOverflowingActivationHeightPlaceholders) {
     for (auto network : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
         SelectParams(network);
@@ -223,12 +223,16 @@ TEST_F(UpgradesTest, NoOverflowingActivationHeightPlaceholders) {
 
     SelectParams(CBaseChainParams::MAIN);
     const Consensus::Params& mainParams = Params().GetConsensus();
-    // Parked (NO_ACTIVATION_HEIGHT) reads as DISABLED — matching the Rust side's
-    // "never activates" for unscheduled upgrades — and in particular not ACTIVE.
+    // Mainnet NU6.3 activates at the height fixed by ZIP 258 and shipped in
+    // Zebra v6.0.0 — pending below it, active from it, and in particular NOT
+    // active at genesis (the failure mode of the overflowed placeholder).
+    EXPECT_EQ(mainParams.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight, 3428143);
     EXPECT_EQ(
         NetworkUpgradeState(0, mainParams, Consensus::UPGRADE_NU6_3),
-        UPGRADE_DISABLED);
+        UPGRADE_PENDING);
     EXPECT_FALSE(mainParams.NetworkUpgradeActive(0, Consensus::UPGRADE_NU6_3));
+    EXPECT_FALSE(mainParams.NetworkUpgradeActive(3428142, Consensus::UPGRADE_NU6_3));
+    EXPECT_TRUE(mainParams.NetworkUpgradeActive(3428143, Consensus::UPGRADE_NU6_3));
 
     // Revert to the default for other tests.
     SelectParams(CBaseChainParams::REGTEST);

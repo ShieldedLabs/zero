@@ -12,6 +12,7 @@
 #include "test/test_util.h"
 #include "util/test.h"
 #include "zcash/JoinSplit.hpp"
+#include "zip317.h"
 
 #include <librustzcash.h>
 #include <rust/bridge.h>
@@ -2260,4 +2261,498 @@ TEST(ChecktransactionTests, OrchardV3BuilderRejectsOutputsAndReportsIt) {
             false, {orchard::OrchardValuePool::Orchard, orchard::ProtocolVersion::InsecureV1}, uint256());
         EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 0, std::nullopt));
     }
+}
+
+// ===== NU6.3 rule battery mirroring the Zebra v6.0.0 test suite =====
+//
+// Zebra fabricates invalid shielded data directly (zebra-consensus/src/
+// transaction/tests.rs, zebra-chain/src/transaction/tests/vectors.rs); zcashd's
+// bundles are opaque librustzcash objects, so the equivalent coverage is built
+// by serializing a real builder-made transaction, patching specific bytes, and
+// re-parsing. That also pins WHERE each rule is enforced in this stack: some
+// violations are grammar errors the vendored crate rejects at parse
+// (Flags::from_byte — reserved bits, Orchard-pool bit 2), others deserialize
+// fine and must be caught by the C++ checks in
+// CheckTransactionWithoutProofVerification. If a crate bump ever loosens the
+// parse grammar, the EXPECT_THROW tests here fail — the signal to add the C++
+// backstop Zebra carries. // @claude
+
+// v5/v6 OrchardAction wire layout (the Ironwood component reuses it, ZIP 229):
+// cv(32) nullifier(32) rk(32) cmx(32) ephemeralKey(32) encCiphertext(580)
+// outCiphertext(80). A bundle section is: nActions(compactsize) actions
+// flags(1) valueBalance(8) anchor(32) proof(compactsize+bytes) spendAuthSigs
+// (64 per action) bindingSig(64).
+constexpr size_t V6_ACTION_SIZE = 820;
+constexpr size_t V6_ACTION_NULLIFIER_OFFSET = 32;
+constexpr size_t V6_ACTION_EPK_OFFSET = 128;
+
+static std::vector<unsigned char> SerializeTx(const CMutableTransaction& mtx) {
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+    ss << mtx;
+    return std::vector<unsigned char>(ss.begin(), ss.end());
+}
+
+// Locates the byte offset where a trailing bundle section starts. `emptied` is
+// the serialization of the same transaction with that bundle slot cleared: it
+// must be a strict prefix of `full` ending in `emptySlotsAtTail` empty-slot
+// 0x00 markers (nActions = 0), the first of which is where the section begins.
+// Orchard and Ironwood are the final two v6 components (Ironwood last), so
+// clearing the Ironwood slot leaves one trailing marker and clearing the
+// Orchard slot leaves two; v5's Orchard section is last, leaving one.
+static size_t LocateBundleSection(
+    const std::vector<unsigned char>& full,
+    const std::vector<unsigned char>& emptied,
+    size_t emptySlotsAtTail)
+{
+    EXPECT_LT(emptied.size(), full.size());
+    for (size_t i = 0; i < emptySlotsAtTail; i++) {
+        EXPECT_EQ(emptied[emptied.size() - 1 - i], 0x00);
+    }
+    size_t start = emptied.size() - emptySlotsAtTail;
+    EXPECT_TRUE(std::equal(emptied.begin(), emptied.begin() + start, full.begin()));
+    return start;
+}
+
+static CTransaction DeserializeTx(const std::vector<unsigned char>& bytes) {
+    CDataStream ss(bytes, SER_NETWORK, PROTOCOL_VERSION);
+    return CTransaction(deserialize, ss);
+}
+
+// [NU6.3] An Ironwood bundle with actions present must have flags permitting
+// spends or outputs (Zebra: v6_transaction_with_ironwood_actions_must_have_flags
+// / NotEnoughIronwoodFlags). Flags 0x00 is a valid byte for the parse grammar,
+// so the transaction deserializes and the C++ check must catch it — this is a
+// rule the crate does NOT enforce at parse. The transparent input/output keep
+// the earlier source/sink-of-funds checks satisfied once the corrupted flags
+// stop the Ironwood bundle counting as either. // @claude
+TEST(ChecktransactionTests, IronwoodFlagsMustPermitActions) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = BuildV6IronwoodBundle();
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0);
+    mtx.vout.resize(1);
+    mtx.vout[0].nValue = 1000;
+    mtx.vout[0].scriptPubKey = CScript() << OP_TRUE;
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.ironwoodBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+
+    ASSERT_EQ(bytes[start], 2);  // one real output + one dummy padding action
+    size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
+    // Non-coinbase Ironwood-V3 builder: spends | outputs | crossAddress.
+    ASSERT_EQ(bytes[flagsOff], 0x07);
+
+    bytes[flagsOff] = 0x00;
+    CTransaction tx = DeserializeTx(bytes);
+
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-tx-ironwood-flags-disable-actions", BodyCorruption::Default, "")).Times(1);
+    CheckTransactionWithoutProofVerification(tx, state);
+
+    RegtestDeactivateNU6point3();
+}
+
+// ZIP 229: flag bits 3..7 are reserved and MUST be 0. The vendored crate
+// enforces this at parse (Flags::from_byte returns None), so the corrupted
+// transaction must fail to deserialize — there is no C++ backstop. // @claude
+TEST(ChecktransactionTests, IronwoodReservedFlagBitsRejectedAtParse) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = BuildV6IronwoodBundle();
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.ironwoodBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
+    ASSERT_EQ(bytes[flagsOff], 0x07);
+
+    bytes[flagsOff] = 0x0F;  // set reserved bit 3
+    EXPECT_THROW(DeserializeTx(bytes), std::exception);
+
+    RegtestDeactivateNU6point3();
+}
+
+// [NU6.3] The enableCrossAddress flag (bit 2) MUST be 0 for the Orchard pool
+// (Zebra: v6_orchard_bundle_must_not_enable_cross_address). Zebra enforces this
+// as a consensus check; in zcashd the vendored crate rejects the bit at parse
+// for any Orchard-pool bundle, so a v6 Orchard slot carrying it must fail to
+// deserialize. // @claude
+TEST(ChecktransactionTests, V6OrchardSlotRejectsCrossAddressFlagAtParse) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.orchardBundle = BuildV6OrchardBundle();
+
+    auto bytes = SerializeTx(mtx);
+    // The full tx still ends with the empty Ironwood slot's 0x00.
+    ASSERT_EQ(bytes.back(), 0x00);
+    CMutableTransaction emptied(mtx);
+    emptied.orchardBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 2);
+
+    ASSERT_EQ(bytes[start], 2);  // change output + dummy padding action
+    size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
+    // Non-coinbase Orchard-V3 builder: spends | outputs, no cross-address.
+    ASSERT_EQ(bytes[flagsOff], 0x03);
+
+    bytes[flagsOff] = 0x07;  // set enableCrossAddress on the Orchard slot
+    EXPECT_THROW(DeserializeTx(bytes), std::exception);
+
+    RegtestDeactivateNU6point3();
+}
+
+// v5 wind-down, parse half (§10.2): flag bit 2 remains reserved-zero for the
+// v5 Orchard format after NU6.3 — Zebra documents that "a v5 Orchard bundle
+// rejects the flag bit at deserialization", and our parser must agree. A
+// regression here (e.g. a crate bump reading v5 flags with v6 semantics) would
+// be a consensus split. // @claude
+TEST(ChecktransactionTests, V5OrchardRejectsCrossAddressFlagAtParse) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP225_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.orchardBundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, 1000);
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.orchardBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+
+    ASSERT_EQ(bytes[start], 2);
+    size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
+    // Coinbase-style builder: outputs enabled, spends disabled.
+    ASSERT_EQ(bytes[flagsOff], 0x02);
+
+    bytes[flagsOff] = 0x06;  // set the (v5-reserved) cross-address bit
+    EXPECT_THROW(DeserializeTx(bytes), std::exception);
+
+    RegtestDeactivateNU6point3();
+}
+
+// [NU6.3] A transaction revealing the same Ironwood nullifier twice is
+// rejected (Zebra: v6_transaction_with_duplicate_ironwood_nullifier_is_rejected).
+// Nullifiers are plain field elements at parse, so the duplicate deserializes
+// and the C++ in-transaction dedup must catch it. This is the in-tx half; the
+// cross-transaction half is covered by IronwoodShieldedRequirements. // @claude
+TEST(ChecktransactionTests, IronwoodDuplicateNullifierInTxRejected) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = BuildV6IronwoodBundle();
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.ironwoodBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_EQ(bytes[start], 2);
+
+    size_t nf0 = start + 1 + V6_ACTION_NULLIFIER_OFFSET;
+    size_t nf1 = start + 1 + V6_ACTION_SIZE + V6_ACTION_NULLIFIER_OFFSET;
+    // The two (dummy-spend) nullifiers are random and distinct before the copy.
+    ASSERT_FALSE(std::equal(bytes.begin() + nf0, bytes.begin() + nf0 + 32, bytes.begin() + nf1));
+    std::copy(bytes.begin() + nf0, bytes.begin() + nf0 + 32, bytes.begin() + nf1);
+
+    CTransaction tx = DeserializeTx(bytes);
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-ironwood-nullifiers-duplicate", BodyCorruption::Default, "")).Times(1);
+    CheckTransactionWithoutProofVerification(tx, state);
+
+    RegtestDeactivateNU6point3();
+}
+
+// Ironwood action-field encoding: ephemeralKey must be a valid, non-identity
+// Pallas point (§5.4.9.4). In this stack the rejection happens at parse —
+// zcashd's parse_v6 validates epk while building the bundle ("not a valid
+// non-identity Pallas point"), so the all-zeroes identity encoding must fail
+// to deserialize. The C++ bad-ironwood-action-identity-point check
+// (ValidateWithoutProofVerification) is the backstop should a crate bump move
+// that validation; if this EXPECT_THROW starts failing, the backstop is what
+// must fire instead. // @claude
+TEST(ChecktransactionTests, IronwoodActionIdentityPointRejected) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = BuildV6IronwoodBundle();
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.ironwoodBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_EQ(bytes[start], 2);
+
+    size_t epkOff = start + 1 + V6_ACTION_EPK_OFFSET;
+    std::vector<unsigned char> zeros(32, 0x00);
+    ASSERT_FALSE(std::equal(zeros.begin(), zeros.end(), bytes.begin() + epkOff));
+    std::copy(zeros.begin(), zeros.end(), bytes.begin() + epkOff);
+
+    EXPECT_THROW(DeserializeTx(bytes), std::exception);
+
+    RegtestDeactivateNU6point3();
+}
+
+// A coinbase transaction cannot have a positive Ironwood value balance: with
+// spends disabled it would be unsatisfiable by the binding signature, and
+// rejecting it early keeps a malformed coinbase away from the chain-supply
+// accounting (GHSA-g4x5-crjh-29ff; our rule is deliberately stricter than
+// Zebra's — confirmed inert in the H4 diff). Unreachable by any valid build,
+// so constructed here by patching the sign of a real bundle's valueBalance
+// (and disabling its spend flag so the earlier bad-cb-has-ironwood-spend check
+// passes). // @claude
+TEST(ChecktransactionTests, IronwoodCoinbasePositiveValueBalanceRejected) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    auto to = TestOrchardSpendingKey()
+        .ToFullViewingKey()
+        .GetChangeAddress();
+    auto builder = orchard::Builder(
+        false, {orchard::OrchardValuePool::Ironwood, orchard::ProtocolVersion::V3}, uint256());
+    EXPECT_TRUE(builder.AddOutput(std::nullopt, to, 4000, std::nullopt));
+    auto bundle = builder.Build().value().ProveAndSign({}, uint256S("cc")).value();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = bundle;
+    // Coinbase shape: single null-prevout input with a 2..100 byte scriptSig.
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout.SetNull();
+    mtx.vin[0].scriptSig = CScript() << 1 << OP_0;
+
+    auto bytes = SerializeTx(mtx);
+    CMutableTransaction emptied(mtx);
+    emptied.ironwoodBundle = OrchardBundle();
+    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_EQ(bytes[start], 2);
+
+    size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
+    size_t vbOff = flagsOff + 1;
+    ASSERT_EQ(bytes[flagsOff], 0x07);
+    // valueBalance is -4000 (little-endian two's complement int64).
+    const std::vector<unsigned char> vbNeg = {0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    ASSERT_TRUE(std::equal(vbNeg.begin(), vbNeg.end(), bytes.begin() + vbOff));
+
+    // Disable the spend flag (outputs + crossAddress remain — a valid Ironwood
+    // flag byte) so the coinbase checks reach the value-balance rule.
+    bytes[flagsOff] = 0x06;
+
+    // Control: coinbase-shaped, spends disabled, negative balance — passes the
+    // non-contextual checks (the shielding direction is legal here).
+    {
+        CTransaction tx = DeserializeTx(bytes);
+        EXPECT_TRUE(tx.IsCoinBase());
+        CValidationState state;
+        EXPECT_TRUE(CheckTransactionWithoutProofVerification(tx, state));
+    }
+
+    // Flip the sign: +4000.
+    const std::vector<unsigned char> vbPos = {0xa0, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    std::copy(vbPos.begin(), vbPos.end(), bytes.begin() + vbOff);
+
+    CTransaction tx = DeserializeTx(bytes);
+    EXPECT_TRUE(tx.IsCoinBase());
+    EXPECT_EQ(tx.GetIronwoodBundle().GetValueBalance(), 4000);
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-positive-ironwood-valuebalance", BodyCorruption::Default, "")).Times(1);
+    CheckTransactionWithoutProofVerification(tx, state);
+
+    RegtestDeactivateNU6point3();
+}
+
+// [NU6.3 onward] coinbase transactions MUST have an empty Orchard component
+// (ZIP 229; Zebra: coinbase_orchard_component_empty_at_nu6_3). The rule applies
+// to every transaction version, so a v5 coinbase carrying Orchard actions is
+// rejected from NU6.3 even though the v5 format itself is unchanged. The
+// pre-NU6.3 acceptance of the same shape is pinned by
+// NU5AcceptsOrchardShieldedCoinbase. // @claude
+TEST(ChecktransactionTests, CoinbaseOrchardComponentEmptyAtNU6_3) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // Zero-ovk output, so the ZIP 213 recoverable-ciphertext check (which runs
+    // before the NU6.3 block) passes and the NU6.3 rule itself is what fires.
+    auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, 0);
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP225_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId;
+    mtx.orchardBundle = bundle;
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout.SetNull();
+
+    CTransaction tx(mtx);
+    EXPECT_TRUE(tx.IsCoinBase());
+
+    MockCValidationState state;
+    EXPECT_CALL(state, DoS(100, false, REJECT_INVALID, "bad-cb-has-orchard-actions", BodyCorruption::Default, "")).Times(1);
+    ContextualCheckTransaction(tx, state, Params(), 10, true);
+
+    // The rule only constrains coinbase transactions: the same bundle on a
+    // non-coinbase v5 transaction passes the contextual checks at NU6.3
+    // (its value balance is zero, so the ZIP 2006 inflow freeze is satisfied).
+    CMutableTransaction mtxNonCb(mtx);
+    mtxNonCb.vin.clear();
+    CTransaction txNonCb(mtxNonCb);
+    EXPECT_FALSE(txNonCb.IsCoinBase());
+    CValidationState plainState;
+    EXPECT_TRUE(ContextualCheckTransaction(txNonCb, plainState, Params(), 10, true));
+
+    RegtestDeactivateNU6point3();
+}
+
+// v5 wind-down, verification half (§10.2): from NU6.3 the batch validator for a
+// block height uses that height's circuit era for EVERY queued bundle,
+// including v5 Orchard bundles — so a proof created against the old circuit
+// fails under the NU6.3 key (Zebra: halo2::tests pins the same routing,
+// "regardless of transaction version"). A regression that routed v5 bundles by
+// version instead of era would accept old-circuit proofs post-activation on
+// one side only — a chain split (review M5's drift scenario). // @claude
+TEST(ChecktransactionTests, V5OrchardBundleVerifiesUnderEraKeyNotVersionKey) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    // InsecureV1-proven v5 Orchard bundle, signed over a zero sighash.
+    auto bundle = BuildBundleWithOutput(orchard::OrchardValuePool::Orchard, 1000);
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+    mtx.nVersion = ZIP225_TX_VERSION;
+    mtx.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId;
+    mtx.orchardBundle = bundle;
+    CTransaction tx(mtx);
+
+    // Under the era key it was proven against, the bundle validates.
+    {
+        auto batch = orchard::init_batch_validator(
+            false, orchard::OrchardCircuitVersion::InsecurePreNu6_2);
+        EXPECT_TRUE(tx.GetOrchardBundle().QueueAuthValidation(
+            *batch, uint256(), orchard::BundleFormat::V5));
+        EXPECT_TRUE(batch->validate());
+    }
+    // Under the NU6.3 era key — what every post-activation block/mempool batch
+    // uses — the same v5 bundle is rejected. The rejection may surface at
+    // queueing or at validation; either way it must not pass.
+    {
+        auto batch = orchard::init_batch_validator(
+            false, orchard::OrchardCircuitVersion::PostNu6_3);
+        bool queued = tx.GetOrchardBundle().QueueAuthValidation(
+            *batch, uint256(), orchard::BundleFormat::V5);
+        EXPECT_FALSE(queued && batch->validate());
+    }
+
+    RegtestDeactivateNU6point3();
+}
+
+// Validation-side circuit ladder, defined in main.cpp and not exported in a
+// header; declared here so the drift test below can compare it against the
+// building-side ladder. // @claude
+::orchard::OrchardCircuitVersion OrchardCircuitVersionFromHeight(
+    const Consensus::Params& consensusParams, int height);
+
+// The height→circuit ladder exists twice: OrchardCircuitVersionFromHeight
+// (main.cpp, selects the verifying key) and orchard::ProtocolVersionForHeight
+// (transaction_builder.cpp, selects the proving circuit). If they ever
+// disagree, the node proves transactions its own validator rejects (review
+// M5). This pins their era agreement at every boundary from NU6.2 onward —
+// every height where new proofs can still be created. (Mainnet heights below
+// NU6.2 are deliberately not compared: there the builder intentionally
+// returns V2 for all pre-NU6.3 heights while historical validation differs;
+// no new proving happens at those heights.) Zebra's halo2 routing test pins
+// the same property for its verifier. // @claude
+TEST(ChecktransactionTests, OrchardCircuitLaddersAgree) {
+    // Regtest with staged boundaries: NU6.2 at height 5, NU6.3 at height 10.
+    RegtestActivateNU6point3(false, 10);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_NU6_2, 5);
+    {
+        const CChainParams& params = Params();
+        const Consensus::Params& consensus = params.GetConsensus();
+        struct Row {
+            int height;
+            orchard::ProtocolVersion build;
+            orchard::OrchardCircuitVersion validate;
+        };
+        const Row rows[] = {
+            {1,    orchard::ProtocolVersion::InsecureV1, orchard::OrchardCircuitVersion::InsecurePreNu6_2},
+            {4,    orchard::ProtocolVersion::InsecureV1, orchard::OrchardCircuitVersion::InsecurePreNu6_2},
+            {5,    orchard::ProtocolVersion::V2,         orchard::OrchardCircuitVersion::FixedPostNu6_2},
+            {9,    orchard::ProtocolVersion::V2,         orchard::OrchardCircuitVersion::FixedPostNu6_2},
+            {10,   orchard::ProtocolVersion::V3,         orchard::OrchardCircuitVersion::PostNu6_3},
+            {1000, orchard::ProtocolVersion::V3,         orchard::OrchardCircuitVersion::PostNu6_3},
+        };
+        for (const Row& row : rows) {
+            EXPECT_EQ(orchard::ProtocolVersionForHeight(params, row.height), row.build)
+                << "builder ladder at height " << row.height;
+            EXPECT_EQ(OrchardCircuitVersionFromHeight(consensus, row.height), row.validate)
+                << "validator ladder at height " << row.height;
+        }
+    }
+    RegtestDeactivateNU6point3();  // restores mainnet params
+
+    // Mainnet NU6.3 boundary (activation 3,428,143): both ladders switch on
+    // the same block.
+    {
+        const CChainParams& params = Params();
+        const Consensus::Params& consensus = params.GetConsensus();
+        EXPECT_EQ(orchard::ProtocolVersionForHeight(params, 3428142),
+                  orchard::ProtocolVersion::V2);
+        EXPECT_EQ(OrchardCircuitVersionFromHeight(consensus, 3428142),
+                  orchard::OrchardCircuitVersion::FixedPostNu6_2);
+        EXPECT_EQ(orchard::ProtocolVersionForHeight(params, 3428143),
+                  orchard::ProtocolVersion::V3);
+        EXPECT_EQ(OrchardCircuitVersionFromHeight(consensus, 3428143),
+                  orchard::OrchardCircuitVersion::PostNu6_3);
+    }
+}
+
+// ZIP 317 r1: Ironwood actions contribute to the logical action count as their
+// own additive term — arithmetically identical to zcashd's combined
+// orchard+ironwood pass-through (verified against Zebra v6.0.0's
+// conventional_actions(); resolves the transaction.cpp marker's question at
+// test time). A 2-action Ironwood tx pays the 2-action grace fee; adding one
+// transparent input makes 3 logical actions = 15000 zats — the fee the
+// z_shieldtoironwood default must cover. // @claude
+TEST(ChecktransactionTests, IronwoodActionsCountTowardZip317Fee) {
+    LoadProofParameters();
+    RegtestActivateNU6point3();
+
+    CMutableTransaction mtx;
+    SetV6TxHeader(mtx, NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId);
+    mtx.ironwoodBundle = BuildV6IronwoodBundle();
+
+    CTransaction tx(mtx);
+    EXPECT_EQ(tx.GetIronwoodBundle().GetNumActions(), 2);
+    EXPECT_EQ(tx.GetLogicalActionCount(), 2);
+    EXPECT_EQ(tx.GetConventionalFee(), CalculateConventionalFee(2));
+    EXPECT_EQ(tx.GetConventionalFee(), 10000);
+
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(uint256S("1234"), 0);
+    CTransaction tx2(mtx);
+    EXPECT_EQ(tx2.GetLogicalActionCount(), 3);
+    EXPECT_EQ(tx2.GetConventionalFee(), CalculateConventionalFee(3));
+    EXPECT_EQ(tx2.GetConventionalFee(), 15000);
+
+    RegtestDeactivateNU6point3();
 }

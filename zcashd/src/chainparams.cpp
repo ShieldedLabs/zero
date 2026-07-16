@@ -147,13 +147,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 3364600;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160;
-        // @nomerge: NU6.3 mainnet activation height TBD (ZIP 258 still lists it as TBD).
-        // Parked at NO_ACTIVATION_HEIGHT like ZFUTURE: any other placeholder is a live
-        // height — the previous 0xCCCCCCCC overflowed the signed int to a negative
-        // value, making a mainnet build treat NU6.3 as active from genesis (and the
-        // Rust side, which maps negatives to "never activates", disagree with C++).
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
-            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Height fixed by ZIP 258 and shipped in the reference validator
+        // (Zebra v6.0.0, zebra-chain/src/parameters/constants.rs). The ZIP's
+        // MIN_NETWORK_PROTOCOL_VERSION is still TBD — that provisionality is
+        // tracked on the nProtocolVersion lines, not here. // @claude
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 3428143;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

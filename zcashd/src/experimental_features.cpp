@@ -11,6 +11,10 @@ bool fExperimentalDeveloperSetPoolSizeZero = false;
 bool fExperimentalPaymentDisclosure = false;
 bool fExperimentalInsightExplorer = false;
 bool fExperimentalLightWalletd = false;
+// Test-only Ironwood origination (z_shieldtoironwood; review S4 / plan UC1).
+// Not a wallet: the destination key is freshly generated per call and only
+// echoed in the RPC result. // @claude
+bool fExperimentalIronwoodOrigination = false;
 
 std::optional<std::string> InitExperimentalMode()
 {
@@ -20,6 +24,7 @@ std::optional<std::string> InitExperimentalMode()
     fExperimentalPaymentDisclosure = GetBoolArg("-paymentdisclosure", false);
     fExperimentalInsightExplorer = GetBoolArg("-insightexplorer", false);
     fExperimentalLightWalletd  = GetBoolArg("-lightwalletd", false);
+    fExperimentalIronwoodOrigination = GetBoolArg("-ironwoodorigination", false);
 
     // Fail if user has set experimental options without the global flag
     if (!fExperimentalMode) {
@@ -33,6 +38,8 @@ std::optional<std::string> InitExperimentalMode()
             return _("Insight explorer requires -experimentalfeatures.");
         } else if (fExperimentalLightWalletd) {
             return _("Light Walletd requires -experimentalfeatures.");
+        } else if (fExperimentalIronwoodOrigination) {
+            return _("Ironwood origination requires -experimentalfeatures.");
         }
     }
     return std::nullopt;
@@ -51,6 +58,8 @@ std::vector<std::string> GetExperimentalFeatures()
         experimentalfeatures.push_back("insightexplorer");
     if (fExperimentalLightWalletd)
         experimentalfeatures.push_back("lightwalletd");
+    if (fExperimentalIronwoodOrigination)
+        experimentalfeatures.push_back("ironwoodorigination");
 
     return experimentalfeatures;
 }
