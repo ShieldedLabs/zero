@@ -49,6 +49,8 @@ Specifically, we have agreed to engage in responsible disclosures for security i
 - Zcash Open Development Lab (ZODL), which maintains the `zcash/zcash` core
   node, `librustzcash`, `zallet`, and related software, via its security
   disclosure process at <https://github.com/zcash/.github/blob/main/SECURITY.md>
+- The maintainers of zakura-core/zakura, via their security disclosure process at
+  https://github.com/zakura-core/zakura/blob/main/SECURITY.md
 
 ## Deviations from the Standard
 
