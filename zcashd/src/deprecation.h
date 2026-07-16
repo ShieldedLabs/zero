@@ -22,8 +22,8 @@
 // set to the *testnet* NU6.3 activation height (4,134,000), which made testnet
 // `signrawtransaction` default to the not-yet-active NU6.3 branch id
 // (signatures invalid to every current node) and pushed the mainnet auto-halt
-// ~1.7 years out (review H3). Mainnet was at height 3,407,408 on 2026-07-10. // @claude
-static const int APPROX_RELEASE_HEIGHT = 3407500;
+// ~1.7 years out (review H3). Mainnet was at height 3,414,566 on 2026-07-16. // @claude
+static const int APPROX_RELEASE_HEIGHT = 3415000;
 static const int RELEASE_TO_DEPRECATION_WEEKS = 7;
 static const int EXPECTED_BLOCKS_PER_HOUR = 3600 / Consensus::POST_BLOSSOM_POW_TARGET_SPACING;
 static_assert(EXPECTED_BLOCKS_PER_HOUR == 48, "The value of Consensus::POST_BLOSSOM_POW_TARGET_SPACING was chosen such that this assertion holds.");
