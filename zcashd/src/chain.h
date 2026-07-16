@@ -25,7 +25,7 @@ static const int CHAIN_HISTORY_ROOT_VERSION = 2010200;
 static const int NU5_DATA_VERSION = 4050000;
 static const int TRANSPARENT_VALUE_VERSION = 5040026;
 static const int NU6_DATA_VERSION = 5100025;
-static const int NU6_3_DATA_VERSION = 6200050;
+static const int NU6_3_DATA_VERSION = 6200051;
 
 /**
  * Maximum amount of time that a block timestamp is allowed to be ahead of the
