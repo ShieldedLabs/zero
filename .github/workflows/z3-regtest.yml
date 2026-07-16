@@ -33,7 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     # First uncached run builds two large Rust workspaces (~40 min); cached
     # runs are dominated by mining (~10 min).
-    timeout-minutes: 90
+    # 150, not 90: CI runners mine the regtest chain ~2.5x slower than dev
+    # hardware and the spend-poison scenario added ~220 blocks; measured full
+    # run is ~100 minutes. qa/regtest-harness block-budget work will bring
+    # this back down.
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@v7
