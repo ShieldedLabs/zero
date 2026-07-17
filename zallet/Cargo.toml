@@ -185,16 +185,16 @@ zewif = { git = "https://github.com/zcash/zewif.git", rev = "0a5a234490a339ca8dd
 zewif-zcashd = { git = "https://github.com/zcash/zewif-zcashd.git", rev = "c640713b91b79d153a7fee2888088931cd7e8326" }
 
 # TEMPORARY: pin the zaino crates to zingolabs/zaino `feat/ironwood_nu6_3`
-# (base e7c9dfdb; [zero] fork-pinned at aphelionz/zaino 2775587ba44b7b09d993f6d0566baa624326cf08
+# (base e7c9dfdb; [zero] fork-pinned at aphelionz/zaino 8de62f42ecef1b5835154c885c42bf5924883eb8
 # = base + the syncing-validator patience backport, branch
 # zero-pin-e7c9dfdb-sync-patience: the embedded chain index otherwise exits
 # the wallet ~45s into any run against a still-syncing zebrad), which updates zaino for
 # the NU6.3 / ironwood librustzcash and zebra lines. This is a dedicated commit
 # to be fixed up as that branch advances; repoint at upstream zaino once the
 # NU6.3 work lands there.
-zaino-common = { git = "https://github.com/aphelionz/zaino.git", rev = "2775587ba44b7b09d993f6d0566baa624326cf08" }
-zaino-fetch = { git = "https://github.com/aphelionz/zaino.git", rev = "2775587ba44b7b09d993f6d0566baa624326cf08" }
-zaino-state = { git = "https://github.com/aphelionz/zaino.git", rev = "2775587ba44b7b09d993f6d0566baa624326cf08" }
+zaino-common = { git = "https://github.com/aphelionz/zaino.git", rev = "8de62f42ecef1b5835154c885c42bf5924883eb8" }
+zaino-fetch = { git = "https://github.com/aphelionz/zaino.git", rev = "8de62f42ecef1b5835154c885c42bf5924883eb8" }
+zaino-state = { git = "https://github.com/aphelionz/zaino.git", rev = "8de62f42ecef1b5835154c885c42bf5924883eb8" }
 
 [profile.release]
 debug = "line-tables-only"

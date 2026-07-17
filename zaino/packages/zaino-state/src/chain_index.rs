@@ -1031,6 +1031,9 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
             let mut current_backoff = timings.initial_backoff;
             #[cfg(feature = "prometheus")]
             let mut has_reached_tip = false;
+            // Unconditional (unlike the prometheus-gated `has_reached_tip`): gates
+            // the startup grace period on the failure path below.
+            let mut synced_once = false;
 
             loop {
                 let source = source.clone();
@@ -1129,6 +1132,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
                         consecutive_failures = 0;
                         current_backoff = timings.initial_backoff;
                         status.store(StatusType::Ready);
+                        synced_once = true;
                         #[cfg(feature = "prometheus")]
                         {
                             metrics::counter!(SYNC_ITERATIONS_TOTAL).increment(1);
@@ -1165,21 +1169,23 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
                             metrics::histogram!(SYNC_ITERATION_DURATION_SECONDS)
                                 .record(iteration_start.elapsed().as_secs_f64());
                         }
-                        // A validator that is still performing its own initial sync
-                        // can transiently advertise best-chain blocks it cannot yet
-                        // serve (observed in CI as ReorgFailure carrying
-                        // MissingBlockError while zebrad checkpoint-syncs from
-                        // scratch). That condition routinely outlives the standard
-                        // ~45-second failure budget but resolves on its own once the
-                        // validator catches up, so it gets a 12x budget (~15 minutes
-                        // at the default backoff ladder) instead of exiting the
-                        // process into a container crash-loop. The classification is
-                        // textual because the reorg-walk error variant carries only
-                        // a message; a typed cause should replace it upstream.
-                        let failure_budget = if format!("{e:?}").contains("MissingBlockError") {
-                            timings.max_consecutive_failures * 12
-                        } else {
+                        // Until the first successful sync, the backing validator may
+                        // still be performing its own initial sync (checkpoint-syncing
+                        // from scratch) and cannot answer best-chain / spend queries
+                        // consistently; those failures are transient and clear once it
+                        // catches up. Stay patient during that window, then hold the
+                        // standard budget so a genuine sustained failure AFTER we have
+                        // synced at least once still escalates promptly. Gating on
+                        // `has_reached_tip` (set the first time an iteration succeeds)
+                        // covers the whole startup-transient class (MissingBlockError,
+                        // "could not determine best chain", ...) without matching on
+                        // error text, which is fragile: a single unhandled variant
+                        // (here: the bare reorg-walk failure) reinstated the ~45-second
+                        // crash-loop the text match was meant to prevent.
+                        let failure_budget = if synced_once {
                             timings.max_consecutive_failures
+                        } else {
+                            timings.max_consecutive_failures.saturating_mul(12)
                         };
                         if consecutive_failures >= failure_budget {
                             #[cfg(feature = "prometheus")]
