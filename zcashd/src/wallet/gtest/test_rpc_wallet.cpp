@@ -226,17 +226,28 @@ TEST(WalletRPCTests, OrchardResolutionAfterNU6_3)
         }
 
         { // A UA with both Orchard and Sapling receivers must resolve to Sapling.
+            // EXPECT (not ASSERT) throughout: an early return here would skip the
+            // tear-down below and poison chainActive for the following tests.
             libzcash::UnifiedAddress ua;
             ua.AddReceiver(orchardAddr);
             ua.AddReceiver(saplingAddr);
             std::vector<Payment> payments { Payment(ua, 1 * COIN, std::nullopt) };
             auto res = builder.PrepareTransaction(
                     *pwalletMain, selector, inputs, payments, chainActive, strategy, std::nullopt, 1);
-            ASSERT_TRUE(res.has_value()) << "dual-receiver UA payment failed to resolve";
-            const auto& resolved = res.value().GetPayments().GetResolvedPayments();
-            ASSERT_EQ(resolved.size(), 1u);
-            EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(resolved[0].address))
-                << "post-NU6.3 resolution must select the Sapling receiver, not Orchard";
+            EXPECT_TRUE(res.has_value()) << "dual-receiver UA payment failed to resolve";
+            if (res.has_value()) {
+                // The resolved list also carries the (internal) change payment;
+                // only the external payment's receiver choice is under test.
+                size_t externalCount = 0;
+                for (const auto& rp : res.value().GetPayments().GetResolvedPayments()) {
+                    if (!rp.isInternal) {
+                        externalCount++;
+                        EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(rp.address))
+                            << "post-NU6.3 resolution must select the Sapling receiver, not Orchard";
+                    }
+                }
+                EXPECT_EQ(externalCount, 1u);
+            }
         }
 
         // Tear down
