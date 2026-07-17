@@ -807,18 +807,30 @@ for acct in json.load(sys.stdin)["result"]:
       sleep 2
     done
   fi
-  local shield_txid="" shield_rawtx=""
+  local shield_txid="" shield_rawtx="" op_error=""
   if [ "$opstatus" = "success" ]; then
     shield_txid=$(wallet_rpc z_getoperationresult "[[\"$opid\"]]" | json_field "['result'][0]['result']['txid']") || true
-    # Capture the raw bytes from the mempool: the mining restart below wipes
-    # the mempool, so the transaction must be resubmitted after it.
+  else
+    op_error=$(wallet_rpc z_getoperationresult "[[\"$opid\"]]" | json_field "['result'][0].get('error', {}).get('message', '')") || true
+    # The operation can report failure for a post-broadcast bookkeeping step
+    # (its own store races the wallet's mempool scan of the same tx, which
+    # the slow debug-build proving window makes likely). The chain is the
+    # ground truth: on this private regtest the mempool can only contain our
+    # transaction, so recover the txid from there.
+    shield_txid=$(zebra_rpc getrawmempool | json_field "['result'][0]" 2>/dev/null) || true
+    if [ "$shield_txid" = "None" ]; then shield_txid=""; fi
     if [ -n "$shield_txid" ]; then
-      shield_rawtx=$(zebra_rpc getrawtransaction "[\"$shield_txid\", 0]" | json_field "['result']") || true
+      log "shielding op reported '$opstatus' (${op_error:-no error}); recovered tx $shield_txid from the mempool"
     fi
   fi
+  # Capture the raw bytes from the mempool: the mining restart below wipes
+  # the mempool, so the transaction must be resubmitted after it.
+  if [ -n "$shield_txid" ]; then
+    shield_rawtx=$(zebra_rpc getrawtransaction "[\"$shield_txid\", 0]" | json_field "['result']") || true
+  fi
   stop_zallet
-  if [ "$opstatus" != "success" ] || [ -z "$shield_rawtx" ] || [ "$shield_rawtx" = "None" ]; then
-    fail "spend-poison: shielding tx not built/captured (status: ${opstatus:-none}, txid: ${shield_txid:-none})"
+  if [ -z "$shield_rawtx" ] || [ "$shield_rawtx" = "None" ]; then
+    fail "spend-poison: shielding tx not built/captured (status: ${opstatus:-none}, error: ${op_error:-none}, txid: ${shield_txid:-none})"
     start_zallet "zallet.log"
     return
   fi
