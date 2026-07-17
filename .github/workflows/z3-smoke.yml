@@ -169,6 +169,11 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/shieldedlabs/zero-zebra:buildcache
             type=gha,scope=zero-zebra
+          # Registry/gha cache manifests have served STALE source layers for
+          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
+          # the commit under test; COPY layer falsely CACHED). Compile stages
+          # must never come from cache; base/apt layers still may.
+          no-cache-filters: release
 
       - name: Load zaino image
         uses: docker/build-push-action@v7
@@ -185,6 +190,11 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/shieldedlabs/zero-zaino:buildcache
             type=gha,scope=zero-zaino
+          # Registry/gha cache manifests have served STALE source layers for
+          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
+          # the commit under test; COPY layer falsely CACHED). Compile stages
+          # must never come from cache; base/apt layers still may.
+          no-cache-filters: builder
 
       - name: Load zallet image
         uses: docker/build-push-action@v7
@@ -200,6 +210,11 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/shieldedlabs/zero-zallet:buildcache
             type=gha,scope=zero-zallet
+          # Registry/gha cache manifests have served STALE source layers for
+          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
+          # the commit under test; COPY layer falsely CACHED). Compile stages
+          # must never come from cache; base/apt layers still may.
+          no-cache-filters: builder
 
       # From here on this is the bundle's README walkthrough, scripted.
       - name: One-time wallet init (offline)
