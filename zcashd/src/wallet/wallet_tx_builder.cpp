@@ -100,6 +100,7 @@ static tl::expected<ResolvedPayment, AddressResolutionError>
 ResolvePayment(
         const Payment& payment,
         bool canResolveOrchard,
+        bool orchardPoolClosed,
         const TransactionStrategy& strategy,
         CAmount& maxSaplingAvailable,
         CAmount& maxOrchardAvailable,
@@ -158,6 +159,18 @@ ResolvePayment(
                 }
                 return {{ua, ua.GetSaplingReceiver().value(), payment.GetAmount(), payment.GetMemo(), false}};
             } else {
+                // From NU6.3 the Orchard pool no longer accepts new outputs; when the
+                // recipient UA's Orchard receiver is the only one we could have used,
+                // surface the pool closure at resolution time instead of failing late
+                // in the builder with a policy-shaped error (review XR-4). A UA with a
+                // usable Sapling or (policy-permitting) transparent receiver has
+                // already been resolved above. // @claude
+                if (orchardPoolClosed && ua.GetOrchardReceiver().has_value()
+                    && !ua.GetSaplingReceiver().has_value()
+                    && !(strategy.AllowRevealedRecipients()
+                         && (ua.GetP2SHReceiver().has_value() || ua.GetP2PKHReceiver().has_value()))) {
+                    return tl::make_unexpected(AddressResolutionError::OrchardPoolClosed);
+                }
                 if (strategy.AllowRevealedRecipients()) {
                     if (ua.GetP2SHReceiver().has_value()) {
                         return {{
@@ -169,7 +182,8 @@ ResolvePayment(
                         // This should only occur when we have
                         // • an Orchard-only UA,
                         // • `AllowRevealedRecipients`, and
-                        // • can’t resolve Orchard (which means either a Sprout selector or pre-NU5).
+                        // • can’t resolve Orchard (which means either a Sprout selector or
+                        //   pre-NU5; the post-NU6.3 pool closure is handled above).
                         return tl::make_unexpected(AddressResolutionError::CouldNotResolveReceiver);
                     }
                 } else if (strategy.AllowRevealedAmounts()) {
@@ -227,9 +241,11 @@ ResolveNetPayment(
         const std::optional<CAmount>& fee,
         const TransactionStrategy& strategy,
         bool afterNU5,
+        bool orchardPoolClosed,
         uint32_t consensusBranchId)
 {
-    bool canResolveOrchard = afterNU5 && !selector.SelectsSprout();
+    // From NU6.3 the Orchard pool no longer accepts new outputs (review XR-4).
+    bool canResolveOrchard = afterNU5 && !orchardPoolClosed && !selector.SelectsSprout();
     CAmount maxSaplingAvailable = spendable.GetSaplingTotal();
     CAmount maxOrchardAvailable = spendable.GetOrchardTotal();
     uint32_t orchardOutputs{0};
@@ -246,6 +262,7 @@ ResolveNetPayment(
             return ResolvePayment(
                     Payment(netpay.first, spendable.Total() - initialFee, netpay.second),
                     canResolveOrchard,
+                    orchardPoolClosed,
                     strategy,
                     tempMaxSapling,
                     tempMaxOrchard,
@@ -258,6 +275,7 @@ ResolveNetPayment(
                             return ResolvePayment(
                                     Payment(netpay.first, spendable.Total() - finalFee, netpay.second),
                                     canResolveOrchard,
+                                    orchardPoolClosed,
                                     strategy,
                                     maxSaplingAvailable,
                                     maxOrchardAvailable,
@@ -428,6 +446,10 @@ WalletTxBuilder::PrepareTransaction(
     auto consensus = params.GetConsensus();
     int anchorHeight = GetAnchorHeight(chain, anchorConfirmations);
     bool afterNU5 = consensus.NetworkUpgradeActive(anchorHeight, Consensus::UPGRADE_NU5);
+    // From NU6.3 the Orchard pool no longer accepts new outputs; payment resolution
+    // must stop preferring a UA's Orchard receiver once the closure is in force at
+    // the anchor height (review XR-4).
+    bool orchardPoolClosed = consensus.NetworkUpgradeActive(anchorHeight, Consensus::UPGRADE_NU6_3);
     auto consensusBranchId = CurrentEpochBranchId(chain.Height(), consensus);
     auto selected = examine(payments, match {
             [&](const std::vector<Payment>& payments) {
@@ -439,10 +461,11 @@ WalletTxBuilder::PrepareTransaction(
                         strategy,
                         fee,
                         afterNU5,
+                        orchardPoolClosed,
                         consensusBranchId);
             },
             [&](const NetAmountRecipient& netRecipient) {
-                return ResolveNetPayment(wallet, selector, spendable, netRecipient, fee, strategy, afterNU5, consensusBranchId)
+                return ResolveNetPayment(wallet, selector, spendable, netRecipient, fee, strategy, afterNU5, orchardPoolClosed, consensusBranchId)
                     .map([&](const auto& pair) {
                         const auto& [payment, finalFee] = pair;
                         return InputSelection(spendable, {{payment}}, finalFee, std::nullopt);
@@ -658,6 +681,7 @@ WalletTxBuilder::ResolveInputsAndPayments(
         const TransactionStrategy& strategy,
         const std::optional<CAmount>& fee,
         bool afterNU5,
+        bool orchardPoolClosed,
         uint32_t consensusBranchId) const
 {
     LOCK2(cs_main, wallet.cs_wallet);
@@ -672,12 +696,13 @@ WalletTxBuilder::ResolveInputsAndPayments(
     uint32_t orchardOutputs{0};
 
     // we can only select Orchard addresses if we’re not sending from Sprout, since there is no tx
-    // version where both Sprout and Orchard are valid.
-    bool canResolveOrchard = afterNU5 && !selector.SelectsSprout();
+    // version where both Sprout and Orchard are valid — and only until NU6.3
+    // closes the Orchard pool to new outputs (review XR-4).
+    bool canResolveOrchard = afterNU5 && !orchardPoolClosed && !selector.SelectsSprout();
     std::vector<ResolvedPayment> resolvedPayments;
     std::optional<AddressResolutionError> resolutionError;
     for (const auto& payment : payments) {
-        auto res = ResolvePayment(payment, canResolveOrchard, strategy, maxSaplingAvailable, maxOrchardAvailable, orchardOutputs);
+        auto res = ResolvePayment(payment, canResolveOrchard, orchardPoolClosed, strategy, maxSaplingAvailable, maxOrchardAvailable, orchardOutputs);
         (void)res.map([&](const ResolvedPayment& rpayment) { resolvedPayments.emplace_back(rpayment); });
         if (!res.has_value()) {
             return tl::make_unexpected(res.error());
