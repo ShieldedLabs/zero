@@ -18,7 +18,9 @@
 #   poison-heal     a stored tx row with no mined height and zero expiry must
 #                   not crash the wallet, and must self-heal (zcash/zallet#568)
 #   reorg           a depth-10 reorg under a live wallet: node, index, and
-#                   listings must converge on the replacement branch
+#                   listings must converge on the replacement branch; plus a
+#                   reorg across a wallet outage (the stored-rows-ahead-of-
+#                   cursor window of zallet-issue-reorg-blockconflict.md)
 #
 # Scenarios run in the order above and are stateful by design (later ones
 # build on earlier ones' chain/wallet); `--only` skips assertions but never
@@ -1001,7 +1003,7 @@ print(len(rows))') || true
 # cannot be lost to a restart, and zallet stays up throughout (production
 # wallets live through reorgs; a crash here is a finding, not harness noise).
 scenario_reorg() {
-  local depth=10
+  local depth=10 depth_offline=13
   local old_tip inv_height inv_hash new_tip new_hash pre_count post_count want_count resp
 
   at_height() { [ "$(zebra_height 2>/dev/null || echo -1)" = "$1" ]; }
@@ -1087,6 +1089,66 @@ sys.exit(1 if bad else 0)'
   assert "reorg: restarted wallet listing unchanged (got $post_count, want $want_count)" \
     [ "$post_count" = "$want_count" ]
   assert "reorg: restarted wallet lists only canonical UTXOs" utxos_canonical
+
+  # Offline-reorg variant: the incident window from
+  # zallet-issue-reorg-blockconflict.md. The wallet misses the fork because it
+  # is down when it happens, and comes back while the node still sits at the
+  # rolled-back tip: its scan cursor re-pins there, BELOW the fork point,
+  # while its stored block rows still reach the old tip ABOVE it. Cursor-based
+  # fork detection alone cannot see the reorg from there, so when the
+  # replacement branch is then mined under it, the wallet must treat the
+  # stored-row hash mismatch as the reorg it is (truncate and rescan) and
+  # converge; the pre-fix behavior was a fatal BlockConflict at the first
+  # replaced height, repeating on every start.
+  #
+  # This leg must cut BELOW the first leg's fork point: reconsiderblock above
+  # left the original branch as a live candidate, so invalidating only the
+  # top of the replacement branch would not roll the tip back (zebra falls
+  # over to the reconsidered branch instead). Invalidating a block the two
+  # branches share kills both, making the rollback deterministic; hence
+  # depth_offline (13) > depth + 2.
+  old_tip=$new_tip
+  inv_height=$((old_tip - depth_offline + 1))
+  inv_hash=$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")
+  pre_count=$want_count
+  stop_zallet
+  resp=$(zebra_rpc invalidateblock "[\"$inv_hash\"]") || resp="(rpc failure)"
+  assert "reorg-offline: invalidateblock accepted" contains "$resp" '"result"'
+  wait_until "tip rolled back to $((inv_height - 1))" at_height "$((inv_height - 1))"
+
+  # Restart against the rolled-back chain so the cursor re-pins below the
+  # stored rows. Settle signal: the wallet's own view of the node tip reaches
+  # the rolled-back height (the wallet's scan state cannot signal this:
+  # stored rows sit above the node tip, so fully_synced never equals it).
+  # Deliberately not asserted: how far the boot gets before the replacement
+  # branch lands is timing, not contract; convergence below is the contract.
+  start_zallet "zallet.log"
+  local settle_deadline=$((SECONDS + 60))
+  until [ "$(wallet_rpc getwalletstatus 2>/dev/null \
+      | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$((inv_height - 1))" ]; do
+    if [ "$SECONDS" -ge "$settle_deadline" ]; then
+      log "settle window elapsed without the wallet reporting node tip $((inv_height - 1))"
+      break
+    fi
+    sleep 1
+  done
+
+  resp=$(zebra_rpc generate "[$((depth_offline + 2))]" 120) || resp="(rpc failure)"
+  assert "reorg-offline: generate mined the replacement branch" contains "$resp" '"result"'
+  new_tip=$(zebra_height)
+  assert "reorg-offline: tip advanced past the old branch ($old_tip -> $new_tip)" \
+    [ "$new_tip" = "$((old_tip + 2))" ]
+  assert "reorg-offline: block at height $inv_height replaced" \
+    [ "$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")" != "$inv_hash" ]
+
+  WAIT_TIMEOUT=180 wait_until "offline-reorged wallet synced to $new_tip" fully_synced "$new_tip" || true
+  assert "reorg-offline: zallet survived the reorg it was down for" zallet_alive
+  assert "reorg-offline: wallet fully synced at $new_tip" fully_synced "$new_tip"
+  want_count=$((pre_count + new_tip - old_tip))
+  post_count=$(transparent_utxos '[]' 60 | count_lines) || true
+  assert "reorg-offline: listing tracks the canonical branch ($pre_count -> $post_count, want $want_count)" \
+    [ "$post_count" = "$want_count" ]
+  assert "reorg-offline: every listed UTXO is on the canonical chain" utxos_canonical
 }
 
 run_scenario() {
