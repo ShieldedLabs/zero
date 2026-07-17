@@ -5,24 +5,51 @@ All notable changes to Zebra are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Zebra 6.1.0](https://github.com/ZcashFoundation/zebra/releases/tag/v6.1.0) - 2026-07-17
+
+### Added
+
+- Added the `getstandardfee` RPC, a parameterless method returning the
+  recommended standard fee per logical action (the ZIP-317 marginal fee, 5000
+  zatoshis) with a `version` field for future dynamic fee estimation
+  ([#10717](https://github.com/ZcashFoundation/zebra/pull/10717)).
+
+### Security
+
+- Reserve space for the block header and transaction count when selecting block template
+  transactions, so blocks mined from Zebra's templates can no longer exceed the consensus size
+  limit ([GHSA-95m2-vx53-v2jw](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-95m2-vx53-v2jw)).
+- Avoid quadratic validation work when checking the remaining transparent value of blocks with
+  many transactions ([GHSA-4g24-549m-hp75](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-4g24-549m-hp75)).
+- Prevent a peer from stalling chain synchronization by delivering a rejected
+  block body that shares its header hash with a later valid block
+  ([GHSA-8gxx-hc65-vv82](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-8gxx-hc65-vv82)).
+- Score misbehavior for peers that directly push consensus-invalid transactions, matching the
+  treatment of peers that advertise them
+  ([GHSA-g7c4-2w6c-cr3r](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-g7c4-2w6c-cr3r)).
+
 ## [Zebra 6.0.0](https://github.com/ZcashFoundation/zebra/releases/tag/v6.0.0) - 2026-07-10
 
 ### Added
 
 - NU6.3 (Ironwood) now activates on Mainnet at block height 3,428,143, matching
-  `zcash_protocol`. Node operators must upgrade to this release before activation.
+  `zcash_protocol`. Node operators must upgrade to this release before activation
+  ([#10938](https://github.com/ZcashFoundation/zebra/pull/10938)).
 
 ### Changed
 
-- Updated the `zcash_*` and `orchard` crates to their released NU6.3 versions.
+- Updated the `zcash_*` and `orchard` crates to their released NU6.3 versions
+  ([#10938](https://github.com/ZcashFoundation/zebra/pull/10938)).
 - Updated `rocksdb` to 0.24. The bundled `librocksdb-sys` now always runs
   `bindgen` to generate its FFI bindings, so **`libclang` is required at build
   time** (in addition to `protoc` and a C++ compiler) even when linking a system
   RocksDB via `ROCKSDB_LIB_DIR`. Install `libclang-dev` (Debian/Ubuntu),
-  `clang` (Arch), or the equivalent for your platform.
+  `clang` (Arch), or the equivalent for your platform
+  ([#10922](https://github.com/ZcashFoundation/zebra/pull/10922)).
 - Bumped the workspace (libraries) MSRV from 1.85.1 to 1.88. The `zebrad` binary
   MSRV is unchanged at 1.91. `home` is no longer pinned to 0.5.11, since 0.5.12
-  builds on the new MSRV.
+  builds on the new MSRV
+  ([#10927](https://github.com/ZcashFoundation/zebra/pull/10927)).
 
 ### Fixed
 
@@ -35,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Don't disconnect from peers that return empty `FindBlocks` or `FindHeaders`
   responses when the local node is at or near the chain tip
   ([#10732](https://github.com/ZcashFoundation/zebra/pull/10732))
-- Fix syncer restarts due to incorrect error downcasting.
+- Fix syncer restarts due to incorrect error downcasting
+  ([#10916](https://github.com/ZcashFoundation/zebra/pull/10916)).
 - Fix a read-state syncer startup hang: a co-located consumer whose finalized state
   had caught up past the node's non-finalized root would re-subscribe endlessly
   instead of syncing, advancing only one block per newly mined block
