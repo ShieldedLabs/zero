@@ -30,7 +30,10 @@ permissions:
 
 jobs:
   build-push:
-    runs-on: ubuntu-latest
+    # 16-vCPU Blacksmith runner: the zallet image is a full release build of the
+    # wallet + halo2/orchard proving stack + zaino indexer + rocksdb (C++), which
+    # ran ~25min on the 4-vCPU ubuntu-latest runner. Matches z3-smoke.yml.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
