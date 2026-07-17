@@ -27,17 +27,20 @@ ARG NO_TLS=false
 # Takes precedence over NO_TLS when set.
 ARG CARGO_FEATURES=""
 
-# Build deps incl. protoc for prost-build
-# Versions pinned (DL3008) for reproducibility / supply-chain hygiene. Pins
-# match the candidate versions in docker.io/library/rust:1.95.0-bookworm; bump
-# them together with the base image (query with `apt-cache policy <pkg>`).
+# Build deps incl. protoc for prost-build.
+# [zero] Unpinned deliberately (was DL3008-style exact pins): Debian point
+# releases delete superseded versions from the bookworm suite, so exact pins
+# rot and break every fresh build (observed 2026-07-17: protobuf-compiler
+# 3.21.12-3 replaced by a deb12 security bump), while layer caching hides the
+# rot until the worst moment. These are builder-stage tools only; binary
+# reproducibility is governed by Cargo.lock, not toolchain patch levels.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      pkg-config=1.8.1-1 \
-      clang=1:14.0-55.7~deb12u1 \
-      cmake=3.25.1-1 \
-      make=4.3-4.1 \
-      ca-certificates=20230311+deb12u1 \
-      protobuf-compiler=3.21.12-3 \
+      pkg-config \
+      clang \
+      cmake \
+      make \
+      ca-certificates \
+      protobuf-compiler \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy entire workspace (prevents missing members)
