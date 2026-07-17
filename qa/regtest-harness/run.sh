@@ -35,13 +35,15 @@
 #   ZEBRAD_BIN, ZALLET_BIN   binary paths (defaults below)
 #   HARNESS_WORKDIR          working directory (default: mktemp -d)
 #   MINE_PHASE_BLOCKS        blocks mined per funding phase (default 120)
+#   ZEBRA_RPC_PORT           zebra RPC port (default 18232)
+#   ZALLET_RPC_PORT          zallet RPC port (default 28232)
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ZEBRAD_BIN="${ZEBRAD_BIN:-$REPO_ROOT/zebra/target/debug/zebrad}"
 ZALLET_BIN="${ZALLET_BIN:-$REPO_ROOT/zallet/target/debug/zallet}"
-MINE_PHASE_BLOCKS="${MINE_PHASE_BLOCKS:-120}"
+MINE_PHASE_BLOCKS="${MINE_PHASE_BLOCKS:-105}"
 
 # Public test constants (regtest-only; never reuse where value can exist).
 # Compressed secp256k1 pubkeys and their regtest P2PKH encodings.
@@ -55,6 +57,10 @@ ADDR_UNRELATED="tmJGRY2ME1HZqWbg8wKVQYo6tTrC5WJ9ENv"
 # Fixed seed for the spend-poison scenario's signer + recovery wallets (a
 # standard BIP-39 test vector; regtest funds only).
 MNEMONIC_POISON="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+# The poison seed's account-0 first external transparent address (derivation
+# is deterministic; the scenario asserts the live derivation still matches).
+# Its coinbase is mined during setup so phase 2 matures it for free.
+ADDR_C_POISON="tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd"
 
 ZEBRA_RPC_PORT="${ZEBRA_RPC_PORT:-18232}"
 ZALLET_RPC_PORT="${ZALLET_RPC_PORT:-28232}"
@@ -147,9 +153,10 @@ wait_until() {
   done
 }
 
+# zebra_rpc <method> [params-json] [per-call timeout]
 zebra_rpc() {
-  local method="$1" params="${2:-[]}"
-  curl -sf -m "$RPC_CALL_TIMEOUT" -H 'content-type: application/json' \
+  local method="$1" params="${2:-[]}" tmo="${3:-$RPC_CALL_TIMEOUT}"
+  curl -sf -m "$tmo" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":\"h\",\"method\":\"$method\",\"params\":$params}" \
     "http://127.0.0.1:$ZEBRA_RPC_PORT"
 }
@@ -209,7 +216,12 @@ EOF
 
 start_zebra() {
   local logfile="$1"
-  "$ZEBRAD_BIN" -c "$WORKDIR/zebrad.toml" start >> "$WORKDIR/$logfile" 2>&1 &
+  # zebrad also reads ZEBRA_*-prefixed environment variables as config
+  # overrides, so the harness's own ZEBRA_RPC_PORT would reach it as an
+  # unknown `rpc_port` field and abort startup. Strip it; the port is
+  # already baked into the generated zebrad.toml.
+  env -u ZEBRA_RPC_PORT \
+    "$ZEBRAD_BIN" -c "$WORKDIR/zebrad.toml" start >> "$WORKDIR/$logfile" 2>&1 &
   ZEBRA_PID=$!
   wait_until "zebra RPC answering" zebra_rpc getblockcount
 }
@@ -230,7 +242,10 @@ stop_zebra() {
 
 start_zallet() {
   local logfile="$1" datadir="${2:-$WORKDIR/zallet-data}"
+  # Same env-config trap as start_zebra: keep the harness's ZALLET_RPC_PORT
+  # out of zallet's environment (the port is baked into zallet.toml).
   RUST_LOG="${ZALLET_RUST_LOG:-info}" \
+    env -u ZALLET_RPC_PORT \
     "$ZALLET_BIN" -d "$datadir" -c "$WORKDIR/zallet.toml" start \
     >> "$WORKDIR/$logfile" 2>&1 &
   ZALLET_PID=$!
@@ -363,7 +378,7 @@ fully_synced() {
 # ingestion that follows the import-triggered rescan.
 setup_converged() {
   fully_synced "$TIP" \
-    && [ "$(wallet_db 'SELECT COUNT(*) FROM transparent_received_outputs;' 2>/dev/null)" = "$TIP" ]
+    && [ "$(wallet_db 'SELECT COUNT(*) FROM transparent_received_outputs;' 2>/dev/null)" = "$((TIP - X_COUNT))" ]
 }
 
 raw_rows_present() {
@@ -446,18 +461,26 @@ EOF
   # and shutdown, so every expectation below derives from the ACTUAL mined
   # boundaries, never from the requested targets.
   PHASE1_TIP=$(zebra_height)
-  log "funding phase 2: mining to height $((PHASE1_TIP + MINE_PHASE_BLOCKS)) for $ADDR_B"
-  mine_to "$ADDR_B" $((PHASE1_TIP + MINE_PHASE_BLOCKS))
+  # One coinbase for the spend-poison scenario's derived address: phase 2's
+  # blocks mature it for free, so the scenario never mines a maturity window.
+  log "funding poison address: mining to height $((PHASE1_TIP + 1)) for $ADDR_C_POISON"
+  mine_to "$ADDR_C_POISON" $((PHASE1_TIP + 1))
+  C_TIP=$(zebra_height)
+  X_COUNT=$((C_TIP - PHASE1_TIP))
+  log "funding phase 2: mining to height $((C_TIP + MINE_PHASE_BLOCKS)) for $ADDR_B"
+  mine_to "$ADDR_B" $((C_TIP + MINE_PHASE_BLOCKS))
   TIP=$(zebra_height)
 
   # Coinbase outputs need 100 confirmations and z_listunspent evaluates
   # spendability at the next block (target height TIP+1), so heights
   # 1..TIP-99 are spendable. Addr A owns heights 1..PHASE1_TIP, addr B owns
   # PHASE1_TIP+1..TIP. (Verified empirically at two chain lengths.)
-  MATURE_TOTAL=$((TIP - 99))
-  MATURE_A=$((PHASE1_TIP < MATURE_TOTAL ? PHASE1_TIP : MATURE_TOTAL))
+  # MATURE_TOTAL counts only WATCHED mature coinbases: the poison address's
+  # X_COUNT coinbases are unwatched by the main wallet and never list here.
+  MATURE_A=$((PHASE1_TIP < TIP - 99 ? PHASE1_TIP : TIP - 99))
+  MATURE_TOTAL=$((TIP - 99 - X_COUNT))
   MATURE_B=$((MATURE_TOTAL - MATURE_A))
-  log "mined boundaries: phase1=$PHASE1_TIP tip=$TIP mature=(A=$MATURE_A B=$MATURE_B total=$MATURE_TOTAL)"
+  log "mined boundaries: phase1=$PHASE1_TIP poison=$X_COUNT tip=$TIP mature=(A=$MATURE_A B=$MATURE_B watched=$MATURE_TOTAL)"
   if [ "$MATURE_B" -le 0 ]; then
     echo "::error::MINE_PHASE_BLOCKS too small: phase-2 coinbases never mature" >&2
     exit 1
@@ -482,7 +505,7 @@ EOF
   local resp
   resp=$(wallet_rpc z_importaddress "[\"$ACCOUNT\", \"$PUBKEY_A\", true]" 30) || resp="(rpc failure)"
   contains "$resp" '"address"' || { echo "::error::rescan kick failed: $resp" >&2; exit 1; }
-  WAIT_TIMEOUT=$((TIP * 5)) wait_until "wallet synced to $TIP with all $TIP coinbase receipts ingested" setup_converged \
+  WAIT_TIMEOUT=$((TIP * 5)) wait_until "wallet synced to $TIP with all $((TIP - X_COUNT)) watched coinbase receipts ingested" setup_converged \
     || { echo "::error::setup never converged (receipts: $(wallet_db 'SELECT COUNT(*) FROM transparent_received_outputs;' 2>/dev/null))" >&2; exit 1; }
 }
 
@@ -656,18 +679,19 @@ scenario_poison_heal() {
 # newer receipt's near-tip request could therefore mark an older output's
 # not-yet-fetched spend range as checked, leaving the spent output listed as
 # unspent forever. The repro builds a real on-chain EXTERNAL spend: a signer
-# wallet (fixed mnemonic, its own datadir) shields a matured coinbase from a
-# derived transparent address INTO THE MAIN WALLET's account (a different
-# seed: if the spend paid the poison seed, the recovery below would decrypt
-# it during scanning and record the spend through the enhancement path,
-# bypassing the spend-search code under test). Newer coinbases then land on
-# the same address, the signer is destroyed, and a fresh recovery of the
-# poison seed must discover a spend it cannot decrypt and did not create.
-# Receipt ingestion and spend-search servicing each only run at startup or on
-# tip change, so the flow restarts zallet deliberately: once to ingest
-# receipts (which queues the spend-search requests), once more to service
-# those requests. Runs LAST: it extends the chain, invalidating the
-# mature-count math of earlier scenarios.
+# wallet (fixed mnemonic, its own datadir) shields the setup-funded, already
+# mature coinbase on its derived transparent address INTO THE MAIN WALLET's
+# account (a different seed: if the spend paid the poison seed, the recovery
+# below would decrypt it during scanning and record the spend through the
+# enhancement path, bypassing the spend-search code under test). The signer
+# then deshields a small amount back to the same address: the newer receipt,
+# deliberately NON-coinbase so it lists without a maturity window. The signer
+# is destroyed, and a fresh recovery of the poison seed must discover a spend
+# it cannot decrypt and did not create. Receipt ingestion and spend-search
+# servicing each only run at startup or on tip change, so the flow restarts
+# zallet deliberately: once to ingest receipts (which queues the spend-search
+# requests), once more to service those requests. Runs LAST: it extends the
+# chain, invalidating the mature-count math of earlier scenarios.
 scenario_spend_poison() {
   # The shielding target, captured while the main wallet is still up.
   local ua_main
@@ -682,7 +706,7 @@ for acct in json.load(sys.stdin)["result"]:
   stop_zallet
   local signer_dir="$WORKDIR/zallet-signer" fresh_dir="$WORKDIR/zallet-fresh"
   local resp seedfp addr_c opid opstatus
-  local x_tip x_count s_height b_tip b_count poison_tip
+  local s_height b_height poison_tip
   if [ -z "$ua_main" ]; then
     fail "spend-poison: could not capture the main wallet's shielded address"
     start_zallet "zallet.log"
@@ -716,25 +740,20 @@ for acct in json.load(sys.stdin)["result"]:
     start_zallet "zallet.log"
     return
   fi
+  # Derivation-drift tripwire: setup funded ADDR_C_POISON on the assumption
+  # that this signer derives exactly that address.
+  if [ "$addr_c" != "$ADDR_C_POISON" ]; then
+    fail "spend-poison: derived address $addr_c != funded constant $ADDR_C_POISON"
+    start_zallet "zallet.log"
+    return
+  fi
 
-  # X coinbases: mined to the derived address, then 100 elsewhere so X matures
-  # and the eventual spend height sits beyond X's first 41-block check window.
-  mine_to "$addr_c" $((TIP + 1))
-  x_tip=$(zebra_height)
-  x_count=$((x_tip - TIP))
-  # +105, not +100: zebra can drop a non-finalized block across the serve
-  # restart, and the shielding below needs every X coinbase safely mature.
-  mine_to "$ADDR_B" $((x_tip + 105))
-
-  # Signer: sync, then restart once so the startup sweep ingests the coinbase
-  # receipts (receipts are written by the enhancement pass, which runs only at
-  # startup or on tip change, and this chain is frozen).
+  # Signer: sync, then restart once so the startup sweep ingests the setup's
+  # X_COUNT coinbase receipts (receipts are written by the enhancement pass,
+  # which runs only at startup or on tip change, and this chain is frozen).
   start_zallet "zallet-signer.log" "$signer_dir"
   local signer_tip signer_restarted="" sync_deadline
   signer_tip=$(zebra_height)
-  # The embedded chain index has a startup window where historic block-range
-  # fetches can hang (pre-existing zaino readiness defect, see
-  # zaino-issue-readiness.md); one restart clears it, so allow exactly one.
   sync_deadline=$((SECONDS + signer_tip * 3))
   until fully_synced "$signer_tip" > /dev/null 2>&1; do
     if [ "$SECONDS" -ge "$sync_deadline" ]; then
@@ -754,10 +773,21 @@ for acct in json.load(sys.stdin)["result"]:
   stop_zallet
   start_zallet "zallet-signer.log" "$signer_dir"
   signer_receipts() {
-    [ "$(wallet_db_at "$signer_dir" "SELECT COUNT(*) FROM transparent_received_outputs;" 2>/dev/null)" = "$x_count" ]
+    [ "$(wallet_db_at "$signer_dir" "SELECT COUNT(*) FROM transparent_received_outputs;" 2>/dev/null)" = "$X_COUNT" ]
   }
-  WAIT_TIMEOUT=180 wait_until "signer ingested $x_count coinbase receipts" signer_receipts || {
+  WAIT_TIMEOUT=180 wait_until "signer ingested $X_COUNT coinbase receipts" signer_receipts || {
     fail "spend-poison: signer never ingested its coinbase receipts"
+    stop_zallet; start_zallet "zallet.log"; return
+  }
+  # Receipt ingestion proves the index serves transaction fetches, but the
+  # transaction BUILDER also needs treestate queries, which warm up
+  # independently after a restart (observed: z_shieldcoinbase stuck in
+  # "executing"). Gate on the node view reporting the real tip.
+  signer_node_ready() {
+    [ "$(wallet_rpc getwalletstatus | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$signer_tip" ]
+  }
+  WAIT_TIMEOUT=180 wait_until "signer node view at $signer_tip" signer_node_ready || {
+    fail "spend-poison: signer chain view never warmed for shielding"
     stop_zallet; start_zallet "zallet.log"; return
   }
 
@@ -766,7 +796,7 @@ for acct in json.load(sys.stdin)["result"]:
   opid=$(wallet_rpc z_shieldcoinbase "[\"$addr_c\", \"$ua_main\"]" 60 | json_field "['result']['opid']") || true
   opstatus=""
   if [ -n "$opid" ]; then
-    local op_deadline=$((SECONDS + 120))
+    local op_deadline=$((SECONDS + 240))
     while [ "$SECONDS" -lt "$op_deadline" ]; do
       opstatus=$(wallet_rpc z_getoperationstatus "[[\"$opid\"]]" | json_field "['result'][0]['status']") || true
       case "$opstatus" in success|failed) break ;; esac
@@ -789,25 +819,62 @@ for acct in json.load(sys.stdin)["result"]:
     return
   fi
 
-  # Mine the shielding tx (spend height S), then land newer coinbases on the
-  # same address above S, then mature them.
+  # Mine the shielding tx (spend height S), then bury it ten blocks so the
+  # recipient's new orchard note clears any default spend-confirmation policy.
+  # The signer's role ends here.
+  rm -rf "$signer_dir"
   mine_with_tx "$ADDR_B" $(( $(zebra_height) + 1 )) "$shield_rawtx" "$shield_txid"
   s_height=$(zebra_height)
-  mine_to "$addr_c" $((s_height + 3))
-  b_tip=$(zebra_height)
-  b_count=$((b_tip - s_height))
-  # +110: same drop-across-restart hazard; the newest B coinbase must stay
-  # clear of the 100-confirmation maturity boundary the listing assert needs.
-  mine_to "$ADDR_B" $((b_tip + 110))
-  poison_tip=$(zebra_height)
-  rm -rf "$signer_dir"
+  mine_to "$ADDR_B" $((s_height + 10))
 
-  # Sanity: the chain itself agrees X is spent (only the B coinbases remain).
+  # The newer receipt on the address: the MAIN wallet (which received the
+  # shielded value; the poison seed cannot decrypt that tx by design)
+  # deshields a small amount back to the derived address. Non-coinbase, so no
+  # maturity window is needed for listing.
+  start_zallet "zallet.log"
+  local deshield_tip
+  deshield_tip=$(zebra_height)
+  WAIT_TIMEOUT=$((deshield_tip * 3)) wait_until "main wallet synced to $deshield_tip" fully_synced "$deshield_tip" || {
+    fail "spend-poison: main wallet never caught up for the deshield"
+    return
+  }
+  opid=$(wallet_rpc z_sendmany "[\"$ua_main\", [{\"address\": \"$ADDR_C_POISON\", \"amount\": 0.5}], 1, null, \"AllowRevealedRecipients\"]" 60 | json_field "['result']") || true
+  opstatus=""
+  if [ -n "$opid" ] && [ "$opid" != "None" ]; then
+    local op2_deadline=$((SECONDS + 240))
+    while [ "$SECONDS" -lt "$op2_deadline" ]; do
+      opstatus=$(wallet_rpc z_getoperationstatus "[[\"$opid\"]]" | json_field "['result'][0]['status']") || true
+      case "$opstatus" in success|failed) break ;; esac
+      sleep 2
+    done
+  fi
+  local deshield_txid="" deshield_rawtx=""
+  if [ "$opstatus" = "success" ]; then
+    deshield_txid=$(wallet_rpc z_getoperationresult "[[\"$opid\"]]" | json_field "['result'][0]['result']['txid']") || true
+    if [ -n "$deshield_txid" ]; then
+      deshield_rawtx=$(zebra_rpc getrawtransaction "[\"$deshield_txid\", 0]" | json_field "['result']") || true
+    fi
+  fi
+  stop_zallet
+  if [ "$opstatus" != "success" ] || [ -z "$deshield_rawtx" ] || [ "$deshield_rawtx" = "None" ]; then
+    fail "spend-poison: deshield tx not built/captured (status: ${opstatus:-none}, txid: ${deshield_txid:-none})"
+    start_zallet "zallet.log"
+    return
+  fi
+
+  # Mine the deshield (the newer receipt), then a small margin tolerant of
+  # zebra dropping a non-finalized block across the serve restart.
+  mine_with_tx "$ADDR_B" $(( $(zebra_height) + 1 )) "$deshield_rawtx" "$deshield_txid"
+  b_height=$(zebra_height)
+  mine_to "$ADDR_B" $((b_height + 3))
+  poison_tip=$(zebra_height)
+
+  # Sanity: the chain agrees X is spent; only the deshielded receipt remains.
   local chain_unspent
   chain_unspent=$(zebra_rpc getaddressutxos "[{\"addresses\": [\"$addr_c\"]}]" \
     | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))') || true
-  assert "spend-poison: chain shows only the $b_count newer coinbases unspent (got $chain_unspent)" \
-    [ "$chain_unspent" = "$b_count" ]
+  assert "spend-poison: chain shows only the deshielded receipt unspent (got $chain_unspent)" \
+    [ "$chain_unspent" = "1" ]
 
   # Fresh recovery of the poison seed: it must discover the spend it never made.
   mkdir -p "$fresh_dir"
@@ -875,16 +942,16 @@ for acct in json.load(sys.stdin)["result"]:
     [ "$(wallet_db_at "$fresh_dir" \
       "SELECT COUNT(*) FROM transparent_received_outputs tro
        JOIN addresses a ON a.id = tro.address_id
-       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$((x_count + b_count))" ]
+       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$((X_COUNT + 1))" ]
   }
-  WAIT_TIMEOUT=180 wait_until "recovery ingested $((x_count + b_count)) receipts" fresh_tracked || true
+  WAIT_TIMEOUT=180 wait_until "recovery ingested $((X_COUNT + 1)) receipts" fresh_tracked || true
   local tracked spent
   tracked=$(wallet_db_at "$fresh_dir" \
     "SELECT COUNT(*) FROM transparent_received_outputs tro
      JOIN addresses a ON a.id = tro.address_id
      WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null) || true
-  assert "spend-poison: recovery tracked all $((x_count + b_count)) coinbases on the derived address (got $tracked)" \
-    [ "$tracked" = "$((x_count + b_count))" ]
+  assert "spend-poison: recovery tracked $((X_COUNT + 1)) outputs on the derived address (got $tracked)" \
+    [ "$tracked" = "$((X_COUNT + 1))" ]
 
   # Restart 2: a fresh startup sweep whose request batch now contains the
   # queued spend-search requests; this pass must discover the external spend.
@@ -895,25 +962,26 @@ for acct in json.load(sys.stdin)["result"]:
       "SELECT COUNT(*) FROM transparent_received_output_spends s
        JOIN transparent_received_outputs tro ON tro.id = s.transparent_received_output_id
        JOIN addresses a ON a.id = tro.address_id
-       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$x_count" ]
+       WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null)" = "$X_COUNT" ]
   }
-  WAIT_TIMEOUT=180 wait_until "external spend of $x_count outputs recorded" spend_recorded || true
+  WAIT_TIMEOUT=180 wait_until "external spend of $X_COUNT outputs recorded" spend_recorded || true
   spent=$(wallet_db_at "$fresh_dir" \
     "SELECT COUNT(*) FROM transparent_received_output_spends s
      JOIN transparent_received_outputs tro ON tro.id = s.transparent_received_output_id
      JOIN addresses a ON a.id = tro.address_id
      WHERE a.cached_transparent_receiver_address = '$addr_c';" 2>/dev/null) || true
-  assert "spend-poison: external spend recorded for all $x_count shielded coinbases (got $spent)" \
-    [ "$spent" = "$x_count" ]
+  assert "spend-poison: external spend recorded for all $X_COUNT shielded coinbases (got $spent)" \
+    [ "$spent" = "$X_COUNT" ]
 
-  # RPC-level contract: the spent outputs are gone, the newer matured ones list.
+  # RPC-level contract: the spent coinbases are gone; the deshielded receipt
+  # lists immediately (non-coinbase: no maturity requirement).
   local listed
   listed=$(wallet_rpc z_listunspent "[1, 9999999, true, [\"$addr_c\"]]" 60 | python3 -c '
 import json, sys
 rows = [u for u in json.load(sys.stdin)["result"] if u["pool"] == "transparent"]
 print(len(rows))') || true
-  assert "spend-poison: z_listunspent shows exactly the $b_count unspent coinbases (got $listed)" \
-    [ "$listed" = "$b_count" ]
+  assert "spend-poison: z_listunspent shows exactly the deshielded receipt (got $listed)" \
+    [ "$listed" = "1" ]
 
   # Restore the main wallet for any scenario that might follow.
   stop_zallet
