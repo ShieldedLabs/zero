@@ -76,11 +76,31 @@ jobs:
           # key only needs to rotate when the harness itself changes.
           key: z3-golden-${{ hashFiles('qa/regtest-harness/run.sh') }}
 
-      - name: Run the harness
+      # Three isolated invocations from the same golden snapshot, mirroring
+      # run-parallel.sh's semantics sequentially (2-core runners cannot host
+      # concurrent stacks). Isolation matters for correctness, not just
+      # speed: the reorg scenario is reliable against a pristine chain but
+      # accumulates tolerance drift when run after the other scenarios'
+      # chain mutations at release-profile mining speed.
+      - name: Golden chain
         env:
-          # Stable path so the failure artifact can find it.
-          HARNESS_WORKDIR: ${{ runner.temp }}/z3-regtest
-        run: qa/regtest-harness/run.sh
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-golden
+        run: qa/regtest-harness/run.sh --setup-only
+
+      - name: Wallet-contract scenarios
+        env:
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-fast
+        run: qa/regtest-harness/run.sh --only baseline,dust,filter,union,hang-guard,poison-heal
+
+      - name: Spend-poison scenario
+        env:
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-poison
+        run: qa/regtest-harness/run.sh --only spend-poison
+
+      - name: Reorg scenario
+        env:
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-reorg
+        run: qa/regtest-harness/run.sh --only reorg
 
       - name: Upload workdir on failure
         if: failure()
