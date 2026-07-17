@@ -362,6 +362,21 @@ TEST(TransactionBuilder, EnableIronwoodRequiresV6)
     RegtestDeactivateNU5();
 }
 
+// review XR-7: an unsupported (pool, protocol) pairing crosses the raw FFI
+// boundary, where the crate builds with panic='abort' — before the fix this
+// test aborted the whole process at Builder construction. Now the FFI returns
+// null and every use of the builder throws the null-inner logic_error. // @claude
+TEST(TransactionBuilder, InvalidOrchardBuilderPairingFailsGracefully)
+{
+    // (Ironwood, InsecureV1) and (Ironwood, V2) are not constructible bundle
+    // versions; both must yield an inert builder, not a process abort.
+    for (auto version : {orchard::ProtocolVersion::InsecureV1, orchard::ProtocolVersion::V2}) {
+        orchard::Builder builder(
+            false, {orchard::OrchardValuePool::Ironwood, version}, uint256());
+        EXPECT_THROW((void)builder.Build(), std::logic_error);
+    }
+}
+
 TEST(TransactionBuilder, RejectsTransparentToOrchardIfDisabled)
 {
     LoadProofParameters();

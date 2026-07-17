@@ -67,6 +67,10 @@ pub extern "C" fn orchard_builder_new(
     };
     let cross_address_bit =
         flags.cross_address_enabled && bundle_version.protocol_version == ffi::ProtocolVersion::V3;
+    // Every failure path below returns null rather than panicking: this is a raw
+    // `extern "C"` boundary and the crate builds with `panic = 'abort'`, so a panic
+    // here would take down the whole node from (e.g.) block-template creation
+    // instead of failing one call. The C++ wrapper null-checks. // @claude (review XR-7)
     let bundle_version = match (bundle_version.value_pool, bundle_version.protocol_version) {
         (ffi::ValuePool::Orchard, ffi::ProtocolVersion::InsecureV1) => {
             orchard::bundle::BundleVersion::orchard_insecure_v1()
@@ -80,31 +84,39 @@ pub extern "C" fn orchard_builder_new(
         (ffi::ValuePool::Ironwood, ffi::ProtocolVersion::V3) => {
             orchard::bundle::BundleVersion::ironwood_v3()
         }
-        _ => panic!("invalid Orchard bundle version"),
+        (pool, version) => {
+            error!(
+                "Invalid Orchard bundle version: (pool {}, protocol {}) is not a supported pair",
+                pool.repr, version.repr
+            );
+            return ptr::null_mut();
+        }
     };
-    let flags = orchard::bundle::Flags::from_byte(
+    let flags = match orchard::bundle::Flags::from_byte(
         (flags.spends_enabled as u8)
             | ((flags.outputs_enabled as u8) << 1)
             | ((cross_address_bit as u8) << 2),
         bundle_version,
-    )
-    .expect("invalid Orchard bundle flags");
+    ) {
+        Some(flags) => flags,
+        None => {
+            error!("Invalid Orchard bundle flags for this bundle version");
+            return ptr::null_mut();
+        }
+    };
     let anchor = unsafe { anchor.as_ref() }
         .map(|a| orchard::Anchor::from_bytes(*a).unwrap())
         .unwrap_or_else(|| MerkleHashOrchard::empty_root(32.into()).into());
     // The builder stamps this circuit version onto each action's circuit; the proving key
     // passed to `orchard_unauthorized_bundle_prove_and_sign` must match.
-    Box::into_raw(Box::new(
-        Builder::new(bundle_type, bundle_version, flags, anchor)
-            .expect("failed to build orchard bundle"), /* @nocommit: infallible? + errors */
-    ))
+    match Builder::new(bundle_type, bundle_version, flags, anchor) {
+        Ok(builder) => Box::into_raw(Box::new(builder)),
+        Err(e) => {
+            error!("Failed to construct Orchard builder: {:?}", e);
+            ptr::null_mut()
+        }
+    }
 }
-// orchard_builder_new_nu6_3(
-//     coinbase: bool,
-//     anchor: *const [u8; 32],
-// ) -> *mut Builder {
-//     orchard_builder_new(coinbase, anchor, orchard::BundleProtocol::)
-// }
 
 #[no_mangle]
 pub extern "C" fn orchard_builder_add_spend(
