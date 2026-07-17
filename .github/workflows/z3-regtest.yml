@@ -48,17 +48,33 @@ jobs:
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
+          # v2: release-profile switch; fresh prefix rebuilds the caches
+          # from scratch rather than layering release artifacts onto the
+          # old debug cache entries.
+          prefix-key: v2-release
           workspaces: |
             zebra -> target
             zallet -> target
 
+      # Release profile: mining, proving, and scanning are compute-bound;
+      # debug binaries ran the harness 5-10x slower and widened its
+      # startup-race retry windows.
       - name: Build zebrad (internal miner)
         working-directory: zebra
-        run: cargo build -p zebrad --features internal-miner
+        run: cargo build --release -p zebrad --features internal-miner
 
       - name: Build zallet (zaino backend)
         working-directory: zallet
-        run: cargo build -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import
+        run: cargo build --release -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import
+
+      - name: Cache the golden chain
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/z3-harness-golden
+          # The harness computes its own content key (GOLDEN_EPOCH + mining
+          # constants) and self-invalidates on restore failure; this outer
+          # key only needs to rotate when the harness itself changes.
+          key: z3-golden-${{ hashFiles('qa/regtest-harness/run.sh') }}
 
       - name: Run the harness
         env:

@@ -26,6 +26,30 @@ Scenarios run in order and are stateful by design (later scenarios build on
 the chain and wallet mutations of earlier ones). `--only` skips scenarios but
 never reorders them.
 
+## Speed model
+
+The harness runs **release-profile** binaries (debug runs are 5-10x slower
+and flakier: a debug orchard proof alone takes minutes). Setup's mining and
+wallet convergence are snapshotted as a **golden chain** under
+`~/.cache/z3-harness-golden/<key>` and restored on later runs (~1 minute
+instead of ~5). `run-parallel.sh` runs the scenario groups as three
+port-isolated stacks from the same snapshot: full suite in roughly the time
+of its slowest scenario.
+
+**When to rebuild the golden chain**: bump `GOLDEN_EPOCH` in `run.sh` (which
+changes the snapshot key) whenever any of these change:
+
+- zallet wallet-db migrations (schema),
+- zebra's state/cache format,
+- setup logic, config templates, or the mined layout the scenarios expect
+  (phase sizes, funded addresses, the poison coinbase).
+
+Forgetting a bump costs time, not correctness: a stale snapshot fails the
+restore verification (height, receipt count, wallet sync) and the harness
+falls back to a full re-mine, then re-snapshots. `--regen-golden` forces
+that path manually; `--setup-only` builds the snapshot without running
+scenarios (used by `run-parallel.sh` to pre-warm).
+
 ## Running locally
 
 ```sh

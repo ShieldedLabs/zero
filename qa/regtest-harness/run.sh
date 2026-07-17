@@ -45,8 +45,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ZEBRAD_BIN="${ZEBRAD_BIN:-$REPO_ROOT/zebra/target/debug/zebrad}"
-ZALLET_BIN="${ZALLET_BIN:-$REPO_ROOT/zallet/target/debug/zallet}"
+# Release binaries by default: mining, proving, and scanning are
+# compute-bound, and debug-profile runs are 5-10x slower end to end (a
+# debug orchard proof alone takes minutes and widens every startup-race
+# window this harness has to defend against).
+ZEBRAD_BIN="${ZEBRAD_BIN:-$REPO_ROOT/zebra/target/release/zebrad}"
+ZALLET_BIN="${ZALLET_BIN:-$REPO_ROOT/zallet/target/release/zallet}"
 MINE_PHASE_BLOCKS="${MINE_PHASE_BLOCKS:-105}"
 
 # Public test constants (regtest-only; never reuse where value can exist).
@@ -85,6 +89,8 @@ while [ $# -gt 0 ]; do
     --keep) KEEP=1 ;;
     --build) BUILD=1 ;;
     --only) ONLY="$2"; shift ;;
+    --regen-golden) REGEN_GOLDEN=1 ;;
+    --setup-only) SETUP_ONLY=1 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -431,6 +437,95 @@ for u in json.load(sys.stdin)["result"]:
 
 count_lines() { grep -c . || true; }
 
+# --- Golden chain -----------------------------------------------------------
+# Mining and wallet convergence dominate setup (~4 minutes even at release
+# profile), and their output is fully determined by the constants below, so
+# it is mined once and snapshotted. BUMP GOLDEN_EPOCH whenever a change
+# invalidates old snapshots that the key cannot see on its own:
+#   - zallet wallet-db migrations (schema changes)
+#   - zebra state format changes (cache version)
+#   - any change to setup()'s logic, the config templates, or scenario
+#     expectations about the mined layout
+# A stale snapshot that slips through fails the restore verification below
+# and falls back to a full re-mine, so a missed bump costs time, not
+# correctness.
+GOLDEN_EPOCH=1
+GOLDEN_DIR="${GOLDEN_DIR:-$HOME/.cache/z3-harness-golden}"
+REGEN_GOLDEN=0
+SETUP_ONLY=0
+
+golden_key() {
+  printf 'epoch=%s|blocks=%s|%s|%s|%s|%s|%s'     "$GOLDEN_EPOCH" "$MINE_PHASE_BLOCKS"     "$PUBKEY_A" "$PUBKEY_B" "$ADDR_C_POISON" "$MNEMONIC_POISON" "$ADDR_UNRELATED"     | shasum -a 256 | cut -c1-16
+}
+
+# Restore a snapshot into the workdir and start the stack from it. Returns
+# non-zero (leaving the workdir dirty for the full path to overwrite) if the
+# snapshot is absent or fails verification.
+golden_restore() {
+  local key gdir
+  key=$(golden_key)
+  gdir="$GOLDEN_DIR/$key"
+  [ -f "$gdir/meta.env" ] || return 1
+  log "golden chain: restoring snapshot $key"
+  rm -rf "$WORKDIR/zebra-cache" "$WORKDIR/zallet-data"
+  cp -R "$gdir/zebra-cache" "$WORKDIR/zebra-cache"
+  cp -R "$gdir/zallet-data" "$WORKDIR/zallet-data"
+  cp "$gdir/encryption-identity.txt" "$WORKDIR/" 2>/dev/null || true
+  # shellcheck source=/dev/null
+  . "$gdir/meta.env"
+  write_zebra_config "$ADDR_A" false
+  start_zebra "zebra-serve.log"
+  if [ "$(zebra_height 2>/dev/null || echo 0)" != "$TIP" ]; then
+    log "golden chain: zebra height mismatch (want $TIP); discarding snapshot"
+    stop_zebra; return 1
+  fi
+  start_zallet "zallet.log"
+  if ! WAIT_TIMEOUT=120 wait_until "restored wallet reports tip $TIP" fully_synced "$TIP"; then
+    log "golden chain: restored wallet never verified; discarding snapshot"
+    stop_zallet; stop_zebra; return 1
+  fi
+  if [ "$(wallet_db 'SELECT COUNT(*) FROM transparent_received_outputs;' 2>/dev/null)" != "$((TIP - X_COUNT))" ]; then
+    log "golden chain: receipt count mismatch; discarding snapshot"
+    stop_zallet; stop_zebra; return 1
+  fi
+  log "golden chain: restored (tip=$TIP watched-mature=$MATURE_TOTAL)"
+}
+
+# Snapshot the converged post-setup state. Daemons must be stopped by the
+# caller; writes atomically (tmp dir + rename) so an interrupted save never
+# leaves a half snapshot under the key.
+golden_save() {
+  local key gdir tmp
+  key=$(golden_key)
+  gdir="$GOLDEN_DIR/$key"
+  tmp="$GOLDEN_DIR/.tmp.$key.$$"
+  rm -rf "$tmp" "$gdir"
+  mkdir -p "$tmp"
+  cp -R "$WORKDIR/zebra-cache" "$tmp/zebra-cache"
+  cp -R "$WORKDIR/zallet-data" "$tmp/zallet-data"
+  cp "$WORKDIR/encryption-identity.txt" "$tmp/" 2>/dev/null || true
+  {
+    printf 'PHASE1_TIP=%s
+' "$PHASE1_TIP"
+    printf 'C_TIP=%s
+' "$C_TIP"
+    printf 'X_COUNT=%s
+' "$X_COUNT"
+    printf 'TIP=%s
+' "$TIP"
+    printf 'MATURE_A=%s
+' "$MATURE_A"
+    printf 'MATURE_B=%s
+' "$MATURE_B"
+    printf 'MATURE_TOTAL=%s
+' "$MATURE_TOTAL"
+    printf 'ACCOUNT=%s
+' "$ACCOUNT"
+  } > "$tmp/meta.env"
+  mv "$tmp" "$gdir"
+  log "golden chain: snapshot saved as $key"
+}
+
 setup() {
   log "workdir: $WORKDIR"
   [ -x "$ZEBRAD_BIN" ] || { echo "::error::zebrad not found at $ZEBRAD_BIN (need --features internal-miner)" >&2; exit 1; }
@@ -459,6 +554,12 @@ bind = ["127.0.0.1:$ZALLET_RPC_PORT"]
 user = "$RPC_USER"
 password = "$RPC_PASS"
 EOF
+
+  if [ "$REGEN_GOLDEN" = 0 ] && golden_restore; then
+    return 0
+  fi
+  rm -rf "$WORKDIR/zebra-cache" "$WORKDIR/zallet-data"
+  mkdir -p "$WORKDIR/zallet-data" "$WORKDIR/zebra-cache"
 
   log "initializing wallet (offline)"
   "$ZALLET_BIN" -d "$WORKDIR/zallet-data" -c "$WORKDIR/zallet.toml" generate-encryption-identity > "$WORKDIR/init.log" 2>&1
@@ -540,6 +641,17 @@ EOF
   contains "$resp" '"address"' || { echo "::error::rescan kick failed: $resp" >&2; exit 1; }
   WAIT_TIMEOUT=$((TIP * 5)) wait_until "wallet synced to $TIP with all $((TIP - X_COUNT)) watched coinbase receipts ingested" setup_converged \
     || { echo "::error::setup never converged (receipts: $(wallet_db 'SELECT COUNT(*) FROM transparent_received_outputs;' 2>/dev/null))" >&2; exit 1; }
+
+  # Snapshot the converged state for future runs, then hand back the same
+  # running stack the non-golden path always produced.
+  stop_zallet
+  stop_zebra
+  golden_save
+  write_zebra_config "$ADDR_A" false
+  start_zebra "zebra-serve.log"
+  start_zallet "zallet.log"
+  WAIT_TIMEOUT=120 wait_until "stack back up after snapshot (tip $TIP)" fully_synced "$TIP" \
+    || { echo "::error::stack never came back after golden snapshot" >&2; exit 1; }
 }
 
 scenario_baseline() {
@@ -1203,12 +1315,18 @@ run_scenario() {
 
 main() {
   if [ "$BUILD" = 1 ]; then
-    log "building zebrad (internal-miner) and zallet (zaino backend)"
-    (cd "$REPO_ROOT/zebra" && cargo build -p zebrad --features internal-miner)
-    (cd "$REPO_ROOT/zallet" && cargo build -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import)
+    log "building zebrad (internal-miner) and zallet (zaino backend), release profile"
+    (cd "$REPO_ROOT/zebra" && cargo build --release -p zebrad --features internal-miner)
+    (cd "$REPO_ROOT/zallet" && cargo build --release -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import)
   fi
 
   setup
+  if [ "$SETUP_ONLY" = 1 ]; then
+    log "--setup-only: golden chain ready; skipping scenarios"
+    log "=== results: $PASSES passed, $FAILURES failed ==="
+    [ "$FAILURES" = 0 ]
+    return
+  fi
   run_scenario baseline
   run_scenario dust
   run_scenario filter
