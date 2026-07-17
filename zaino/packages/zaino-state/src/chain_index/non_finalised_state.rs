@@ -172,9 +172,9 @@ impl From<UpdateError> for SyncError {
             UpdateError::FinalizedStateCorruption => SyncError::CannotReadFinalizedState(
                 FinalisedStateError::Custom("mystery update failure".to_string()),
             ),
-            UpdateError::DatabaseHole(source) => SyncError::ReorgFailure(format!(
-                "could not determine best chain: {source}"
-            )),
+            UpdateError::DatabaseHole(source) => {
+                SyncError::ReorgFailure(format!("could not determine best chain: {source}"))
+            }
             UpdateError::ValidatorConnectionError(e) => SyncError::ValidatorConnectionError(
                 NodeConnectionError::UnrecoverableError(Box::new(MissingBlockError(e.to_string()))),
             ),

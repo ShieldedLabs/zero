@@ -1165,7 +1165,23 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
                             metrics::histogram!(SYNC_ITERATION_DURATION_SECONDS)
                                 .record(iteration_start.elapsed().as_secs_f64());
                         }
-                        if consecutive_failures >= timings.max_consecutive_failures {
+                        // A validator that is still performing its own initial sync
+                        // can transiently advertise best-chain blocks it cannot yet
+                        // serve (observed in CI as ReorgFailure carrying
+                        // MissingBlockError while zebrad checkpoint-syncs from
+                        // scratch). That condition routinely outlives the standard
+                        // ~45-second failure budget but resolves on its own once the
+                        // validator catches up, so it gets a 12x budget (~15 minutes
+                        // at the default backoff ladder) instead of exiting the
+                        // process into a container crash-loop. The classification is
+                        // textual because the reorg-walk error variant carries only
+                        // a message; a typed cause should replace it upstream.
+                        let failure_budget = if format!("{e:?}").contains("MissingBlockError") {
+                            timings.max_consecutive_failures * 12
+                        } else {
+                            timings.max_consecutive_failures
+                        };
+                        if consecutive_failures >= failure_budget {
                             #[cfg(feature = "prometheus")]
                             metrics::counter!(SYNC_ERRORS_TOTAL, "severity" => "critical")
                                 .increment(1);
@@ -1179,7 +1195,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
                         }
                         tracing::warn!(
                             consecutive_failures,
-                            max = timings.max_consecutive_failures,
+                            max = failure_budget,
                             backoff = ?current_backoff,
                             ?e,
                             "sync loop iteration failed, retrying"
