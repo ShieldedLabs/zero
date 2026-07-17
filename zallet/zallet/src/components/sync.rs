@@ -56,7 +56,6 @@ use zcash_client_backend::{
     sync::decryptor,
 };
 use zcash_client_sqlite::AccountUuid;
-#[cfg(not(feature = "spend-index"))]
 use zcash_client_sqlite::error::SqliteClientError;
 use zcash_primitives::block::BlockHash;
 #[cfg(not(feature = "spend-index"))]
@@ -315,6 +314,20 @@ async fn initialize<C: Chain>(
             // [`NON_RETRYABLE_ERROR_BACKOFF`]): warn, back off, and loop to re-derive the
             // scan ranges against a fresh chain view.
             Err(error) => {
+                // A stored-row hash conflict is the reorg signal for a fork above the
+                // scan cursor but at or below stored block rows (e.g. the chain reorged
+                // while the wallet was offline): rewind to just below the conflict and
+                // loop to re-derive the scan ranges. Backing off instead would retry
+                // the same conflicting range forever.
+                if let Some(conflict_height) = block_conflict_height(&error) {
+                    warn!(
+                        "Stored block at height {conflict_height} conflicts with the \
+                         best chain during initial scan; treating as a reorg and \
+                         rewinding"
+                    );
+                    db_data.truncate_to_height(conflict_height - 1)?;
+                    continue;
+                }
                 warn!("Initial scan of {scan_range} failed; will retry: {error}");
                 time::sleep(if is_retryable(&error) {
                     REORG_RETRY_BACKOFF
@@ -363,16 +376,107 @@ fn is_retryable(error: &SyncError) -> bool {
 /// truncate and step back a small fixed amount at a time along their own view of the chain.
 const FORK_SEARCH_STEP: u32 = 10;
 
+/// Returns the wallet's highest recorded block that a chain view with tip height
+/// `view_tip` can pass judgment on: the highest stored block row at or below `view_tip`,
+/// or `prev_tip` (the scan cursor) if that is higher or no such row exists.
+///
+/// Fork-point detection must search from this block rather than from the scan cursor:
+/// block rows can be stored ahead of the cursor (e.g. rows written before a restart that
+/// the cursor has not yet caught back up to), and a fork above the cursor but at or below
+/// those rows would otherwise go undetected until the block stream collides with a stale
+/// row ([`SqliteClientError::BlockConflict`]). Rows above the view tip are ignored: the
+/// backend cannot judge them (it may merely be behind, e.g. after discarding its
+/// non-finalized state on restart), and they cannot conflict with a block stream that
+/// ends at the view tip.
+fn wallet_view_tip(
+    db_data: &DbConnection,
+    prev_tip: ChainBlock,
+    view_tip: BlockHeight,
+) -> Result<ChainBlock, SyncError> {
+    let stored_tip = match db_data.block_max_scanned()? {
+        Some(max) if max.block_height() <= view_tip => Some(ChainBlock {
+            height: max.block_height(),
+            hash: max.block_hash(),
+        }),
+        Some(_) => stored_block_at_or_below(db_data, view_tip)?,
+        None => None,
+    };
+    Ok(select_wallet_view_tip(prev_tip, stored_tip))
+}
+
+/// The selection rule for [`wallet_view_tip`]: prefer the stored block row when it is
+/// strictly above the scan cursor, otherwise the cursor itself.
+fn select_wallet_view_tip(prev_tip: ChainBlock, stored_tip: Option<ChainBlock>) -> ChainBlock {
+    match stored_tip {
+        Some(stored) if stored.height > prev_tip.height => stored,
+        _ => prev_tip,
+    }
+}
+
+/// The wallet's highest stored block row at or below `height`, if any.
+fn stored_block_at_or_below(
+    db_data: &DbConnection,
+    height: BlockHeight,
+) -> Result<Option<ChainBlock>, SyncError> {
+    use rusqlite::OptionalExtension as _;
+
+    db_data
+        .with_raw(|conn, _| {
+            conn.query_row(
+                "SELECT height, hash FROM blocks
+                 WHERE height <= :height
+                 ORDER BY height DESC
+                 LIMIT 1",
+                rusqlite::named_params! {":height": u32::from(height)},
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+        })
+        .map_err(|e| SyncError::from(SqliteClientError::from(e)))?
+        .map(|(height, hash)| {
+            BlockHash::try_from_slice(&hash)
+                .map(|hash| ChainBlock {
+                    height: BlockHeight::from_u32(height),
+                    hash,
+                })
+                .ok_or_else(|| {
+                    SyncError::from(SqliteClientError::CorruptedData(format!(
+                        "Invalid block hash at height {height}"
+                    )))
+                })
+        })
+        .transpose()
+}
+
+/// If `error` is a stored-block hash conflict, returns the height at which the wallet's
+/// stored block row disagrees with the block just scanned from the best chain.
+///
+/// During near-tip scanning this conflict is a reorg signal, not a fatal error: it means
+/// the fork lies above the wallet's scan cursor but at or below its stored block rows,
+/// exactly the window that fork-point detection from the cursor alone cannot see.
+fn block_conflict_height(error: &SyncError) -> Option<BlockHeight> {
+    match error {
+        SyncError::Other(e) => match e.as_ref() {
+            SqliteClientError::BlockConflict(height) => Some(*height),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Locates the block from which to resume scanning after the wallet's view of the chain
 /// diverges from the backend's best chain.
+///
+/// `wallet_tip` is the wallet's highest recorded block that the backend's view can pass
+/// judgment on (see [`wallet_view_tip`]); the search spans the reorg window below it.
 ///
 /// First asks the backend for the most recent entry of a [block locator](locator) spanning
 /// the reorg window that is on the best chain, which resolves ordinary reorgs in a single
 /// round-trip. An **empty** locator means the wallet has no recorded history yet (a fresh
-/// wallet), so it simply syncs forward from `prev_tip`.
+/// wallet), so it simply syncs forward from `wallet_tip`.
 ///
 /// If the wallet has fallen far enough behind that its recorded history is below the
-/// backend's non-finalized state — so `find_fork_point` cannot locate the divergence — the
+/// backend's non-finalized state (so `find_fork_point` cannot locate the divergence), the
 /// search falls back to the mobile-wallet behaviour: walk the wallet's own view of the
 /// chain back [`FORK_SEARCH_STEP`] blocks at a time, comparing each of the wallet's block
 /// hashes against the backend's best chain, until one matches (the resume point) or the
@@ -380,22 +484,23 @@ const FORK_SEARCH_STEP: u32 = 10;
 async fn locate_fork_point<V: ChainView>(
     chain_view: &V,
     db_data: &DbConnection,
-    prev_tip: ChainBlock,
+    wallet_tip: ChainBlock,
 ) -> Result<ChainBlock, SyncError> {
     let birthday = db_data
         .get_wallet_birthday()?
         .unwrap_or(BlockHeight::from_u32(0));
 
     // Fast path: locate the fork point within the reorg window in one round-trip.
-    let locator = locator::build_block_locator(db_data, prev_tip.height)?;
+    let locator = locator::build_block_locator(db_data, wallet_tip.height)?;
     match chain_view
         .find_fork_point(&locator)
         .await
         .map_err(SyncError::Chain)?
     {
         Some(fork_point) => return Ok(fork_point),
-        // A fresh wallet has no recorded history to fork from; sync forward from prev_tip.
-        None if locator.hashes().is_empty() => return Ok(prev_tip),
+        // A fresh wallet has no recorded history to fork from; sync forward from the
+        // wallet tip.
+        None if locator.hashes().is_empty() => return Ok(wallet_tip),
         None => {}
     }
 
@@ -403,9 +508,9 @@ async fn locate_fork_point<V: ChainView>(
     // back a fixed step at a time, looking for one of its blocks still on the best chain.
     debug!(
         "wallet tip {} (height {}) is not on the best chain; stepping back to find a resume point",
-        prev_tip.hash, prev_tip.height,
+        wallet_tip.hash, wallet_tip.height,
     );
-    step_back_to_best_chain(chain_view, prev_tip, birthday, |height| {
+    step_back_to_best_chain(chain_view, wallet_tip, birthday, |height| {
         Ok(db_data.get_block_hash(height)?)
     })
     .await
@@ -513,6 +618,25 @@ async fn steady_state<C: Chain>(
                     time::sleep(REORG_RETRY_BACKOFF).await;
                     continue;
                 }
+                // A stored-row hash conflict is a reorg that fork-point detection did not
+                // see. The blocks below the conflict were just applied from the best
+                // chain, so rewind to the block below it, reset the cursor, and rescan.
+                // Exiting instead would leave the conflicting row in place, making this
+                // a deterministic crash loop on every restart.
+                if let Some(conflict_height) = block_conflict_height(&error) {
+                    warn!(
+                        "Stored block at height {conflict_height} conflicts with the \
+                         best chain; treating as a reorg and rewinding"
+                    );
+                    let truncation_height = db_data.truncate_to_height(conflict_height - 1)?;
+                    if let Some(hash) = db_data.get_block_hash(truncation_height)? {
+                        prev_tip = ChainBlock {
+                            height: truncation_height,
+                            hash,
+                        };
+                    }
+                    continue;
+                }
                 return Err(error);
             }
         }
@@ -549,29 +673,39 @@ async fn steady_state_iteration<C: Chain>(
             .expect("closure always returns Some");
         tip_change_signal.notify_one();
 
-        // Find where the wallet's history rejoins the backend's best chain.
-        let fork_point = locate_fork_point(&chain_view, db_data, *prev_tip).await?;
+        // Find where the wallet's history rejoins the backend's best chain. The search
+        // starts from the wallet's highest recorded block this view can judge, not from
+        // the scan cursor: a fork above the cursor but at or below stored-ahead block
+        // rows must also be detected (see [`wallet_view_tip`]).
+        let wallet_tip = wallet_view_tip(db_data, *prev_tip, current_tip.height)?;
+        let fork_point = locate_fork_point(&chain_view, db_data, wallet_tip).await?;
         assert!(fork_point.height <= current_tip.height);
 
-        // Fetch blocks that need to be applied to the wallet.
-        let blocks_to_apply = chain_view.stream_blocks_to_tip(fork_point.height + 1);
-        tokio::pin!(blocks_to_apply);
-
-        // If the fork point is equal to `prev_tip` then no reorg has occurred.
-        if fork_point != *prev_tip {
-            // Ensured by `find_fork_point`.
-            assert!(fork_point.height < prev_tip.height);
+        // If the fork point is equal to the wallet's recorded tip, no reorg has occurred.
+        if fork_point != wallet_tip {
+            // Ensured by `locate_fork_point`.
+            assert!(fork_point.height < wallet_tip.height);
 
             // Rewind the wallet to the fork point. `truncate_to_height` fully resets
             // the wallet state to that height, so the blocks in the old fork need no
-            // further handling.
+            // further handling. The scan cursor only moves back if it was itself above
+            // the fork point; stored rows between the cursor and the fork point are
+            // still on the best chain, and the stream below re-applies them
+            // idempotently.
             info!(
                 "Chain reorg detected, rewinding to {} {}",
                 fork_point.height, fork_point.hash
             );
             db_data.truncate_to_height(fork_point.height)?;
-            *prev_tip = fork_point;
+            if fork_point.height < prev_tip.height {
+                *prev_tip = fork_point;
+            }
         };
+
+        // Fetch blocks that need to be applied to the wallet, resuming from the scan
+        // cursor.
+        let blocks_to_apply = chain_view.stream_blocks_to_tip(prev_tip.height + 1);
+        tokio::pin!(blocks_to_apply);
 
         // Notify the wallet of block connections.
         while let Some(block) = blocks_to_apply.try_next().await.map_err(SyncError::Chain)? {
@@ -1030,11 +1164,21 @@ async fn batch_decryptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainError, SyncError, is_retryable, rewind_step};
+    use super::{
+        BlockHash, ChainBlock, ChainError, SqliteClientError, SyncError, block_conflict_height,
+        is_retryable, rewind_step, select_wallet_view_tip,
+    };
     use zcash_protocol::consensus::BlockHeight;
 
     fn h(height: u32) -> BlockHeight {
         BlockHeight::from_u32(height)
+    }
+
+    fn b(height: u32, seed: u8) -> ChainBlock {
+        ChainBlock {
+            height: h(height),
+            hash: BlockHash([seed; 32]),
+        }
     }
 
     #[test]
@@ -1077,6 +1221,55 @@ mod tests {
             "bad bytes",
         ))));
         assert!(!is_retryable(&SyncError::BatchDecryptorUnavailable));
+    }
+
+    #[test]
+    fn stored_rows_above_the_cursor_set_the_wallet_view_tip() {
+        // Stored block rows ahead of the scan cursor are what a reorg can conflict
+        // with, so fork-point detection must search from them.
+        assert_eq!(
+            select_wallet_view_tip(b(207, 7), Some(b(223, 23))),
+            b(223, 23)
+        );
+    }
+
+    #[test]
+    fn the_cursor_wins_when_at_or_above_stored_rows() {
+        // Stored row at the cursor height: the cursor is authoritative.
+        assert_eq!(select_wallet_view_tip(b(207, 7), Some(b(207, 7))), b(207, 7));
+        // Stored rows only below the cursor.
+        assert_eq!(
+            select_wallet_view_tip(b(207, 7), Some(b(150, 50))),
+            b(207, 7)
+        );
+        // Fresh wallet: no stored rows at all.
+        assert_eq!(select_wallet_view_tip(b(207, 7), None), b(207, 7));
+    }
+
+    #[test]
+    fn block_conflicts_are_reorg_signals() {
+        let conflict = SyncError::from(SqliteClientError::BlockConflict(h(214)));
+        assert_eq!(block_conflict_height(&conflict), Some(h(214)));
+        // Not the stale-view retry path: it must fall through to the conflict handler.
+        assert!(!is_retryable(&conflict));
+    }
+
+    #[test]
+    fn other_errors_are_not_reorg_signals() {
+        assert_eq!(
+            block_conflict_height(&SyncError::Chain(ChainError::backend("boom"))),
+            None
+        );
+        assert_eq!(
+            block_conflict_height(&SyncError::from(SqliteClientError::CorruptedData(
+                "bad".into()
+            ))),
+            None
+        );
+        assert_eq!(
+            block_conflict_height(&SyncError::BatchDecryptorUnavailable),
+            None
+        );
     }
 
     #[cfg(not(feature = "spend-index"))]
