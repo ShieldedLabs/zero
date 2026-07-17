@@ -4,11 +4,18 @@ name: Z3 stack smoke test
 # prove the deploy/z3-stack/ bundle works end to end: zebra healthy, zaino
 # serving lightwalletd gRPC, zallet answering wallet RPC with a node tip, no
 # crash-loops, nothing exposed that shouldn't be. None of the checks need a
-# synced chain, so the smoke phase takes minutes; the builds dominate and are
-# cached in GHCR (`:buildcache` refs, shared with images.yml, so the two
-# workflows keep each other warm). Registry cache has no 10 GiB Actions quota
-# and no 7-day expiry; the build job also warms zero-zcashd (not part of the
-# smoke stack) so release-day images.yml runs never start cold.
+# synced chain, so the smoke phase takes minutes; the builds dominate.
+#
+# Each component builds in its own matrix job (= a separate GitHub job with
+# its own success, cache export, and artifact), so a failure in one build or
+# in the downstream smoke job never discards another component's cached
+# layers or built image. Compile stages are always rebuilt fresh
+# (no-cache-filters): a smoke run must never test a stale binary (observed
+# 2026-07-17: a cached COPY layer served an image without the commit under
+# test). The fresh build is made affordable by the 16-vCPU runner and by the
+# three components building in parallel; base and apt layers still come from
+# cache. Each build hands its exact image to the smoke job as an artifact, so
+# smoke never rebuilds.
 #
 # Build definitions mirror deploy/z3-stack/docker-compose.build.yml; keep them
 # in sync if you change contexts, Dockerfiles, or build args.
@@ -37,11 +44,14 @@ permissions:
   packages: write
 
 jobs:
-  # Populate the build cache for the images in parallel, so the smoke job's
-  # rebuilds are cache hits and its wall-clock is max(build) + smoke.
+  # One separate job per component (matrix legs are independent jobs). Each
+  # builds its image FRESH, exports its build cache (base/apt layers warm the
+  # next run), and uploads the exact image it built as an artifact for the
+  # smoke job. `fail-fast: false` keeps a failure in one component from
+  # cancelling the others, so their caches and artifacts still land.
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,25 +61,33 @@ jobs:
             dockerfile: zebra/docker/Dockerfile
             build_args: |
               FEATURES=release_max_level_info,progress-bar,prometheus
+            no_cache_filters: release
+            smoke_image: true
           - name: zero-zaino
             context: zaino
             dockerfile: zaino/Dockerfile
             build_args: |
               NO_TLS=true
             rust_toolchain_file: zaino/rust-toolchain.toml
+            no_cache_filters: builder
+            smoke_image: true
           - name: zero-zallet
             context: zallet
             dockerfile: zallet/Dockerfile
             build_args: |
               FEATURES=zaino,rpc-cli,zcashd-import
+            no_cache_filters: builder
+            smoke_image: true
           # Not part of the z3 stack; built here only to keep its build cache
-          # warm (registry cache entries are only refreshed when read, and
-          # zcashd is otherwise built solely on releases). A warm rebuild is
-          # seconds; a cold one repopulates off the release critical path.
+          # warm (registry cache entries are refreshed only when read, and
+          # zcashd is otherwise built solely on releases). Cache-warm only: no
+          # no-cache-filters, no artifact, not consumed by smoke.
           - name: zero-zcashd
             context: zcashd
             dockerfile: docker/zcashd/Dockerfile
             build_args: ""
+            no_cache_filters: ""
+            smoke_image: false
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,28 +126,51 @@ jobs:
             echo "BUILD_ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # Cache refs are hardcoded lowercase: registry references reject the
-      # uppercase in github.repository_owner. PR runs can't push packages
-      # (read-only token on forks), so they write the ephemeral GHA cache
-      # instead; every run reads both, so PR builds still start warm.
-      - name: Build (cache only)
+      # Authoritative build. `load` puts the image in this job's Docker daemon
+      # so it can be saved as an artifact; the compile stage is rebuilt fresh
+      # (no-cache-filters) for correctness; cache-to warms the cheap layers.
+      # Cache refs are hardcoded lowercase (registry rejects the uppercase in
+      # github.repository_owner). PR runs (read-only token) write the GHA
+      # cache instead of the registry; every run reads both.
+      - name: Build ${{ matrix.name }}
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           target: runtime
           platforms: linux/amd64
-          push: false
+          load: ${{ matrix.smoke_image }}
+          tags: ghcr.io/shieldedlabs/${{ matrix.name }}:smoke
           build-args: ${{ steps.args.outputs.build_args }}
+          no-cache-filters: ${{ matrix.no_cache_filters }}
           cache-from: |
             type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
             type=gha,scope=${{ matrix.name }}
           cache-to: ${{ github.event_name == 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.name) || format('type=registry,ref=ghcr.io/shieldedlabs/{0}:buildcache,mode=max,image-manifest=true', matrix.name) }}
 
+      # Hand the exact built image to the smoke job. Artifacts (not a GHCR
+      # push) so this works unchanged on fork PRs, where the token cannot
+      # push images.
+      - name: Export image artifact
+        if: matrix.smoke_image
+        run: |
+          set -euxo pipefail
+          docker save "ghcr.io/shieldedlabs/${{ matrix.name }}:smoke" \
+            | zstd -T0 -3 > "${{ runner.temp }}/${{ matrix.name }}.tzst"
+
+      - name: Upload image artifact
+        if: matrix.smoke_image
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.name }}
+          path: ${{ runner.temp }}/${{ matrix.name }}.tzst
+          retention-days: 1
+          if-no-files-found: error
+
   smoke:
     needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
     env:
       ZERO_IMAGE_TAG: smoke
     defaults:
@@ -141,87 +182,26 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Download stack images
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/images
 
-      - name: Resolve zaino RUST_VERSION
-        id: zaino_args
-        working-directory: .
+      - name: Load stack images
+        working-directory: ${{ github.workspace }}
         run: |
-          set -euo pipefail
-          rv=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
-               zaino/rust-toolchain.toml | head -n1)
-          echo "rust_version=${rv}" >> "$GITHUB_OUTPUT"
+          set -euxo pipefail
+          for f in "${{ runner.temp }}"/images/*.tzst; do
+            zstd -d -c "$f" | docker load
+          done
+          docker image ls | grep shieldedlabs
 
-      # Rebuilds are cache hits from the build job; load the images locally
-      # under the :smoke tag that ZERO_IMAGE_TAG points the compose file at.
-      - name: Load zebra image
-        uses: docker/build-push-action@v7
-        with:
-          context: zebra
-          file: zebra/docker/Dockerfile
-          target: runtime
-          platforms: linux/amd64
-          load: true
-          tags: ghcr.io/shieldedlabs/zero-zebra:smoke
-          build-args: |
-            FEATURES=release_max_level_info,progress-bar,prometheus
-          cache-from: |
-            type=registry,ref=ghcr.io/shieldedlabs/zero-zebra:buildcache
-            type=gha,scope=zero-zebra
-          # Registry/gha cache manifests have served STALE source layers for
-          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
-          # the commit under test; COPY layer falsely CACHED). Compile stages
-          # must never come from cache; base/apt layers still may.
-          no-cache-filters: release
-
-      - name: Load zaino image
-        uses: docker/build-push-action@v7
-        with:
-          context: zaino
-          file: zaino/Dockerfile
-          target: runtime
-          platforms: linux/amd64
-          load: true
-          tags: ghcr.io/shieldedlabs/zero-zaino:smoke
-          build-args: |
-            NO_TLS=true
-            RUST_VERSION=${{ steps.zaino_args.outputs.rust_version }}
-          cache-from: |
-            type=registry,ref=ghcr.io/shieldedlabs/zero-zaino:buildcache
-            type=gha,scope=zero-zaino
-          # Registry/gha cache manifests have served STALE source layers for
-          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
-          # the commit under test; COPY layer falsely CACHED). Compile stages
-          # must never come from cache; base/apt layers still may.
-          no-cache-filters: builder
-
-      - name: Load zallet image
-        uses: docker/build-push-action@v7
-        with:
-          context: zallet
-          file: zallet/Dockerfile
-          target: runtime
-          platforms: linux/amd64
-          load: true
-          tags: ghcr.io/shieldedlabs/zero-zallet:smoke
-          build-args: |
-            FEATURES=zaino,rpc-cli,zcashd-import
-          cache-from: |
-            type=registry,ref=ghcr.io/shieldedlabs/zero-zallet:buildcache
-            type=gha,scope=zero-zallet
-          # Registry/gha cache manifests have served STALE source layers for
-          # these builds (observed 2026-07-17: a smoke run's zaino image lacked
-          # the commit under test; COPY layer falsely CACHED). Compile stages
-          # must never come from cache; base/apt layers still may.
-          no-cache-filters: builder
-
-      # From here on this is the bundle's README walkthrough, scripted.
       # All probe logic lives in deploy/z3-stack/smoke.sh (single source of
       # truth, also runnable locally against docker-compose.build.yml images
-      # for ~2-minute iteration instead of a full CI round trip). The script
-      # prints one ok:/FAIL: line per probe and dumps container state itself
-      # when a probe fails.
+      # for ~2-minute iteration). The script prints one ok:/FAIL: line per
+      # probe and dumps container state itself when a probe fails.
       - name: Wallet init, stack up, smoke probes
         run: ./smoke.sh --init --up
 
