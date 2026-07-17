@@ -296,7 +296,8 @@ WalletTxBuilder::GetChangeAddress(
         const SpendableInputs& spendable,
         const Payments& resolvedPayments,
         const TransactionStrategy& strategy,
-        bool afterNU5) const
+        bool afterNU5,
+        bool orchardPoolClosed) const
 {
     // Determine the account we're sending from.
     auto sendFromAccount = wallet.FindAccountForSelector(selector).value_or(ZCASH_LEGACY_ACCOUNT);
@@ -321,7 +322,16 @@ WalletTxBuilder::GetChangeAddress(
                     }
                     break;
                 case ReceiverType::Orchard:
-                    if (afterNU5
+                    // From NU6.3 the Orchard pool no longer accepts new outputs —
+                    // change included. Without this gate the Orchard-first change
+                    // preference resolved change into the closed pool and every
+                    // change-producing spend failed at build time, including
+                    // Sapling-only sends under AllowRevealedAmounts-or-weaker
+                    // policies (review H-P2-1). Change falls back to Sapling,
+                    // which is policy-consistent: any post-NU6.3 spend that
+                    // reaches change resolution with Orchard inputs is already a
+                    // cross-pool (revealed-amounts) transaction. // @claude
+                    if (afterNU5 && !orchardPoolClosed
                         && (!spendable.orchardNoteMetadata.empty() || strategy.AllowRevealedAmounts())) {
                         result.insert(OutputPool::Orchard);
                     }
@@ -585,6 +595,7 @@ WalletTxBuilder::IterateLimit(
         const SpendableInputs& spendable,
         Payments& resolved,
         bool afterNU5,
+        bool orchardPoolClosed,
         uint32_t consensusBranchId) const
 {
     SpendableInputs spendableMut;
@@ -624,7 +635,8 @@ WalletTxBuilder::IterateLimit(
                         spendableMut,
                         resolved,
                         strategy,
-                        afterNU5);
+                        afterNU5,
+                        orchardPoolClosed);
 
                 if (maybeChangeAddr.has_value()) {
                     changeAddr = maybeChangeAddr.value();
@@ -761,7 +773,8 @@ WalletTxBuilder::ResolveInputsAndPayments(
                     spendableMut,
                     resolved,
                     strategy,
-                    afterNU5);
+                    afterNU5,
+                    orchardPoolClosed);
 
             if (maybeChangeAddr.has_value()) {
                 changeAddr = maybeChangeAddr.value();
@@ -791,7 +804,7 @@ WalletTxBuilder::ResolveInputsAndPayments(
             }
         }
     } else {
-        auto limitResult = IterateLimit(wallet, selector, strategy, sendAmount, dustThreshold, spendable, resolved, afterNU5, consensusBranchId);
+        auto limitResult = IterateLimit(wallet, selector, strategy, sendAmount, dustThreshold, spendable, resolved, afterNU5, orchardPoolClosed, consensusBranchId);
         if (limitResult.has_value()) {
             std::tie(spendableMut, finalFee, changeAddr) = limitResult.value();
             targetAmount = sendAmount + finalFee;

@@ -47,6 +47,7 @@ from test_framework.util import (
     nustr,
     start_node,
     start_nodes,
+    wait_and_assert_operationid_status,
 )
 
 NU6_3_ACTIVATION = 210
@@ -119,7 +120,19 @@ class Nu6_3Test(BitcoinTestFramework):
         # Stop two short of activation first: mempool acceptance validates
         # against the *next* block height, so v6 rejection must be probed while
         # next-height (209) is still pre-NU6.3.
-        node0.generate(NU6_3_ACTIVATION - 2)
+        node0.generate(NU6_3_ACTIVATION - 10)
+        self.sync_all()
+
+        # Pre-activation Orchard funding for the H-P2-1 change-pool phase
+        # below: shielding coinbase before activation lands in Orchard — the
+        # last legal inflow window for that pool. Done a few blocks below the
+        # boundary: a transaction built closer to it has its expiry clamped to
+        # activation-1 and is rejected as tx-expiring-soon. // @claude (review H-P2-1)
+        self.shield_account = node0.z_getnewaccount()['account']
+        self.shield_ua = node0.z_getaddressforaccount(self.shield_account)['address']
+        opid = node0.z_shieldcoinbase('*', self.shield_ua)['opid']
+        wait_and_assert_operationid_status(node0, opid)
+        node0.generate(8)
         self.sync_all()
 
         # A v6 transaction must be rejected before activation
@@ -185,9 +198,11 @@ class Nu6_3Test(BitcoinTestFramework):
         treestate = node0.z_gettreestate(str(NU6_3_ACTIVATION))
         assert_equal(treestate['ironwood']['commitments']['finalRoot'], IRONWOOD_TREE_EMPTY_ROOT)
         assert_equal(treestate['ironwood']['commitments']['finalState'], '000000')
-        # Ironwood shares Orchard's MerkleCRH, so the empty roots coincide.
+        # Ironwood shares Orchard's MerkleCRH, so the empty roots coincide —
+        # compare against the Orchard tree while it was still empty (the
+        # H-P2-1 funding above put real commitments into Orchard by now).
         assert_equal(treestate['ironwood']['commitments']['finalRoot'],
-                     treestate['orchard']['commitments']['finalRoot'])
+                     node0.z_gettreestate('1')['orchard']['commitments']['finalRoot'])
 
         # Ironwood subtree index is served (empty; a real subtree needs 2^16 notes).
         subtrees = node0.z_getsubtreesbyindex('ironwood', 0)
@@ -206,6 +221,56 @@ class Nu6_3Test(BitcoinTestFramework):
         node0.generate(1)
         self.sync_all()
         assert_equal(node1.getreceivedbyaddress(taddr1), Decimal('1.23'))
+
+        # --- H-P2-1: post-NU6.3 change-pool routing --------------------------
+        print("Spending Orchard and Sapling balances with change (H-P2-1)")
+        # Comfortable anchor depth for the pre-activation Orchard note.
+        node0.generate(2)
+        self.sync_all()
+
+        # Class A: a partial spend of the pre-activation Orchard balance must
+        # succeed, with change falling back to Sapling. Before the H-P2-1 fix,
+        # change resolution routed to the closed Orchard pool and every
+        # change-producing Orchard spend failed at build time with "Cannot
+        # create an Orchard output". // @claude
+        ua1_account = node1.z_getnewaccount()['account']
+        ua1 = node1.z_getaddressforaccount(ua1_account)['address']
+        balance0 = node0.z_getbalanceforaccount(self.shield_account)['pools']
+        assert 'orchard' in balance0, balance0
+        opid = node0.z_sendmany(
+            self.shield_ua, [{'address': ua1, 'amount': 3}], 1, None,
+            'AllowRevealedAmounts')
+        txid_a = wait_and_assert_operationid_status(node0, opid)
+        raw = node0.getrawtransaction(txid_a, 1)
+        assert_equal(raw['version'], 6)
+        # The spend nets value OUT of the closed Orchard pool...
+        assert raw['orchard']['valueBalanceZat'] > 0, raw['orchard']
+        # ...and both the payment and the change are Sapling outputs.
+        assert_equal(len(raw['vShieldedOutput']), 2)
+        self.sync_all()
+        node0.generate(3)  # confirm + anchor depth for node1's fresh note
+        self.sync_all()
+
+        # Class B: a partial unshield from a Sapling-only account (the payment
+        # above landed in ua1's Sapling receiver) must also succeed. Before
+        # the fix, an AllowRevealedAmounts-or-weaker policy alone routed the
+        # change into the closed Orchard pool even with no Orchard notes
+        # anywhere in the account. // @claude
+        balance1 = node1.z_getbalanceforaccount(ua1_account)['pools']
+        assert_equal(sorted(balance1.keys()), ['sapling'])
+        taddr_b = node0.getnewaddress()
+        opid = node1.z_sendmany(
+            ua1, [{'address': taddr_b, 'amount': 1}], 1, None,
+            'AllowRevealedRecipients')
+        txid_b = wait_and_assert_operationid_status(node1, opid)
+        raw = node1.getrawtransaction(txid_b, 1)
+        assert_equal(raw['version'], 6)
+        assert_equal(raw['orchard']['actions'], [])
+        assert_equal(len(raw['vout']), 1)
+        assert len(raw['vShieldedSpend']) >= 1, raw
+        self.sync_all()
+        node0.generate(1)
+        self.sync_all()
 
         # --- Python-built v6 transaction (§8.2 codec against a live node) ----
         print("Submitting a python-built v6 transaction")

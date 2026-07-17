@@ -392,7 +392,8 @@ private:
             const SpendableInputs& spendable,
             const Payments& resolvedPayments,
             const TransactionStrategy& strategy,
-            bool afterNU5) const;
+            bool afterNU5,
+            bool orchardPoolClosed) const;
 
     tl::expected<
         std::tuple<SpendableInputs, CAmount, std::optional<ChangeAddress>>,
@@ -406,6 +407,7 @@ private:
             const SpendableInputs& spendable,
             Payments& resolved,
             bool afterNU5,
+            bool orchardPoolClosed,
             uint32_t consensusBranchId) const;
 
     /**
