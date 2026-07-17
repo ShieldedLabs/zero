@@ -5446,8 +5446,6 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
             "Run zcashd with '-experimentalfeatures -ironwoodorigination' to enable it.");
     }
 
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-
     uint256 hash = ParseHashV(params[0], "parameter 1");
     int nOut = params[1].get_int();
     if (nOut < 0)
@@ -5459,24 +5457,8 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
     if (fee < 0)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be non-negative");
 
-    // The UTXO to shield, from this wallet.
-    auto it = pwalletMain->mapWallet.find(hash);
-    if (it == pwalletMain->mapWallet.end())
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in wallet");
-    const CWalletTx& wtx = it->second;
-    if ((size_t) nOut >= wtx.vout.size())
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Output index out of range");
-    if (pwalletMain->IsSpent(hash, nOut, std::nullopt))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is already spent");
-    const CTxOut& utxo = wtx.vout[nOut];
-    CAmount amount = utxo.nValue - fee;
-    if (amount <= 0)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO value does not cover the fee");
-
-    int nextBlockHeight = chainActive.Height() + 1;
-
     // Freshly-generated destination; the mnemonic in the result is the only
-    // copy of this key material.
+    // copy of this key material. Needs no locks.
     auto coinType = Params().BIP44CoinType();
     auto seed = MnemonicSeed::Random(coinType);
     auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, coinType, 0);
@@ -5484,20 +5466,62 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
     libzcash::diversifier_index_t j(0);
     auto recipient = fvk.ToIncomingViewingKey().Address(j);
 
-    // Anchors: the Orchard anchor selects the current (v6-capable) tx format
-    // in the builder ctor; the Ironwood bundle commits to the chain's best
-    // Ironwood anchor so the on-chain anchor check passes.
-    uint256 orchardAnchor = pcoinsTip->GetBestAnchor(ORCHARD);
-    uint256 saplingAnchor = pcoinsTip->GetBestAnchor(SAPLING);
-    uint256 ironwoodAnchor = pcoinsTip->GetBestAnchor(IRONWOOD);
+    // Phase 1: read the wallet/chain state under the locks, copying out what
+    // the (lock-free) proving phase needs (review L-P2-2a). // @claude
+    CScript utxoScriptPubKey;
+    CAmount utxoValue;
+    CAmount amount;
+    int nextBlockHeight;
+    uint256 orchardAnchor, saplingAnchor, ironwoodAnchor;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        // The builder signs with wallet keys below; fail early and clearly on
+        // a locked wallet instead of with a generic late signing error
+        // (review L-P2-2d). // @claude
+        EnsureWalletIsUnlocked();
 
+        // The UTXO to shield, from this wallet.
+        auto it = pwalletMain->mapWallet.find(hash);
+        if (it == pwalletMain->mapWallet.end())
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in wallet");
+        const CWalletTx& wtx = it->second;
+        if ((size_t) nOut >= wtx.vout.size())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Output index out of range");
+        if (pwalletMain->IsSpent(hash, nOut, std::nullopt))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is already spent");
+        // An immature coinbase input would pass building and then be rejected
+        // at mempool admission — after the wallet had already recorded the
+        // spend, wedging the UTXO until -zapwallettxes (review L-P2-2b). // @claude
+        if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity(std::nullopt) > 0)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is an immature coinbase output");
+        const CTxOut& utxo = wtx.vout[nOut];
+        utxoScriptPubKey = utxo.scriptPubKey;
+        utxoValue = utxo.nValue;
+        amount = utxoValue - fee;
+        if (amount <= 0)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO value does not cover the fee");
+
+        nextBlockHeight = chainActive.Height() + 1;
+
+        // Anchors: the Orchard anchor selects the current (v6-capable) tx
+        // format in the builder ctor; the Ironwood bundle commits to the
+        // chain's best Ironwood anchor so the on-chain anchor check passes.
+        orchardAnchor = pcoinsTip->GetBestAnchor(ORCHARD);
+        saplingAnchor = pcoinsTip->GetBestAnchor(SAPLING);
+        ironwoodAnchor = pcoinsTip->GetBestAnchor(IRONWOOD);
+    }
+
+    // Phase 2: build, prove, and sign WITHOUT holding cs_main — the halo2
+    // prover runs for seconds and must not stall block/mempool processing
+    // (review L-P2-2a). The builder touches only the keystore, which has its
+    // own internal lock. // @claude
     auto builder = TransactionBuilder(
         Params(), nextBlockHeight, orchardAnchor, saplingAnchor, pwalletMain);
     builder.SetFee(fee);
     if (!builder.EnableIronwood(ironwoodAnchor))
         throw JSONRPCError(RPC_INVALID_PARAMETER,
             "Could not enable Ironwood: NU6.3 is not active at the next block height");
-    builder.AddTransparentInput(COutPoint(hash, nOut), utxo.scriptPubKey, utxo.nValue);
+    builder.AddTransparentInput(COutPoint(hash, nOut), utxoScriptPubKey, utxoValue);
     if (!builder.AddIronwoodOutput(fvk.ToExternalOutgoingViewingKey(), recipient, amount, std::nullopt))
         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add Ironwood output");
 
@@ -5506,10 +5530,18 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, buildResult.GetError());
     CTransaction tx = buildResult.GetTxOrThrow();
 
-    // Commit through the wallet (marking the input spent) and relay. There is
-    // no UA involved, so no recipient mappings are recorded.
-    std::vector<RecipientMapping> recipientMappings;
-    SendTransaction(tx, recipientMappings, std::nullopt, false);
+    // Phase 3: re-take the locks, re-check that the input was not spent while
+    // we were proving, then commit through the wallet (marking the input
+    // spent) and relay. There is no UA involved, so no recipient mappings are
+    // recorded. // @claude
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        if (pwalletMain->IsSpent(hash, nOut, std::nullopt))
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "UTXO was spent while the transaction was being proven");
+        std::vector<RecipientMapping> recipientMappings;
+        SendTransaction(tx, recipientMappings, std::nullopt, false);
+    }
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx.GetHash().GetHex());
