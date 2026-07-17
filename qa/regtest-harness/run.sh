@@ -187,6 +187,35 @@ wallet_db_at() {
   sqlite3 -cmd '.timeout 5000' "$datadir/wallet.db" "$@"
 }
 
+# start_zallet_warm <logfile> <datadir> <expected_tip>: start zallet and wait
+# until BOTH its node view and its wallet scan reach the expected tip. The
+# embedded chain index has a startup window in which historic fetches and
+# treestate queries can wedge outright (pre-existing zaino readiness defect,
+# see zaino-issue-readiness.md); one restart clears it, so allow exactly one.
+# Returns non-zero (without recording a failure) if the wallet never warms.
+start_zallet_warm() {
+  local logfile="$1" datadir="$2" expected_tip="$3"
+  start_zallet "$logfile" "$datadir"
+  local restarted="" deadline=$((SECONDS + expected_tip * 3))
+  while true; do
+    if [ "$(wallet_rpc getwalletstatus | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$expected_tip" ]         && fully_synced "$expected_tip" > /dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      if [ -z "$restarted" ]; then
+        restarted=1
+        log "zallet warm-up stalled (embedded-index startup race); restarting once"
+        stop_zallet
+        start_zallet "$logfile" "$datadir"
+        deadline=$((SECONDS + expected_tip * 3))
+      else
+        return 1
+      fi
+    fi
+    sleep 1
+  done
+}
+
 zebra_height() {
   zebra_rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])'
 }
@@ -847,10 +876,9 @@ for acct in json.load(sys.stdin)["result"]:
   # shielded value; the poison seed cannot decrypt that tx by design)
   # deshields a small amount back to the derived address. Non-coinbase, so no
   # maturity window is needed for listing.
-  start_zallet "zallet.log"
   local deshield_tip
   deshield_tip=$(zebra_height)
-  WAIT_TIMEOUT=$((deshield_tip * 3)) wait_until "main wallet synced to $deshield_tip" fully_synced "$deshield_tip" || {
+  start_zallet_warm "zallet.log" "$WORKDIR/zallet-data" "$deshield_tip" || {
     fail "spend-poison: main wallet never caught up for the deshield"
     return
   }
