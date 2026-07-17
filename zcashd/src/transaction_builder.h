@@ -404,8 +404,10 @@ public:
     /// anchor); output-only bundles still commit to it on the wire.
     ///
     /// Returns `false` — and Ironwood stays disabled — unless the builder is
-    /// constructing a v6 (ZIP 229) transaction, i.e. NU6.3 is active at the
-    /// build height and no earlier format was forced. // @claude
+    /// constructing exactly a v6 (ZIP 229) transaction, i.e. NU6.3 is active
+    /// at the build height and no earlier (or ZFUTURE) format was selected.
+    /// One-shot: a second call returns `false` and leaves the first builder
+    /// (and its value bookkeeping) intact (review L-P2-1). // @claude
     [[nodiscard]] bool EnableIronwood(const uint256& ironwoodAnchor);
 
     /// Adds an Ironwood recipient output. Requires EnableIronwood().

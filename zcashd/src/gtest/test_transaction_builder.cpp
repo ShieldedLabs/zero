@@ -362,6 +362,35 @@ TEST(TransactionBuilder, EnableIronwoodRequiresV6)
     RegtestDeactivateNU5();
 }
 
+// review L-P2-1: EnableIronwood is one-shot and exact-v6.
+TEST(TransactionBuilder, EnableIronwoodOneShotAndExactV6)
+{
+    // (a) Re-arm refused: a second EnableIronwood would discard the first
+    // builder while valueBalanceIronwood kept its debit — Build()'s change
+    // equation would then silently convert that value into miner fee (the H1
+    // bug class). // @claude
+    {
+        auto consensusParams = RegtestActivateNU6point3();
+        auto builder = TransactionBuilder(Params(), 1, uint256(), SaplingMerkleTree::empty_root());
+        EXPECT_TRUE(builder.EnableIronwood(uint256()));
+        EXPECT_FALSE(builder.EnableIronwood(uint256()));
+        RegtestDeactivateNU6point3();
+    }
+    // (b) ZFUTURE (nVersion 0xFFFF, which passed the previous `< v6` check)
+    // fails the exact-v6 check: its wire format has no Ironwood slot, so
+    // enabling would build a bundle that is silently dropped at
+    // serialization — the case the guard exists to prevent. // @claude
+    {
+        RegtestActivateNU6point3(false, 10);
+        UpdateNetworkUpgradeParameters(Consensus::UPGRADE_ZFUTURE, 20);
+        auto builder = TransactionBuilder(Params(), 25, uint256(), SaplingMerkleTree::empty_root());
+        EXPECT_FALSE(builder.EnableIronwood(uint256()));
+        UpdateNetworkUpgradeParameters(
+            Consensus::UPGRADE_ZFUTURE, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+        RegtestDeactivateNU6point3();
+    }
+}
+
 // review XR-7: an unsupported (pool, protocol) pairing crosses the raw FFI
 // boundary, where the crate builds with panic='abort' — before the fix this
 // test aborted the whole process at Builder construction. Now the FFI returns

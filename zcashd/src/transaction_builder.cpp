@@ -385,8 +385,17 @@ bool TransactionBuilder::EnableIronwood(const uint256& ironwoodAnchor)
     // The Ironwood slot only exists on the v6 (ZIP 229) wire format, which the
     // ctor selects when NU6.3 is active at nHeight (and no earlier format was
     // forced); a v6 build height also guarantees ProtocolVersionForHeight is
-    // V3, the only valid (Ironwood, *) builder pairing. // @claude
-    if (mtx.nVersion < ZIP229_TX_VERSION) {
+    // V3, the only valid (Ironwood, *) builder pairing. The check is
+    // exact-version: `< ZIP229_TX_VERSION` also admitted ZFUTURE (0xFFFF),
+    // whose serialization has no Ironwood slot either (review L-P2-1b). // @claude
+    if (mtx.nVersion != ZIP229_TX_VERSION) {
+        return false;
+    }
+    // One-shot: re-arming would discard the previous builder while any
+    // AddIronwoodOutput debit survived in valueBalanceIronwood, and Build()'s
+    // change equation would silently convert that value into miner fee
+    // (review L-P2-1a). // @claude
+    if (ironwoodBuilder.has_value()) {
         return false;
     }
     ironwoodBuilder = orchard::Builder(
