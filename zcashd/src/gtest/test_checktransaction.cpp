@@ -2299,17 +2299,37 @@ static std::vector<unsigned char> SerializeTx(const CMutableTransaction& mtx) {
 // Orchard and Ironwood are the final two v6 components (Ironwood last), so
 // clearing the Ironwood slot leaves one trailing marker and clearing the
 // Orchard slot leaves two; v5's Orchard section is last, leaving one.
-static size_t LocateBundleSection(
+//
+// Returns nullopt (with a recorded test failure) if the prefix property does
+// not hold, so a caller can bail before indexing with a bogus offset — the
+// previous EXPECT_* guards were non-fatal and the helper's own std::equal
+// could read out of bounds after one failed (review L-P2-3). Callers must
+// ASSERT_TRUE(...has_value()). // @claude
+static std::optional<size_t> LocateBundleSection(
     const std::vector<unsigned char>& full,
     const std::vector<unsigned char>& emptied,
     size_t emptySlotsAtTail)
 {
-    EXPECT_LT(emptied.size(), full.size());
+    if (emptied.size() >= full.size()) {
+        ADD_FAILURE() << "emptied serialization (" << emptied.size()
+                      << " bytes) is not shorter than the full one (" << full.size() << ")";
+        return std::nullopt;
+    }
+    if (emptied.size() < emptySlotsAtTail) {
+        ADD_FAILURE() << "emptied serialization is shorter than the expected tail markers";
+        return std::nullopt;
+    }
     for (size_t i = 0; i < emptySlotsAtTail; i++) {
-        EXPECT_EQ(emptied[emptied.size() - 1 - i], 0x00);
+        if (emptied[emptied.size() - 1 - i] != 0x00) {
+            ADD_FAILURE() << "expected empty-slot 0x00 marker at tail offset " << i;
+            return std::nullopt;
+        }
     }
     size_t start = emptied.size() - emptySlotsAtTail;
-    EXPECT_TRUE(std::equal(emptied.begin(), emptied.begin() + start, full.begin()));
+    if (!std::equal(emptied.begin(), emptied.begin() + start, full.begin())) {
+        ADD_FAILURE() << "emptied serialization is not a prefix of the full one";
+        return std::nullopt;
+    }
     return start;
 }
 
@@ -2341,7 +2361,9 @@ TEST(ChecktransactionTests, IronwoodFlagsMustPermitActions) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.ironwoodBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
 
     ASSERT_EQ(bytes[start], 2);  // one real output + one dummy padding action
     size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
@@ -2372,7 +2394,9 @@ TEST(ChecktransactionTests, IronwoodReservedFlagBitsRejectedAtParse) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.ironwoodBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
     size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
     ASSERT_EQ(bytes[flagsOff], 0x07);
 
@@ -2400,7 +2424,9 @@ TEST(ChecktransactionTests, V6OrchardSlotRejectsCrossAddressFlagAtParse) {
     ASSERT_EQ(bytes.back(), 0x00);
     CMutableTransaction emptied(mtx);
     emptied.orchardBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 2);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 2);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
 
     ASSERT_EQ(bytes[start], 2);  // change output + dummy padding action
     size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
@@ -2432,7 +2458,9 @@ TEST(ChecktransactionTests, V5OrchardRejectsCrossAddressFlagAtParse) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.orchardBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
 
     ASSERT_EQ(bytes[start], 2);
     size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
@@ -2461,7 +2489,9 @@ TEST(ChecktransactionTests, IronwoodDuplicateNullifierInTxRejected) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.ironwoodBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
     ASSERT_EQ(bytes[start], 2);
 
     size_t nf0 = start + 1 + V6_ACTION_NULLIFIER_OFFSET;
@@ -2497,7 +2527,9 @@ TEST(ChecktransactionTests, IronwoodActionIdentityPointRejected) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.ironwoodBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
     ASSERT_EQ(bytes[start], 2);
 
     size_t epkOff = start + 1 + V6_ACTION_EPK_OFFSET;
@@ -2541,7 +2573,9 @@ TEST(ChecktransactionTests, IronwoodCoinbasePositiveValueBalanceRejected) {
     auto bytes = SerializeTx(mtx);
     CMutableTransaction emptied(mtx);
     emptied.ironwoodBundle = OrchardBundle();
-    size_t start = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    auto startOpt = LocateBundleSection(bytes, SerializeTx(emptied), 1);
+    ASSERT_TRUE(startOpt.has_value());
+    size_t start = startOpt.value();
     ASSERT_EQ(bytes[start], 2);
 
     size_t flagsOff = start + 1 + 2 * V6_ACTION_SIZE;
