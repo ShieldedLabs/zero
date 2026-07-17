@@ -119,7 +119,24 @@ things belong together, and a wallet cannot be restored without all of them:
 
 ## Verify the stack
 
-One proof per layer, from the bottom up.
+The fastest full check is the smoke script, which runs the exact probe
+sequence CI uses (liveness per layer plus the wallet-RPC contract checks)
+and prints one `ok:`/`FAIL:` line per probe:
+
+```sh
+./smoke.sh                  # against a running stack, ~2 minutes
+./smoke.sh --init --up      # first run: wallet init + compose up first
+```
+
+For iterating on locally built images, build with the overlay first:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml build
+ZERO_IMAGE_TAG=latest ./smoke.sh --init --up
+```
+
+The manual per-layer proofs below remain for debugging a specific layer,
+from the bottom up.
 
 **Zebra answers RPC** (this is also exactly what the compose healthcheck
 does):
