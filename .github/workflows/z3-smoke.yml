@@ -169,7 +169,12 @@ jobs:
 
   smoke:
     needs: build
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # GitHub-hosted, NOT Blacksmith: zebra's mainnet P2P starves on Blacksmith
+    # runners (peer handshakes succeed but no block ever downloads; observed
+    # twice 2026-07-17, zebra pinned at Height(0) for the whole probe window,
+    # which starves zaino's chain index and every downstream probe). The probes
+    # are cheap; only the builds need the big runner.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       ZERO_IMAGE_TAG: smoke
