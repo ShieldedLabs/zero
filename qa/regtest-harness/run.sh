@@ -84,6 +84,8 @@ WAIT_TIMEOUT=300
 KEEP=0
 BUILD=0
 ONLY=""
+REGEN_GOLDEN=0
+SETUP_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP=1 ;;
@@ -451,8 +453,6 @@ count_lines() { grep -c . || true; }
 # correctness.
 GOLDEN_EPOCH=1
 GOLDEN_DIR="${GOLDEN_DIR:-$HOME/.cache/z3-harness-golden}"
-REGEN_GOLDEN=0
-SETUP_ONLY=0
 
 golden_key() {
   printf 'epoch=%s|blocks=%s|%s|%s|%s|%s|%s'     "$GOLDEN_EPOCH" "$MINE_PHASE_BLOCKS"     "$PUBKEY_A" "$PUBKEY_B" "$ADDR_C_POISON" "$MNEMONIC_POISON" "$ADDR_UNRELATED"     | shasum -a 256 | cut -c1-16
