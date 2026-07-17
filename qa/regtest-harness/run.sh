@@ -17,6 +17,8 @@
 #                   (v11 -> v12 regression; ~10 min hang in production)
 #   poison-heal     a stored tx row with no mined height and zero expiry must
 #                   not crash the wallet, and must self-heal (zcash/zallet#568)
+#   reorg           a depth-10 reorg under a live wallet: node, index, and
+#                   listings must converge on the replacement branch
 #
 # Scenarios run in the order above and are stateful by design (later ones
 # build on earlier ones' chain/wallet); `--only` skips assertions but never
@@ -989,6 +991,104 @@ print(len(rows))') || true
   start_zallet "zallet.log"
 }
 
+# A reorg is normal chain behavior the whole stack must survive while live:
+# the 2026-07-16 testnet incident (zebra-issue-fork-recovery.md) ended in a
+# wedged node precisely because fork recovery is never exercised. Depth 10
+# stays well inside zebra's non-finalized window (100 blocks on regtest), so
+# invalidateblock can always reach the branch point, while going beyond the
+# trivial depth-1 tip swap. The whole reorg runs on the LIVE serving node:
+# `generate` needs no miner restart, so the in-memory invalidation state
+# cannot be lost to a restart, and zallet stays up throughout (production
+# wallets live through reorgs; a crash here is a finding, not harness noise).
+scenario_reorg() {
+  local depth=10
+  local old_tip inv_height inv_hash new_tip new_hash pre_count post_count want_count resp
+
+  at_height() { [ "$(zebra_height 2>/dev/null || echo -1)" = "$1" ]; }
+
+  # Every UTXO the wallet lists must exist on the canonical chain: an
+  # orphaned output still listed as unspent is the production false-unspent
+  # class (hot-wallet balance over-report).
+  utxos_canonical() {
+    wallet_rpc z_listunspent '[]' 60 | python3 -c '
+import json, sys, urllib.request
+rows = [u for u in json.load(sys.stdin)["result"] if u["pool"] == "transparent"]
+bad = 0
+for u in rows:
+    req = urllib.request.Request(
+        "http://127.0.0.1:'"$ZEBRA_RPC_PORT"'",
+        data=json.dumps({"jsonrpc": "2.0", "id": "h",
+                         "method": "getrawtransaction",
+                         "params": [u["txid"], 1]}).encode(),
+        headers={"content-type": "application/json"})
+    try:
+        resp = json.load(urllib.request.urlopen(req, timeout=15))
+        height = (resp.get("result") or {}).get("height", -1)
+    except Exception:
+        height = -1
+    if height is None or height < 0:
+        bad += 1
+        print("non-canonical utxo: %s:%s" % (u["txid"], u["outindex"]), file=sys.stderr)
+sys.exit(1 if bad else 0)'
+  }
+
+  old_tip=$(zebra_height)
+  inv_height=$((old_tip - depth + 1))
+  inv_hash=$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")
+  pre_count=$(transparent_utxos '[]' 60 | count_lines) || true
+
+  resp=$(zebra_rpc invalidateblock "[\"$inv_hash\"]") || resp="(rpc failure)"
+  assert "reorg: invalidateblock accepted" contains "$resp" '"result"'
+  wait_until "tip rolled back to $((inv_height - 1))" at_height "$((inv_height - 1))"
+
+  # Replacement branch: depth + 2 blocks, strictly more work than the
+  # invalidated branch, paying the serving config's miner address (ADDR_B).
+  resp=$(zebra_rpc generate "[$((depth + 2))]" 120) || resp="(rpc failure)"
+  assert "reorg: generate mined the replacement branch" contains "$resp" '"result"'
+  new_tip=$(zebra_height)
+  assert "reorg: tip advanced past the old branch ($old_tip -> $new_tip)" \
+    [ "$new_tip" = "$((old_tip + 2))" ]
+  new_hash=$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")
+  assert "reorg: block at height $inv_height replaced" [ "$new_hash" != "$inv_hash" ]
+
+  # The operator's fork tools must not wedge the node: reconsidering the
+  # orphaned branch reinstates it as a candidate, but the replacement branch
+  # has more work and must remain best.
+  resp=$(zebra_rpc reconsiderblock "[\"$inv_hash\"]") || resp="(rpc failure)"
+  assert "reorg: reconsiderblock accepted" contains "$resp" '"result"'
+  assert "reorg: replacement branch stays best after reconsiderblock" \
+    [ "$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")" != "$inv_hash" ]
+
+  assert "reorg: zallet survived the live reorg" zallet_alive
+  WAIT_TIMEOUT=180 wait_until "wallet synced to post-reorg tip $new_tip" fully_synced "$new_tip" || true
+  assert "reorg: wallet fully synced at post-reorg tip $new_tip" fully_synced "$new_tip"
+
+  # The reorg window (top $depth blocks) is entirely immature coinbase on
+  # both branches, so the only legitimate listing change is the maturity
+  # horizon advancing by the net height gain; those newly mature heights are
+  # all phase-2-or-later blocks paying watched ADDR_B (requires
+  # TIP - 99 > C_TIP, which MINE_PHASE_BLOCKS=105 guarantees with margin).
+  want_count=$((pre_count + new_tip - old_tip))
+  post_count=$(transparent_utxos '[]' 60 | count_lines) || true
+  assert "reorg: listing tracks the canonical branch ($pre_count -> $post_count, want $want_count)" \
+    [ "$post_count" = "$want_count" ]
+  assert "reorg: every listed UTXO is on the canonical chain" utxos_canonical
+  assert "reorg: getwalletstatus answers within ${RPC_CALL_TIMEOUT}s" \
+    wallet_rpc getwalletstatus
+
+  # Restart variant: the reorged state must also be correct from a fresh
+  # startup sweep (persistence-level guard; a stale orphaned row surviving
+  # restart is the wedge class from the incident notes).
+  stop_zallet
+  start_zallet "zallet.log"
+  WAIT_TIMEOUT=180 wait_until "restarted wallet re-synced to $new_tip" fully_synced "$new_tip" || true
+  assert "reorg: restarted wallet fully synced at $new_tip" fully_synced "$new_tip"
+  post_count=$(transparent_utxos '[]' 60 | count_lines) || true
+  assert "reorg: restarted wallet listing unchanged (got $post_count, want $want_count)" \
+    [ "$post_count" = "$want_count" ]
+  assert "reorg: restarted wallet lists only canonical UTXOs" utxos_canonical
+}
+
 run_scenario() {
   local name="$1"
   if [ -n "$ONLY" ] && ! contains ",$ONLY," ",$name,"; then
@@ -1014,6 +1114,8 @@ main() {
   run_scenario hang-guard
   run_scenario poison-heal
   run_scenario spend-poison
+  # reorg mutates the chain irreversibly; it must stay last.
+  run_scenario reorg
 
   log "=== results: $PASSES passed, $FAILURES failed ==="
   [ "$FAILURES" = 0 ]

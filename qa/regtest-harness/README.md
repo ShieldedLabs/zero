@@ -20,6 +20,7 @@ Every scenario is a regression guard for a specific production incident:
 | `union` | multi-address filters matching nothing (`all` vs `any`) | zcash/zallet#596 |
 | `hang-guard` | a filtered listing sweeping *other* addresses' dust through per-outpoint checks (~10-minute RPC hang on an exchange wallet) | v11→v12 regression |
 | `poison-heal` | a stored transaction row with no mined height and zero expiry crash-looping the wallet at startup; it must instead be skipped and self-heal via the status sweep | zcash/zallet#568 |
+| `reorg` | a depth-10 reorg driven on the live node (`invalidateblock` + `generate`, plus a `reconsiderblock` wedge check) under a running wallet; the index and listings must converge on the replacement branch, including across a wallet restart | 2026-07-16 testnet fork-recovery wedge; false-unspent class. Runs last: it mutates the chain irreversibly |
 
 Scenarios run in order and are stateful by design (later scenarios build on
 the chain and wallet mutations of earlier ones). `--only` skips scenarios but
