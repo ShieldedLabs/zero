@@ -47,6 +47,8 @@ use std::ops::Range;
 use tokio::{sync::Notify, time};
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_backend::data_api::TransactionsInvolvingAddress;
+#[cfg(all(not(feature = "spend-index"), feature = "zcashd-import"))]
+use zcash_client_backend::decrypt_transaction;
 use zcash_client_backend::{
     data_api::{
         TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite, scanning::ScanPriority,
@@ -58,6 +60,8 @@ use zcash_client_backend::{
 use zcash_client_sqlite::AccountUuid;
 #[cfg(not(feature = "spend-index"))]
 use zcash_client_sqlite::error::SqliteClientError;
+#[cfg(not(feature = "spend-index"))]
+use zcash_keys::encoding::AddressCodec as _;
 use zcash_primitives::block::BlockHash;
 #[cfg(not(feature = "spend-index"))]
 use zcash_protocol::TxId;
@@ -855,6 +859,64 @@ async fn service_address_request<V: ChainView>(
             .get_address_tx_ids(&address, fetch_range)
             .await
             .map_err(SyncError::Chain)?;
+        let total = txids.len();
+        if total > 0 {
+            info!(
+                address = %address.encode(params),
+                total,
+                "recording address spend history"
+            );
+        }
+
+        // Fetch with bounded concurrency and store in batched database
+        // transactions. The previous one-fetch-one-store loop paid a full
+        // write-lock acquisition and wallet-db transaction per transaction
+        // (observed in production at roughly one transaction per second),
+        // which turned a busy exchange address's history walk into days;
+        // batching brings it to minutes. `store_decrypted_txs` performs the
+        // same per-transaction work as `decrypt_and_store_transaction`
+        // (decrypt + store), including order-independent transparent spend
+        // recording via the spend map, inside one enclosing transaction per
+        // chunk.
+        #[cfg(feature = "zcashd-import")]
+        {
+            let ufvks = db_data.get_unified_full_viewing_keys()?;
+            const CHUNK: usize = 1_000;
+            let mut done = 0usize;
+            for txid_chunk in txids.chunks(CHUNK) {
+                let fetched: Vec<_> = futures::stream::iter(txid_chunk.iter().copied())
+                    .map(|txid| chain_view.get_transaction(txid))
+                    .buffered(8)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(SyncError::Chain)?;
+                let txs: Vec<_> = fetched.into_iter().flatten().collect();
+                let decrypted = txs
+                    .iter()
+                    .map(|tx| {
+                        decrypt_transaction(
+                            params,
+                            tx.mined_height,
+                            Some(view_tip),
+                            &tx.inner,
+                            &ufvks,
+                        )
+                    })
+                    .collect();
+                let stored = txs.len();
+                db_data.store_decrypted_txs(decrypted)?;
+                done += stored;
+                if total > CHUNK {
+                    info!(
+                        stored = done,
+                        candidates = total,
+                        "address spend history progress"
+                    );
+                }
+            }
+        }
+        // Builds without the batch-store API keep the correct-but-slow path.
+        #[cfg(not(feature = "zcashd-import"))]
         for txid in txids {
             if let Some(tx) = chain_view
                 .get_transaction(txid)
