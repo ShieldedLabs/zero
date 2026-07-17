@@ -122,6 +122,7 @@ private:
     CAmount sproutValue;
     CAmount saplingValue;
     CAmount orchardValue;
+    CAmount ironwoodValue;
 
     // Chain context for the block
     int nHeight;

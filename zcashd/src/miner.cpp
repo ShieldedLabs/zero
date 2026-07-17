@@ -373,6 +373,7 @@ void BlockAssembler::resetBlock(const MinerAddress& minerAddress)
     sproutValue = 0;
     saplingValue = 0;
     orchardValue = 0;
+    ironwoodValue = 0;
 
     lastFewTxs = 0;
     blockFinished = false;
@@ -443,9 +444,11 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(
         assert(pindexPrev->nChainSproutValue.has_value());
         assert(pindexPrev->nChainSaplingValue.has_value());
         assert(pindexPrev->nChainOrchardValue.has_value());
+        assert(pindexPrev->nChainIronwoodValue.has_value());
         sproutValue = pindexPrev->nChainSproutValue.value();
         saplingValue = pindexPrev->nChainSaplingValue.value();
         orchardValue = pindexPrev->nChainOrchardValue.value();
+        ironwoodValue = pindexPrev->nChainIronwoodValue.value();
     }
 
     constructZIP317BlockTemplate();
@@ -596,9 +599,11 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
         CAmount sproutValueDummy = sproutValue;
         CAmount saplingValueDummy = saplingValue;
         CAmount orchardValueDummy = orchardValue;
+        CAmount ironwoodValueDummy = ironwoodValue;
 
         saplingValueDummy += -iter->GetTx().GetValueBalanceSapling();
         orchardValueDummy += -iter->GetTx().GetOrchardBundle().GetValueBalance();
+        ironwoodValueDummy += -iter->GetTx().GetIronwoodBundle().GetValueBalance();
 
         for (auto js : iter->GetTx().vJoinSplit) {
             sproutValueDummy += js.vpub_old;
@@ -620,6 +625,11 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
                       iter->GetTx().GetHash().GetHex());
             return false;
         }
+        if (ironwoodValueDummy < 0) {
+            LogPrintf("CreateNewBlock: tx %s appears to violate Ironwood turnstile\n",
+                      iter->GetTx().GetHash().GetHex());
+            return false;
+        }
 
         // We update this here instead of in AddToBlock to avoid recalculating
         // the deltas, because there are no more checks and we know that the
@@ -627,6 +637,7 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
         sproutValue = sproutValueDummy;
         saplingValue = saplingValueDummy;
         orchardValue = orchardValueDummy;
+        ironwoodValue = ironwoodValueDummy;
     }
 
     return true;
