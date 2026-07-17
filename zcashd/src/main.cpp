@@ -7223,6 +7223,8 @@ bool RegenerateSubtrees(ShieldedType type, const Consensus::Params& consensusPar
         upgrade = Consensus::UPGRADE_SAPLING;
     } else if (type == ORCHARD) {
         upgrade = Consensus::UPGRADE_NU5;
+    } else if (type == IRONWOOD) {
+        upgrade = Consensus::UPGRADE_NU6_3;
     } else {
         throw std::runtime_error("RegenerateSubtrees: bad shielded pool type");
     }
@@ -7264,9 +7266,9 @@ bool RegenerateSubtrees(ShieldedType type, const Consensus::Params& consensusPar
             assert(blockIndex != nullptr);
 
             // Because these blocks are connected to the active chain
-            // tip, and because we are inspecting blocks where Sapling/Orchard
-            // are activated, hashFinalSaplingRoot and hashFinalOrchardRoot
-            // are guaranteed to be non-null.
+            // tip, and because we are inspecting blocks where Sapling/Orchard/
+            // Ironwood are activated, hashFinalSaplingRoot, hashFinalOrchardRoot
+            // and hashFinalIronwoodRoot are guaranteed to be non-null.
             if (type == SAPLING) {
                 SaplingMerkleTree latest_frontier;
                 assert(pcoinsTip->GetSaplingAnchorAt(blockIndex->hashFinalSaplingRoot, latest_frontier));
@@ -7274,6 +7276,10 @@ bool RegenerateSubtrees(ShieldedType type, const Consensus::Params& consensusPar
             } else if (type == ORCHARD) {
                 OrchardMerkleFrontier latest_frontier;
                 assert(pcoinsTip->GetOrchardAnchorAt(blockIndex->hashFinalOrchardRoot, latest_frontier));
+                return latest_frontier.current_subtree_index();
+            } else if (type == IRONWOOD) {
+                IronwoodMerkleFrontier latest_frontier;
+                assert(pcoinsTip->GetIronwoodAnchorAt(blockIndex->hashFinalIronwoodRoot, latest_frontier));
                 return latest_frontier.current_subtree_index();
             } else {
                 assert(false);
@@ -7409,10 +7415,38 @@ bool RegenerateSubtrees(ShieldedType type, const Consensus::Params& consensusPar
             assert(false);
         };
 
+        // Twin of pushOrchard for the Ironwood pool (review XR-3). // @claude
+        auto pushIronwood = [&]() {
+            IronwoodMerkleFrontier ironwood_tree;
+            assert(pcoinsTip->GetIronwoodAnchorAt(pindex->pprev->hashFinalIronwoodRoot, ironwood_tree));
+            for (const CTransaction &tx : block.vtx) {
+                if (tx.GetIronwoodBundle().IsPresent()) {
+                    try {
+                        auto appendResult = ironwood_tree.AppendBundle(tx.GetIronwoodBundle());
+                        if (appendResult.has_subtree_boundary) {
+                            libzcash::SubtreeData subtree(appendResult.completed_subtree_root, nHeight);
+
+                            pcoinsTip->PushSubtree(IRONWOOD, subtree);
+                            return true;
+                        }
+                    } catch (const rust::Error& e) {
+                        return false;
+                    }
+                }
+            }
+
+            // Similarly we should not get here.
+            assert(false);
+        };
+
         if (type == SAPLING) {
             pushSapling();
         } else if (type == ORCHARD) {
             if (!pushOrchard()) {
+                return false;
+            }
+        } else if (type == IRONWOOD) {
+            if (!pushIronwood()) {
                 return false;
             }
         } else {
