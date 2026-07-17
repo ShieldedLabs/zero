@@ -1001,11 +1001,15 @@ impl NonFinalizedState {
                 // For now, we don't show any work here, see the deleted code in PR #7087.
                 let mut desc = String::new();
 
-                if let Some(recent_fork_height) = chain.recent_fork_height() {
-                    let recent_fork_length = chain
-                        .recent_fork_length()
-                        .expect("just checked recent fork height");
-
+                // `recent_fork_length()` can be `None` even when
+                // `recent_fork_height()` is `Some`: after a rewind (e.g.
+                // `invalidateblock`) the fork height can sit above the new tip,
+                // and the length method documents returning `None` for that.
+                // Metrics-only code must never abort the node, so skip the
+                // fork description instead of expecting.
+                if let (Some(recent_fork_height), Some(recent_fork_length)) =
+                    (chain.recent_fork_height(), chain.recent_fork_length())
+                {
                     let mut plural = "s";
                     if recent_fork_length == 1 {
                         plural = "";
