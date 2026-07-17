@@ -8842,7 +8842,8 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
         else if (fMissingInputs &&
                  tx.vJoinSplit.empty() &&
                  !tx.GetSaplingBundle().IsPresent() &&
-                 !tx.GetOrchardBundle().IsPresent())
+                 !tx.GetOrchardBundle().IsPresent() &&
+                 !tx.GetIronwoodBundle().IsPresent())
         {
             bool fRejectedParents = false; // It may be the case that the orphan's parents have all been rejected
             for (const CTxIn& txin : tx.vin) {
