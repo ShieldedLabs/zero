@@ -1,0 +1,20 @@
+[package]
+name = "zebra-differential"
+version = "0.1.0"
+edition = "2021"
+description = "Feeds zcashd-built raw transactions through the vendored Zebra's consensus verifier (tx-level zcashd<->Zebra differential)"
+
+[dependencies]
+zebra-chain = { path = "../../zebra/zebra-chain" }
+zebra-consensus = { path = "../../zebra/zebra-consensus" }
+zebra-state = { path = "../../zebra/zebra-state" }
+zebra-node-services = { path = "../../zebra/zebra-node-services" }
+zebra-test = { path = "../../zebra/zebra-test" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.4", features = ["util"] }
+chrono = "0.4"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
