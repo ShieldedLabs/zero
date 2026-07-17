@@ -20,6 +20,9 @@ services:
     image: ghcr.io/shieldedlabs/zero-zebra:${ZERO_IMAGE_TAG:-latest}
     container_name: zebra
     restart: unless-stopped
+    # Zebra flushes state on shutdown; Docker's default 10s SIGKILL grace can
+    # cut that short and cost a slow recovery on the next start.
+    stop_grace_period: 2m
     environment:
       CONFIG_FILE_PATH: /etc/zebra/zebrad.toml
     volumes:
@@ -48,6 +51,8 @@ services:
     image: ghcr.io/shieldedlabs/zero-zaino:${ZERO_IMAGE_TAG:-latest}
     container_name: zaino
     restart: unless-stopped
+    # Give the chain index time to flush cleanly (Docker default is 10s).
+    stop_grace_period: 2m
     depends_on:
       zebra:
         condition: service_healthy
@@ -64,6 +69,8 @@ services:
     image: ghcr.io/shieldedlabs/zero-zallet:${ZERO_IMAGE_TAG:-latest}
     container_name: zallet
     restart: unless-stopped
+    # Give the wallet database time to flush cleanly (Docker default is 10s).
+    stop_grace_period: 2m
     # Zallet embeds Zaino's indexer libraries and talks DIRECTLY to Zebra's
     # JSON-RPC (see zallet.toml), not to the zaino container.
     depends_on:

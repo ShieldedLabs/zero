@@ -14,6 +14,9 @@ Group=zcash
 ExecStart=/usr/local/bin/zcashd -conf=/etc/zcash/zcash.conf -datadir=/var/lib/zcash -printtoconsole
 Restart=on-failure
 RestartSec=5
+# zcashd flushes chainstate on shutdown and can legitimately take minutes;
+# systemd's 90s default would SIGKILL it mid-flush.
+TimeoutStopSec=300
 
 # Hardening
 NoNewPrivileges=true

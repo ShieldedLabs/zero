@@ -12,6 +12,14 @@ listen_addr = "[::]:8233"
 # Set this to your public IP:port if Zebra is behind a NAT or load balancer.
 # external_addr = "203.0.113.42:8233"
 
+# Zebra allows 1 inbound connection per source IP by default. If your Docker
+# setup routes inbound P2P through the userland proxy (Docker Desktop, or
+# userland-proxy fallback paths), every inbound peer appears to come from the
+# gateway IP and the node effectively serves ONE public peer. Linux with
+# iptables DNAT preserves source IPs and is unaffected. Raise only if you have
+# confirmed source-IP collapse on your host:
+# max_connections_per_ip = 10
+
 # Docker path. For a non-Docker host, change both cache_dir values to a
 # host-writable directory, e.g. "/var/lib/zebra".
 cache_dir = "/home/zebra/.cache/zebra"

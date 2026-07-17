@@ -22,6 +22,9 @@ services:
     #     FEATURES: "release_max_level_info,progress-bar,prometheus"
     container_name: zebra
     restart: unless-stopped
+    # Zebra flushes state on shutdown; Docker's default 10s SIGKILL grace can
+    # cut that short and cost a slow recovery on the next start.
+    stop_grace_period: 2m
     environment:
       CONFIG_FILE_PATH: /etc/zebra/zebrad.toml
     volumes:
@@ -39,6 +42,9 @@ services:
     #   target: runtime
     container_name: zcashd
     restart: unless-stopped
+    # zcashd flushes chainstate on shutdown and can legitimately take minutes;
+    # a 10s SIGKILL risks dirty state and a long reindex on restart.
+    stop_grace_period: 5m
     depends_on:
       - zebra
     command: ["-conf=/etc/zcash/zcash.conf", "-printtoconsole"]
