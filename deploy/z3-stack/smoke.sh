@@ -50,14 +50,39 @@ PASSES=0
 pass() { PASSES=$((PASSES + 1)); printf 'ok:   %s\n' "$*"; }
 fail() { FAILURES=$((FAILURES + 1)); printf 'FAIL: %s\n' "$*" >&2; }
 
+# A container that has restarted this many times is crash-looping, not slow
+# to start; a probe waiting on it should fail immediately rather than burn its
+# full deadline. A healthy stack sits at 0; a one-off restart is tolerated.
+CRASHLOOP_THRESHOLD="${CRASHLOOP_THRESHOLD:-3}"
+
+# crashlooping: prints and returns 0 (true) if any stack container is
+# crash-looping past the threshold. Containers that do not exist yet (early
+# probes) inspect to nothing and are treated as fine.
+crashlooping() {
+  local c rc
+  for c in zebra zaino zallet; do
+    rc=$(docker inspect --format '{{.RestartCount}}' "$c" 2>/dev/null || echo 0)
+    if [ "${rc:-0}" -ge "$CRASHLOOP_THRESHOLD" ]; then
+      echo "crash-loop detected: container $c has restarted $rc times" >&2
+      return 0
+    fi
+  done
+  return 1
+}
+
 # probe_until <seconds> <command...>: poll every 5s until the command
-# succeeds or the deadline passes. Returns the command's final verdict, so
-# `if probe_until ...` cannot be fooled by the loop's own exit status.
+# succeeds, the deadline passes, or a stack container starts crash-looping.
+# Returns the command's final verdict (0 success, non-zero failure), so
+# `if probe_until ...` cannot be fooled by the loop's own exit status. The
+# crash-loop check turns a broken stack from a full-deadline hang (the
+# production z_listunspent hang and the zaino/zallet startup crash-loops were
+# both this class) into a failure within one poll interval.
 probe_until() {
   local budget="$1"; shift
   local deadline=$((SECONDS + budget))
   while true; do
     if "$@" > /dev/null 2>&1; then return 0; fi
+    if crashlooping; then return 1; fi
     if [ "$SECONDS" -ge "$deadline" ]; then return 1; fi
     sleep 5
   done
