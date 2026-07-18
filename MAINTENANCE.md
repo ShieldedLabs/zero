@@ -129,6 +129,16 @@ upstream. To recover the rationale during a conflict, grep the change:
 - The weekly **upstream-watch** scheduled job reports what is new and the
   conflict risk against our delta. It never merges on its own.
 
+## Release changelog
+
+`CHANGELOG.md` at the repo root carries one `## vN` section per release:
+grouped one-liners (Security / Fixed / Performance / Deploy / Testing / CI /
+Docs as applicable), succinct and complete, with commit SHAs. `release.yml`
+refuses to release unless a non-empty section for the version exists, and
+embeds it in the GitHub release body. Stage entries under `## Unreleased` as
+work lands; cutting a release means retitling that section to
+`## vN - YYYY-MM-DD`, pushing, then dispatching the workflow.
+
 ## Upstreaming (upstream flow)
 
 - Use the `upstream-change` skill: it splits the relevant prefix history, rebases

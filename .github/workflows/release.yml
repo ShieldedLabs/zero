@@ -70,6 +70,27 @@ jobs:
           echo "version=$next" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Next release: $tag (commit $GITHUB_SHA)"
+      - name: Require a changelog section
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Extract this release's section from CHANGELOG.md (heading to next
+          # "## "). Refuse to release without real content: retitle the
+          # Unreleased section to "## ${TAG} - YYYY-MM-DD" before dispatching.
+          awk -v tag="$TAG" '
+            $0 ~ "^## "tag"([[:space:]]|$)" {on=1; next}
+            /^## / {on=0}
+            /^---$/ {on=0}
+            on' CHANGELOG.md | sed '/^[[:space:]]*$/d' > section.md
+          if ! [ -s section.md ]; then
+            echo "::error::CHANGELOG.md has no non-empty '## ${TAG}' section." \
+              "Write the release notes (retitle Unreleased to '## ${TAG} - $(date +%F)')," \
+              "push, then re-dispatch."
+            exit 1
+          fi
+          echo "Changelog section for ${TAG}:"
+          cat section.md
 
   # 2. Source archives: one ZIP per vendored component (only tracked files).
   source:
@@ -161,6 +182,10 @@ jobs:
     needs: [version, source, binaries]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -175,8 +200,17 @@ jobs:
         run: |
           set -euo pipefail
           ls -lh dist
+          # Same extraction the version job validated.
+          awk -v tag="$TAG" '
+            $0 ~ "^## "tag"([[:space:]]|$)" {on=1; next}
+            /^## / {on=0}
+            /^---$/ {on=0}
+            on' CHANGELOG.md > changes.md
           {
             echo "Zero release ${VERSION}, built from commit ${GITHUB_SHA}."
+            echo
+            echo "## Changes"
+            cat changes.md
             echo
             echo "## Source archives"
             echo
