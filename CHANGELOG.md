@@ -5,7 +5,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] 2026-07-09
 
 This release introduces `orchard::bundle::BundleVersion`, the `(value pool, protocol
 version)` of an Orchard bundle, built from the new `orchard::ValuePool` and
@@ -80,6 +80,10 @@ Existing callers keep the current behavior by constructing bundles with
 - New builder errors:
   - `orchard::builder::BuildError::{CrossAddressDisabled, InvalidNoteVersion, UnrepresentableFlags, CoinbaseSpendsEnabled}`
   - `orchard::builder::OutputError::{SpendsDisabled, CrossAddressDisabled, RecipientNotOwned}`
+- `orchard::builder::BundleType::UNPADDED`, a transactional bundle type that disables
+  padding for transactions whose shape is already public (e.g. pool migrations).
+- `orchard::builder::Builder::bundle_type`, returning the `BundleType` the builder
+  was constructed with.
 - Ironwood and note-version APIs:
   - `orchard::NoteVersion`, the note plaintext version selector, with variants
     `V2` (the ZIP 212 Orchard note plaintext format) and `V3` (the
@@ -105,6 +109,7 @@ Existing callers keep the current behavior by constructing bundles with
     property before signing. It is a no-op for bundles that permit cross-address
     transfers.
   - `orchard::pczt::ParseError::InvalidNoteVersion`
+  - `orchard::pczt::TxExtractorError::UnrepresentableFlags`
   - `orchard::pczt::VerifyError::DisallowedCrossAddressTransfer`
   - `orchard::pczt::IoFinalizerError::CrossAddressRestriction`
   - `orchard::pczt::ProverError::DisallowedCrossAddressTransfer`, wrapping the
@@ -117,10 +122,8 @@ Existing callers keep the current behavior by constructing bundles with
     `Result<Builder, BuildError>`; the `Flags` are validated against the
     `BundleVersion` (rejected with `BuildError::UnrepresentableFlags`), and a
     `BundleType::Coinbase` builder requires spends-disabled flags (rejected with
-    `BuildError::CoinbaseSpendsEnabled`). `BundleVersion::default_flags` supplies a
-    suitable default that the caller may restrict further. The builder derives the
-    circuit version from the bundle version rather than from an explicit
-    `OrchardCircuitVersion`.
+    `BuildError::CoinbaseSpendsEnabled`). The builder derives the circuit version
+    from the bundle version rather than from an explicit `OrchardCircuitVersion`.
   - `orchard::builder::bundle` now takes a `BundleVersion` and `Flags` in place of
     the circuit-version argument, and takes the wallet-controlled change outputs
     as a separate `changes: Vec<ChangeInfo>` argument (plain `outputs` and
@@ -132,8 +135,9 @@ Existing callers keep the current behavior by constructing bundles with
     `Coinbase`. The bundle's `Flags` are supplied separately to the builder. `flags`
     are no longer derived from the bundle type, so `BundleType::flags` has been
     removed.
-  - `orchard::builder::BundleType::num_actions` now takes a `Flags` (in place of a
-    `BundleVersion`), reading the spend/output/cross-address policy directly from it.
+  - `orchard::builder::BundleType::num_actions` now takes a `Flags` argument
+    (previously it read the flags carried by the `BundleType`), reading the
+    spend/output/cross-address policy directly from it.
     For bundles that disable cross-address transfers, `num_actions` counts
     `num_spends + num_outputs` requested actions (a requested spend and a requested
     output never share an action) rather than the maximum of the two, and
@@ -145,25 +149,19 @@ Existing callers keep the current behavior by constructing bundles with
     `BundleVersion`.
   - `orchard::builder::BundleMetadata::output_action_index` now indexes the plain
     outputs first, followed by the wallet-controlled change outputs.
-- For `BundleVersion::orchard_v3()`, the builder constructs
-  withdrawal/change bundles that disable cross-address transfers: every action's
-  output is addressed to the expanded receiver of the note it spends. The
-  fabricated zero-value output paired with each real spend carries a randomized,
-  undecryptable note ciphertext rather than one encrypted to the spent note's
-  receiver, so neither the owning wallet nor a holder of that receiver's incoming
-  viewing key can use it to detect the spend. Ordinary outputs are rejected
-  (`Builder::add_output` returns `OutputError::CrossAddressDisabled`); retained
-  shielded value must be added with `Builder::add_change_output`, which rejects a
-  recipient not owned by the full viewing key (`OutputError::RecipientNotOwned`)
-  and requires spends to be enabled (`OutputError::SpendsDisabled`). The cross-address
-  bit is now a caller-supplied flag rather than a builder-chosen default:
-  `BundleVersion::default_flags` returns the least-restrictive flag set consensus permits
-  — cross-address transfers enabled, except for the Orchard pool under
-  `BundleVersion::orchard_v3()`, where consensus mandates the restriction — and a caller
-  may restrict it further (a tighter choice the bundle version permits) before passing the
-  flags to the builder. Coinbase bundles follow the same constraints as non-coinbase
-  bundles: post-NU6.3 Orchard coinbase transactions cannot contain Orchard actions, so
-  post-NU6.3 coinbase bundle construction in this crate is only useful for
+- `orchard::builder::BundleType::Transactional` now carries a required
+  `pad_to_minimum: Option<u8>` field, so callers that directly construct or
+  pattern-match this public enum variant must update their code. When set to
+  `Some(1)`, the bundle is not padded to the 2-action minimum and contains
+  exactly the requested actions (at least one, if `bundle_required` is set).
+  When set to `None`, the default 2-action minimum is used.
+  `BundleType::DEFAULT` keeps the existing padded behavior.
+- When the bundle's `Flags` disable cross-address transfers (mandatory under
+  `BundleVersion::orchard_v3()`, per `default_flags`), the builder rejects ordinary
+  outputs (`Builder::add_output` returns `OutputError::CrossAddressDisabled`); retained
+  shielded value must instead be added with `Builder::add_change_output`. Because
+  post-NU6.3 Orchard coinbase transactions cannot contain Orchard actions, post-NU6.3
+  coinbase bundle construction in this crate is only useful for
   `BundleVersion::ironwood_v3()`.
 - `orchard::bundle::Flags::{to_byte, from_byte}` now take a
   `BundleVersion`. Bit 2 (`enableCrossAddress`) is only representable for
