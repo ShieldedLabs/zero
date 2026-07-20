@@ -28,7 +28,7 @@ use zcash_primitives::{
     transaction::{
         components::sapling as sapling_serialization,
         txid::{BlockTxCommitmentDigester, TxIdDigester},
-        Authorized, Transaction, TransactionDigest, TxVersion,
+        Authorized, Transaction, TransactionDigest,
     },
 };
 use zcash_protocol::{memo::MemoBytes, value::ZatBalance};
