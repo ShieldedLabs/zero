@@ -378,6 +378,33 @@ TEST(WalletRPCTests, ChangePoolPrefersOrchardBeforeNU6_3)
     UnloadGlobalWallet();
 }
 
+// The closure gate is keyed to the next block height, not the (lagging)
+// anchor height. At the activation boundary — NU6.3 active for the next
+// block but not yet at the anchor height — change must already avoid the
+// Orchard pool, or the send fails late at build time exactly during the
+// activation window. Negative control: with the gate keyed to the anchor
+// height instead, this scaffold resolves change to Orchard and the test
+// fails. // @claude
+TEST(WalletRPCTests, ChangePoolExcludesOrchardInActivationWindow)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    // NU6.3 activates at height 1: the scaffold's fake tip is at height 0, so
+    // with anchorConfirmations = 1 the anchor height (0) is pre-activation
+    // while the next block height (1) is post-activation.
+    RegtestActivateNU6point3(false, 1);
+    LoadGlobalWallet();
+    {
+        auto changeAddr = ResolveChangeForAccountSelector();
+        EXPECT_TRUE(changeAddr.has_value()) << "no internal change payment was resolved";
+        if (changeAddr.has_value()) {
+            EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(changeAddr.value()))
+                << "change in the activation window must already avoid the closing Orchard pool";
+        }
+    }
+    RegtestDeactivateNU6point3();
+    UnloadGlobalWallet();
+}
+
 // TODO: test private methods
 TEST(WalletRPCTests, RPCZMergeToAddressInternals)
 {

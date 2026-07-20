@@ -5420,8 +5420,10 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
             "\nShields a single transparent wallet UTXO to a freshly-generated Ironwood\n"
             "address. The destination spending key is NOT stored: its recovery mnemonic is\n"
             "returned in the result and the shielded funds are unspendable until Ironwood\n"
-            "wallet support exists somewhere. Intended for exercising the Ironwood pool on\n"
-            "test networks; do not use with funds you are not prepared to strand.\n"
+            "wallet support exists somewhere. The mnemonic is also written to debug.log\n"
+            "immediately before broadcast, so a lost RPC response does not strand the key\n"
+            "material. Intended for exercising the Ironwood pool on test networks; do not\n"
+            "use with funds you are not prepared to strand.\n"
             "\nArguments:\n"
             "1. \"txid\"  (string, required) The id of the transaction holding the UTXO to shield.\n"
             "2. n         (numeric, required) The output index of the UTXO to shield.\n"
@@ -5491,7 +5493,9 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is already spent");
         // An immature coinbase input would pass building and then be rejected
         // at mempool admission — after the wallet had already recorded the
-        // spend, wedging the UTXO until -zapwallettxes (review L-P2-2b). // @claude
+        // spend, leaving a rejected-but-signed transaction in the wallet
+        // (the input itself stays respendable, since IsSpent ignores
+        // conflicts below depth 0). // @claude
         if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity(std::nullopt) > 0)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "UTXO is an immature coinbase output");
         const CTxOut& utxo = wtx.vout[nOut];
@@ -5530,15 +5534,40 @@ UniValue z_shieldtoironwood(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, buildResult.GetError());
     CTransaction tx = buildResult.GetTxOrThrow();
 
-    // Phase 3: re-take the locks, re-check that the input was not spent while
-    // we were proving, then commit through the wallet (marking the input
-    // spent) and relay. There is no UA involved, so no recipient mappings are
+    // Phase 3: re-take the locks and re-validate what a reorg during the
+    // lock-free proving phase could have invalidated — a respend of the
+    // input, a de-matured coinbase, or the Ironwood anchor leaving the best
+    // chain — BEFORE committing. Once SendTransaction commits, a mempool
+    // rejection leaves a signed, resurrectable transaction in the wallet
+    // while this RPC throws without returning the recovery mnemonic, so the
+    // reorg-class rejections are caught here, on the throw-before-commit
+    // side. Then commit through the wallet (marking the input spent) and
+    // relay. There is no UA involved, so no recipient mappings are
     // recorded. // @claude
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         if (pwalletMain->IsSpent(hash, nOut, std::nullopt))
             throw JSONRPCError(RPC_WALLET_ERROR,
                 "UTXO was spent while the transaction was being proven");
+        auto it = pwalletMain->mapWallet.find(hash);
+        if (it == pwalletMain->mapWallet.end())
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "UTXO's transaction left the wallet while the transaction was being proven");
+        if (it->second.IsCoinBase() && it->second.GetBlocksToMaturity(std::nullopt) > 0)
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "UTXO's coinbase became immature again while the transaction was being proven (reorg)");
+        IronwoodMerkleFrontier ironwoodTree;
+        if (!pcoinsTip->GetIronwoodAnchorAt(ironwoodAnchor, ironwoodTree))
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                "The Ironwood anchor left the best chain while the transaction was being proven (reorg); retry");
+
+        // Persist the recovery material to debug.log BEFORE the commit: after
+        // this point a lost RPC response (or a commit-then-reject) must not
+        // destroy the only copy of the destination key. Logging key material
+        // is deliberate for this test-only, double-gated RPC. // @claude
+        LogPrintf("z_shieldtoironwood: committing tx %s shielding %s ZEC; recovery mnemonic (account 0, diversifier 0): %s\n",
+                  tx.GetHash().GetHex(), FormatMoney(amount), std::string(seed.GetMnemonic().c_str()));
+
         std::vector<RecipientMapping> recipientMappings;
         SendTransaction(tx, recipientMappings, std::nullopt, false);
     }

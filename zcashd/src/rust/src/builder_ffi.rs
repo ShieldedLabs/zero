@@ -265,7 +265,15 @@ pub extern "C" fn orchard_unauthorized_bundle_prove_and_sign(
     sighash: *const [u8; 32],
 ) -> *mut Bundle<Authorized, ZatBalance> {
     let bundle = unsafe { Box::from_raw(bundle) };
-    let keys = unsafe { slice::from_raw_parts(keys, keys_len) };
+    // Output-only bundles (e.g. the Ironwood origination path) pass an empty
+    // key list, and C++'s `std::vector::data()` is null for a never-grown
+    // vector — `slice::from_raw_parts` requires a non-null pointer even for
+    // length 0, so the empty case must not reach it. // @claude
+    let keys: &[*const SpendingKey] = if keys_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(keys, keys_len) }
+    };
     let sighash = unsafe { sighash.as_ref() }.expect("sighash pointer may not be null.");
 
     let signing_keys = keys

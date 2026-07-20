@@ -456,10 +456,16 @@ WalletTxBuilder::PrepareTransaction(
     auto consensus = params.GetConsensus();
     int anchorHeight = GetAnchorHeight(chain, anchorConfirmations);
     bool afterNU5 = consensus.NetworkUpgradeActive(anchorHeight, Consensus::UPGRADE_NU5);
-    // From NU6.3 the Orchard pool no longer accepts new outputs; payment resolution
-    // must stop preferring a UA's Orchard receiver once the closure is in force at
-    // the anchor height (review XR-4).
-    bool orchardPoolClosed = consensus.NetworkUpgradeActive(anchorHeight, Consensus::UPGRADE_NU6_3);
+    // From NU6.3 the Orchard pool no longer accepts new outputs; payment and
+    // change resolution must stop preferring Orchard receivers once the closure
+    // is in force. Unlike `afterNU5` above — an anchor property, because it
+    // governs witness validity — the closure is a property of the block the
+    // transaction will be mined in, so it is keyed to the next block height.
+    // Keying it to the lagging anchor height would leave an
+    // anchorConfirmations-block window at activation where resolution still
+    // selects Orchard receivers and every such send fails late at build
+    // time. // @claude
+    bool orchardPoolClosed = consensus.NetworkUpgradeActive(chain.Height() + 1, Consensus::UPGRADE_NU6_3);
     auto consensusBranchId = CurrentEpochBranchId(chain.Height(), consensus);
     auto selected = examine(payments, match {
             [&](const std::vector<Payment>& payments) {
