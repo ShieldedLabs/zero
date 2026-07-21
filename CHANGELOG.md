@@ -8,6 +8,12 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v20 - 2026-07-21
+
+- zcashd: Ironwood is now fully supported (mainnet and testnet)
+- zcashd: Bumped the EOL date to ~2026-09-03 (restores the original 7-week EOL window)
+- zcashd: Various bug fixes, hardening, and regression tests
+
 ## v19 - 2026-07-18
 
 ### Fixed
