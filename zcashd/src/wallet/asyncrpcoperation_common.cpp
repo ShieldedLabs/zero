@@ -96,6 +96,14 @@ void ThrowInputSelectionError(
                                     "with the `privacyPolicy` parameter set to "
                                     "`AllowRevealedAmounts` or weaker if you wish to allow this "
                                     "transaction to proceed anyway"));
+                case AddressResolutionError::OrchardPoolClosed:
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "Could not send to an Orchard receiver: from NU6.3 the Orchard pool "
+                        "no longer accepts new outputs, and the recipient address has no "
+                        "other receiver this wallet is able to use (see the "
+                        "Orchard-to-Ironwood migration guidance). Ask the recipient for an "
+                        "address with a Sapling or transparent receiver.");
                 case AddressResolutionError::TransparentReceiverNotAllowed:
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,

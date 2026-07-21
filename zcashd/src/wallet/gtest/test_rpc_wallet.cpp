@@ -11,7 +11,9 @@
 #include "wallet/asyncrpcoperation_common.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
 #include "wallet/asyncrpcoperation_sendmany.h"
+#include "zcash/Address.hpp" // @claude for UnifiedAddress in the XR-4 test
 #include "zcash/JoinSplit.hpp"
+#include "zcash/address/mnemonic.h" // @claude for MnemonicSeed::Random in the XR-4 test
 #include "zcash/memo.h"
 #include "zip317.h"
 
@@ -149,6 +151,257 @@ TEST(WalletRPCTests, PrepareTransaction)
     }
     // Revert to default
     RegtestDeactivateSapling();
+    UnloadGlobalWallet();
+}
+
+// review XR-4: from NU6.3 the Orchard pool no longer accepts new outputs, so
+// payment resolution must stop preferring a UA's Orchard receiver — falling
+// back to a usable Sapling receiver, and failing at *resolution* time with a
+// migration-pointing error for Orchard-only recipients (instead of resolving
+// to Orchard and failing late in the builder). // @claude
+TEST(WalletRPCTests, OrchardResolutionAfterNU6_3)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    RegtestActivateNU6point3();
+    LoadGlobalWallet();
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+
+        if (!pwalletMain->HaveMnemonicSeed()) {
+            pwalletMain->GenerateNewSeed();
+        }
+
+        // Fund the wallet with a fake-mined transparent UTXO (same scaffold as
+        // the PrepareTransaction test above).
+        auto taddr = pwalletMain->GenerateNewKey(true).GetID();
+        int nextBlockHeight = chainActive.Height() + 1;
+        CMutableTransaction mtx = CreateNewContextualCMutableTransaction(
+                Params().GetConsensus(), nextBlockHeight, false);
+        CScript scriptPubKey = CScript() << OP_DUP << OP_HASH160 << ToByteVector(taddr) << OP_EQUALVERIFY << OP_CHECKSIG;
+        mtx.vout.push_back(CTxOut(5 * COIN, scriptPubKey));
+        CWalletTx wtx(pwalletMain, mtx);
+        pwalletMain->LoadWalletTx(wtx);
+
+        CBlock block;
+        block.vtx.push_back(wtx);
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        auto blockHash = block.GetHash();
+        CBlockIndex fakeIndex {block};
+        mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+        chainActive.SetTip(&fakeIndex);
+        wtx.SetMerkleBranch(block);
+        pwalletMain->LoadWalletTx(wtx);
+
+        WalletTxBuilder builder(Params(), minRelayTxFee);
+        auto selector = CWallet::LegacyTransparentZTXOSelector(
+                true,
+                TransparentCoinbasePolicy::Disallow);
+        // Fully permissive so that neither the Sapling fallback nor transparent
+        // change is blocked by policy — isolating the pool-closure behavior.
+        TransactionStrategy strategy(PrivacyPolicy::AllowFullyTransparent);
+
+        SpendableInputs inputs;
+        inputs.utxos.emplace_back(&wtx, 0, std::nullopt, 100, true);
+
+        auto coinType = Params().BIP44CoinType();
+        auto orchardAddr =
+            libzcash::OrchardSpendingKey::ForAccount(MnemonicSeed::Random(coinType), coinType, 0)
+                .ToFullViewingKey().GetChangeAddress();
+        auto saplingAddr = pwalletMain->GenerateNewLegacySaplingZKey();
+
+        { // An Orchard-only UA must fail at resolution time with OrchardPoolClosed.
+            auto ua = libzcash::UnifiedAddress::ForSingleReceiver(orchardAddr);
+            std::vector<Payment> payments { Payment(ua, 1 * COIN, std::nullopt) };
+            (void)builder.PrepareTransaction(
+                    *pwalletMain, selector, inputs, payments, chainActive, strategy, std::nullopt, 1)
+                .map_error([](const auto& err) {
+                    EXPECT_TRUE(examine(err, match {
+                        [](const AddressResolutionError& are) {
+                            return are == AddressResolutionError::OrchardPoolClosed;
+                        },
+                        [](const auto&) { return false; },
+                    })) << "expected AddressResolutionError::OrchardPoolClosed";
+                })
+                .map([](const auto&) { FAIL() << "expected resolution to fail"; });
+        }
+
+        { // A UA with both Orchard and Sapling receivers must resolve to Sapling.
+            // EXPECT (not ASSERT) throughout: an early return here would skip the
+            // tear-down below and poison chainActive for the following tests.
+            libzcash::UnifiedAddress ua;
+            ua.AddReceiver(orchardAddr);
+            ua.AddReceiver(saplingAddr);
+            std::vector<Payment> payments { Payment(ua, 1 * COIN, std::nullopt) };
+            auto res = builder.PrepareTransaction(
+                    *pwalletMain, selector, inputs, payments, chainActive, strategy, std::nullopt, 1);
+            EXPECT_TRUE(res.has_value()) << "dual-receiver UA payment failed to resolve";
+            if (res.has_value()) {
+                // The resolved list also carries the (internal) change payment;
+                // only the external payment's receiver choice is under test.
+                size_t externalCount = 0;
+                for (const auto& rp : res.value().GetPayments().GetResolvedPayments()) {
+                    if (!rp.isInternal) {
+                        externalCount++;
+                        EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(rp.address))
+                            << "post-NU6.3 resolution must select the Sapling receiver, not Orchard";
+                    }
+                }
+                EXPECT_EQ(externalCount, 1u);
+            }
+        }
+
+        // Tear down
+        chainActive.SetTip(NULL);
+        mapBlockIndex.erase(blockHash);
+    }
+    RegtestDeactivateNU6point3();
+    UnloadGlobalWallet();
+}
+
+// Shared scaffold for the H-P2-1 change-pool tests: fund the wallet with a
+// fake-mined transparent UTXO, prepare a 1-ZEC Sapling-recipient payment from
+// a unified-account selector under AllowFullyTransparent (a superset of the
+// AllowRevealedAmounts trigger), and return the resolved *internal change*
+// address. The caller asserts which pool it landed in; the network upgrade
+// state is whatever the caller activated. Assumes the global wallet is
+// loaded. // @claude (review H-P2-1)
+static std::optional<libzcash::RecipientAddress> ResolveChangeForAccountSelector()
+{
+    std::optional<libzcash::RecipientAddress> changeAddr;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    if (!pwalletMain->HaveMnemonicSeed()) {
+        pwalletMain->GenerateNewSeed();
+    }
+    auto ufvkpair = pwalletMain->GenerateNewUnifiedSpendingKey();
+    auto account = ufvkpair.second;
+
+    // Fund the wallet with a fake-mined transparent UTXO (same scaffold as
+    // the resolution tests above).
+    auto taddr = pwalletMain->GenerateNewKey(true).GetID();
+    int nextBlockHeight = chainActive.Height() + 1;
+    CMutableTransaction mtx = CreateNewContextualCMutableTransaction(
+            Params().GetConsensus(), nextBlockHeight, false);
+    CScript scriptPubKey = CScript() << OP_DUP << OP_HASH160 << ToByteVector(taddr) << OP_EQUALVERIFY << OP_CHECKSIG;
+    mtx.vout.push_back(CTxOut(5 * COIN, scriptPubKey));
+    CWalletTx wtx(pwalletMain, mtx);
+    pwalletMain->LoadWalletTx(wtx);
+
+    CBlock block;
+    block.vtx.push_back(wtx);
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    auto blockHash = block.GetHash();
+    CBlockIndex fakeIndex {block};
+    mapBlockIndex.insert(std::make_pair(blockHash, &fakeIndex));
+    chainActive.SetTip(&fakeIndex);
+    wtx.SetMerkleBranch(block);
+    pwalletMain->LoadWalletTx(wtx);
+
+    WalletTxBuilder builder(Params(), minRelayTxFee);
+    auto selector = pwalletMain->ZTXOSelectorForAccount(
+            account,
+            true,
+            TransparentCoinbasePolicy::Disallow,
+            {libzcash::ReceiverType::P2PKH,
+             libzcash::ReceiverType::Sapling,
+             libzcash::ReceiverType::Orchard});
+    EXPECT_TRUE(selector.has_value());
+    TransactionStrategy strategy(PrivacyPolicy::AllowFullyTransparent);
+
+    SpendableInputs inputs;
+    inputs.utxos.emplace_back(&wtx, 0, std::nullopt, 100, true);
+
+    auto saplingRecipient = pwalletMain->GenerateNewLegacySaplingZKey();
+    std::vector<Payment> payments { Payment(saplingRecipient, 1 * COIN, std::nullopt) };
+
+    if (selector.has_value()) {
+        auto res = builder.PrepareTransaction(
+                *pwalletMain, selector.value(), inputs, payments, chainActive, strategy,
+                std::nullopt, 1);
+        EXPECT_TRUE(res.has_value()) << "payment with change failed to resolve";
+        if (res.has_value()) {
+            for (const auto& rp : res.value().GetPayments().GetResolvedPayments()) {
+                if (rp.isInternal) {
+                    changeAddr = rp.address;
+                }
+            }
+        }
+    }
+
+    // Tear down (EXPECTs above keep us reaching this on failure).
+    chainActive.SetTip(NULL);
+    mapBlockIndex.erase(blockHash);
+    return changeAddr;
+}
+
+// review H-P2-1: from NU6.3 the Orchard pool no longer accepts new outputs —
+// change included. Change resolution for an account whose receivers include
+// Orchard must fall back to Sapling; before the fix the Orchard-first change
+// preference resolved change into the closed pool (under AllowRevealedAmounts
+// or with selected Orchard notes) and every change-producing spend then
+// failed at build time. // @claude
+TEST(WalletRPCTests, ChangePoolExcludesOrchardAfterNU6_3)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    RegtestActivateNU6point3();
+    LoadGlobalWallet();
+    {
+        auto changeAddr = ResolveChangeForAccountSelector();
+        EXPECT_TRUE(changeAddr.has_value()) << "no internal change payment was resolved";
+        if (changeAddr.has_value()) {
+            EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(changeAddr.value()))
+                << "post-NU6.3 change must resolve to Sapling, not the closed Orchard pool";
+        }
+    }
+    RegtestDeactivateNU6point3();
+    UnloadGlobalWallet();
+}
+
+// Control for the gate above: before NU6.3 the Orchard-first change
+// preference is intact — the same scaffold resolves change to Orchard. This
+// pins that the H-P2-1 gate switches exactly at activation and does not
+// regress pre-activation behavior. // @claude
+TEST(WalletRPCTests, ChangePoolPrefersOrchardBeforeNU6_3)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    RegtestActivateNU5();
+    LoadGlobalWallet();
+    {
+        auto changeAddr = ResolveChangeForAccountSelector();
+        EXPECT_TRUE(changeAddr.has_value()) << "no internal change payment was resolved";
+        if (changeAddr.has_value()) {
+            EXPECT_TRUE(std::holds_alternative<libzcash::OrchardRawAddress>(changeAddr.value()))
+                << "pre-NU6.3 change must still prefer the Orchard pool";
+        }
+    }
+    RegtestDeactivateNU5();
+    UnloadGlobalWallet();
+}
+
+// The closure gate is keyed to the next block height, not the (lagging)
+// anchor height. At the activation boundary — NU6.3 active for the next
+// block but not yet at the anchor height — change must already avoid the
+// Orchard pool, or the send fails late at build time exactly during the
+// activation window. Negative control: with the gate keyed to the anchor
+// height instead, this scaffold resolves change to Orchard and the test
+// fails. // @claude
+TEST(WalletRPCTests, ChangePoolExcludesOrchardInActivationWindow)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    // NU6.3 activates at height 1: the scaffold's fake tip is at height 0, so
+    // with anchorConfirmations = 1 the anchor height (0) is pre-activation
+    // while the next block height (1) is post-activation.
+    RegtestActivateNU6point3(false, 1);
+    LoadGlobalWallet();
+    {
+        auto changeAddr = ResolveChangeForAccountSelector();
+        EXPECT_TRUE(changeAddr.has_value()) << "no internal change payment was resolved";
+        if (changeAddr.has_value()) {
+            EXPECT_TRUE(std::holds_alternative<libzcash::SaplingPaymentAddress>(changeAddr.value()))
+                << "change in the activation window must already avoid the closing Orchard pool";
+        }
+    }
+    RegtestDeactivateNU6point3();
     UnloadGlobalWallet();
 }
 

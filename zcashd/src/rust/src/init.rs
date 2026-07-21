@@ -8,7 +8,7 @@ use orchard::circuit::OrchardCircuitVersion;
 use tracing::info;
 
 use crate::{
-    ORCHARD_PK_NU6_2, ORCHARD_PK_NU6_3, ORCHARD_VK_FIXED, ORCHARD_VK_INSECURE, SAPLING_OUTPUT_PARAMS, SAPLING_OUTPUT_VK,
+    ORCHARD_PK_NU6_2, ORCHARD_PK_NU6_3, ORCHARD_VK_FIXED, ORCHARD_VK_INSECURE, ORCHARD_VK_NU6_3, SAPLING_OUTPUT_PARAMS, SAPLING_OUTPUT_VK,
     SAPLING_SPEND_PARAMS, SAPLING_SPEND_VK, SPROUT_GROTH16_PARAMS_PATH, SPROUT_GROTH16_VK,
 };
 
@@ -76,4 +76,9 @@ fn zksnark_params(sprout_path: String, load_proving_keys: bool) {
     }
     LazyLock::force(&ORCHARD_VK_INSECURE);
     LazyLock::force(&ORCHARD_VK_FIXED);
+    // The NU6.3 verifying key is needed by consensus validation from the moment
+    // the upgrade activates; without this warm-up its first dereference happens
+    // inside orchard_batch_validation_init under cs_main, stalling block and
+    // mempool processing for the ~1-2s halo2 keygen. // @claude (review XR-5a)
+    LazyLock::force(&ORCHARD_VK_NU6_3);
 }

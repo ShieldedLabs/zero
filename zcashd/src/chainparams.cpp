@@ -147,13 +147,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 170150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight = 3364600;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nProtocolVersion = 170160;
-        // @nomerge: NU6.3 mainnet activation height TBD (ZIP 258 still lists it as TBD).
-        // Parked at NO_ACTIVATION_HEIGHT like ZFUTURE: any other placeholder is a live
-        // height — the previous 0xCCCCCCCC overflowed the signed int to a negative
-        // value, making a mainnet build treat NU6.3 as active from genesis (and the
-        // Rust side, which maps negatives to "never activates", disagree with C++).
-        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight =
-            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Height fixed by ZIP 258 and shipped in the reference validator
+        // (Zebra v6.0.0, zebra-chain/src/parameters/constants.rs). The ZIP's
+        // MIN_NETWORK_PROTOCOL_VERSION is still TBD — that provisionality is
+        // tracked on the nProtocolVersion lines, not here. // @claude
+        consensus.vUpgrades[Consensus::UPGRADE_NU6_3].nActivationHeight = 3428143;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -388,10 +386,20 @@ public:
             (2400000, uint256S("0x0000000000294d1c8d87a1b6566d302aa983691bc3cab0583a245389bbb9d285"))
             (2600000, uint256S("0x0000000000b5ad92fcec0069d590f674d05ec7d96b1ff727863ea390950c4e49"))
             (2800000, uint256S("0x00000000011a226fb25d778d65b055605a82da016989b7788e0ce83c4f8d64f7"))
-            (3000000, uint256S("0x0000000000573729e4db33678233e5dc0cc721c9c09977c64dcaa3f6344de8e9")),
-            1752983473,     // * UNIX timestamp of last checkpoint block
-            15537904,       // * total number of transactions between genesis and last checkpoint
-            5967            // * estimated number of transactions per day after checkpoint
+            (3000000, uint256S("0x0000000000573729e4db33678233e5dc0cc721c9c09977c64dcaa3f6344de8e9"))
+            // Pre-NU6.3 release refresh (plan §7.6): height and hash taken from the
+            // reference validator's regenerated checkpoint list (Zebra v6.0.0,
+            // zebra-chain/src/parameters/checkpoint/main-checkpoints.txt — its
+            // highest entry, ~22k blocks below the 3,428,143 activation) and
+            // cross-checked against a public explorer, which agrees byte-for-byte.
+            // Do not add a checkpoint above 3,428,143 unless the chain-supply
+            // fallback checkpoint carries the real Ironwood balance (see H5 /
+            // ChainSupplyCheckpointIronwoodValue). // @claude
+            (3406406, uint256S("0x0000000000b17bd5c2f1780f79ff0ed40d325bacb13edb12784d6968eac53b14")),
+            1783609570,     // * UNIX timestamp of last checkpoint block (2026-07-09 15:06:10 UTC)
+            17833721,       // * total number of transactions between genesis and last checkpoint
+                            //   (estimated from explorer totals; feeds progress display only)
+            6031            // * estimated number of transactions per day after checkpoint
                             //   (total number of tx * 48 * 24) / checkpoint block height
         };
 

@@ -1,9 +1,12 @@
 #include "chainparams.h"
 #include "consensus/params.h"
 #include "consensus/consensus.h"
+#include "consensus/upgrades.h" // @claude for NetworkUpgradeInfo in the Ironwood sighash check
 #include "consensus/validation.h"
 #include "key_io.h"
 #include "main.h"
+#include "script/interpreter.h" // @claude for SignatureHash/PrecomputedTransactionData
+#include <rust/orchard.h> // @claude for init_batch_validator
 #include "pubkey.h"
 #include "rpc/protocol.h"
 #include "transaction_builder.h"
@@ -272,6 +275,135 @@ TEST(TransactionBuilder, TransparentToOrchard)
 
     // Revert to default
     RegtestDeactivateNU5();
+}
+
+// Review S4: a transparent-to-Ironwood shielding transaction built end-to-end
+// by TransactionBuilder. From NU6.3 the Ironwood pool is the destination for
+// newly shielded value (the Orchard pool rejects inflows), and it permits
+// cross-address transfers, so arbitrary recipients are accepted. The bundle's
+// proof and signatures must batch-validate under the verifier's own two-slot
+// v6 sighash, which commits to the transparent input via allPrevOutputs.
+// // @claude
+TEST(TransactionBuilder, TransparentToIronwood)
+{
+    LoadProofParameters();
+    auto consensusParams = RegtestActivateNU6point3();
+
+    CBasicKeyStore keystore;
+    CKey tsk = AddTestCKeyToKeyStore(keystore);
+    auto scriptPubKey = GetScriptForDestination(tsk.GetPubKey().GetID());
+
+    auto coinType = Params().BIP44CoinType();
+    auto seed = MnemonicSeed::Random(coinType);
+    auto sk = libzcash::OrchardSpendingKey::ForAccount(seed, coinType, 0);
+    auto ivk = sk.ToFullViewingKey().ToIncomingViewingKey();
+    libzcash::diversifier_index_t j(0);
+    auto recipient = ivk.Address(j);
+
+    // Create a shielding transaction from transparent to Ironwood
+    // 0.00005 t-ZEC in, 0.00004 z-ZEC out, default fee
+    auto builder = TransactionBuilder(Params(), 1, uint256(), SaplingMerkleTree::empty_root(), &keystore);
+    builder.AddTransparentInput(COutPoint(uint256S("1234"), 0), scriptPubKey, 5000);
+    EXPECT_TRUE(builder.EnableIronwood(uint256()));
+    EXPECT_TRUE(builder.AddIronwoodOutput(std::nullopt, recipient, 4000, std::nullopt));
+    auto maybeTx = builder.Build();
+    if (maybeTx.IsError()) {
+        std::cerr << "Failed to build transaction: " << maybeTx.GetError() << std::endl;
+        GTEST_FAIL();
+    }
+    auto tx = maybeTx.GetTxOrThrow();
+
+    EXPECT_TRUE(tx.IsZip229V6());
+    EXPECT_EQ(tx.vin.size(), 1);
+    EXPECT_EQ(tx.vout.size(), 0);
+    EXPECT_FALSE(tx.GetOrchardBundle().IsPresent());
+    EXPECT_TRUE(tx.GetIronwoodBundle().IsPresent());
+    EXPECT_EQ(tx.GetIronwoodBundle().GetValueBalance(), -4000);
+
+    CValidationState state;
+    EXPECT_TRUE(ContextualCheckTransaction(tx, state, Params(), 2, true));
+    EXPECT_EQ(state.GetRejectReason(), "");
+
+    // Verifier-side sighash, exactly as ContextualCheckShieldedInputs
+    // computes it; the builder's binding signature must validate under it.
+    std::vector<CTxOut> allPrevOutputs;
+    allPrevOutputs.emplace_back(5000, scriptPubKey);
+    const PrecomputedTransactionData txdata(tx, allPrevOutputs);
+    CScript scriptCode;
+    uint256 verifierSighash = SignatureHash(
+        scriptCode, tx, NOT_AN_INPUT, SIGHASH_ALL, 0,
+        NetworkUpgradeInfo[Consensus::UPGRADE_NU6_3].nBranchId, txdata);
+    auto batch = orchard::init_batch_validator(false, orchard::OrchardCircuitVersion::PostNu6_3);
+    EXPECT_TRUE(tx.GetIronwoodBundle().QueueAuthValidation(
+        *batch, verifierSighash, orchard::BundleFormat::V6Ironwood));
+    EXPECT_TRUE(batch->validate());
+
+    RegtestDeactivateNU6point3();
+}
+
+// EnableIronwood is only valid on the v6 (ZIP 229) format: before NU6.3 the
+// builder constructs v5-or-earlier transactions, whose serializations have no
+// Ironwood slot, so enabling must fail rather than build a bundle that would
+// be silently dropped on the wire. // @claude
+TEST(TransactionBuilder, EnableIronwoodRequiresV6)
+{
+    auto consensusParams = RegtestActivateNU5();
+
+    auto builder = TransactionBuilder(Params(), 1, uint256(), SaplingMerkleTree::empty_root());
+    EXPECT_FALSE(builder.EnableIronwood(uint256()));
+    EXPECT_THROW(
+        (void)builder.AddIronwoodOutput(
+            std::nullopt,
+            libzcash::OrchardSpendingKey::ForAccount(MnemonicSeed::Random(Params().BIP44CoinType()), Params().BIP44CoinType(), 0)
+                .ToFullViewingKey().GetChangeAddress(),
+            4000, std::nullopt),
+        std::runtime_error);
+
+    RegtestDeactivateNU5();
+}
+
+// review L-P2-1: EnableIronwood is one-shot and exact-v6.
+TEST(TransactionBuilder, EnableIronwoodOneShotAndExactV6)
+{
+    // (a) Re-arm refused: a second EnableIronwood would discard the first
+    // builder while valueBalanceIronwood kept its debit — Build()'s change
+    // equation would then silently convert that value into miner fee (the H1
+    // bug class). // @claude
+    {
+        auto consensusParams = RegtestActivateNU6point3();
+        auto builder = TransactionBuilder(Params(), 1, uint256(), SaplingMerkleTree::empty_root());
+        EXPECT_TRUE(builder.EnableIronwood(uint256()));
+        EXPECT_FALSE(builder.EnableIronwood(uint256()));
+        RegtestDeactivateNU6point3();
+    }
+    // (b) ZFUTURE (nVersion 0xFFFF, which passed the previous `< v6` check)
+    // fails the exact-v6 check: its wire format has no Ironwood slot, so
+    // enabling would build a bundle that is silently dropped at
+    // serialization — the case the guard exists to prevent. // @claude
+    {
+        RegtestActivateNU6point3(false, 10);
+        UpdateNetworkUpgradeParameters(Consensus::UPGRADE_ZFUTURE, 20);
+        auto builder = TransactionBuilder(Params(), 25, uint256(), SaplingMerkleTree::empty_root());
+        EXPECT_FALSE(builder.EnableIronwood(uint256()));
+        UpdateNetworkUpgradeParameters(
+            Consensus::UPGRADE_ZFUTURE, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+        RegtestDeactivateNU6point3();
+    }
+}
+
+// review XR-7: an unsupported (pool, protocol) pairing crosses the raw FFI
+// boundary, where the crate builds with panic='abort' — before the fix this
+// test aborted the whole process at Builder construction. Now the FFI returns
+// null and every use of the builder throws the null-inner logic_error. // @claude
+TEST(TransactionBuilder, InvalidOrchardBuilderPairingFailsGracefully)
+{
+    // (Ironwood, InsecureV1) and (Ironwood, V2) are not constructible bundle
+    // versions; both must yield an inert builder, not a process abort.
+    for (auto version : {orchard::ProtocolVersion::InsecureV1, orchard::ProtocolVersion::V2}) {
+        orchard::Builder builder(
+            false, {orchard::OrchardValuePool::Ironwood, version}, uint256());
+        EXPECT_THROW((void)builder.Build(), std::logic_error);
+    }
 }
 
 TEST(TransactionBuilder, RejectsTransparentToOrchardIfDisabled)

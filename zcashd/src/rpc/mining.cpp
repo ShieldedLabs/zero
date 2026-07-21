@@ -631,6 +631,17 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
             checktxtime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
 
             WAIT_LOCK(g_best_block_mutex, lock);
+            // The precompute below builds a shielded coinbase — including
+            // proving, which is why it is precomputed at all — and can throw:
+            // e.g. a prover failure for a Sapling -mineraddress, or the
+            // miner's deliberate Orchard-coinbase rejection (unreachable
+            // today only because init refuses Orchard miner addresses at
+            // startup). cs_main is released in this scope, so an escaping
+            // exception would unwind past ENTER_CRITICAL_SECTION and
+            // unbalance the lock; catch it here, drop the precompute for
+            // this wait, and let the template creation below surface the
+            // error cleanly under cs_main. // @claude
+            bool precompute_failed = false;
             while (g_best_block == hashWatchedChain && IsRPCRunning())
             {
                 // Before waiting, generate the coinbase for the block following the next
@@ -639,11 +650,20 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
                 // Note that the time to create the coinbase tx here does not add to,
                 // but instead is included in, the 10 second delay, since we're waiting
                 // until an absolute time is reached.
-                if (!cached_next_cb_mtx && IsShieldedMinerAddress(minerAddress)) {
-                    cached_next_cb_height = nHeight + 2;
-                    cached_next_cb_mtx = CreateCoinbaseTransaction(
-                        Params(), CAmount{0}, minerAddress, cached_next_cb_height);
-                    next_cb_mtx = cached_next_cb_mtx;
+                if (!precompute_failed && !cached_next_cb_mtx && IsShieldedMinerAddress(minerAddress)) {
+                    try {
+                        cached_next_cb_height = nHeight + 2;
+                        cached_next_cb_mtx = CreateCoinbaseTransaction(
+                            Params(), CAmount{0}, minerAddress, cached_next_cb_height);
+                        next_cb_mtx = cached_next_cb_mtx;
+                    } catch (const std::exception& e) {
+                        LogPrintf("getblocktemplate: longpoll coinbase precompute for height %d failed: %s\n",
+                                  nHeight + 2, e.what());
+                        cached_next_cb_height = 0;
+                        cached_next_cb_mtx = nullopt;
+                        next_cb_mtx = nullopt;
+                        precompute_failed = true;
+                    }
                 }
                 bool timedout = g_best_block_cv.wait_until(lock, checktxtime) == std::cv_status::timeout;
 

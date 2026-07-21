@@ -239,6 +239,9 @@ enum class AddressResolutionError {
     //! Despite a lax `PrivacyPolicy`, other factors made it impossible to find a receiver for a
     //! recipient UA
     CouldNotResolveReceiver,
+    //! From NU6.3 the Orchard pool no longer accepts new outputs, and the recipient UA has no
+    //! other receiver we are able to use (review XR-4)
+    OrchardPoolClosed,
     //! Requested `PrivacyPolicy` doesn’t include `AllowRevealedRecipients`, but we are trying to
     //! pay a UA where we can only select a transparent receiver
     TransparentReceiverNotAllowed,
@@ -389,7 +392,8 @@ private:
             const SpendableInputs& spendable,
             const Payments& resolvedPayments,
             const TransactionStrategy& strategy,
-            bool afterNU5) const;
+            bool afterNU5,
+            bool orchardPoolClosed) const;
 
     tl::expected<
         std::tuple<SpendableInputs, CAmount, std::optional<ChangeAddress>>,
@@ -403,6 +407,7 @@ private:
             const SpendableInputs& spendable,
             Payments& resolved,
             bool afterNU5,
+            bool orchardPoolClosed,
             uint32_t consensusBranchId) const;
 
     /**
@@ -419,6 +424,7 @@ private:
             const TransactionStrategy& strategy,
             const std::optional<CAmount>& fee,
             bool afterNU5,
+            bool orchardPoolClosed,
             uint32_t consensusBranchId) const;
     /**
      * Compute the internal and external OVKs to use in transaction construction, given
