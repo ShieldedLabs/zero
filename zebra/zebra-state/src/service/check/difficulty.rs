@@ -186,6 +186,11 @@ impl AdjustedDifficulty {
     /// Implements `ThresholdBits` from the Zcash specification, and the Testnet
     /// minimum difficulty adjustment from ZIPs 205 and 208.
     pub fn expected_difficulty_threshold(&self) -> CompactDifficulty {
+        // [zero] Reverted the upstream #10952 regtest fixed-powLimit special-case
+        // (paired with the block-time revert in read/difficulty.rs). Both were
+        // zcashd-sidecar accommodations; we do not run the sidecar, and the pair
+        // regresses zaino reorg handling. See
+        // reports/zebra-v6.2.0-reorg-regression-2026-07-20.md.
         if NetworkUpgrade::is_testnet_min_difficulty_block(
             &self.network,
             self.candidate_height,

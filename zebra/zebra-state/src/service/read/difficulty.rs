@@ -236,6 +236,12 @@ fn difficulty_time_and_history_tree(
         .checked_add(Duration32::from_seconds(BLOCK_MAX_TIME_SINCE_MEDIAN))
         .expect("a valid block time plus a small constant is in-range");
 
+    // [zero] Reverted the upstream #10952 regtest special-case (`min_time` on
+    // Regtest) back to the v6.1.0 clamp. That accommodation existed only so a
+    // zcashd-compat sidecar accepts Zebra's regtest headers; we do not run the
+    // sidecar in the Z3 stack, and its clustered near-median timestamps regress
+    // zaino's reorg handling (a live reorg leaves a persisted non-canonical
+    // coinbase in z_listunspent). See reports/zebra-v6.2.0-reorg-regression-2026-07-20.md.
     let cur_time = cur_time.clamp(min_time, max_time);
 
     // Now that we have a valid time, get the difficulty for that time.

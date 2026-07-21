@@ -1189,6 +1189,22 @@ sys.exit(1 if bad else 0)'
   old_tip=$(zebra_height)
   inv_height=$((old_tip - depth + 1))
   inv_hash=$(zebra_rpc getblockhash "[$inv_height]" | json_field "['result']")
+
+  # Capture pre_count from a maturity-current listing. A coinbase matures purely
+  # by height (spendable once tip - height >= 99), but a live wallet does not
+  # re-evaluate maturity for already-scanned blocks as the tip advances, so after
+  # a prior scenario's mining the running listing can lag the true mature set by
+  # the few heights that crossed the horizon since the last sweep. The reorg's
+  # rescan below catches that lag up, which would inflate post_count past
+  # `pre_count + net-height-gain` and fail the exact-count assertion even though
+  # every listed UTXO is canonical. Force a fresh maturity sweep (restart; the
+  # chain is static here since zebra runs without the miner) so pre_count reflects
+  # the true mature set and want_count stays exact. Symmetric with the post-reorg
+  # measurements, which are taken after the reorg/restart sweep.
+  stop_zallet
+  start_zallet "zallet.log"
+  WAIT_TIMEOUT=180 wait_until "pre-reorg wallet maturity-current at $old_tip" fully_synced "$old_tip" || true
+  assert "reorg: pre-reorg wallet maturity-current at $old_tip" fully_synced "$old_tip"
   pre_count=$(transparent_utxos '[]' 60 | count_lines) || true
 
   resp=$(zebra_rpc invalidateblock "[\"$inv_hash\"]") || resp="(rpc failure)"
