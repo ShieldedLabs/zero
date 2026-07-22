@@ -379,10 +379,3 @@ unwrap_in_result = "warn"
 
 # TODOs: fix this lint eventually
 result_large_err = "allow"
-
-# [zero] Build the stack against the vendored subtrees rather than crates.io, so
-# editing the in-tree copy changes the binaries (one cohesive, tailored stack).
-# Pilot: orchard only (vendored orchard/ == 0.15.0 == this workspace's pin, so no
-# API change). librustzcash crates to follow once the stack converges on one rev.
-[patch.crates-io]
-orchard = { path = "../orchard" }
