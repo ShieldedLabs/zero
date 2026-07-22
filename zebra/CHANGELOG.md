@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
   [zakura](https://github.com/zakura-core/zakura) authors for the major part of
   this implementation.
 
+### Security
+
+- Allow chain synchronization to immediately retry an honest block body after
+  rejecting a body with the same header hash, without waiting for a child block
+  to trigger cleanup
+
 ## [Zebra 6.1.0](https://github.com/ZcashFoundation/zebra/releases/tag/v6.1.0) - 2026-07-17
 
 ### Added
