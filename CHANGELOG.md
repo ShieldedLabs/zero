@@ -8,6 +8,20 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v21 - 2026-07-22
+
+### Security
+
+- zebra: peers submitting invalid shielded proofs are now banned. Failed
+  Orchard/Ironwood Halo2 proofs, Orchard binding signatures, and Sprout
+  JoinSplit signatures previously collapsed to a zero misbehaviour score,
+  letting a peer force expensive verification indefinitely.
+  (GHSA-2p4c-3q4q-p463, 036f233273)
+- zebra: known-block queries drain rejected-block notifications before
+  checking sent hashes, so an honest block body sharing a header hash with a
+  rejected body is accepted immediately instead of stalling sync as a
+  duplicate. (GHSA-8gxx-hc65-vv82, 81b51213b3)
+
 ## v20 - 2026-07-21
 
 - zcashd: Ironwood is now fully supported (mainnet and testnet)
