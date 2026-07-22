@@ -31,6 +31,11 @@ on:
       - "zallet/Dockerfile"
       - ".github/workflows/z3-smoke.yml"
   workflow_dispatch:
+  # Called by release.yml: every release is gated on a green smoke run of the
+  # exact commit being released. Added 2026-07-22 after v21 nearly shipped
+  # zebra security carries whose PR touched none of the paths above, so no
+  # smoke ran before the release was dispatched.
+  workflow_call:
   schedule:
     # Weekly: catches interop breakage from subtree updates that don't touch
     # the paths above.

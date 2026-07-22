@@ -92,7 +92,20 @@ jobs:
           echo "Changelog section for ${TAG}:"
           cat section.md
 
-  # 2. Source archives: one ZIP per vendored component (only tracked files).
+  # 2. Stack smoke test: build the z3 images from this commit's vendored
+  #    source and prove the deploy bundle comes up healthy. Runs in parallel
+  #    with the source/binaries jobs; only the final publish job waits on it.
+  #    This gates every release on a smoke run of the exact released commit,
+  #    even when the changes touched none of z3-smoke's PR path filters
+  #    (e.g. subtree-only security patches).
+  smoke:
+    needs: version
+    uses: ./.github/workflows/z3-smoke.yml
+    permissions:
+      contents: read
+      packages: write
+
+  # 3. Source archives: one ZIP per vendored component (only tracked files).
   source:
     needs: version
     runs-on: ubuntu-latest
@@ -118,7 +131,7 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
-  # 3. Prebuilt binaries. Matrix is one entry today; add rows for zainod/zallet
+  # 4. Prebuilt binaries. Matrix is one entry today; add rows for zainod/zallet
   #    or arm64 without touching the rest of the pipeline.
   binaries:
     needs: version
@@ -177,9 +190,11 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # 4. Create the release once, with everything attached.
+  # 5. Create the release once, with everything attached. Publishing waits on
+  #    the smoke gate: a release must never exist for a commit whose stack
+  #    doesn't come up.
   release:
-    needs: [version, source, binaries]
+    needs: [version, smoke, source, binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
