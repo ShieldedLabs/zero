@@ -22,6 +22,16 @@ date) before dispatching the release.
   rejected body is accepted immediately instead of stalling sync as a
   duplicate. (GHSA-8gxx-hc65-vv82, 81b51213b3)
 
+### Fixed
+
+- zebra: outbound peer connections require the peer to advertise NODE_NETWORK,
+  and rejected peers are recorded so they are not redialed. Without this, the
+  current mainnet peer population (dominated by non-serving services=0 nodes
+  since the zcashd EoS halt) fills all outbound slots and stalls fresh syncs
+  at genesis indefinitely. Verified A/B: patched node syncs from the same
+  seeders where stock zebra 6.2.x stalls. Upstreamed as
+  ZcashFoundation/zebra#11061. (2af34bee90)
+
 ## v20 - 2026-07-21
 
 - zcashd: Ironwood is now fully supported (mainnet and testnet)

@@ -377,6 +377,13 @@ impl ConnectedAddr {
     pub fn is_inbound(&self) -> bool {
         matches!(self, InboundDirect { .. } | InboundProxy { .. })
     }
+
+    /// Returns true if the [`ConnectedAddr`] was created for an outbound connection.
+    ///
+    /// Note: [`ConnectedAddr::Isolated`] connections are neither inbound nor outbound.
+    pub fn is_outbound(&self) -> bool {
+        matches!(self, OutboundDirect { .. } | OutboundProxy { .. })
+    }
 }
 
 impl fmt::Debug for ConnectedAddr {
@@ -783,6 +790,39 @@ where
         return Err(HandshakeError::ObsoleteVersion(remote.version));
     }
 
+    // # Security
+    //
+    // Reject outbound connections to peers that don't advertise the NODE_NETWORK service
+    // bit, because they can't serve us blocks or transactions. Non-serving peers would
+    // otherwise occupy scarce outbound slots, and time out the block requests routed to
+    // them, which can stall initial sync entirely when such peers dominate the reachable
+    // peer population.
+    //
+    // Inbound connections are exempt, so light clients (which can advertise no services)
+    // can still connect to us. Isolated connections are exempt because the caller chose
+    // the peer deliberately.
+    if connected_addr.is_outbound() && !remote.services.contains(PeerServices::NODE_NETWORK) {
+        debug!(
+            remote_ip = ?their_addr,
+            ?remote.services,
+            ?remote.user_agent,
+            "disconnecting from outbound peer without required services",
+        );
+
+        // the value is the number of rejected handshakes, by peer IP, services, and user agent
+        metrics::counter!(
+            "zcash.net.peers.missing_services",
+            "remote_ip" => their_addr.to_string(),
+            "services" => format!("{:?}", remote.services),
+            "user_agent" => remote.user_agent.clone(),
+        )
+        .increment(1);
+
+        return Err(HandshakeError::MissingRequiredServices {
+            advertised: remote.services,
+        });
+    }
+
     let negotiated_version = min(constants::CURRENT_NETWORK_PROTOCOL_VERSION, remote.version);
 
     // Limit containing struct size, and avoid multiple duplicates of 300+ bytes of data.
@@ -961,6 +1001,9 @@ where
                         HandshakeError::Io(_) => "io_error",
                         HandshakeError::Serialization(_) => "serialization",
                         HandshakeError::ObsoleteVersion(_) => "obsolete_version",
+                        HandshakeError::MissingRequiredServices { .. } => {
+                            "missing_required_services"
+                        }
                         HandshakeError::Timeout => "timeout",
                     };
                     metrics::histogram!(
@@ -973,6 +1016,22 @@ where
                         "reason" => reason
                     )
                     .increment(1);
+
+                    // The peer told us it can't serve us blocks: record its advertised
+                    // services in the address book, so the crawler skips it instead of
+                    // re-dialing it forever. (Dial failures are otherwise recorded with
+                    // `services: None`, which the outbound-candidate check treats as a
+                    // full node, see `MetaAddr::last_known_info_is_valid_for_outbound`.)
+                    if let HandshakeError::MissingRequiredServices { advertised } = &err {
+                        if let Some(book_addr) = connected_addr.get_address_book_addr() {
+                            // the collector doesn't depend on network activity,
+                            // so this await should not hang
+                            let _ = address_book_updater
+                                .send(MetaAddr::new_errored(book_addr, *advertised))
+                                .await;
+                        }
+                    }
+
                     return Err(err);
                 }
             };

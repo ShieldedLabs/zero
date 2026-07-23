@@ -566,3 +566,55 @@ fn new_misbehavior_canonicalizes_ipv4_mapped_addr() {
     assert_eq!(updated.addr(), canonical_addr);
     assert_eq!(updated.misbehavior(), 100);
 }
+
+/// A peer that fails an outbound handshake because it advertises services
+/// without `NODE_NETWORK` must be excluded from future outbound connection
+/// attempts, and must not be gossiped onward.
+///
+/// A later failure recorded without services (like `dial`'s generic failure
+/// path) must not erase the recorded services.
+#[test]
+fn errored_peer_with_empty_services_is_not_retried_for_outbound() {
+    let _init_guard = zebra_test::init();
+
+    let instant_now = Instant::now();
+    let chrono_now = Utc::now();
+
+    let address = PeerSocketAddr::from(([44, 33, 22, 11], 8233));
+
+    // A gossiped peer claiming NODE_NETWORK is a valid outbound candidate.
+    let peer =
+        MetaAddr::new_gossiped_meta_addr(address, PeerServices::NODE_NETWORK, DateTime32::now());
+    assert!(peer.last_known_info_is_valid_for_outbound(&Mainnet));
+
+    // The crawler attempts the peer, and the handshake learns its real
+    // services are empty and rejects it.
+    let peer = MetaAddr::new_reconnect(peer.addr())
+        .apply_to_meta_addr(peer, instant_now, chrono_now)
+        .expect("attempt change applies to gossiped peer");
+    let peer = MetaAddr::new_errored(peer.addr(), PeerServices::empty())
+        .apply_to_meta_addr(peer, instant_now, chrono_now)
+        .expect("services-carrying failure applies to attempted peer");
+
+    assert_eq!(peer.services, Some(PeerServices::empty()));
+    assert!(
+        !peer.last_known_info_is_valid_for_outbound(&Mainnet),
+        "a peer without NODE_NETWORK must not be an outbound candidate",
+    );
+    assert!(
+        peer.sanitize(&Mainnet).is_none(),
+        "a peer without NODE_NETWORK must not be gossiped onward",
+    );
+
+    // A later services-less failure (dial's generic failure recording) must
+    // preserve the recorded services, whether or not the concurrent change
+    // is applied.
+    match MetaAddr::new_errored(peer.addr(), None).apply_to_meta_addr(peer, instant_now, chrono_now)
+    {
+        None => {}
+        Some(updated) => {
+            assert_eq!(updated.services, Some(PeerServices::empty()));
+            assert!(!updated.last_known_info_is_valid_for_outbound(&Mainnet));
+        }
+    }
+}
