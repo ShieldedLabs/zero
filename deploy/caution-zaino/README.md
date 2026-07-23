@@ -2,12 +2,14 @@
 
 Runs zainod (the Zcash CompactTxStreamer indexer, vendored at `zaino/`) inside
 [Caution](https://caution.co) (AWS Nitro Enclaves, EnclaveOS, reproducible EIF
-builds) against a zebra validator running OUTSIDE the enclave: the existing
-Shielded Labs zebra in Kubernetes, updated to zero-zebra v21 (already synced,
-so no fresh-sync lead time). The enclave has no persistent disk; v0 uses
-zaino's upstream `ephemeral_finalised_state = true` mode, which opens no LMDB
-and proxies finalised reads to the validator. Zero zaino source patches
-required.
+builds) against a zebra validator running OUTSIDE the enclave: a zero-zebra
+v21 node on an instance in the SAME VPC subnet as the enclave (Caution side),
+with its state seeded from one of our synced caches to skip the multi-day
+initial sync (see SEEDING.md). The same-subnet private address natively
+satisfies both verified zainod link constraints below. The enclave has no
+persistent disk; v0 uses zaino's upstream `ephemeral_finalised_state = true`
+mode, which opens no LMDB and proxies finalised reads to the validator. Zero
+zaino source patches required.
 
 ## Layout
 
@@ -92,10 +94,10 @@ queries stop leaving the enclave.
 
 ## Open questions for Caution (Anton)
 
-1. Private connectivity from the enclave egress to our k8s zebra: BYOC into
-   an account/VPC that reaches the cluster privately, VPC peering, or a
-   WireGuard/VPN on the parent instance? The RPC hop is plaintext HTTP and
-   zainod rejects public validator IPs, so a private path is mandatory.
+1. The validator box: an instance in the enclave's VPC subnet with 500 GB+
+   fast disk (gp3/NVMe) running our zero-zebra v21 image, RPC 8232 bound to
+   its private address, cookie auth off, security-grouped to the enclave
+   egress path only. We seed its state (SEEDING.md) to skip the initial sync.
 2. Does the `http`/Caddy ingress carry gRPC (HTTP/2), and does TLS terminate
    inside the enclave (STEVE) or outside? Raw TCP 8137 is our fallback.
 3. Builder: network during `docker build` (we `cargo fetch`, then build with

@@ -31,8 +31,9 @@ enclave "zaino" {
     #   port   = 8137
     # }
 
-    # Egress to the zebra validator JSON-RPC (the Shielded Labs zebra in k8s,
-    # zero-zebra v21). Two hard constraints, verified in the zaino source:
+    # Egress to the zebra validator JSON-RPC (zero-zebra v21 on an instance
+    # in this VPC subnet, state-seeded; see SEEDING.md in the zero repo).
+    # Two hard constraints, verified in the zaino source:
     #   1. zainod rejects validator addresses that resolve to public IPs at
     #      config load; the endpoint must present as a private IP or a
     #      cluster-internal hostname.
