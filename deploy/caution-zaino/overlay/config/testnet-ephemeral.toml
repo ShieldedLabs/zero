@@ -22,3 +22,9 @@ validator_jsonrpc_listen_address = 'zebra.internal:18232'
 [storage.cache]
 capacity = 10000
 shard_power = 4
+
+# Required by config parsing even in ephemeral mode; values are unused there
+# (the ephemeral path never opens or creates the database).
+[storage.database]
+path = '/tmp/zaino-db'
+size = 8

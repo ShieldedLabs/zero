@@ -77,10 +77,20 @@ not fight them):
 
 | Mode | Working set | memory_mb | Basis |
 |---|---|---|---|
-| ephemeral (v0) | ~1001 recent blocks (0.1-2 GiB) + mempool + process | 8192 (4096 likely fine) | estimated; rehearsal measurement pending |
+| ephemeral (v0) | 32 MiB idle, 77 MiB peak under a sustained 25k-block on-demand scan | 8192 (wildly conservative; 512-1024 would run) | MEASURED 2026-07-23, diskless read-only container vs local mainnet zebra |
 | persistent tmpfs (roadmap) | full LMDB, est 50-80 GiB (45 GiB measured partial) + tuned heaps | 98304-131072 | r6i.4xlarge class parent |
 | lightwalletd --nocache (fallback) | stateless proxy | 2048 | well under 1 GiB |
 | lightwalletd cache tmpfs | 30.7 GiB cache (measured 2026-07) + margin | 49152 | rebuilds from genesis every boot |
+
+Measured behavior (rehearsal, ephemeral mode): startup to serving is dominated
+by building the ~1001-block non-finalised window (a couple of minutes when the
+validator tip is also moving; near-instant against a settled tip). Recent
+GetBlockRange (blocks already in the window) streams sub-second. Deep
+historical GetBlockRange proxies every block from the validator at roughly
+50 blocks/s and is bounded by zaino's streaming timeout (4x `service.timeout`,
+so about 120 s per call by default); wallets chunk these ranges, but raise
+`service.timeout` if a single long scan matters. RSS stays flat regardless,
+so RAM is a non-issue for v0.
 
 ## Privacy posture, stated honestly
 
