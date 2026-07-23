@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Outbound handshakes now reject peers whose version message does not advertise
+  `NODE_NETWORK`, returning the new `HandshakeError::MissingRequiredServices`
+  variant, and record the peer's advertised services in the address book so
+  `last_known_info_is_valid_for_outbound` excludes the peer from future
+  outbound attempts. Inbound and isolated connections are unaffected
+- Added `ConnectedAddr::is_outbound`
+- Note: the new variant on the exhaustive public `HandshakeError` enum is a
+  breaking change for consumers matching it exhaustively
+
 ## [10.1.1] - 2026-07-17
 
 ### Changed

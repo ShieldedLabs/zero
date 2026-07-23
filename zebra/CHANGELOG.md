@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org).
   [zakura](https://github.com/zakura-core/zakura) authors for the major part of
   this implementation.
 
+### Fixed
+
+- Outbound peer connections now require the peer to advertise the `NODE_NETWORK`
+  service bit, and a rejected peer's advertised services are recorded in the
+  address book so the peer is not redialed. Previously, non-serving peers
+  (nodes advertising `services=0`) could occupy all outbound connection slots
+  and receive block download requests that always time out, stalling fresh
+  syncs at genesis indefinitely. Inbound connections still accept peers with
+  any services, so light clients can connect
+
 ### Security
 
 - Allow chain synchronization to immediately retry an honest block body after
