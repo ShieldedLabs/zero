@@ -31,8 +31,16 @@ enclave "zaino" {
     #   port   = 8137
     # }
 
-    # Egress to the zebra validator JSON-RPC. Tighten cidr_ipv4 to the
-    # validator /32 once its address is known. Testnet RPC 18232, mainnet 8232.
+    # Egress to the zebra validator JSON-RPC (the Shielded Labs zebra in k8s,
+    # zero-zebra v21). Two hard constraints, verified in the zaino source:
+    #   1. zainod rejects validator addresses that resolve to public IPs at
+    #      config load; the endpoint must present as a private IP or a
+    #      cluster-internal hostname.
+    #   2. the RPC hop is plaintext HTTP (scheme is hardcoded; no TLS path
+    #      exists for this client), so it must NEVER transit the public
+    #      internet: same-VPC, peering, or a host-level tunnel only.
+    # Tighten cidr_ipv4 to the validator /32 once the private address is known.
+    # Testnet RPC 18232, mainnet 8232.
     egress {
       cidr_ipv4   = "10.0.0.0/8"
       port        = 18232

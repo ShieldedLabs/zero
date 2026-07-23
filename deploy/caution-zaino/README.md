@@ -2,10 +2,12 @@
 
 Runs zainod (the Zcash CompactTxStreamer indexer, vendored at `zaino/`) inside
 [Caution](https://caution.co) (AWS Nitro Enclaves, EnclaveOS, reproducible EIF
-builds) against a zebra validator running OUTSIDE the enclave. The enclave has
-no persistent disk; v0 uses zaino's upstream `ephemeral_finalised_state = true`
-mode, which opens no LMDB and proxies finalised reads to the validator. Zero
-zaino source patches required.
+builds) against a zebra validator running OUTSIDE the enclave: the existing
+Shielded Labs zebra in Kubernetes, updated to zero-zebra v21 (already synced,
+so no fresh-sync lead time). The enclave has no persistent disk; v0 uses
+zaino's upstream `ephemeral_finalised_state = true` mode, which opens no LMDB
+and proxies finalised reads to the validator. Zero zaino source patches
+required.
 
 ## Layout
 
@@ -51,13 +53,23 @@ Testnet to mainnet is three edits in `overlay/caution.hcl`:
 2. `unit.env` `ZAINO_VALIDATOR_SETTINGS__VALIDATOR_JSONRPC_LISTEN_ADDRESS`
 3. `network.egress` port 8232 (and tighten `cidr_ipv4` to the validator /32)
 
-Constraints inherited from zainod (upstream behavior, do not fight them):
+Constraints inherited from zainod (upstream behavior, verified in source; do
+not fight them):
 
-- The validator address must resolve to a private/loopback IP, or be a
-  hostname (validated at connect time). Public validator IPs are rejected.
+- The validator address must resolve to a private/loopback IP at config load;
+  public IPs are rejected there (config.rs, `is_private_listen_addr`). A
+  hostname that does not resolve at load passes and is only resolved again at
+  connect time with no further IP-class check, but do not lean on that.
+- The validator RPC hop is plaintext HTTP: the URL scheme is hardcoded
+  (`connector.rs`, `format!("http://{}:{}")`) and no config or feature
+  produces an https client, even though rustls is linked. Basic-auth and
+  cookie credentials travel base64-in-cleartext. Consequence: the
+  enclave-to-validator link must be private end to end (same VPC, peering, or
+  a host-level tunnel); never the public internet.
 - Secret-like config keys (passwords, cookies, tokens) are refused via env and
-  must live in a config file. v0 sidesteps this: run zebra with
-  `enable_cookie_auth = false` on the private enclave-to-validator link.
+  must live in a config file. v0 sidesteps auth entirely: expose the k8s
+  zebra RPC with `enable_cookie_auth = false` on an internal-only service,
+  locked down by network policy to the enclave egress path.
 
 ## Sizing (answer to "how much RAM")
 
@@ -80,7 +92,10 @@ queries stop leaving the enclave.
 
 ## Open questions for Caution (Anton)
 
-1. Egress mechanics: does the destination present as a private IP or hostname?
+1. Private connectivity from the enclave egress to our k8s zebra: BYOC into
+   an account/VPC that reaches the cluster privately, VPC peering, or a
+   WireGuard/VPN on the parent instance? The RPC hop is plaintext HTTP and
+   zainod rejects public validator IPs, so a private path is mandatory.
 2. Does the `http`/Caddy ingress carry gRPC (HTTP/2), and does TLS terminate
    inside the enclave (STEVE) or outside? Raw TCP 8137 is our fallback.
 3. Builder: network during `docker build` (we `cargo fetch`, then build with

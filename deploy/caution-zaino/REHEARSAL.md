@@ -1,9 +1,15 @@
 # Local rehearsal: diskless zainod against a synced mainnet zebra
 
-Pre-flight for the Caution deployment, run on a machine with the synced
-mainnet zebra container (`zcash-zebrad-1`, RPC on host port 8232, cookie auth
-off). Proves the exact enclave topology: ephemeral zainod, external validator,
-zero writable disk.
+Pre-flight for the Caution deployment. Proves the exact enclave topology:
+ephemeral zainod, external validator, zero writable disk.
+
+Two validator options; either satisfies zainod's private-address rule:
+
+- **Fast path: the k8s zebra.** `kubectl port-forward` the zebra RPC service
+  to local port 8232; the rehearsal config's `host.docker.internal:8232` then
+  reaches it via a loopback tunnel. No waiting for local catch-up.
+- **Local container** (`zcash-zebrad-1`, RPC on host port 8232, cookie auth
+  off): fully offline-capable, but must catch up first (step 1).
 
 ## 1. Start the validator and let it catch up
 
