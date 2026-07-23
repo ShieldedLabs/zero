@@ -1,0 +1,19 @@
+# Local rehearsal profile: ephemeral zainod on this machine against the local
+# mainnet zebra (container zcash-zebrad-1, RPC published on host port 8232).
+# host.docker.internal resolves to a Docker Desktop private address, which
+# satisfies zainod's private-IP validator requirement.
+# See ../REHEARSAL.md for the procedure.
+
+backend = 'fetch'
+network = 'Mainnet'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'host.docker.internal:8232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4

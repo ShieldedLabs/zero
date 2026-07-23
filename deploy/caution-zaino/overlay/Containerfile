@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+
+# Caution build-context Containerfile for zainod.
+# Derived from Dockerfile.deterministic in this tree (diff against it when
+# bumping). Caution builds with plain `docker build -f Containerfile .` from
+# the repo root and passes NO build args, so every choice is hardcoded:
+#   - target: x86_64-unknown-linux-musl, fully static (Nitro enclave EIF)
+#   - features: no_tls_use_unencrypted_traffic. This only removes the
+#     plaintext-bind refusal; the file-based [grpc_settings.tls] path still
+#     works, so one image covers both TLS topologies.
+#   - config profiles baked at /etc/zaino/, selected via unit.args in
+#     caution.hcl
+
+FROM stagex/pallet-rust:1.96.0@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/pallet-clang@sha256:15cce53f7f94e6eefb67587bb62b2ae5b8a82d043e2b6ef800647b30f4320928 AS pallet-clang
+FROM stagex/user-protobuf:35.0@sha256:e93f664067dd9f61c4abe04630a8422ee1bdefa8f466efc2eaeea15d7ee4e67c AS protobuf
+FROM stagex/user-abseil-cpp:20260107.1@sha256:411fd1a6a20daae3d931c43928fad8a816e96e5333437cb13c6c81e451f46542 AS abseil-cpp
+FROM stagex/core-busybox:1.38.0@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a9701ce49db04c6c181 AS busybox
+
+FROM pallet-rust AS builder
+
+SHELL ["/bin/sh", "-euo", "pipefail", "-c"]
+COPY --from=pallet-clang . /
+COPY --from=protobuf . /
+COPY --from=abseil-cpp . /
+
+WORKDIR /usr/src/app
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV CXXSTDLIB="c++"
+ENV RUST_BACKTRACE=1
+ENV RUSTFLAGS="-C codegen-units=1"
+ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
+ENV RUSTFLAGS="${RUSTFLAGS} -C linker=clang -C link-arg=-fuse-ld=mold"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++abi.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
+ENV SOURCE_DATE_EPOCH=1
+ENV CXXFLAGS="-stdlib=libc++ -include cstdint"
+ENV ROCKSDB_USE_PKG_CONFIG=0
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --network=none \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release --frozen --target $TARGET_ARCH --bin zainod \
+      --features no_tls_use_unencrypted_traffic && \
+    install -D -m 0755 /usr/src/app/target/${TARGET_ARCH}/release/zainod /usr/local/bin/zainod
+
+FROM scratch AS export
+COPY --from=builder /usr/local/bin/zainod /zainod
+
+FROM busybox AS runtime
+COPY --from=export /zainod /zainod
+COPY config/ /etc/zaino/
+ENTRYPOINT ["/zainod"]
+CMD ["start", "--config", "/etc/zaino/testnet-ephemeral.toml"]
