@@ -22,7 +22,11 @@ fi
 
 echo "==> splitting zaino/ prefix from zero@$SHA (first run can take a minute)"
 git -C "$ZERO_ROOT" branch -D "$SPLIT_BRANCH" >/dev/null 2>&1 || true
-git -C "$ZERO_ROOT" subtree split --prefix=zaino HEAD -b "$SPLIT_BRANCH" >/dev/null
+# --ignore-joins: our subtree imports are squashed, so the recorded upstream
+# split hashes only resolve in clones that happen to have the upstream remote
+# fetched. Ignoring joins splits purely from the path-filtered zero history
+# (squash snapshots plus [zero] carries), which works on any fresh clone.
+git -C "$ZERO_ROOT" subtree split --prefix=zaino --ignore-joins HEAD -b "$SPLIT_BRANCH" >/dev/null
 
 mkdir -p "$DEST"
 if [ ! -d "$DEST/.git" ]; then
