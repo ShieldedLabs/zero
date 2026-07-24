@@ -47,6 +47,28 @@ the zero repo; a standalone Caution repo needs the same three subfolders.
 Build on x86 (`caution-z3.yml`, Blacksmith runner). Do not build under arm64
 emulation: musl cross-build of two rust workspaces with rocksdb is far too slow.
 
+### Reproducibility: who sets which flags
+
+Two layers, split by ownership:
+
+- In-recipe determinism (in the Containerfile, ours to set): pinned StageX
+  base digests, `SOURCE_DATE_EPOCH=1`, `-C link-arg=-Wl,--build-id=none`,
+  `-C codegen-units=1`, no incremental. These make the compiled binaries
+  bit-for-bit reproducible.
+- Image-packaging determinism (docker build flags, auto-added by the caution
+  backend): `--output type=oci,rewrite-timestamp=true,force-compression=true`
+  plus `SOURCE_DATE_EPOCH=1`, matching zcash/zallet `utils/build.sh` line 21.
+  These normalise layer timestamps and compression so the OCI/EIF digest is
+  reproducible. You do not add these yourself: `caution` supplies them, builds
+  everything, then transplants the result into EnclaveOS (a minimal
+  StageX-built Linux).
+
+`build.sh` runs the same deterministic docker build locally (assemble context,
+then the OCI build with those flags) for local reproduction / `caution verify`.
+`caution-z3-reproduce.yml` proves the binary layer reproduces (two cold builds,
+identical sha256); full EIF-digest reproduction is what `caution verify` checks
+independently on Caution's side.
+
 ## Files
 
 - `zainod-colocated.toml`: zaino profile, validator at localhost, ephemeral.
