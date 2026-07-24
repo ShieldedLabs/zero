@@ -25,6 +25,15 @@ overlay/                     copied verbatim onto the assembled repo root
 rehearsal/                   local pre-flight config, see REHEARSAL.md
 ```
 
+## Chosen architecture: co-located enclave
+
+As of 2026-07-23 the direction is both zebrad and zainod in ONE enclave (Anton's
+team owns the zebra packaging). See [combined/](combined/README.md) for that
+integration (localhost validator link, single attestation, ephemeral zaino so
+state is not duplicated, temporary 384 GiB footprint until Caution disk support
+lands). The single-zaino artifacts below still stand for an external-zebra
+deployment and for local rehearsal.
+
 ## How deployment works
 
 Caution builds `docker build -f Containerfile .` from the ROOT of the repo you
