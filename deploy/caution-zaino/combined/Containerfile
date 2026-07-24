@@ -138,6 +138,14 @@ ENV ROCKSDB_USE_PKG_CONFIG=0
 
 COPY zaino/ .
 
+# Serialize against the zebra build. BuildKit runs independent stages in
+# parallel, so without this both Rust workspaces hit their heaviest codegen
+# (rocksdb, then final-crate linking under codegen-units=1) at the same moment,
+# which can exhaust a constrained builder's memory or disk and take the
+# BuildKit daemon down with it. This barrier costs wall-clock but halves peak
+# build footprint.
+COPY --from=zebra-release /usr/local/bin/zebrad /tmp/.zebra-build-barrier
+
 RUN cargo fetch --locked --target ${TARGET_ARCH}
 
 RUN --network=none \
