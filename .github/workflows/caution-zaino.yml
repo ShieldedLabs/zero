@@ -39,3 +39,20 @@ jobs:
         run: |
           docker run --rm --entrypoint /bin/sh caution-zaino:ci \
             -c '/zainod --version && ls /etc/zaino'
+
+      # Caution starts the enclave via unit.command, not the Docker ENTRYPOINT;
+      # assert the declared command actually exists and is executable.
+      - name: Verify caution.hcl unit.command resolves in the image
+        run: |
+          set -euo pipefail
+          HCL=deploy/caution-zaino/overlay/caution.hcl
+          CMD=$(grep -E '^[[:space:]]*command[[:space:]]*=' "$HCL" \
+                | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$CMD" ]; then echo "no unit.command found in $HCL"; exit 1; fi
+          echo "caution.hcl unit.command = $CMD"
+          if docker run --rm --entrypoint /bin/sh caution-zaino:ci -c "test -x '$CMD'"; then
+            echo "OK: $CMD exists and is executable in the image"
+          else
+            echo "FAIL: $CMD is missing or not executable in the image"
+            exit 1
+          fi

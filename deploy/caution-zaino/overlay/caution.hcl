@@ -59,10 +59,12 @@ enclave "zaino" {
     }
   }
 
-  # Bring-up only: console and ssh access, disables attestation verification.
-  # Remove this block for the attested demo build.
+  # Bring-up only, and OFF by default: enabling debug gives console and ssh
+  # access but disables attestation verification. Flip to true and add your key
+  # while bringing the enclave up, then set it back to false for the attested
+  # demo.
   debug {
-    enabled  = true
+    enabled  = false
     ssh_keys = [
       # "ssh-ed25519 AAAA... mark"
     ]

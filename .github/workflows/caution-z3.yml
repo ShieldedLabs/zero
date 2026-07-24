@@ -8,8 +8,13 @@ name: caution-z3
 on:
   workflow_dispatch:
   pull_request:
+    # The combined image consumes all three vendored trees, so changes there
+    # can break this build; narrow filters would give false coverage.
     paths:
       - "deploy/caution-zaino/combined/**"
+      - "zebra/**"
+      - "zaino/**"
+      - "orchard/**"
       - ".github/workflows/caution-z3.yml"
 
 concurrency:
@@ -38,3 +43,21 @@ jobs:
             /usr/local/bin/zebrad --version &&
             /usr/local/bin/zainod --version &&
             ls -l /usr/local/bin/run-both.sh /etc/zebra/zebrad.toml /etc/zaino/zainod-colocated.toml'
+
+      # The smoke test above runs the Docker ENTRYPOINT, but Caution starts the
+      # enclave via unit.command in caution.hcl. Those can drift apart, so
+      # assert the declared command actually exists and is executable.
+      - name: Verify caution.hcl unit.command resolves in the image
+        run: |
+          set -euo pipefail
+          HCL=deploy/caution-zaino/combined/caution.hcl
+          CMD=$(grep -E '^[[:space:]]*command[[:space:]]*=' "$HCL" \
+                | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$CMD" ]; then echo "no unit.command found in $HCL"; exit 1; fi
+          echo "caution.hcl unit.command = $CMD"
+          if docker run --rm --entrypoint /bin/sh caution-z3:ci -c "test -x '$CMD'"; then
+            echo "OK: $CMD exists and is executable in the image"
+          else
+            echo "FAIL: $CMD is missing or not executable in the image"
+            exit 1
+          fi

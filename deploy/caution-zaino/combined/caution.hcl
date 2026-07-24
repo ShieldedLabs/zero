@@ -41,11 +41,17 @@ enclave "z3-node" {
   }
 
   unit "default" {
-    command = "/run-both.sh"
+    # Must match where the Containerfile installs the supervisor. CI asserts
+    # this path exists and is executable inside the built image.
+    command = "/usr/local/bin/run-both.sh"
   }
 
+  # Bring-up only, and OFF by default: enabling debug disables attestation
+  # verification, which defeats the point of the enclave. Flip to true and add
+  # your key while bringing the enclave up, then set it back to false for the
+  # attested demo.
   debug {
-    enabled  = true
+    enabled  = false
     ssh_keys = [
       # "ssh-ed25519 AAAA... mark"
     ]
