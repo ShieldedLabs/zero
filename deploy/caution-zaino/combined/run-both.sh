@@ -11,9 +11,9 @@
 
 set -eu
 
-ZEBRA_BIN=${ZEBRA_BIN:-/zebrad}
+ZEBRA_BIN=${ZEBRA_BIN:-/usr/local/bin/zebrad}
 ZEBRA_CONF=${ZEBRA_CONF:-/etc/zebra/zebrad.toml}
-ZAINO_BIN=${ZAINO_BIN:-/zainod}
+ZAINO_BIN=${ZAINO_BIN:-/usr/local/bin/zainod}
 ZAINO_CONF=${ZAINO_CONF:-/etc/zaino/zainod-colocated.toml}
 ZEBRA_RPC=${ZEBRA_RPC:-http://127.0.0.1:8232/}
 RPC_WAIT_TRIES=${RPC_WAIT_TRIES:-900}   # x2s = up to 30 min for state open + tip
@@ -33,26 +33,41 @@ echo "supervisor: starting zebrad"
 "$ZEBRA_BIN" start --config "$ZEBRA_CONF" &
 zebra_pid=$!
 
-echo "supervisor: waiting for zebra RPC at $ZEBRA_RPC"
-i=0
-until wget -q -O /dev/null \
-    --header='Content-Type: application/json' \
-    --post-data='{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}' \
-    "$ZEBRA_RPC" 2>/dev/null; do
-  i=$((i + 1))
+# Gate on zebra RPC readiness. Prefer a real RPC probe via wget; if the runtime
+# lacks wget, fall back to a fixed grace period (zainod also retries the
+# validator connection on its own, per the [zero] startup-hardening carries).
+if command -v wget >/dev/null 2>&1; then
+  echo "supervisor: waiting for zebra RPC at $ZEBRA_RPC"
+  i=0
+  until wget -q -O /dev/null \
+      --header='Content-Type: application/json' \
+      --post-data='{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}' \
+      "$ZEBRA_RPC" 2>/dev/null; do
+    i=$((i + 1))
+    if ! kill -0 "$zebra_pid" 2>/dev/null; then
+      echo "supervisor: zebrad exited during startup"
+      exit 1
+    fi
+    if [ "$i" -ge "$RPC_WAIT_TRIES" ]; then
+      # Do not treat an unconfirmed probe as fatal: busybox wget may lack
+      # long-option support, in which case the probe never succeeds. zainod
+      # retries the validator on its own (the [zero] startup-hardening carries),
+      # so start it anyway rather than restart-looping the enclave.
+      echo "supervisor: zebra RPC not confirmed in time, starting zainod anyway"
+      break
+    fi
+    sleep 2
+  done
+else
+  echo "supervisor: wget absent, waiting ${ZEBRA_GRACE:-60}s before starting zaino"
+  sleep "${ZEBRA_GRACE:-60}"
   if ! kill -0 "$zebra_pid" 2>/dev/null; then
     echo "supervisor: zebrad exited during startup"
     exit 1
   fi
-  if [ "$i" -ge "$RPC_WAIT_TRIES" ]; then
-    echo "supervisor: zebra RPC not up in time"
-    shutdown
-    exit 1
-  fi
-  sleep 2
-done
+fi
 
-echo "supervisor: zebra RPC up, starting zainod"
+echo "supervisor: starting zainod"
 "$ZAINO_BIN" start --config "$ZAINO_CONF" &
 zaino_pid=$!
 

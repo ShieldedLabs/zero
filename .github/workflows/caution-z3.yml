@@ -1,0 +1,40 @@
+name: caution-z3
+
+# Build verification for the co-located enclave image (zebrad + zainod in one
+# EIF). First-ever combined static-musl build; the zebra half adapts Anton
+# Livaja's StageX recipe (ZcashFoundation/zebra#10491), the zaino half is our
+# proven recipe. x86 only: cross-building musl under emulation is far too slow.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/caution-zaino/combined/**"
+      - ".github/workflows/caution-z3.yml"
+
+concurrency:
+  group: caution-z3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-combined:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Assemble combined context
+        run: bash deploy/caution-zaino/combined/assemble-combined.sh "$RUNNER_TEMP/z3-enclave"
+
+      - name: Build combined enclave image (zebrad + zainod)
+        working-directory: ${{ runner.temp }}/z3-enclave
+        run: docker build -f Containerfile -t caution-z3:ci .
+
+      - name: Smoke test both binaries and configs
+        run: |
+          docker run --rm --entrypoint /bin/sh caution-z3:ci -c '
+            /usr/local/bin/zebrad --version &&
+            /usr/local/bin/zainod --version &&
+            ls -l /usr/local/bin/run-both.sh /etc/zebra/zebrad.toml /etc/zaino/zainod-colocated.toml'

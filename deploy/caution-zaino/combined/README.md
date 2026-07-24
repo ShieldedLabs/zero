@@ -28,6 +28,25 @@ state moves to a persistent volume and the same design runs on a far smaller,
 cheaper instance. The beefy instance is only needed until then. Retroactive
 grant funding (ZCG) is a candidate to cover the bridge.
 
+## The single combined image (built and CI-verified here)
+
+`Containerfile` builds both binaries static-musl in one multi-stage build and
+ships a busybox runtime that runs both via `run-both.sh`:
+
+- zebra stage: adapted from Anton Livaja's StageX recipe
+  (ZcashFoundation/zebra#10491), which already solves rocksdb + libzcash_script
+  under musl. Fed our vendored zebra 6.2.0.
+- zaino stage: our already-CI-green `../overlay/Containerfile` recipe.
+
+Build context = a repo with THREE subfolders: `zebra/`, `zaino/`, and
+`orchard/`. orchard is required because zebra carries a `[zero]` patch
+`orchard = { path = "../orchard" }`; it is copied to `/home/orchard` in the
+build so that path resolves. `assemble-combined.sh` produces this context from
+the zero repo; a standalone Caution repo needs the same three subfolders.
+
+Build on x86 (`caution-z3.yml`, Blacksmith runner). Do not build under arm64
+emulation: musl cross-build of two rust workspaces with rocksdb is far too slow.
+
 ## Files
 
 - `zainod-colocated.toml`: zaino profile, validator at localhost, ephemeral.
