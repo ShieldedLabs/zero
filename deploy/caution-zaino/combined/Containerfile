@@ -1,0 +1,180 @@
+# syntax=docker/dockerfile:1
+# check=skip=UndefinedVar,UserExist
+
+# Combined Caution enclave image: zebrad + zainod, both static-musl, one EIF.
+#
+# Two independent, individually-proven build recipes joined at a shared runtime:
+#   - zebra stage: adapted from Anton Livaja's StageX Dockerfile.deterministic
+#     (ZcashFoundation/zebra PR #10491), which solves rocksdb + libzcash_script
+#     under musl. Fed our vendored zebra 6.2.0 source under zebra/.
+#   - zaino stage: our proven deploy/caution-zaino/overlay/Containerfile recipe,
+#     fed our vendored zaino source under zaino/.
+# Build context = a repo with zebra/ and zaino/ as subfolders (assemble via
+# assemble-combined.sh). rust-toolchain.toml is intentionally not copied into
+# the zebra build stage, so the pinned pallet-rust digest is the toolchain.
+
+ARG TARGET_ARCH="x86_64-unknown-linux-musl"
+
+############################################################
+# Zebra StageX bases (Anton's pins)
+############################################################
+FROM stagex/core-busybox:1.37.0@sha256:d608daa946e4799cf28b105aba461db00187657bd55ea7c2935ff11dac237e27 AS busybox
+FROM stagex/pallet-rust:1.94.0@sha256:2fbe7b164dd92edb9c1096152f6d27592d8a69b1b8eb2fc907b5fadea7d11668 AS zebra-pallet-rust
+FROM stagex/pallet-clang@sha256:07c01477a41eba3ec57a0e84c73659dec17662247a8f92b8b902f0aa02b58ca3 AS zebra-pallet-clang
+FROM stagex/user-protobuf:26.1@sha256:a135aaf060990b6ef8a7c715c16f175811d3a1f5383970f5771adef05a0bc56a AS zebra-protobuf
+FROM stagex/user-abseil-cpp:20240116.2@sha256:20a241145158a0aa7cb83ed5dc4f9ad6360dc975352787f4e6b00e8a39943f62 AS zebra-abseil-cpp
+FROM stagex/core-gmp:6.3.0@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
+FROM stagex/core-mpfr:4.1.0@sha256:b390b6023fce662a834d207e683864d4c37001b0af9e56a62aab6b7ee9fda097 AS mpfr
+FROM stagex/core-mpc:1.2.1@sha256:5385d8ddf991a1911da0d2ee69b0eaeb95baa111101ebf50933559956ac5ca71 AS mpc
+FROM stagex/core-isl:0.24@sha256:6c78dd13483288b4ddd967866cf4ccf5cc20f9130368c0d10e3e498ddb6d3573 AS isl
+
+############################################################
+# Zebra: deps
+############################################################
+FROM zebra-pallet-rust AS zebra-deps
+SHELL ["/bin/sh", "-xo", "pipefail", "-c"]
+
+COPY --from=zebra-pallet-clang . /
+COPY --from=zebra-protobuf . /
+COPY --from=zebra-abseil-cpp . /
+COPY --from=gmp . /
+COPY --from=mpfr . /
+COPY --from=mpc . /
+COPY --from=isl . /
+
+# librocksdb-sys and libzcash-script build scripts emit -lstdc++, but
+# pallet-clang ships libc++ (LLVM). Redirect -lstdc++ to libc++ + libc++abi.
+RUN printf 'INPUT(-lc++ -lc++abi)\n' > /usr/lib/libstdc++.a
+
+ENV CARGO_INCREMENTAL=0
+ENV CARGO_HOME=/home/zebra/.cargo
+
+############################################################
+# Zebra: release binary
+############################################################
+FROM zebra-deps AS zebra-release
+ARG TARGET_ARCH
+ARG FEATURES="default-release-binaries"
+ENV FEATURES=${FEATURES}
+WORKDIR /home/zebra
+
+ENV RUST_BACKTRACE=1
+ENV RUSTFLAGS="-C codegen-units=1"
+ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
+ENV RUSTFLAGS="${RUSTFLAGS} -C linker=clang"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=lld"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--allow-multiple-definition"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--whole-archive"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++abi.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libzstd.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libz.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--no-whole-archive"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-ldl"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-lm"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
+ENV SOURCE_DATE_EPOCH=1
+ENV CXXFLAGS="-stdlib=libc++ -include cstdint"
+ENV ROCKSDB_USE_PKG_CONFIG=0
+
+# Reconstruct the zebra workspace at $HOME from the zebra/ subfolder. Note:
+# rust-toolchain.toml is deliberately NOT copied, so the pinned pallet-rust
+# provides the toolchain (our zebra pins 1.91; pallet-rust 1.94 builds it).
+COPY zebra/Cargo.toml zebra/Cargo.lock ./
+COPY zebra/tower-batch-control ./tower-batch-control
+COPY zebra/tower-fallback ./tower-fallback
+COPY zebra/zebra-chain ./zebra-chain
+COPY zebra/zebra-consensus ./zebra-consensus
+COPY zebra/zebra-network ./zebra-network
+COPY zebra/zebra-node-services ./zebra-node-services
+COPY zebra/zebra-rpc ./zebra-rpc
+COPY zebra/zebra-script ./zebra-script
+COPY zebra/zebra-state ./zebra-state
+COPY zebra/zebra-test ./zebra-test
+COPY zebra/zebra-utils ./zebra-utils
+COPY zebra/zebrad ./zebrad
+# zebra's [zero] delta patches orchard = { path = "../orchard" }; the vendored
+# orchard resolves to /home/orchard from the /home/zebra workspace.
+COPY orchard /home/orchard
+
+RUN cargo fetch --locked --target ${TARGET_ARCH} && \
+    cargo metadata --locked --format-version=1 > /dev/null 2>&1
+
+RUN --network=none \
+    cargo build --frozen --release \
+    --features "${FEATURES}" \
+    --target ${TARGET_ARCH} \
+    --package zebrad --bin zebrad && \
+    install -D -m 0755 /home/zebra/target/${TARGET_ARCH}/release/zebrad /usr/local/bin/zebrad
+
+############################################################
+# Zaino StageX bases (our pins) + builder
+############################################################
+FROM stagex/pallet-rust:1.96.0@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS zaino-pallet-rust
+FROM stagex/pallet-clang@sha256:15cce53f7f94e6eefb67587bb62b2ae5b8a82d043e2b6ef800647b30f4320928 AS zaino-pallet-clang
+FROM stagex/user-protobuf:35.0@sha256:e93f664067dd9f61c4abe04630a8422ee1bdefa8f466efc2eaeea15d7ee4e67c AS zaino-protobuf
+FROM stagex/user-abseil-cpp:20260107.1@sha256:411fd1a6a20daae3d931c43928fad8a816e96e5333437cb13c6c81e451f46542 AS zaino-abseil-cpp
+
+FROM zaino-pallet-rust AS zaino-builder
+ARG TARGET_ARCH
+SHELL ["/bin/sh", "-euo", "pipefail", "-c"]
+COPY --from=zaino-pallet-clang . /
+COPY --from=zaino-protobuf . /
+COPY --from=zaino-abseil-cpp . /
+WORKDIR /usr/src/app
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV CXXSTDLIB="c++"
+ENV RUST_BACKTRACE=1
+ENV RUSTFLAGS="-C codegen-units=1"
+ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
+ENV RUSTFLAGS="${RUSTFLAGS} -C linker=clang -C link-arg=-fuse-ld=mold"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=/usr/lib/libc++abi.a"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
+ENV SOURCE_DATE_EPOCH=1
+ENV CXXFLAGS="-stdlib=libc++ -include cstdint"
+ENV ROCKSDB_USE_PKG_CONFIG=0
+
+COPY zaino/ .
+
+RUN cargo fetch --locked --target ${TARGET_ARCH}
+
+RUN --network=none \
+    cargo build --release --frozen --target ${TARGET_ARCH} --bin zainod \
+      --features no_tls_use_unencrypted_traffic && \
+    install -D -m 0755 target/${TARGET_ARCH}/release/zainod /usr/local/bin/zainod
+
+############################################################
+# Export stages (for extracting binaries / reproducibility checks)
+############################################################
+FROM scratch AS export-zebra
+COPY --from=zebra-release /usr/local/bin/zebrad /zebrad
+FROM scratch AS export-zaino
+COPY --from=zaino-builder /usr/local/bin/zainod /zainod
+
+############################################################
+# Runtime: both binaries + supervisor + baked configs
+############################################################
+FROM busybox AS runtime
+ENV UID=10001
+ENV GID=10001
+ENV HOME=/home/zebra
+WORKDIR /home/zebra
+
+COPY --chmod=0644 <<-'EOF' /etc/passwd
+root:x:0:0:root:/root:/bin/sh
+zebra:x:10001:10001::/home/zebra:/bin/sh
+EOF
+COPY --chmod=0644 <<-'EOF' /etc/group
+root:x:0:
+zebra:x:10001:
+EOF
+
+COPY --from=zebra-release /usr/local/bin/zebrad /usr/local/bin/zebrad
+COPY --from=zaino-builder /usr/local/bin/zainod /usr/local/bin/zainod
+COPY --chmod=0755 run-both.sh /usr/local/bin/run-both.sh
+COPY config/zebrad.toml /etc/zebra/zebrad.toml
+COPY config/zainod-colocated.toml /etc/zaino/zainod-colocated.toml
+
+ENTRYPOINT ["/usr/local/bin/run-both.sh"]

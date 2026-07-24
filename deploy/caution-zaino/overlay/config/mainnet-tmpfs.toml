@@ -1,0 +1,32 @@
+# ROADMAP STUB: not for v0.
+#
+# Persistent finalised state on an in-enclave tmpfs. Needs a ~128 GiB
+# memory_mb enclave (see the sizing table in the zero repo,
+# deploy/caution-zaino/README.md) and accepts a full from-genesis re-index on
+# every enclave start; zainod serves reads throughout via its ephemeral
+# passthrough, converging from proxy to local serving over a few hours.
+#
+# To activate: point caution.hcl unit.args at this file, raise
+# resources.memory_mb accordingly, and ensure /data is a writable tmpfs in the
+# enclave image.
+
+backend = 'fetch'
+network = 'Mainnet'
+ephemeral_finalised_state = false
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'zebra.internal:8232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4
+
+[storage.database]
+path = '/data/zaino'
+size = 128
+sync_write_batch_size = 2
+accumulator_rebuild_memory_size = 2
+sync_checkpoint_interval = 60

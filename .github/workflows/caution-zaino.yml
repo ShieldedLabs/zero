@@ -1,0 +1,41 @@
+name: caution-zaino
+
+# Build verification for the Caution enclave context: assemble the standalone
+# repo exactly as it would be pushed, then docker-build the deterministic
+# StageX Containerfile on a native x86 runner. Caution's builder must never be
+# first contact with a change to this recipe.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/caution-zaino/**"
+      - "zaino/Cargo.lock"
+      - "zaino/Dockerfile.deterministic"
+      - ".github/workflows/caution-zaino.yml"
+
+concurrency:
+  group: caution-zaino-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-context:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # subtree split walks the full history
+          fetch-depth: 0
+
+      - name: Assemble Caution build context
+        run: bash deploy/caution-zaino/assemble.sh "$RUNNER_TEMP/zaino-caution"
+
+      - name: Build deterministic enclave image
+        working-directory: ${{ runner.temp }}/zaino-caution
+        run: docker build -f Containerfile -t caution-zaino:ci .
+
+      - name: Smoke test binary and baked configs
+        run: |
+          docker run --rm --entrypoint /bin/sh caution-zaino:ci \
+            -c '/zainod --version && ls /etc/zaino'

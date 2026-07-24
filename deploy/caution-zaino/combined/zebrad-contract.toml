@@ -1,0 +1,21 @@
+# NOT our deliverable: this is the CONTRACT zaino needs from the zebra side of
+# the co-located enclave (Anton's team owns the zebra packaging). It documents
+# the minimal zebrad config the supervisor and zainod-colocated.toml assume.
+
+[network]
+network = "Mainnet"
+
+[state]
+# tmpfs inside the enclave; holds the full ~276 GB state. Seeded once over
+# vsock at enclave setup (see ../SEEDING.md) so there is no from-genesis sync.
+cache_dir = "/data/zebra"
+
+[rpc]
+# localhost only: zaino connects here, the hop never leaves the enclave.
+listen_addr = "127.0.0.1:8232"
+# off, so no cookie-file / secret plumbing is needed for the localhost link.
+enable_cookie_auth = false
+
+# zebra also needs OUTBOUND network to the Zcash P2P network (TCP 8233) and to
+# DNS seeders (UDP/TCP 53) to stay at the chain tip. Those become egress rules
+# in caution.hcl, provided through the parent's vsock proxy.
