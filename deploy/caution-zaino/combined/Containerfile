@@ -165,6 +165,20 @@ COPY --from=zaino-builder /usr/local/bin/zainod /zainod
 # Runtime: both binaries + supervisor + baked configs
 ############################################################
 FROM busybox AS runtime
+
+# The stagex busybox base is usr-merged (/bin -> usr/bin, /lib -> usr/lib,
+# /lib64 -> usr/lib) but ships no usr/lib, so /lib and /lib64 are DANGLING
+# symlinks. Caution's EIF builder runs `test -e <rootfs>/lib || mkdir -p
+# <rootfs>/lib`, and mkdir cannot create through a dangling symlink, so
+# initramfs assembly dies with "No such file or directory". Materialising the
+# targets makes the `test -e` succeed so the mkdir never runs. Our binaries are
+# static musl, so these directories stay empty.
+#
+# USER root is required because the stagex base runs as uid 1000 and cannot
+# mkdir in /usr; the enclave runs this rootfs as its own init anyway.
+USER root
+RUN mkdir -p /usr/lib /etc/ssl/certs
+
 ENV UID=10001
 ENV GID=10001
 ENV HOME=/home/zebra
