@@ -11,8 +11,11 @@ enclave "z3-node" {
   }
 
   resources {
-    cpu       = 32
-    memory_mb = 327680 # 320 GiB; tune against the r6i.12xlarge 384 GiB parent
+    # cpu 48 per Anton (r6i.12xlarge has 48 vCPU). Memory: the measured need is
+    # ~276 GB of tmpfs state plus a few GB of process, so 320 GiB leaves headroom
+    # while still leaving room on the 384 GiB parent.
+    cpu       = 48
+    memory_mb = 327680
   }
 
   network {
