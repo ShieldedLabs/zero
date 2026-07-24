@@ -1,0 +1,59 @@
+name: caution-z3-reproduce
+
+# Answers "does it reproduce?": builds each binary twice from a cold cache and
+# compares sha256. The StageX recipe is designed to be bit-for-bit
+# deterministic (pinned digests, SOURCE_DATE_EPOCH=1, --build-id=none,
+# codegen-units=1, no incremental). This is the same-runner test (controls for
+# time/PID/tmp nondeterminism); the cross-machine gold standard is what
+# `caution verify` does independently on Caution's side.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/caution-z3-reproduce.yml"
+
+concurrency:
+  group: caution-z3-reproduce-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reproduce:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Assemble combined context
+        run: bash deploy/caution-zaino/combined/assemble-combined.sh "$RUNNER_TEMP/z3"
+
+      - name: Build each binary twice (cold) and compare hashes
+        working-directory: ${{ runner.temp }}/z3
+        run: |
+          set -euo pipefail
+          for t in export-zebra export-zaino; do
+            docker build -f Containerfile --target "$t" --no-cache \
+              --output "type=local,dest=out1-$t" .
+            docker build -f Containerfile --target "$t" --no-cache \
+              --output "type=local,dest=out2-$t" .
+          done
+
+          echo "=== binary hashes ==="
+          sha256sum \
+            out1-export-zebra/zebrad out2-export-zebra/zebrad \
+            out1-export-zaino/zainod out2-export-zaino/zainod
+
+          fail=0
+          if [ "$(sha256sum < out1-export-zebra/zebrad)" = "$(sha256sum < out2-export-zebra/zebrad)" ]; then
+            echo "zebrad: REPRODUCES (identical across two cold builds)"
+          else
+            echo "zebrad: DIFFERS between builds"; fail=1
+          fi
+          if [ "$(sha256sum < out1-export-zaino/zainod)" = "$(sha256sum < out2-export-zaino/zainod)" ]; then
+            echo "zainod: REPRODUCES (identical across two cold builds)"
+          else
+            echo "zainod: DIFFERS between builds"; fail=1
+          fi
+          exit $fail
