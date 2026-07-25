@@ -178,6 +178,11 @@ FROM busybox AS runtime
 # mkdir in /usr; the enclave runs this rootfs as its own init anyway.
 USER root
 RUN mkdir -p /usr/lib /etc/ssl/certs
+# Writable working dirs the processes need at runtime. zebra's config points
+# cache_dir at /data/zebra; create /data so it does not depend on the enclave
+# root being writable. /tmp is used by zaino (and as the ephemeral db path) and
+# by general tooling; 1777 so any uid can write.
+RUN mkdir -p /data /tmp && chmod 1777 /tmp
 
 ENV UID=10001
 ENV GID=10001
