@@ -93,23 +93,28 @@ makes a young platform better.
 
 ## Where it stands
 
-Everything up to and including serving is proven:
+A **testnet node is live right now**, and every layer is proven end to end:
 
-- The combined image builds **reproducibly** (identical binaries across
-  independent builds).
-- Caution's platform **builds it, attests it, and boots it**, with a live
-  attestation endpoint.
-- The co-located supervisor **starts both processes** as one unit.
-- Zaino **serves real mainnet compact blocks** to a wallet client.
+- The combined image builds **reproducibly**, identical binaries across
+  independent builds.
+- Caution's platform **builds it, attests it, and boots it**. The running
+  enclave returns a real signed attestation document to a nonce challenge.
+- The co-located supervisor **starts both processes** as one unit inside the
+  enclave.
+- The enclave **serves real wallet queries** over the public internet,
+  `GetLightdInfo`, `GetLatestBlock`, and compact-block `GetBlockRange`, while
+  the validator syncs the chain inside the box.
 
-What we have not yet run is the full stack serving *inside* the enclave against
-mainnet, because that needs the validator's ~280 GB of synced state, and
-enclaves do not have persistent disk today. Two platform features close that gap,
-and both are on Caution's near-term roadmap: **persistent enclave storage**, and
-**large-memory or bring-your-own-compute enclaves**. Once they land, the same
-reproducible image becomes what we believe would be the first fully verifiable
-Zcash node, and its state can be seeded from a synced snapshot to skip the
-initial sync.
+To our knowledge this is the first attested, reproducibly-built Zcash node of
+any kind.
+
+What we have not yet run is the same stack against **mainnet**, because
+mainnet's ~280 GB of chain state needs either persistent enclave disk or a
+large-memory enclave, and testnet's ~15-20 GB fits in RAM today while mainnet's
+does not. Both of those are on Caution's near-term roadmap (**persistent enclave
+storage** and **large-memory / bring-your-own-compute enclaves**), and when they
+land the same reproducible image becomes a fully verifiable Zcash *mainnet*
+node, with its state seeded from a synced snapshot to skip the initial sync.
 
 ## Why it matters
 

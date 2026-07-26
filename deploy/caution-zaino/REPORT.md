@@ -3,27 +3,31 @@
 **Audience:** Shielded Labs leadership
 **Author:** Mark Henderson
 **Date:** 2026-07-26
-**Status:** Proof of concept complete. Not production-ready. Two platform-side blockers remain.
+**Status:** Live attested testnet node running and serving. Mainnet is a fast-follow gated on two Caution platform features.
 
 ## TL;DR
 
-We built and proved a proof of concept for running Zcash infrastructure inside a
-Trusted Execution Environment (TEE): a single AWS Nitro enclave running **both**
-a full `zebrad` validator and a `zainod` lightwallet indexer, from a
-**bit-for-bit reproducible, remotely attestable** build, on Caution's verifiable
-compute platform.
+We built, deployed, and are now running a Zcash node inside a Trusted Execution
+Environment (TEE): a single AWS Nitro enclave running **both** a full `zebrad`
+validator and a `zainod` lightwallet indexer, from a **bit-for-bit reproducible,
+remotely attested** build, on Caution's verifiable compute platform.
 
-Every layer works and is demonstrated: the reproducible build, the attestation,
-the enclave boot, the co-located supervisor, and zaino serving real mainnet
-compact blocks to a wallet client. The one thing we have not yet run is the full
-stack **serving inside the enclave against mainnet**, because that requires a
-fully-synced ~280 GB chain state, and the enclave has no persistent disk yet.
-That is a platform limitation on Caution's side, not a flaw in our design, and
-both of the pieces needed to close it are on their roadmap.
+This is no longer just a proof of concept. A **testnet node is live and serving
+right now**: the enclave is attested (a valid signed attestation document, not a
+mock), and it answers real wallet queries (`GetLightdInfo`, `GetLatestBlock`,
+and compact-block `GetBlockRange`) over the public internet while `zebrad` syncs
+the testnet chain inside the enclave. To our knowledge this is the first
+attested, reproducibly-built Zcash node of any kind.
 
-We recommend treating this as a successful PoC, publishing a joint technical
-post with Caution, and scoping the production node as a fast-follow gated on two
-specific Caution platform features.
+The one thing we have not yet run is the same stack **against mainnet**, because
+mainnet's ~280 GB chain state needs either persistent enclave disk or a
+large-memory (~320 GB) enclave, both on Caution's near-term roadmap. Testnet's
+state is ~15-20 GB, which fits a 32 GB enclave in RAM today, which is why the
+testnet node runs now and the mainnet node is a fast-follow.
+
+We recommend treating this as a success (a running, verifiable node, not a
+slide), publishing a joint technical post with Caution, and scoping the mainnet
+node as a fast-follow gated on those two specific Caution platform features.
 
 ## What we set out to do
 
@@ -41,9 +45,10 @@ and it makes the zaino-to-zebra link a loopback hop that never leaves enclave
 memory. To our knowledge this would be the first fully verifiable Zcash node of
 any kind.
 
-## What we achieved (the proof of concept)
+## What we achieved
 
-All of the following are demonstrated with concrete evidence (see Appendix).
+All of the following are demonstrated with concrete evidence (see Appendix), and
+items 1-4 are running live on the deployed testnet node right now.
 
 1. **Reproducible build.** A single Containerfile builds both `zebrad` and
    `zainod` as fully static musl binaries using StageX (source-bootstrapped,
@@ -62,13 +67,16 @@ All of the following are demonstrated with concrete evidence (see Appendix).
    lifecycles together. Demonstrated end to end: zebra starts, opens its RPC,
    zaino launches, both run as one unit.
 
-4. **Serving real mainnet data.** The exact `zainod` binary from the combined
-   image, in ephemeral (diskless) mode, serves live mainnet compact blocks to a
-   wallet client: `GetLightdInfo`, `GetLatestBlock`, and `GetBlockRange` all
-   return correct data, at a ~66 MiB memory footprint.
+4. **Serving live from the enclave.** The deployed testnet enclave answers real
+   wallet queries over the public internet: `GetLightdInfo`, `GetLatestBlock`,
+   and compact-block `GetBlockRange` all return correct data while `zebrad`
+   syncs the testnet chain inside the enclave, at a ~66 MiB indexer footprint.
+   (We separately verified the same against mainnet data in a local rehearsal.)
 
-Put together: the design is sound and every component is proven. What remains is
-an integration step blocked by a platform limitation, not a research risk.
+Put together: the design is sound, every component is proven, and the full
+stack is running and serving on testnet. What remains is scaling the same image
+to mainnet, which is blocked by a platform limitation (state size vs enclave
+disk/RAM), not a research risk.
 
 ## What we learned
 
@@ -110,7 +118,9 @@ Caution counterpart asked us to surface.
 
 ## What is not done, and why
 
-**A live mainnet node serving inside the enclave.** This needs a fully-synced
+The testnet node is live and serving (see above). The remaining gap is:
+
+**A live MAINNET node serving inside the enclave.** This needs a fully-synced
 ~280 GB `zebra` state available to the enclave. Two Caution platform features
 gate it, both on their roadmap:
 
@@ -134,43 +144,47 @@ Neither is our engineering to do; both are normal platform maturation.
 
 ## Timeline and what shipping looks like
 
-- **Now:** PoC complete and reproducible. Fixes committed.
-- **Testnet demo (optional, ~half a day):** a testnet chain syncs in ~4 hours,
-  small enough to sync inside the enclave and prove the whole stack serving
-  live and attested. This is the cheapest path to a *running* public demo, at
-  the cost of the enclave re-syncing on each cold boot.
+- **Now (done):** testnet node **live and serving, attested**, in a 32 GB
+  fully-managed enclave. Reproducible build, fixes committed. `caution verify`
+  can be run against it to confirm the running enclave matches this source.
+  (The enclave re-syncs testnet on each cold boot, ~hours, since there is no
+  persistent disk yet; fine for a demo kept warm.)
 - **Mainnet node (fast-follow):** gated on Caution's disk support (~2 weeks) and
   a large-memory/BYOC enclave. Once both exist, the same reproducible image
-  becomes the first fully verifiable Zcash node. State can be seeded from a
-  synced cache to skip the initial sync (documented and verified).
+  becomes the first fully verifiable Zcash mainnet node. State can be seeded
+  from a synced cache to skip the initial sync (documented and verified).
 
 ## Recommendation
 
-1. **Call the PoC a success.** The hard, novel parts (reproducible build,
-   attestation, co-located enclave, diskless indexer serving) are done and
-   proven.
+1. **Call it a success.** Not a slide deck: a running, attested, verifiable
+   testnet node serving real wallet queries, from a reproducible build. The
+   hard, novel parts are done and demonstrated on live infrastructure.
 2. **Publish jointly with Caution.** A short technical post is drafted. It is
    good for Shielded Labs (leadership in privacy-preserving infra) and for
    Caution (a real, demanding workload on their platform).
-3. **Scope the production node as a fast-follow**, explicitly gated on Caution's
+3. **Scope the mainnet node as a fast-follow**, explicitly gated on Caution's
    disk support and a large-memory enclave. Keep the relationship warm; Anton is
    an eager partner.
-4. **Consider the testnet demo** if we want something live and attested to point
-   at before the mainnet blockers clear.
+4. **Run `caution verify` against the live testnet node** to capture the
+   end-to-end "running enclave matches reviewed source" result as the capstone
+   evidence for the post.
 
 ## Appendix: evidence
 
 - **Reproducible build:** two cold CI builds, identical SHA-256:
   `zebrad 2f982c0d…eeadd`, `zainod 358432a1…b5c4b`.
-- **Caution deploy:** `Docker image built, building EIF... Complete!` ->
-  `Build complete` -> `Deployment successful!`, public IP and attestation URL
-  issued, app state `running`.
+- **Attested deploy (testnet):** `Build complete` -> `Waiting for health
+  check... Complete! (1m35s)` -> `Deployment successful!`, app state `running`,
+  32 GB fully-managed enclave.
+- **Attestation live:** a nonce challenge to the enclave's `/attestation`
+  endpoint returns a real ~6.8 KB signed attestation document (0 bytes in debug
+  mode, where attestation is disabled).
 - **Co-located supervisor:** `supervisor: starting zebrad` -> zebra
   `Opened RPC endpoint at 127.0.0.1:8232` -> `supervisor: starting zainod` ->
-  `zainod started, version: 0.6.0-rc.1`, both processes running.
-- **Serving:** `GetLightdInfo` -> `chainName: main, blockHeight: 3425949`;
-  `GetLatestBlock` -> `3425949`; `GetBlockRange` -> compact blocks returned;
-  ~66 MiB RSS.
+  `zainod started`, both processes running, no crash loop.
+- **Serving (live testnet, over the internet):** `GetLightdInfo` ->
+  `chainName: test`, height climbing as it syncs; `GetLatestBlock` -> current
+  height; `GetBlockRange 100..104` -> 5 compact blocks; ~66 MiB indexer RSS.
 - **Repo:** `deploy/caution-zaino/` (single-indexer and combined enclave build
   contexts, configs, supervisor, seeding runbook, CI). Reproducibility and
   build checks are enforced in CI.
