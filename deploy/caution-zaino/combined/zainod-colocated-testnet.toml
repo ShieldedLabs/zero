@@ -1,0 +1,23 @@
+# Testnet variant of the co-located zaino config (see zainod-colocated.toml for
+# the mainnet version and notes). Selected at deploy time via ZAINO_CONF in
+# caution.hcl. Ephemeral: the co-located zebra holds the chain state; zaino
+# proxies over loopback and stays tiny.
+
+backend = 'fetch'
+network = 'Testnet'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = '127.0.0.1:8232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4
+
+# Required by config parsing even in ephemeral mode; never opened in this mode.
+[storage.database]
+path = '/tmp/zaino-db'
+size = 8

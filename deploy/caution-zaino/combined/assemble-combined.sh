@@ -31,6 +31,9 @@ cp "$HERE/caution.hcl" "$DEST/caution.hcl"
 cp "$HERE/zainod-colocated.toml" "$DEST/config/zainod-colocated.toml"
 # The zebra-side config contract becomes the baked zebrad.toml.
 cp "$HERE/zebrad-contract.toml" "$DEST/config/zebrad.toml"
+# Testnet variants, selected at deploy time via ZEBRA_CONF / ZAINO_CONF.
+cp "$HERE/zebrad-testnet.toml" "$DEST/config/zebrad-testnet.toml"
+cp "$HERE/zainod-colocated-testnet.toml" "$DEST/config/zainod-colocated-testnet.toml"
 
 echo "==> assembled: $DEST"
 echo "verify (x86): docker build -f Containerfile $DEST"

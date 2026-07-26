@@ -208,7 +208,10 @@ EOF
 COPY --from=zebra-release /usr/local/bin/zebrad /usr/local/bin/zebrad
 COPY --from=zaino-builder /usr/local/bin/zainod /usr/local/bin/zainod
 COPY --chmod=0755 run-both.sh /usr/local/bin/run-both.sh
+# Both networks are baked; caution.hcl selects one via ZEBRA_CONF / ZAINO_CONF.
 COPY config/zebrad.toml /etc/zebra/zebrad.toml
 COPY config/zainod-colocated.toml /etc/zaino/zainod-colocated.toml
+COPY config/zebrad-testnet.toml /etc/zebra/zebrad-testnet.toml
+COPY config/zainod-colocated-testnet.toml /etc/zaino/zainod-colocated-testnet.toml
 
 ENTRYPOINT ["/usr/local/bin/run-both.sh"]
