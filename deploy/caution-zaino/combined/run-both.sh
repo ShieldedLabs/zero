@@ -30,7 +30,12 @@ shutdown() {
 trap shutdown TERM INT
 
 echo "supervisor: starting zebrad"
-"$ZEBRA_BIN" start --config "$ZEBRA_CONF" &
+# zebrad's config flag is GLOBAL and must precede the subcommand:
+# `zebrad -c <file> start`. `zebrad start --config <file>` errors with
+# "unexpected argument '--config'" and exits, which is what silently kept
+# zebra from ever starting in the first live enclave deploy. (zainod, below,
+# does use the `start --config <file>` form: the two CLIs differ.)
+"$ZEBRA_BIN" -c "$ZEBRA_CONF" start &
 zebra_pid=$!
 
 # Gate on zebra RPC readiness. Prefer a real RPC probe via wget; if the runtime

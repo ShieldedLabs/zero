@@ -178,6 +178,13 @@ FROM busybox AS runtime
 # mkdir in /usr; the enclave runs this rootfs as its own init anyway.
 USER root
 RUN mkdir -p /usr/lib /etc/ssl/certs
+# Ship a real CA bundle. Current-source zaino builds reqwest with webpki-roots
+# (compiled-in), so the validator JSON-RPC client does not strictly need this,
+# but tonic is built with tls-native-roots and older builds used native-roots
+# for reqwest too (a stale image failed at startup with "No CA certificates
+# were loaded from the system"). Baking the bundle makes startup robust
+# regardless. Source is the pinned stagex pallet-rust used for the build.
+COPY --from=zaino-pallet-rust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 # Writable working dirs the processes need at runtime. zebra's config points
 # cache_dir at /data/zebra; create /data so it does not depend on the enclave
 # root being writable. /tmp is used by zaino (and as the ephemeral db path) and
