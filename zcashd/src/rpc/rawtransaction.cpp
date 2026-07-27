@@ -307,7 +307,9 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
         if (tx.nVersion >= ZIP225_TX_VERSION) {
             entry.pushKV("orchard", OrchardStyleBundleToJSON(tx.GetOrchardBundle(), false));
         }
-        if (tx.nVersion >= ZIP229_TX_VERSION) {
+        // Exact-v6 check rather than >=: later-numbered formats (ZFUTURE) have
+        // no Ironwood slot in their wire format. // @claude
+        if (tx.IsZip229V6()) {
             entry.pushKV("ironwood", OrchardStyleBundleToJSON(tx.GetIronwoodBundle(), true));
         }
     }
@@ -1204,7 +1206,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
     // We can't sign v5+ transactions without knowing all inputs.
     if (mergedTx.nVersion >= ZIP225_TX_VERSION) {
         if (!view.HaveInputs(mergedTx)) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot sign v5 transactions without knowing all inputs");
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot sign v5+ transactions without knowing all inputs");
         }
         for (const auto& input : mergedTx.vin) {
             allPrevOutputs.push_back(view.GetOutputFor(input));
