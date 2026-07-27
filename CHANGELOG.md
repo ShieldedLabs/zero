@@ -8,6 +8,15 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v22 - 2026-07-27
+
+### Fixed
+
+- zcashd: `z_gettreestate` help documents the `ironwood` object's pre-activation presence with a null `finalRoot`
+- zcashd: raw-tx JSON emits `ironwood` only for exact-v6 transactions (ZFUTURE no longer shows an empty bundle)
+- zcashd: `GetHistoryAt`'s size-check error names the invalid record size
+- zcashd: Updated source documentation and clarified error messages
+
 ## v21 - 2026-07-22
 
 ### Security

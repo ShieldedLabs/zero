@@ -198,20 +198,25 @@ HistoryNode CCoinsViewDB::GetHistoryAt(uint32_t epochId, HistoryIndex index) con
     // History node records have grown across upgrades (V1: 171 bytes, V2: 244,
     // V3: 317): a client contemporary with an epoch wrote that epoch's exact
     // width, while later clients always write today's full array with the tail
-    // zero-padded. Read the raw record and accept ANY valid historical width,
-    // zero-padding into the full-width node — byte-identical to what a current
-    // client writes, and the per-version parser (dispatched by epoch on the
-    // Rust side, the single format authority) never reads past its version's
-    // length. Keeping the read width-agnostic means a future format bump
-    // cannot re-create the in-place-upgrade abort this replaced: an
-    // epoch-keyed width ladder here had to be extended by hand at every bump,
-    // and a missed arm threw on the first block connect (review C3). // @claude
+    // zero-padded. Read the raw record and accept any width within the
+    // historical range, zero-padding into the full-width node — byte-identical
+    // to what a current client writes, and the per-version parser (dispatched
+    // by epoch on the Rust side, the single format authority) never reads past
+    // its version's length. This is a bounds check, deliberately NOT an
+    // exact-width whitelist: these records are written only by this node, so a
+    // non-canonical in-range width can only mean local corruption (reindex
+    // recovers), while a whitelist would re-create the hand-maintained width
+    // ladder this read replaced — that ladder had to be extended at every
+    // format bump, and a missed arm aborted the first block connect after an
+    // in-place upgrade (review C3). // @claude
     std::string raw;
     if (!db.ReadRaw(make_pair(DB_MMR_NODE, make_pair(epochId, index)), raw)) {
         throw runtime_error("History data inconsistent (expected node not found) - reindex?");
     }
     if (raw.size() < NODE_V1_SERIALIZED_LENGTH || raw.size() > NODE_SERIALIZED_LENGTH) {
-        throw runtime_error("History data inconsistent (unexpected node size) - reindex?");
+        throw runtime_error(strprintf(
+            "History node record has invalid size %u (expected %u to %u bytes) - reindex?",
+            raw.size(), NODE_V1_SERIALIZED_LENGTH, NODE_SERIALIZED_LENGTH));
     }
     std::copy(raw.begin(), raw.end(), mmrNode.begin());
 
