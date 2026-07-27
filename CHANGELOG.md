@@ -12,8 +12,6 @@ date) before dispatching the release.
 
 ### Fixed
 
-Third-party audit follow-up changes:
-
 - zcashd: `z_gettreestate` help documents the `ironwood` object's pre-activation presence with a null `finalRoot`
 - zcashd: raw-tx JSON emits `ironwood` only for exact-v6 transactions (ZFUTURE no longer shows an empty bundle)
 - zcashd: `GetHistoryAt`'s size-check error names the invalid record size
