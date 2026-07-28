@@ -8,6 +8,43 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v24 - 2026-07-28
+
+### Fixed
+
+- zebra: peers are no longer penalized for relaying transactions with the
+  adjacent NU6.2 or NU6.3 consensus branch ID within 40 blocks either side of
+  NU6.3 activation. Around the boundary a peer's tip can legitimately sit on
+  the other side of it, and Zebra scored that as misbehavior and banned the
+  peer, shedding honest peers exactly when the peer set matters most. Ironwood
+  activates on Mainnet at block 3,428,143. Carried from upstream v6.2.3, which
+  is an optional hardening release with no security advisories attached; taken
+  for the activation-window behavior specifically. (upstream #11113, 157e96f93e)
+
+### Testing
+
+- The z3 smoke probes assert that the deployed zebrad reports the NU6.3 branch
+  ID and pins activation at 3,428,143. A stale image passed every other probe
+  while silently lacking both the consensus rules and the grace window above;
+  the 2026-07-17 cached-layer incident shipped that exact class of mismatch.
+- New `qa/log-filter-injection-test.sh` covers the zebrad-log-filter fix from
+  v23 with seven assertions (command substitution, backticks, metacharacters,
+  backslash preservation, passthrough). Verified to fail against the pre-fix
+  script. It runs as a seconds-long `quick-checks` job ahead of the image
+  builds, since zebra-utils scripts are not in the runtime image and cannot be
+  stack-probed.
+
+### CI
+
+- z3-smoke and z3-regtest now trigger on vendored crate sources
+  (`zebra/zebra-*`, `zebra/zebrad`, zaino and zallet packages, lockfiles), not
+  just Dockerfiles and deploy config. Previously a PR that changed consensus or
+  wallet code but no Dockerfile ran no CI at all, which is how v21's zebra
+  security carries reached the release dispatch untested and why the
+  release-time `workflow_call` gate was added. Gating the release is the
+  backstop; running on the PR is the fix. Scoped to crate sources so docs and
+  changelog edits do not trigger a three-image build.
+
 ## v23 - 2026-07-27
 
 ### Security

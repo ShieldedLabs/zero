@@ -19,6 +19,15 @@ on:
       - "librustzcash/**"
       - "qa/regtest-harness/**"
       - ".github/workflows/z3-regtest.yml"
+      # zebra crate sources: the harness exercises zebra's consensus, state,
+      # and reorg behavior through the running stack, and zebra is the
+      # component whose changes have actually broken it (the v6.2.0 reorg
+      # regression, caught by this harness and fixed by a [zero] revert).
+      # Omitting it meant zebra carries merged with no regtest signal.
+      - "zebra/zebra-*/**"
+      - "zebra/zebrad/**"
+      - "zebra/Cargo.toml"
+      - "zebra/Cargo.lock"
   workflow_dispatch:
   schedule:
     # Weekly, offset from z3-smoke's Monday 06:17 so their failure signals
