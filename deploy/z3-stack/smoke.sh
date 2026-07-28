@@ -149,6 +149,40 @@ fi
 # checkouts (directory-name prefixed); derive it from the running container.
 STACK_NETWORK="$(docker inspect zebra --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null | head -1)"
 
+# zebra_rpc <method> [params-json]: call zebra's JSON-RPC from inside the
+# container. The bundle sets enable_cookie_auth = false and the image carries
+# curl (the compose healthcheck uses the same call), so no auth or extra image
+# is needed.
+zebra_rpc() {
+  local method="$1" params="${2:-[]}"
+  timeout 20 $COMPOSE exec -T zebra curl -sf -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"smoke\",\"method\":\"$method\",\"params\":$params}" \
+    http://127.0.0.1:8232
+}
+
+# --- probe: the deployed zebrad is Ironwood-aware at the right height -----
+# NU6.3 (Ironwood) activates on Mainnet at 3,428,143. Two things depend on that
+# exact height being compiled into the binary that is actually running: the
+# consensus rules themselves, and the [upstream-pending #11113] carry, whose
+# 40-block grace window for adjacent NU6.2/NU6.3 branch IDs is measured from
+# it. A stale image would pass every other probe here while silently lacking
+# both (the 2026-07-17 cached-layer incident shipped exactly that class of
+# mismatch), so assert the height positively rather than assume the build.
+# No sync required: getblockchaininfo reports the upgrade table immediately.
+NU6_3_ACTIVATION_HEIGHT=3428143
+NU6_3_BRANCH_ID=37a5165b
+upgrades=$(zebra_rpc getblockchaininfo 2>&1) || true
+if contains "$upgrades" "$NU6_3_BRANCH_ID"; then
+  pass "zebrad knows the NU6.3 branch id ($NU6_3_BRANCH_ID)"
+else
+  fail "zebrad does not report the NU6.3 branch id $NU6_3_BRANCH_ID: $upgrades"
+fi
+if contains "$upgrades" "$NU6_3_ACTIVATION_HEIGHT"; then
+  pass "zebrad pins NU6.3 activation at $NU6_3_ACTIVATION_HEIGHT"
+else
+  fail "zebrad does not pin NU6.3 activation at $NU6_3_ACTIVATION_HEIGHT: $upgrades"
+fi
+
 # --- probe: zaino serves lightwalletd gRPC -------------------------------
 zaino_grpc_answers() {
   timeout 20 docker run --rm --network "$STACK_NETWORK" \

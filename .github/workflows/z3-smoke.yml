@@ -30,6 +30,24 @@ on:
       - "zaino/entrypoint.sh"
       - "zallet/Dockerfile"
       - ".github/workflows/z3-smoke.yml"
+      - "qa/log-filter-injection-test.sh"
+      # Vendored source that ends up in the shipped binaries. Without these,
+      # a PR that changes consensus or wallet code but no Dockerfile ran no
+      # CI at all: that is how v21's zebra security carries reached the
+      # release dispatch untested, and the workflow_call gate below was the
+      # patch. Gating the release is the backstop; running on the PR is the
+      # fix. Scoped to crate sources rather than the whole subtree so book/,
+      # docs, and CHANGELOG edits do not trigger a full three-image build.
+      - "zebra/zebra-*/**"
+      - "zebra/zebrad/**"
+      - "zebra/Cargo.toml"
+      - "zebra/Cargo.lock"
+      - "zaino/packages/**"
+      - "zaino/Cargo.toml"
+      - "zaino/Cargo.lock"
+      - "zallet/zallet*/**"
+      - "zallet/Cargo.toml"
+      - "zallet/Cargo.lock"
   workflow_dispatch:
   # Called by release.yml: every release is gated on a green smoke run of the
   # exact commit being released. Added 2026-07-22 after v21 nearly shipped
@@ -49,6 +67,23 @@ permissions:
   packages: write
 
 jobs:
+  # Seconds-long checks that need no build, run before the three 45-minute
+  # image builds so an obvious regression fails the PR immediately instead of
+  # after the matrix. Deliberately not a `needs:` dependency of the builds:
+  # these are independent signals, and blocking a 45-minute build on a shell
+  # test would trade fast feedback for slow feedback.
+  quick-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Covers the [upstream-pending #11050] carry. zebra-utils scripts are
+      # not in the runtime image, so this cannot be a stack probe.
+      - name: zebrad-log-filter shell-injection regression test
+        run: ./qa/log-filter-injection-test.sh
+
   # One separate job per component (matrix legs are independent jobs). Each
   # builds its image FRESH, exports its build cache (base/apt layers warm the
   # next run), and uploads the exact image it built as an artifact for the
