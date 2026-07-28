@@ -8,6 +8,35 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v23 - 2026-07-27
+
+### Security
+
+- zebra: ZIP-317 policy is now applied to mempool transactions before any
+  expensive cryptographic verification, instead of after. This completes the
+  GHSA-2p4c-3q4q-p463 mitigation: v21 banned peers that send invalid shielded
+  proofs, but the node had already paid for proof verification by the time the
+  ban landed. An unauthenticated peer could force full Halo2/Groth16
+  verification on transactions that could never be mined. Rated high upstream,
+  and specific to NU6.3/Ironwood-active nodes, which is every image we ship.
+  (upstream #11053, 3b7467e7b8)
+- zebra: `zebrad-log-filter` no longer executes log text as shell. It used GNU
+  sed's `e` flag with log-line content interpolated into the executed string,
+  so piping logs through the filter ran attacker-influenced text as commands.
+  Not shipped or invoked by any image, but operators run it by hand against
+  live logs. (upstream #11050, 196815dbe1)
+
+Scope note: upstream zebra v6.2.2 carries a third security fix, redacting the
+Elasticsearch password from the startup config dump (#11051). It is deliberately
+not carried. That code is behind the `elasticsearch` feature, which none of our
+builds enable (`FEATURES=release_max_level_info,progress-bar,prometheus`), and
+the fix changes a public field type, so carrying it would add a breaking
+zebra-state API change with no effect on anything we ship. It arrives on the
+next zebra subtree pull.
+
+Both carries are marked `[upstream-pending]` and drop on the next zebra subtree
+pull that reaches v6.2.1 / v6.2.2.
+
 ## v22 - 2026-07-27
 
 ### Fixed
