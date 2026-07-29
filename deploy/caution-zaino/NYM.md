@@ -111,6 +111,15 @@ address routes to it, so a hijacked or rebound Nym address can only **deny** ser
 never decrypt or MITM. (Binding the Nym address instead would be weaker, since the
 Nym client may run outside the TEE.)
 
+**Server-only authentication.** The wallet authenticates the enclave; the service does
+NOT require a client cert. Mutual TLS adds nothing for a public service any wallet may
+query anonymously, and a persistent client cert is a stable identifier the server could
+use to re-link all of one user's queries, re-introducing at the app layer exactly the
+linkable identity the mixnet erases. If access-gating is ever needed, use a per-session
+privacy-preserving token, not a client cert. (Nym's engineer framed this as "TLS-MA";
+for an anonymous service the load-bearing half is the wallet verifying the attested
+server, so we keep it server-auth only.)
+
 ## Component choice (transport)
 
 **nym-sdk TcpProxy binaries**: `nym-proxy-server` (mixnet -> `127.0.0.1:8137`) and
@@ -122,6 +131,17 @@ ship and are the turnkey path; Stream is the migration target for a custom bridg
 The transport is layer-agnostic, so the attested-TLS gRPC rides inside it opaquely;
 a many-block `GetBlockRange` is correct but slow and bursty (SURB replenishment +
 2 KB Sphinx payloads at mixnet latency, not bandwidth).
+
+**Transport mode is Nym 5-hop mixnet, not dVPN** (verified 2026-07-29). The
+hidden-service property (server addressed by a Nym key, no inbound IP) is built on
+Sphinx addressing + SURBs, which exist ONLY in mixnet mode. Nym's 2-hop dVPN / Fast
+mode (AmneziaWG) is a client-side VPN to a clearnet exit: it hides the wallet USER's
+IP but requires the server to expose a reachable clearnet endpoint, and a dVPN client
+cannot reach a Nym-addressed service at all. So dVPN is not a "faster hidden service",
+it trades server-hiding away. Zeronym uses mixnet and accepts its bulk-sync slowness;
+mitigate with the HTTP/2 window sizing below, resumable range chunking, and
+librustzcash spend-before-sync / subtree-roots to cut the block volume, never by
+switching to dVPN.
 
 ## Wallet UX
 
