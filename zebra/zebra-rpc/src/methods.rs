@@ -2675,74 +2675,114 @@ where
             .ok_or_error(0, "coinbase height not found")?;
         let block_hash = block.hash();
 
-        let block_verifier_router_response = block_verifier_router
-            .ready()
-            .await
-            .map_err(|error| ErrorObject::owned(0, error.to_string(), None::<()>))?
-            .call(zebra_consensus::Request::Commit(Arc::new(block)))
-            .await;
+        // Verify and commit the block in a task that outlives this RPC call.
+        //
+        // A submitted block must not be owned by the client connection: if the miner's
+        // `submitblock` times out and disconnects, dropping this method's future would
+        // otherwise cancel verification part-way through and discard a solved block with no
+        // commit and no log line. Detaching the work means a client that goes away can no
+        // longer change whether the block lands. The success log and the mined-block gossip
+        // move into the task for the same reason: they are the tail of the commit, not of the
+        // client's request.
+        let gbt = self.gbt.clone();
+        let commit_task: tokio::task::JoinHandle<Result<SubmitBlockResponse>> = tokio::spawn(
+            async move {
+                let block_verifier_router_response = block_verifier_router
+                    .ready()
+                    .await
+                    .map_err(|error| ErrorObject::owned(0, error.to_string(), None::<()>))?
+                    .call(zebra_consensus::Request::Commit(Arc::new(block)))
+                    .await;
 
-        let chain_error = match block_verifier_router_response {
-            // Currently, this match arm returns `null` (Accepted) for blocks committed
-            // to any chain, but Accepted is only for blocks in the best chain.
-            //
-            // TODO (#5487):
-            // - Inconclusive: check if the block is on a side-chain
-            // The difference is important to miners, because they want to mine on the best chain.
-            Ok(hash) => {
-                tracing::info!(?hash, ?height, "submit block accepted");
+                let chain_error = match block_verifier_router_response {
+                    // Currently, this match arm returns `null` (Accepted) for blocks committed
+                    // to any chain, but Accepted is only for blocks in the best chain.
+                    //
+                    // TODO (#5487):
+                    // - Inconclusive: check if the block is on a side-chain
+                    // The difference is important to miners, because they want to mine on the best chain.
+                    Ok(hash) => {
+                        tracing::info!(?hash, ?height, "submit block accepted");
 
-                self.gbt
-                    .advertise_mined_block(hash, height)
-                    .map_error_with_prefix(0, "failed to send mined block to gossip task")?;
+                        gbt.advertise_mined_block(hash, height)
+                            .map_error_with_prefix(
+                                0,
+                                "failed to send mined block to gossip task",
+                            )?;
 
-                return Ok(SubmitBlockResponse::Accepted);
+                        return Ok(SubmitBlockResponse::Accepted);
+                    }
+
+                    // Turns BoxError into Result<VerifyChainError, BoxError>,
+                    // by downcasting from Any to VerifyChainError.
+                    Err(box_error) => {
+                        let error = box_error
+                            .downcast::<RouterError>()
+                            .map(|boxed_chain_error| *boxed_chain_error);
+
+                        tracing::info!(
+                            ?error,
+                            ?block_hash,
+                            ?height,
+                            "submit block failed verification"
+                        );
+
+                        error
+                    }
+                };
+
+                let response = match chain_error {
+                    Ok(source) if source.is_duplicate_request() => {
+                        SubmitBlockErrorResponse::Duplicate
+                    }
+
+                    // Currently, these match arms return Reject for the older duplicate in a queue,
+                    // but queued duplicates should be DuplicateInconclusive.
+                    //
+                    // Optional TODO (#5487):
+                    // - DuplicateInconclusive: turn these non-finalized state duplicate block errors
+                    //   into BlockError enum variants, and handle them as DuplicateInconclusive:
+                    //   - "block already sent to be committed to the state"
+                    //   - "replaced by newer request"
+                    // - keep the older request in the queue,
+                    //   and return a duplicate error for the newer request immediately.
+                    //   This improves the speed of the RPC response.
+                    //
+                    // Checking the download queues and BlockVerifierRouter buffer for duplicates
+                    // might require architectural changes to Zebra, so we should only do it
+                    // if mining pools really need it.
+                    Ok(_verify_chain_error) => SubmitBlockErrorResponse::Rejected,
+
+                    // This match arm is currently unreachable, but if future changes add extra error types,
+                    // we want to turn them into `Rejected`.
+                    Err(_unknown_error_type) => SubmitBlockErrorResponse::Rejected,
+                };
+
+                Ok(response.into())
             }
+            // Keep the RPC request's span, so the block's outcome is still attributed to the
+            // submission that started it after the connection is gone.
+            .in_current_span(),
+        );
 
-            // Turns BoxError into Result<VerifyChainError, BoxError>,
-            // by downcasting from Any to VerifyChainError.
-            Err(box_error) => {
-                let error = box_error
-                    .downcast::<RouterError>()
-                    .map(|boxed_chain_error| *boxed_chain_error);
-
-                tracing::info!(
-                    ?error,
+        // A still-connected client waits for the same outcome it got before this change.
+        match commit_task.await {
+            Ok(response) => response,
+            Err(join_error) => {
+                tracing::warn!(
+                    ?join_error,
                     ?block_hash,
                     ?height,
-                    "submit block failed verification"
+                    "submit block verification task failed"
                 );
 
-                error
+                Err(ErrorObject::owned(
+                    0,
+                    format!("block verification task failed: {join_error}"),
+                    None::<()>,
+                ))
             }
-        };
-
-        let response = match chain_error {
-            Ok(source) if source.is_duplicate_request() => SubmitBlockErrorResponse::Duplicate,
-
-            // Currently, these match arms return Reject for the older duplicate in a queue,
-            // but queued duplicates should be DuplicateInconclusive.
-            //
-            // Optional TODO (#5487):
-            // - DuplicateInconclusive: turn these non-finalized state duplicate block errors
-            //   into BlockError enum variants, and handle them as DuplicateInconclusive:
-            //   - "block already sent to be committed to the state"
-            //   - "replaced by newer request"
-            // - keep the older request in the queue,
-            //   and return a duplicate error for the newer request immediately.
-            //   This improves the speed of the RPC response.
-            //
-            // Checking the download queues and BlockVerifierRouter buffer for duplicates
-            // might require architectural changes to Zebra, so we should only do it
-            // if mining pools really need it.
-            Ok(_verify_chain_error) => SubmitBlockErrorResponse::Rejected,
-
-            // This match arm is currently unreachable, but if future changes add extra error types,
-            // we want to turn them into `Rejected`.
-            Err(_unknown_error_type) => SubmitBlockErrorResponse::Rejected,
-        };
-
-        Ok(response.into())
+        }
     }
 
     async fn get_mining_info(&self) -> Result<GetMiningInfoResponse> {
