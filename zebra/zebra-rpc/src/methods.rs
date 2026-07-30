@@ -36,7 +36,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     ops::RangeInclusive,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -863,6 +863,29 @@ where
 
     /// Handler for the `getblocktemplate` RPC.
     gbt: GetBlockTemplateHandler<BlockVerifierRouter, SyncStatus>,
+
+    /// Hashes of blocks that `submitblock` is currently verifying.
+    ///
+    /// Shared between clones of this handler, because a submission is verified by a task that
+    /// outlives the connection that started it, and the next submission of the same block can
+    /// arrive on any connection.
+    submitting_blocks: Arc<Mutex<HashSet<block::Hash>>>,
+}
+
+/// Removes a block hash from [`RpcImpl::submitting_blocks`] once its verification has
+/// finished, whether it was accepted, rejected, or panicked.
+struct SubmittingBlockGuard {
+    submitting_blocks: Arc<Mutex<HashSet<block::Hash>>>,
+    block_hash: block::Hash,
+}
+
+impl Drop for SubmittingBlockGuard {
+    fn drop(&mut self) {
+        self.submitting_blocks
+            .lock()
+            .expect("mutex is not poisoned because it is only ever held across set updates")
+            .remove(&self.block_hash);
+    }
 }
 
 /// A type alias for the last event logged by the server.
@@ -958,6 +981,7 @@ where
             address_book,
             last_warn_error_log_rx,
             gbt,
+            submitting_blocks: Arc::new(Mutex::new(HashSet::new())),
         };
 
         // run the process queue
@@ -2675,6 +2699,34 @@ where
             .ok_or_error(0, "coinbase height not found")?;
         let block_hash = block.hash();
 
+        // Verify each submitted block once at a time.
+        //
+        // Verification outlives the connection that asked for it, so a miner that times out and
+        // resubmits would otherwise stack another full verification of the same block onto a
+        // node that is already too slow to answer in time. Blocks are keyed by hash, so
+        // competing blocks at the same height are still verified independently.
+        let is_new_submission = self
+            .submitting_blocks
+            .lock()
+            .expect("mutex is not poisoned because it is only ever held across set updates")
+            .insert(block_hash);
+
+        if !is_new_submission {
+            tracing::info!(
+                ?block_hash,
+                ?height,
+                "submit block is already being verified"
+            );
+
+            return Ok(SubmitBlockErrorResponse::Duplicate.into());
+        }
+
+        // Dropped when verification finishes, freeing the block for a later submission.
+        let submitting_block_guard = SubmittingBlockGuard {
+            submitting_blocks: self.submitting_blocks.clone(),
+            block_hash,
+        };
+
         // Verify and commit the block in a task that outlives this RPC call.
         //
         // A submitted block must not be owned by the client connection: if the miner's
@@ -2687,6 +2739,10 @@ where
         let gbt = self.gbt.clone();
         let commit_task: tokio::task::JoinHandle<Result<SubmitBlockResponse>> = tokio::spawn(
             async move {
+                // Held by the verifying task, not by the caller, so the block stays reserved
+                // for exactly as long as the work runs.
+                let _submitting_block_guard = submitting_block_guard;
+
                 let block_verifier_router_response = block_verifier_router
                     .ready()
                     .await
