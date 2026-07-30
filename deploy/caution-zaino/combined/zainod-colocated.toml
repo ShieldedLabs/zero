@@ -1,0 +1,30 @@
+# zainod profile for the CO-LOCATED enclave: zebra and zaino in one EIF.
+#
+# Validator is localhost (zebra in the same enclave), which trivially satisfies
+# zainod's private-address rule (loopback is allowed) and means the JSON-RPC
+# hop never leaves enclave memory: the plaintext-RPC concern that applied to an
+# external zebra does not exist here.
+#
+# Ephemeral on purpose: zebra already holds the full ~276 GB state in this
+# enclave, so zaino proxies finalised reads to localhost zebra (free, private)
+# instead of duplicating tens of GB of index in RAM. Keeps zaino at ~77 MB and
+# leaves the RAM budget for zebra.
+
+backend = 'fetch'
+network = 'Mainnet'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = '127.0.0.1:8232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4
+
+# Required by config parsing even in ephemeral mode; never opened in this mode.
+[storage.database]
+path = '/tmp/zaino-db'
+size = 8

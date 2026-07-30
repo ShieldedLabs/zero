@@ -1,0 +1,30 @@
+# zainod profile: Testnet, ephemeral (zero-disk) serving.
+#
+# No [storage.database] section: with ephemeral_finalised_state = true zainod
+# opens no LMDB and serves finalised reads by proxying the validator per
+# request. RAM footprint is the ~1001-block non-finalised window plus the
+# mempool cache plus process overhead.
+#
+# The validator address below is a placeholder hostname (hostname validation
+# defers to connect time); deployments override it via
+# ZAINO_VALIDATOR_SETTINGS__VALIDATOR_JSONRPC_LISTEN_ADDRESS in caution.hcl.
+
+backend = 'fetch'
+network = 'Testnet'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'zebra.internal:18232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4
+
+# Required by config parsing even in ephemeral mode; values are unused there
+# (the ephemeral path never opens or creates the database).
+[storage.database]
+path = '/tmp/zaino-db'
+size = 8

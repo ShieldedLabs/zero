@@ -1,0 +1,17 @@
+# Testnet variant of the zebra-side config contract (see zebrad-contract.toml
+# for the mainnet version and the field notes). Selected at deploy time via
+# ZEBRA_CONF in caution.hcl. Testnet state is ~15-20 GB, so this fits a 32 GB
+# enclave in RAM without persistent disk.
+
+[network]
+network = "Testnet"
+
+[state]
+cache_dir = "/data/zebra"
+
+[rpc]
+listen_addr = "127.0.0.1:8232"
+enable_cookie_auth = false
+
+# Testnet P2P is TCP 18233 (mainnet uses 8233); DNS seeders need 53. Those are
+# the egress rules in caution.hcl for a testnet deploy.

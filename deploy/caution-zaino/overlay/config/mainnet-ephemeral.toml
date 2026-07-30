@@ -1,0 +1,23 @@
+# zainod profile: Mainnet, ephemeral (zero-disk) serving.
+# See testnet-ephemeral.toml for the mode notes; this is the same shape with
+# mainnet network selection and the default mainnet RPC port.
+
+backend = 'fetch'
+network = 'Mainnet'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'zebra.internal:8232'
+
+[storage.cache]
+capacity = 10000
+shard_power = 4
+
+# Required by config parsing even in ephemeral mode; values are unused there
+# (the ephemeral path never opens or creates the database).
+[storage.database]
+path = '/tmp/zaino-db'
+size = 8
