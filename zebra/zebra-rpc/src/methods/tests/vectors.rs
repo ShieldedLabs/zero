@@ -35,7 +35,7 @@ use zebra_state::{
     GetBlockTemplateChainInfo, IntoDisk, LatestChainTip, ReadRequest, ReadResponse,
     ReadStateService,
 };
-use zebra_test::mock_service::MockService;
+use zebra_test::mock_service::{MockService, PanicAssertion};
 
 use crate::methods::{
     hex_data::HexData,
@@ -3329,4 +3329,158 @@ async fn rpc_get_standard_fee() {
     // Static v0 placeholder: the ZIP-317 marginal fee and version 0.
     assert_eq!(response.standard_fee(), 5000);
     assert_eq!(response.version(), 0);
+}
+
+/// Builds an RPC handler whose block verifier is a mock service, along with the channel that
+/// mined blocks are advertised on.
+///
+/// Returns the handler, the mock verifier, and the receiving end of the gossip channel.
+#[allow(clippy::type_complexity)]
+fn mock_submit_block_rpc() -> (
+    RpcImpl<
+        Buffer<
+            MockService<mempool::Request, mempool::Response, PanicAssertion, BoxError>,
+            mempool::Request,
+        >,
+        Buffer<
+            MockService<zebra_state::Request, zebra_state::Response, PanicAssertion, BoxError>,
+            zebra_state::Request,
+        >,
+        Buffer<MockService<ReadRequest, ReadResponse, PanicAssertion, BoxError>, ReadRequest>,
+        NoChainTip,
+        MockAddressBookPeers,
+        MockService<zebra_consensus::Request, Hash, PanicAssertion, BoxError>,
+        MockSyncStatus,
+    >,
+    MockService<zebra_consensus::Request, Hash, PanicAssertion, BoxError>,
+    mpsc::Receiver<(Hash, block::Height)>,
+) {
+    let mempool: MockService<_, _, _, BoxError> = MockService::build().for_unit_tests();
+    let state: MockService<_, _, _, BoxError> = MockService::build().for_unit_tests();
+    let read_state: MockService<_, _, _, BoxError> = MockService::build().for_unit_tests();
+    let block_verifier_router: MockService<_, _, _, BoxError> =
+        MockService::build().for_unit_tests();
+
+    let (mined_block_sender, mined_block_receiver) = mpsc::channel(1);
+    let (_tx, rx) = tokio::sync::watch::channel(None);
+
+    let (rpc, _) = RpcImpl::new(
+        Mainnet,
+        Default::default(),
+        Default::default(),
+        "0.0.1",
+        "RPC test",
+        Buffer::new(mempool, 1),
+        Buffer::new(state, 1),
+        Buffer::new(read_state, 1),
+        block_verifier_router.clone(),
+        MockSyncStatus::default(),
+        NoChainTip,
+        MockAddressBookPeers::default(),
+        rx,
+        Some(mined_block_sender),
+    );
+
+    (rpc, block_verifier_router, mined_block_receiver)
+}
+
+/// Check that a block keeps being verified and committed after the submitting client goes
+/// away, and that it is still advertised to peers.
+///
+/// A miner whose `submitblock` call times out closes its connection, which drops this method's
+/// future. That must not cancel verification, or the solved block is silently lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_submit_block_survives_client_disconnect() {
+    let _init_guard = zebra_test::init();
+
+    let (rpc, mut block_verifier_router, mut mined_block_receiver) = mock_submit_block_rpc();
+
+    let block_bytes = zebra_test::vectors::CONTINUOUS_MAINNET_BLOCKS[&1].to_vec();
+    let block: Arc<Block> = block_bytes
+        .zcash_deserialize_into()
+        .expect("test vector should deserialize");
+    let expected_hash = block.hash();
+    let expected_height = block
+        .coinbase_height()
+        .expect("test vector should have a coinbase height");
+
+    // Poll the call far enough to hand the block to the verifier, then drop it, like a client
+    // that has timed out and closed its connection.
+    let mut submit_block = Box::pin(rpc.submit_block(HexData(block_bytes), None));
+    assert!(
+        futures::poll!(&mut submit_block).is_pending(),
+        "submitblock should still be waiting for the block to be verified"
+    );
+    drop(submit_block);
+
+    // Verification must run to completion without the caller.
+    block_verifier_router
+        .expect_request(zebra_consensus::Request::Commit(block))
+        .await
+        .respond(expected_hash);
+
+    // And the committed block must still reach the block gossip task.
+    let advertised = tokio::time::timeout(Duration::from_secs(10), mined_block_receiver.recv())
+        .await
+        .expect("mined block should be advertised after the client disconnects")
+        .expect("gossip channel should still be open");
+
+    assert_eq!(advertised, (expected_hash, expected_height));
+}
+
+/// Check that submitting a block that is already being verified does not start a second
+/// verification of it.
+///
+/// Verification outlives the connection that asked for it, so without this a miner that times
+/// out and resubmits would stack duplicate work onto an already overloaded node.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_submit_block_verifies_each_block_once_at_a_time() {
+    let _init_guard = zebra_test::init();
+
+    let (rpc, mut block_verifier_router, _mined_block_receiver) = mock_submit_block_rpc();
+
+    let block_bytes = zebra_test::vectors::CONTINUOUS_MAINNET_BLOCKS[&1].to_vec();
+    let block: Arc<Block> = block_bytes
+        .zcash_deserialize_into()
+        .expect("test vector should deserialize");
+    let expected_hash = block.hash();
+
+    // Start a submission, and wait until it reaches the verifier.
+    let first_submission = tokio::spawn({
+        let rpc = rpc.clone();
+        let block_bytes = block_bytes.clone();
+        async move { rpc.submit_block(HexData(block_bytes), None).await }
+    });
+
+    let first_responder = block_verifier_router
+        .expect_request(zebra_consensus::Request::Commit(block))
+        .await;
+
+    // A second submission of the same block must be answered without verifying it again.
+    //
+    // The timeout keeps this a failure rather than a hang: a second verification would block
+    // on a mock response that this test never sends.
+    let second_submission = tokio::time::timeout(
+        Duration::from_secs(10),
+        rpc.submit_block(HexData(block_bytes), None),
+    )
+    .await
+    .expect("a block that is already being verified should be answered without verifying it again");
+
+    assert_eq!(
+        second_submission,
+        Ok(SubmitBlockErrorResponse::Duplicate.into()),
+        "a block that is already being verified should be reported as a duplicate"
+    );
+    block_verifier_router.expect_no_requests().await;
+
+    // The submission that is doing the work still gets its own result.
+    first_responder.respond(expected_hash);
+
+    assert_eq!(
+        first_submission
+            .await
+            .expect("submission task should not panic"),
+        Ok(SubmitBlockResponse::Accepted)
+    );
 }
