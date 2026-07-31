@@ -82,12 +82,20 @@ Row by row:
 
 ## Naive vs Nym-aware wallets
 
-Most wallets today do not speak Nym; they reach the shim over ordinary TLS, so the model must hold even for a wallet that does nothing special.
+Most wallets today do not speak Nym; they reach the shim over ordinary TLS. The model must hold for such a wallet, but not for a *completely* unmodified one: there is exactly one wallet-side requirement, covered right after this.
 
 - For a **naive TLS wallet**, TLS terminates inside the shim's enclave, so the operator cannot read the migration transaction. But the operator's own network still observed that "IP X connected at time T." What protects that wallet is the **batching at the hub**: by holding the migration and co-publishing it with others after a delay, the hub ensures the operator cannot time-match "IP X active at T" against the on-chain migration. This is precisely why the shim must be a TEE (to blind the operator to the contents) and why the hub must batch (to break the timing link for the majority of wallets that cannot hide their own IP).
 - A future **Nym-aware wallet** could encrypt the migration end-to-end to the hub key and route it itself, so the shim would only forward, not decrypt. The near-term design is built so that path drops in later; near-term wallets are assumed naive.
 
 The dependence on batching is the model's soft spot: batch-timing anonymity is only as strong as how many migrations land in a single flush window. The robust, volume-independent win is the IP unlinking from Nym; the batching is an additional layer whose strength varies with migration density. [Honest limits](./trust.md) treats this in full.
+
+## The one wallet-side requirement: aligned anchors and expiry
+
+The system needs no wallet reconfiguration and no new endpoint URL, but it does need one thing from the wallet software: within a migration epoch, wallets must choose **identical anchors and expiry heights**. This is the [ZIP 318](https://zips.z.cash/zip-0318) behavior (minus its network-anonymity defenses, which the shim and hub now supply instead). It is a hard requirement, not a nicety.
+
+The reason is an **anchor-linkage attack**. A migration transaction commits to an *anchor*, a note-commitment-tree root that was current when the wallet built it. A wallet that uses the *latest* anchor stamps its transaction with a timestamp: an attacker who sees the shuffled epoch batch revealed on-chain can match each transaction's anchor to the moment it was current, then match that moment to the time a given IP submitted a migration. The batching's timing protection evaporates. Aligning anchors and expiries across the epoch removes the per-transaction timestamp, so all migrations in a batch look alike.
+
+So the protection is for **ZIP-318-like wallets whose users have opted out of Tor or Nym**, not for completely unmodified wallets. Coordinating this requirement with wallet authors, and aligning the hub's batch granularity to the granularity at which wallets pick anchors and expiries, are open items (see [review](./review.md)).
 
 ## The query path: content passes through, requester IPs blinded
 
@@ -108,3 +116,22 @@ The honest limit: the wallet's IP still reaches the operator's *host* at the TCP
 One leak survives by construction, and the model names it rather than hide it. Because the shim is a drop-in in front of the operator's own backend, a migration is the single request the shim does **not** forward to the backing lwd, so an operator watching its own traffic can infer *that* a given source IP submitted a migration, and roughly when. It does **not** learn *which* on-chain transaction or *what amount*: the hub's batch mixes that client's migration with others' from operators it never sees. So the residual is "IP X migrated something," not "IP X migrated amount Y," which is why the table's source-IP row reads No for the amount even though the bare fact leaks.
 
 This residual is inherent to the drop-in model, and it is why shim-side batching and shim-to-hub cover traffic are rejected as mitigations. [Honest limits](./trust.md) is the single owner of that argument, along with the anonymity-set dependence, delayed broadcast, and the AWS-not-math trust root.
+
+## Defense-in-depth: detection, not prevention
+
+This is an emergency defense-in-depth measure. It does not cryptographically *prevent* every attack; it makes the attacks that matter **detectable after the fact**, which raises their cost and risk. The detection rests on two observable facts: the shim's TLS key is bound into its attestation, and every legitimate certificate for the domain appears in Certificate Transparency logs. Concretely, an attacker who can neither obtain a certificate that stays out of CT logs nor fully break the TEE cannot observe a direct IP-to-migration linkage without the attack later being detected.
+
+A **Trusted Organization** (the party operating the hub) watches both. It verifies the shim's setup attestation (the private key lives only in the enclave, and no other certificate for the domain is still valid, ideally a fresh domain with no prior certificates), re-verifies whenever the certificate is renewed for any reason, makes anonymous requests to the public URL to confirm the attested key is the one actually served (at least for untargeted users), and monitors CT for any new certificate. If it sees a different public key in use, or a new key appear in CT, it **publicly announces that it has detected signs of an attack**.
+
+The honest cost of a detection design: an operator's own mistakes are indistinguishable from an attack. If an operator loses the TEE's state and must recreate it, or accidentally lets Let's Encrypt auto-renew the certificate, that trips the alarm as a false positive. Operators must therefore run carefully (disable certificate auto-renewal, guard the enclave state) and accept that operational slips get announced as possible attacks.
+
+The bar this clears is specific: the design aims to be secure against attacks that fall short of entering a new certificate into CT logs *and* fall short of fully compromising the TEE, including TEE attacks that rewind or replay enclave state, or that observe the enclave's memory-access patterns (both are open hardening items, see [review](./review.md)).
+
+## What this does not defend against
+
+Beyond the query leak (out of scope above) and the residual (above), two active attacks are explicitly out of scope, and one side channel constrains deployment:
+
+- **Active wallet-tagging.** An attacker who can feed a target wallet a false chain can force it to build migrations against uniquely identifiable anchors; those transactions will not be valid, but they become uniquely findable in the revealed batch. An attacker can also hold a target back on the legitimate chain so it uses identifiably old anchors; the only visible symptom is that the user's incoming funds confirm much more slowly than usual. These are active wallet-breaking attacks, not passive observation, and this design does not stop them.
+- **The transaction-size side channel.** An attacker can read a migration's size (its arity) from the TLS ciphertext length at submission time. If one migration in the revealed batch has a distinctive size, that IP is re-linked to it. So migration sizes must overlap across users; if they do not, the batching does not hide a large or unusual transaction.
+
+A near-term deployment blocker sits alongside these: the existing TLS certificate for `zec.rocks` is valid through **October**, so until it expires (or a fresh domain is used, or the key is revoked and wallets check revocation), an attacker holding that certificate could still see targeted users' migrations. See [review](./review.md).

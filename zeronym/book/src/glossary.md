@@ -4,6 +4,8 @@ Component and term definitions, then the primary references. Where another chapt
 
 ## Glossary
 
+**Anchor.** A note-commitment-tree root a shielded transaction commits to, fixing which chain state it was built against. Wallets must choose *aligned* anchors within a migration epoch: a latest-anchor transaction is timestamped by its anchor, which re-links it in the revealed batch (the anchor-linkage attack, see [the problem](./problem.md)).
+
 **Anonymity set.** For a batched migration, the cross-operator batch the [hub](./components.md) publishes together. A batch of one gives no anonymity. See [honest limits](./trust.md).
 
 **Attestation (Nitro / NSM).** A signed AWS Nitro Secure Module document binding an enclave's in-enclave-generated public key to the root hash of the software inside it, verifiable against the AWS Nitro hardware root of trust. Both shim and hub publish one. See [trust](./trust.md).
@@ -20,7 +22,7 @@ Component and term definitions, then the primary references. Where another chapt
 
 **Deshield.** A turnstile crossing moving value from a shielded pool to the transparent pool. Detected by the classifier but passed straight through near-term, not batched.
 
-**Drop-in LWD.** The shim looks like an ordinary light-wallet indexer to every wallet, so users need no config change (no new endpoint URL). Why TLS must terminate inside the enclave and the shim must present a normal CA-issued certificate.
+**Drop-in LWD.** The shim looks like an ordinary light-wallet indexer to every wallet, so users need no config change and no new endpoint URL (wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)). Why TLS must terminate inside the enclave and the shim must present a normal CA-issued certificate.
 
 **Expiry height.** The block height past which a transaction is invalid and will not mine. The hub must flush a queued migration before its expiry height, capping the flush cadence (it cannot be widened to grow a batch). Per-wallet windows are aligned in ZIP 318.
 
@@ -29,6 +31,8 @@ Component and term definitions, then the primary references. Where another chapt
 **Keymaker / locksmith quorum.** Caution's M-of-N quorum mechanism (across three to four consortium orgs) that persists enclave keys across cold boots and upgrades and provisions the single shared hub key to every hub instance. Separate from STEVE. See [trust](./trust.md).
 
 **Migration.** The turnstile crossing the near-term system batches: a cross-pool shielded move, the Orchard-to-Ironwood migration (value leaving Orchard and entering Ironwood in a V6 transaction). The acute, mass, non-time-sensitive event setting the deadline. See [the problem](./problem.md).
+
+**Migration epoch.** The batching window over which wallets choose identical anchors and expiry heights and the hub reveals migrations together in shuffled order. Batches are time or block-height based, never transaction-count based (else an attacker floods its own migrations to isolate a target's). See [the problem](./problem.md) and [the hub](./components.md).
 
 **Nym.** The 5-hop Sphinx mixnet with cover traffic, used near-term only between shim and hub. It makes shim-to-hub traffic unlinkable, hiding which operator or region a migration came from. See [the architecture](./architecture.md).
 
@@ -49,6 +53,8 @@ Component and term definitions, then the primary references. Where another chapt
 **SubmitMigration.** The shim-to-hub request `SubmitMigration { ciphertext, txid, expiry_height }`, answered by `Ack { txid }`. The tx body is encrypted to the hub key; txid and expiry are in the clear to the hub for dedup and flush scheduling. See [the shim](./components.md) and [the hub](./components.md).
 
 **TEE / AWS Nitro enclave.** Trusted Execution Environment. Both shim and hub run as attested, diskless AWS Nitro enclaves, making operator-blindness and hub-blindness cryptographically checkable rather than merely trusted. See [trust](./trust.md).
+
+**Trusted Organization (TO).** The party that operates the hub and, for detection, verifies the shim's setup attestation, makes anonymous requests to confirm the attested key is served, monitors Certificate Transparency, and publicly announces detected attacks. The design is detection-based, not prevention. See [the problem](./problem.md).
 
 **Turnstile crossing.** Any transaction moving value across a value-pool boundary: a deshield, a shield, or a cross-pool migration. The classifier detects every crossing; near-term the system batches only the migration case. See [the shim](./components.md).
 

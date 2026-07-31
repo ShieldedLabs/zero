@@ -98,6 +98,14 @@ The security-relevant claims and assumptions that need expert review before we r
 - **The trust root.** V2 privacy trusts AWS and the hardware, not math. Is the TEE-now-PIR-later (defense-in-depth, distinct failure modes) posture the right long-term answer? See [trust](./trust.md) and [roadmap](./roadmap.md).
 - **Nym.** A 5-hop mixnet for the shim-to-hub path, with STEVE only shim-to-hub and wallet-to-shim being plain TLS terminating in the enclave. Any transport assumptions to challenge?
 
+### Detection design and the wallet requirement
+
+- **Wallet anchor/expiry alignment.** The protection requires ZIP-318-like wallets to choose identical anchors and expiry heights within a migration epoch; a latest-anchor wallet is re-linkable via the anchor (see [the problem](./problem.md)). Confirm with wallet authors, and align the hub's batch granularity to how wallets pick anchors and expiries.
+- **TEE hardening.** The design assumes the enclave resists state rollback (rewind/replay) and memory-access-pattern observation. Both are open hardening items: are they achievable on the target platform, and what is the residual exposure if not?
+- **The `zec.rocks` certificate.** Its existing TLS cert is valid through October, so the scheme is ineffective for that domain until then without a fresh domain or key revocation (and wallets that check revocation). Decide the domain / revocation path.
+- **Accepted non-defenses.** Active wallet-tagging (a false chain or hold-back forcing identifiable anchors) and the transaction-size side channel (a distinctive migration size re-links via TLS ciphertext length) are out of scope by design. Confirm these are acceptable, or scope mitigations.
+- **Operator-error alarms.** Losing TEE state or an accidental certificate renewal is indistinguishable from an attack and will be announced as one. Confirm operators accept this and can run carefully (auto-renewal disabled, enclave state guarded).
+
 ### Coverage against the wallet threat model
 
 We claim Zeronym targets the **server-side and network-metadata** concerns in Taylor's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), specifically the surveilling-lightwalletd and compromised-lightwalletd adversaries, and not the wallet-app-local concerns (key and seed storage, memo integrity, dust resilience, wallet fingerprinting, supply chain), which the model itself lists as the wallet's to address. Near-term the system eliminates one item on that list (migration-broadcast IP linkage) and blinds the operator's indexer to requester IPs; the full vision (indexer + Nym + TEE + PIR) is meant to close the rest of the metadata list. Is that boundary drawn correctly? A full concern-by-concern coverage matrix is planned as a follow-up.

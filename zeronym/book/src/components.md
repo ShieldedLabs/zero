@@ -4,7 +4,7 @@ The concrete engineering designs for both TEE services. The shim and the hub are
 
 ## The zero-indexer-shim (ZIS)
 
-The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no wallet change), forwards all traffic to the operator's unmodified backing lwd, and isolates only **migration** `SendTransaction`s, which it routes over Nym to the hub.
+The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)), forwards all traffic to the operator's unmodified backing lwd, and isolates only **migration** `SendTransaction`s, which it routes over Nym to the hub.
 
 ### Topology and process model
 
@@ -164,7 +164,7 @@ In-RAM (diskless enclave), keyed by **txid** for dedup. Each entry: `{ txid, exp
 
 ### Flush and publish (the core)
 
-- **Flush trigger:** at every height that is a multiple of **N (N < 20; Decision: target ~10, well under Brave's 20-block migration expiry)**, OR earlier if any queued migration's `expiry_height <= H + safety_margin`. `safety_margin` covers not just expiry but expected time-to-mine, so a flushed tx actually confirms before it expires.
+- **Flush trigger:** at every height that is a multiple of **N (N < 20; Decision: target ~10, well under Brave's 20-block migration expiry)**, OR earlier if any queued migration's `expiry_height <= H + safety_margin`. `safety_margin` covers not just expiry but expected time-to-mine, so a flushed tx actually confirms before it expires. Batches are triggered by **time / block-height, never by transaction count**: a count-based flush (say every 100 txs) would let an attacker submit 99 of its own migrations the instant it sees a target submit, isolating the target's transaction in the revealed batch. Batch granularity must also line up with how wallets choose anchors and expiries (see [the problem](./problem.md)).
 - **Publish "simultaneously."** On flush: take all pending migrations, **shuffle the order** (never leak arrival order), and submit them to the node(s) as close to simultaneously as possible (parallel `sendrawtransaction`), so they enter the mempool together and land in the same block window. An on-chain / mempool observer then sees N migrations appear together, unordered, from many shims. **Decision: randomize order + parallel submit**; do not drip them out.
 - **Confirmation tracking.** Move flushed migrations to an "awaiting confirmation" set; watch the chain until each is mined; **re-submit** if a tx is not seen within a few blocks (node dropped it, or a hub crash lost it). Drop from the set once confirmed or expired.
 - **The anonymity set is the batch itself** (cross-operator), so batch size is the key metric; the hub logs achieved batch size honestly (see [honest limits](./trust.md)). Hub-generated decoys are a costly last resort, not the primary lever.
