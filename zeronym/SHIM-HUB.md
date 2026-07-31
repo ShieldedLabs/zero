@@ -1,6 +1,6 @@
 # Zeronym shim + hub: build plan
 
-Build plan for the near-term migration-privacy system (`zero-indexer-shim` +
+Build plan for the near-term turnstile-privacy system (`zero-indexer-shim` +
 `zero-broadcaster` hub + Nym between them). Read [README.md](README.md) first for the
 strategy, threat model, and honest limits. This doc is grounded in the current tree
 (anchors below) so the build does not have to be re-derived.
@@ -18,14 +18,14 @@ Two small, attested-TEE binaries plus a transport:
 
 - **`zero-indexer-shim`**: a transparent proxy each operator runs in front of their
   existing light-wallet backend. Passes all traffic through untouched, except it
-  intercepts a `SendTransaction` carrying an Orchard to Ironwood **migration** tx,
+  intercepts a `SendTransaction` carrying a **turnstile-crossing** tx (deshield, shield, or migration),
   which it isolates and routes over Nym to the hub.
 - **`zero-broadcaster`** (the hub): one central attested-TEE service that accumulates
-  migration txs from every shim, batches them, and publishes them together on a strict
+  turnstile-crossing txs from every shim, batches them, and publishes them together on a strict
   block cadence.
 - **Nym** between shim and hub only (the "zeroith step").
 
-The whole point: the operator never sees the migration tx cleartext, the network
+The whole point: the operator never sees the crossing tx cleartext, the network
 cannot link it to a source IP, and batched publish breaks timing correlation.
 
 ---
@@ -69,7 +69,7 @@ have to track ~20 methods and their streams.
 on request:
   if :path == ".../SendTransaction":
       tx_bytes = decode RawTransaction.data
-      if is_migration(tx_bytes):            # section 3
+      if is_turnstile_crossing(tx_bytes):     # section 3
           encrypt tx to the hub enclave key   # section 5
           hand off to the Nym client -> hub   # section 6 (fire-and-forget + ack)
           return synthesized SendResponse{errorCode: 0}   # see section 8 for the honesty cost
@@ -79,59 +79,79 @@ on request:
       forward verbatim (all queries, streams, other methods)
 ```
 
-Everything that is not a migration broadcast, including all queries, reaches the
-operator's unchanged backend exactly as today. The shim adds no query privacy (by
+Everything that is not a turnstile crossing, including all queries and pure
+transparent or intra-pool shielded payments, reaches the operator's unchanged backend
+exactly as today. The shim adds no query privacy (by
 design; see the README threat model).
 
 ---
 
-## 3. Classifying a migration transaction (the crux)
+## 3. Classifying a turnstile-crossing transaction (the crux)
 
-There is **no canonical on-wire migration marker.** Ironwood is a new shielded pool
-introduced by NU6.3 (branch id `0x37a5165b`; `ShieldedPool::Ironwood`), reusing
-Orchard's Action/Halo2 wire format but type-distinct. "Migration" is a ZIP 318 wallet
-concept, so classification is **structural and heuristic**:
+The shim isolates **any transaction that crosses a value-pool turnstile**: value moving
+between the transparent pool and a shielded pool, or between two shielded pools. The
+Orchard to Ironwood migration is the acute driver, but it is one case of a broader,
+cleaner predicate. Catching every crossing dodges the value-pool ambiguity a
+migration-only rule would have, future-proofs against the next migration, and increases
+batch density (more crossings per flush window = a larger anonymity set).
+
+There is no on-wire "turnstile" or "migration" marker; classification is **structural
+and fee-aware**. The fee subtlety: every shielded transaction has a small value balance
+leaving its pool to pay the fee, so "nonzero shielded value balance" alone would
+false-positive on ordinary shielded payments. The real signal is value crossing to a
+**real destination on the other side**, which transparent input/output presence
+discriminates:
 
 ```
-is_migration(tx) :=
-     tx.version == V6                    # only V6 carries an Ironwood bundle
-  && orchard_bundle present  && orchard_value_balance  > 0   # value LEAVING Orchard
-  && ironwood_bundle present && ironwood_value_balance < 0   # value ENTERING Ironwood
+is_turnstile_crossing(tx):
+  vb_s, vb_o, vb_i = sapling / orchard / ironwood value_balance   # +ve = leaving that pool
+  has_t_out = tx has transparent outputs with value
+  has_t_in  = tx has transparent inputs
+  leaving   = any shielded vb > 0
+  entering  = any shielded vb < 0
+  deshield  = leaving  && has_t_out         # shielded  -> transparent
+  shield    = has_t_in && entering          # transparent -> shielded
+  migrate   = a shielded pool leaving AND a DIFFERENT shielded pool entering  # e.g. Orchard -> Ironwood
+  return deshield || shield || migrate
 ```
 
-Parsing APIs (pick one; both are in-tree):
-- **zebra-chain** (recommended, has ready helpers): `Transaction::V6`,
-  `orchard_value_balance()` (`zebra/zebra-chain/src/transaction.rs:1503`),
-  `ironwood_value_balance()` (`:1520`), `ironwood_shielded_data()` (`:1129`),
-  `expiry_height()` (`:510-529`).
-- **zcash_primitives**: `orchard_bundle()`
-  (`librustzcash/zcash_primitives/src/transaction/mod.rs:451`), `ironwood_bundle()`
-  (`:455`), each bundle's `value_balance()` (sign: positive = value leaving that pool),
-  `expiry_height()` (`:435`).
+Why this is fee-robust without a magic threshold: a pure shielded payment (Orchard to
+Orchard) has `vb_o = fee > 0` but **no transparent outputs**, so `deshield` is false;
+and value that merely leaves a pool to pay the fee cannot appear as an *entering*
+shielded pool, so `migrate` is false. The transparent in/out presence, not a value
+threshold, is the discriminator. Fast-path all-transparent txs and pure-intra-pool
+shielded txs (and pre-V6 txs, for the Ironwood case) straight to passthrough.
 
-Grounding / test vectors: `zaino/docs/notes/ironwood-activation-plan.md` (the domain
-record and the "Orchard pool value non-increasing" predicate) and
-`zaino/live-tests/e2e/tests/ironwood_activation.rs:173-254` (an executable "ZIP 318
-migration shape" test that produces a real Orchard-spend-to-Ironwood tx: use it as the
-classifier's fixture).
+Parsing accessors (all `zebra/zebra-chain/src/transaction.rs`; `zcash_primitives` has
+equivalents):
+- transparent `inputs()` (:555), `outputs()` (:574)
+- `sapling_value_balance()` (:1385), `orchard_value_balance()` (:1503),
+  `ironwood_value_balance()` (:1520), combined `value_balance()` (:1561)
+- `expiry_height()` (:510-529) for the hub's batching deadline
+- Ironwood context: only `Transaction::V6` carries an Ironwood bundle (branch id
+  `0x37a5165b`, NU6.3).
 
-**Open definition questions (for the threat-model doc, section 8) that change the
-predicate:**
-1. **Value-pool ambiguity.** A v6 tx has one shared transparent value pool, so the
-   per-bundle balances cannot prove specific Orchard sats flowed into Ironwood. A tx
-   that exits Orchard to transparent AND shields transparent into Ironwood looks
-   identical to a "pure" migration. Decide whether that counts as a migration (it
-   probably should, but confirm).
-2. **Scope: "Orchard exit" vs strictly "Orchard to Ironwood".** After NU6.3 Orchard is
-   effectively exit-only, so a looser predicate ("any tx spending Orchard") is
-   defensible and catches more. Stricter (the predicate above) has fewer false
-   positives. This trades false positives (a normal tx wrongly delayed) against false
-   negatives (a migration wrongly broadcast in the clear, which leaks). **A false
-   negative is a privacy failure; a false positive is a UX annoyance.** Lean toward
-   over-capture, and let the threat model set the exact line.
-3. **Network + activation.** These pins give NU6.3 a testnet height (4,134,000) and
-   **no mainnet height** in this tree; confirm the mainnet Ironwood activation the
-   Aug-10 urgency is premised on, and which network the shim targets first.
+The three named subcases the predicate must all catch: **deshield** (shielded to
+transparent), **shield** (transparent to shielded), and **migrate** (shielded to
+shielded cross-pool, including Orchard to Ironwood). Grounding / fixtures:
+`zaino/live-tests/e2e/tests/ironwood_activation.rs:173-254` for the migrate case and
+`zaino/docs/notes/ironwood-activation-plan.md`; construct deshield / shield fixtures
+similarly.
+
+**Open definition questions (for the threat-model doc, section 8):**
+1. **False negative = leak, false positive = delay.** A missed crossing broadcasts in
+   the clear (privacy failure); a wrongly-flagged tx is merely delayed. Lean toward
+   over-capture; let the threat model set the exact line.
+2. **Discriminator edge cases.** Confirm against the wallet builders that
+   transparent-output presence cleanly separates a deshield from a fee-only shielded
+   payment, and that no common shape crosses a turnstile with neither a transparent
+   output nor a second shielded pool.
+3. **Coinbase / mining-reward shielding** is a shield (transparent coinbase input to a
+   shielded output). Confirm it should be batched (probably yes).
+4. **Network + activation.** NU6.3 / Ironwood has a testnet height (4,134,000) and no
+   mainnet height in this tree; confirm the target network. Note deshield / shield
+   crossings exist on mainnet today independent of Ironwood, so the shim protects real
+   mainnet traffic from day one even before mainnet Ironwood.
 
 ---
 
@@ -139,31 +159,32 @@ predicate:**
 
 A single central attested-TEE service.
 
-- **Ingest:** receives encrypted migration txs from shims over Nym, decrypts them
+- **Ingest:** receives encrypted turnstile-crossing txs from shims over Nym, decrypts them
   **inside the enclave** (only the attested hub software sees cleartext; the hub's host
   operator, Caution at launch, stays blind).
-- **Accumulate:** holds pending migration txs in RAM (the enclave is diskless), keyed
+- **Accumulate:** holds pending crossing txs in RAM (the enclave is diskless), keyed
   by txid, deduplicated. Tracks each tx's `expiry_height`.
 - **Batch + flush:** publishes all pending txs together on a strict block cadence.
-  **Flush every N blocks with N well under 20** (aim 10-15) because Brave mints
-  migration txs with a +20-block expiry (librustzcash +40, Zingo 100); a tx must
-  publish before it expires. This aligns with ZIP 318. Precedent for expiry handling:
-  the Sprout to Sapling migration op (`MIGRATION_EXPIRY_DELTA = 50`,
-  `zcashd/src/wallet/asyncrpcoperation_saplingmigration.cpp:18,125`), including its
-  rule to skip a round when a tx would expire across the window.
+  Because all crossings are batched, queued txs carry a **range** of expiry heights, so
+  the hub must flush before the **tightest** queued expiry. **Flush every N blocks with
+  N well under 20** (aim 10-15): Brave mints with a +20-block expiry, librustzcash +40,
+  Zingo 100 (ZIP 318 aligns these). Precedent for the skip-if-would-expire rule: the
+  Sprout to Sapling migration op (`MIGRATION_EXPIRY_DELTA = 50`,
+  `zcashd/src/wallet/asyncrpcoperation_saplingmigration.cpp:18,125`).
 - **Publish path:** broadcast via P2P relay to many nodes rather than a single
   lightwallet endpoint (Nate's point: P2P relay is on by default on all full nodes, a
   far larger anonymity set). Concretely, submit to one or more full nodes'
   `sendrawtransaction`, or speak P2P `tx` messages directly. Decide in section 8.
-- **Cover traffic (mitigation for low volume):** optionally emit decoy migration txs so
-  a batch is never size 1. This is the main lever against the density problem (README
-  risk 1). Design carefully so decoys are valid or clearly discardable.
+- **Cover traffic (mitigation if a window is still thin):** optionally emit decoy
+  crossing txs so a batch is never size 1. Batching all crossings already raises density
+  a lot; cover traffic is the backstop for low-activity windows. Design decoys to be
+  valid or clearly discardable.
 
 ---
 
 ## 5. Encryption and key model (shim to hub)
 
-Cleartext migration txs must be visible only inside the two attested enclaves (shim and
+Cleartext crossing txs must be visible only inside the two attested enclaves (shim and
 hub), never to either host operator.
 
 - The shim (a TEE) decodes the tx to classify it, so it necessarily sees cleartext, but
@@ -176,7 +197,7 @@ hub), never to either host operator.
   lets the key be governed by the multi-sig consortium (Caution / Nym / Shielded Labs /
   ZF). Steve is under review (Zooko, Nate, Taylor); treat its interface as a dependency.
 - **Future (Nym-aware wallets):** a wallet that knows the hub could encrypt the
-  migration tx end-to-end to the hub key itself, so the shim would only route, not
+  crossing tx end-to-end to the hub key itself, so the shim would only route, not
   decrypt. Near-term wallets are naive TLS, so the shim classifies. Design the shim so
   this future path drops in.
 
@@ -186,9 +207,9 @@ hub), never to either host operator.
 
 Per `deploy/caution-zaino/NYM.md`: nym-sdk `TcpProxy` binaries, `nym-proxy-client` on
 the shim side and `nym-proxy-server` fronting the hub. The shim opens a Nym tunnel to
-the hub's Nym address; the encrypted migration tx rides inside it. Nym's cover traffic
+the hub's Nym address; the encrypted crossing tx rides inside it. Nym's cover traffic
 is what makes shim-to-hub traffic unlinkable, so the hub cannot tell which region /
-operator a given migration came from. The Nym client can run outside the shim TEE
+operator a given crossing came from. The Nym client can run outside the shim TEE
 (untrusted byte mover) since the payload is already encrypted to the hub key.
 
 ---
@@ -196,8 +217,8 @@ operator a given migration came from. The Nym client can run outside the shim TE
 ## 7. Data flow (end to end)
 
 ```
-wallet --SendTransaction(migration tx)--> shim(TEE)
-   shim: decode, classify migration, encrypt to hub key
+wallet --SendTransaction(crossing tx)--> shim(TEE)
+   shim: decode, classify crossing, encrypt to hub key
    shim --SendResponse{0}--> wallet          (accepted; see 8.1)
    shim --encrypted tx over Nym--> hub(TEE)
       hub: decrypt, dedup by txid, queue with expiry
@@ -206,7 +227,7 @@ wallet --SendTransaction(migration tx)--> shim(TEE)
 tx appears on-chain in the batch, unlinked from the wallet's IP
 ```
 
-Non-migration traffic: `wallet -> shim -> operator backend -> network`, unchanged.
+Non-crossing traffic: `wallet -> shim -> operator backend -> network`, unchanged.
 
 ---
 
@@ -215,25 +236,31 @@ Non-migration traffic: `wallet -> shim -> operator backend -> network`, unchange
 These are the non-obvious risks the design must answer before shipping:
 
 1. **Delayed-broadcast visibility.** The shim returns success immediately, but the tx
-   is not in any mempool until the hub flushes (up to ~15 blocks later). A wallet that
+   is not in any mempool until the hub flushes (up to ~25 min later). A wallet that
    polls "is my tx in the mempool / confirmed?" (via queries that pass through to the
    operator backend, which does not know about the queued tx) will see "not found" for
-   minutes. This can confuse UIs or trigger resends. Options: accept it (migrations are
-   not time-sensitive), define an expected UX, or have the shim answer pending-status
-   for queued txids. **This is the biggest UX risk.**
+   minutes. This can confuse UIs or trigger resends. Because we batch **all** turnstile
+   crossings, this now hits time-sensitive deshields too (paying a merchant, an exchange
+   deposit), which **diverges from the call's decision to keep deshields instant**, a
+   deliberate privacy-over-UX choice to confirm with Nate and Zooko. The eventual escape
+   hatch is Nym-aware wallets (already IP-protected, so broadcast instantly, no
+   batching). Near-term options: accept the delay, define the pending-state UX, or have
+   the shim answer pending-status for queued txids. **This is the biggest UX risk.**
 2. **Resend / idempotency.** If the wallet resends (because the tx did not appear), the
    shim re-queues it. The hub must dedup by txid (it does), and the shim should be
    idempotent per txid within a window.
 3. **Invalid-tx handling.** A normal `sendrawtransaction` validates synchronously and
    returns an error. The shim returns success before the hub publishes, so an invalid
-   migration tx gets a false success and fails silently at flush. Mitigation: stateless
+   crossing tx gets a false success and fails silently at flush. Mitigation: stateless
    pre-validation at the shim or hub, or accept and surface hub-side failures somehow.
-4. **Classification false negatives leak.** A missed migration is broadcast in the clear
+4. **Classification false negatives leak.** A missed crossing is broadcast in the clear
    (privacy failure), so the predicate should over-capture (section 3, question 2).
-5. **Batch density.** At low migration volume a batch may be size 1 (no anonymity).
+5. **Batch density.** At low crossing volume a batch may be size 1 (no anonymity).
    Cover traffic (section 4) is the lever; report achieved batch size honestly.
-6. **Hub liveness = migration liveness.** If the hub is down, migrations stall (they are
-   held, not broadcast). Need a fallback or a clear failure mode, and eventually >1 hub.
+6. **Hub liveness = turnstile-crossing liveness (bigger blast radius now).** If the hub
+   is down, every batched crossing stalls (held, not broadcast). Batching **all**
+   crossings means an outage stalls a large fraction of network shielded activity, not
+   just migrations, raising the priority of failover and eventually >1 hub.
 7. **Expiry across the flush window.** Never queue a tx whose expiry is within the next
    flush; publish it immediately or reject, mirroring the Sapling-migration skip rule.
 
@@ -256,9 +283,10 @@ publish an attestation; the consortium governs the hub key long-term.
 **Critical path (guard ruthlessly):** shim + hub + Nym-between-them + one operator
 running the shim (Caution counts).
 
-1. **Classifier + fixtures.** `is_migration` over `zebra-chain` (or `zcash_primitives`),
-   tested against the `ironwood_activation.rs` migration tx. Settle section 3's
-   definition questions first.
+1. **Classifier + fixtures.** `is_turnstile_crossing` over `zebra-chain` (or
+   `zcash_primitives`), tested against deshield, shield, and migrate fixtures (the
+   `ironwood_activation.rs` tx is the migrate case). Settle section 3's definition
+   questions first.
 2. **Shim proxy.** HTTP/2 pass-through with the single `SendTransaction` intercept;
    forward-everything-else; TLS listener from the grpc.rs template.
 3. **Hub.** Ingest (decrypt), dedup, expiry-aware queue, flush-every-N-blocks, publish
@@ -292,10 +320,10 @@ to weigh against a minimal hand-rolled V6/bundle parser for a smaller TEE surfac
 
 ## 12. Key anchors (verified in-tree)
 
-- Migration classifier: `zebra/zebra-chain/src/transaction.rs:1503` (`orchard_value_balance`),
-  `:1520` (`ironwood_value_balance`), `:1129` (`ironwood_shielded_data`), `:510`
-  (`expiry_height`); or `librustzcash/zcash_primitives/src/transaction/mod.rs:451`
-  (`orchard_bundle`), `:455` (`ironwood_bundle`), `:435` (`expiry_height`).
+- Turnstile classifier: `zebra/zebra-chain/src/transaction.rs:555` (`inputs`), `:574`
+  (`outputs`), `:1385` (`sapling_value_balance`), `:1503` (`orchard_value_balance`),
+  `:1520` (`ironwood_value_balance`), `:1561` (`value_balance`), `:510` (`expiry_height`);
+  `librustzcash/zcash_primitives/src/transaction/mod.rs` has equivalents.
 - Ironwood / NU6.3: `librustzcash/components/zcash_protocol/src/consensus.rs:606,749`
   (branch id `0x37a5165b`), `:529` (testnet height 4,134,000, no mainnet);
   `zebra/zebra-chain/src/ironwood.rs`; domain record

@@ -3,10 +3,11 @@
 **Privacy for Zcash light wallets.** A Shielded Labs product (named by Jason McGee
 Stramaglia: a play on "pseudonym", zero + nym).
 
-> **Near-term (this document): the migration-privacy system.** An urgent, narrowly
-> scoped deliverable that stops Orchard to Ironwood migration transactions from
-> leaking a user's IP address. Target: a soft **~Aug 10** deadline (a joint Nym +
-> Shielded Labs blog post promised a mechanism by then).
+> **Near-term (this document): the turnstile-privacy system.** An urgent, narrowly
+> scoped deliverable that stops turnstile-crossing transactions (starting with the
+> Orchard to Ironwood migration) from leaking a user's IP address. Target: a soft
+> **~Aug 10** deadline (a joint Nym + Shielded Labs blog post promised a mechanism by
+> then).
 >
 > **Long-term (section 9, deferred): the vision.** A fuller indexer + Nym + TEE +
 > PIR product. The near-term system is a deliberate 80% first step toward it, not
@@ -19,23 +20,28 @@ the build.
 
 ---
 
-## 1. The urgent problem: Orchard migration IP leakage
+## 1. The urgent problem: turnstile-crossing IP leakage
 
-Orchard funds must migrate to Ironwood. To migrate, a wallet broadcasts a migration
-transaction. Today that broadcast goes to a light-wallet indexer over clearnet, so
-the operator sees the wallet's **source IP** and the **timing** of the broadcast.
-The migration transaction later appears in cleartext on the public chain. An operator
-holding the source IP can therefore retrospectively link **IP to on-chain migration
-to balance**, by timing.
+The acute driver is the Orchard to Ironwood migration. To migrate, a wallet
+broadcasts a transaction that moves value out of the Orchard pool. Today that
+broadcast goes to a light-wallet indexer over clearnet, so the operator sees the
+wallet's **source IP** and the **timing**. The transaction later appears in cleartext
+on the public chain, so an operator holding the source IP can retrospectively link
+**IP to on-chain transaction to balance**, by timing. Zooko framed this on the call as
+the worst privacy-loss event in Zcash history: users linking their IP address to their
+Zcash balance, hourly, for the migration window.
 
-Zooko framed this on the call as the worst privacy-loss event in Zcash history:
-users linking their IP address to their Zcash balance, hourly, for the duration of
-the migration window. That is the specific leak this system closes.
+**The same leak applies to every turnstile crossing**, not just migrations. Any
+transaction that moves value across a pool boundary (deshielding shielded to
+transparent, shielding transparent to shielded, or a cross-pool migration) is revealed
+on-chain and, linked to a source IP, deanonymizes the user. So the system protects
+**all turnstile crossings**, with the Orchard migration as the urgent first case that
+sets the deadline.
 
-**Scope discipline:** this is about the migration **broadcast**, not about queries.
-Which addresses a wallet looks up is a separate leak, and it is NOT in near-term
-scope (section 4 says so plainly). The near-term win is IP protection during
-migration, which the call judged to be the bulk of the practical privacy at stake.
+**Scope discipline:** this is about the **broadcast** of a crossing, not about queries.
+Which addresses a wallet looks up is a separate leak, and it is NOT in near-term scope
+(section 4 says so plainly). The near-term win is IP protection for value crossing pool
+boundaries, which the call judged to be the bulk of the practical privacy at stake.
 
 ---
 
@@ -43,8 +49,8 @@ migration, which the call judged to be the bulk of the practical privacy at stak
 
 The chosen design (the call's "Option B", after a more decentralized "Option C" was
 set aside): a lightweight attested **shim** in front of each operator's existing
-backend, plus a single attested **hub** that batches migration broadcasts. Nym runs
-only between shim and hub.
+backend, plus a single attested **hub** that batches turnstile-crossing broadcasts.
+Nym runs only between shim and hub.
 
 ```
    Wallet  (naive TLS today, or Nym-aware later)
@@ -53,11 +59,11 @@ only between shim and hub.
  +------------------------- operator host -------------------------+
  |  zero-indexer-shim   (attested TEE, lightweight router)         |
  |    |                                                            |
- |    |-- normal query / normal broadcast --> operator's EXISTING  |
- |    |     (transparent, shielded->transparent,   legacy backend --> Zcash net
- |    |      commerce): passes through instantly                   |
+ |    |-- query / non-crossing broadcast --> operator's EXISTING   |
+ |    |     (t->t, intra-pool shielded):     legacy backend --> Zcash net
+ |    |      passes through instantly                              |
  |    |                                                            |
- |    '-- Orchard MIGRATION tx  (encrypted; operator stays blind) -+--.
+ |    '-- TURNSTILE CROSSING tx (encrypted; operator stays blind) -+--.
  +-------------------------------------------------------------------|-+
                                                                      |  over Nym
                                                             (cover traffic hides
@@ -73,23 +79,26 @@ only between shim and hub.
 
 **How it works:**
 
-- **Normal traffic passes straight through.** All ordinary queries, and all ordinary
-  broadcasts (transparent, shielded-to-transparent, everyday commerce), pass through
-  the shim **instantly** to the operator's existing, unchanged legacy backend. The
-  shim does not index and does not delay them.
-- **Only Orchard migration transactions are intercepted.** The shim isolates a
-  migration tx, which is **encrypted to a key the local operator cannot access**,
-  and routes it over **Nym** to the hub.
-- **The hub batches and publishes.** The `zero-broadcaster` accumulates migration txs
+- **Non-crossing traffic passes straight through.** All queries, and broadcasts that
+  do not cross a pool turnstile (transparent-to-transparent, and pure intra-pool
+  shielded payments), pass through the shim **instantly** to the operator's existing,
+  unchanged backend. The shim does not index them and does not delay them.
+- **Any turnstile-crossing transaction is intercepted.** The shim isolates a crossing
+  tx (deshield, shield, or cross-pool migration), which is **encrypted to a key the
+  local operator cannot access**, and routes it over **Nym** to the hub.
+- **The hub batches and publishes.** The `zero-broadcaster` accumulates crossing txs
   from every shim on the network, holds them, and **publishes them simultaneously**
   after a delay, flushing on a strict block cadence (section 7).
 - **"Zeroith step" scope:** Nym only between shim and hub, a single Caution-run hub,
-  migration transactions only. Everything else is post-launch (section 8).
+  all turnstile crossings. Everything else is post-launch (section 8).
 
-Why only migration txs get delayed: delaying ordinary transactions would break
-time-sensitive uses (retail checkout), which operators and wallet authors would
-refuse to ship. Isolating just the Orchard-pool exit fulfills the urgent mandate
-without disrupting normal wallet behavior.
+Why crossings and not everything: only pool-boundary crossings reveal value moving
+between transparent and shielded (or between pools), which is what deanonymizes a user
+when linked to an IP. Pure-transparent and intra-pool shielded payments do not cross a
+turnstile, so they pass through untouched. Batching **all** crossings, including
+time-sensitive deshields, maximizes batch density and covers the full leak surface; it
+accepts a commerce-latency cost (section 5) and diverges from the call's earlier
+instinct to keep deshields instant.
 
 ---
 
@@ -113,36 +122,36 @@ indexer:
   endpoint URL (which past experience says is nearly impossible to get adopted).
 
 The shim is, in effect, a pragmatic realization of Taylor's "decouple broadcast from
-query" idea, scoped to migrations: the migration broadcast is split off from the
+query" idea, scoped to crossings: the crossing broadcast is split off from the
 operator entirely and sent to a different counterparty (the hub).
 
 ---
 
-## 4. Threat model (migration broadcast path)
+## 4. Threat model (turnstile-crossing broadcast path)
 
-Focused on the migration broadcast, per Zooko's chart revisions on the call (the old
+Focused on the broadcast of a turnstile crossing, per Zooko's chart revisions on the call (the old
 "query hidden from operator" vs "query hidden from indexer" rows were redundant and
 were replaced with explicit broadcast rows). "Verifiable" means the wallet can check
 the property cryptographically via attestation, not merely trust it.
 
-| Property (migration broadcast) | Today (clearnet) | Zeronym (shim + hub) |
+| Property (turnstile-crossing broadcast) | Today (clearnet) | Zeronym (shim + hub) |
 |---|---|---|
-| Migration tx contents hidden from the **operator** | No | Yes (encrypted; the TEE shim keeps the operator blind) |
-| Migration broadcast **linkable to source IP** | Yes, linkable | No (Nym shim-to-hub, plus batching) |
+| Crossing tx contents hidden from the **operator** | No | Yes (encrypted; the TEE shim keeps the operator blind) |
+| Crossing broadcast **linkable to source IP** | Yes, linkable | No (Nym shim-to-hub, plus batching) |
 | **Timing** of the broadcast correlatable to an exposed IP | Yes | No (batched, simultaneous publish breaks the link) |
-| Migration tx contents hidden from the **hub** | n/a | Yes (the hub is an attested TEE; Caution stays blind) |
+| Crossing tx contents hidden from the **hub** | n/a | Yes (the hub is an attested TEE; Caution stays blind) |
 | Guarantee is **verifiable** by the wallet | No | Yes (attested shim + hub) |
 | **Query** privacy (which addresses you look up) | No | **No, out of near-term scope** (queries pass through) |
 
-The last row is the honesty anchor: this system protects the migration **broadcast**,
+The last row is the honesty anchor: this system protects the crossing **broadcast**,
 not general queries. Query privacy is the deferred vision (section 9).
 
 **Naive vs Nym-aware wallets.** Most wallets do not speak Nym, so they reach the shim
 over plain TLS: TLS terminates inside the shim-TEE, so the operator cannot read the
-migration tx, but the operator's network still saw "IP X connected at time T." The
+crossing tx, but the operator's network still saw "IP X connected at time T." The
 **batching at the hub is what protects those naive wallets**: by delaying and
 co-publishing, the operator cannot time-match "IP X active at T" to the on-chain
-migration. This is why the shim must be a TEE (to blind the operator to the contents)
+crossing. This is why the shim must be a TEE (to blind the operator to the contents)
 and why the hub must batch (to break the timing link for the majority of wallets).
 
 ---
@@ -151,37 +160,44 @@ and why the hub must batch (to break the timing link for the majority of wallets
 
 State these plainly; the blog post should not overclaim.
 
-1. **Batch anonymity depends on migration density, and cannot be widened past
-   expiry.** The robust, volume-independent win is IP unlinking via Nym. The
-   *additional* batch-timing anonymity is only as strong as how many migration txs
-   land in a single flush window; a batch of one is not anonymous. Because the flush
-   cadence is capped by transaction expiry (section 7), we cannot lengthen the window
-   to compensate at low volume. **Mitigation to design:** hub-generated cover /
-   decoy migrations to pad the set, and reporting the achieved batch size honestly.
+1. **Batch anonymity depends on crossing density, and cannot be widened past expiry.**
+   The robust, volume-independent win is IP unlinking via Nym. The *additional*
+   batch-timing anonymity is only as strong as how many crossings land in a single
+   flush window; a batch of one is not anonymous. Batching **all** turnstile crossings
+   (not just migrations) helps here, since far more txs land per window. The flush
+   cadence is still capped by expiry (section 7), so at genuinely low activity the
+   backstop is hub-generated cover traffic; report the achieved batch size honestly.
 2. **The hub is concentrated trust and a single point of failure.** Hub liveness =
-   migration liveness. And the hub must handle every migration tx to publish it. This
+   crossing liveness. And the hub must handle every crossing tx to publish it. This
    is tolerable because the **hub is itself an attested TEE**, so Caution (the launch
    operator) stays blind to cleartext; trust reduces to the attested hub software,
    the key consortium (section 6), and hub uptime. It is still a concentration to
    name openly, and the consortium + eventual decentralization is the answer.
 3. **Expiry margin.** Flushing "every <= 20 blocks" cuts it fine for a wallet that
-   mints a migration tx with a 20-block expiry. Flush **well under 20** (aim ~10-15)
+   mints a tx with a 20-block expiry. Flush **well under 20** (aim ~10-15)
    for headroom (section 7).
 4. **The 80% framing.** Mark's read, which the room accepted: IP protection is the
    bulk of the necessary privacy here, and public-chain visibility only shows that
    *an entity* holds a balance, not *who*. Nate's caution stands: privacy is an arms
    race, and gains past the first ~70 to 80% cost exponentially more. This is a
    deliberate Pareto first step, labeled as such.
+5. **Commerce latency (a deliberate divergence from the call).** Batching all crossings
+   delays every deshield and shield up to ~25 min for naive TLS wallets, including
+   time-sensitive ones (a merchant payment, an exchange deposit). The call had leaned
+   toward keeping deshields instant; batching them instead maximizes density and closes
+   the full leak, at a real UX cost. The escape hatch is Nym-aware wallets, which reach
+   the hub directly and need no batching, so they can broadcast instantly. Confirm this
+   tradeoff with Nate and Zooko.
 
 ---
 
 ## 6. Trust and attestation
 
 - **TEE is mandatory** for baseline operator blindness. A non-enclave shim would let
-  the operator read migration contents; a hacked adjacent node could peer at
+  the operator read crossing contents; a hacked adjacent node could peer at
   outbound txs. The enclave is what makes operator-blindness real and checkable.
 - **The hub is an attested TEE.** Even the hub's operator (Caution at launch) cannot
-  read cleartext migration txs; only the attested hub software can, and only to
+  read cleartext crossing txs; only the attested hub software can, and only to
   batch and publish.
 - **"Steve"** is Caution's enclave-to-enclave encrypted key-sharing protocol, used to
   move the keys the shim encrypts to. It is under review (Zooko, Nate, Taylor).
@@ -198,10 +214,12 @@ State these plainly; the blog post should not overclaim.
 
 ## 7. Timing and expiry constraints
 
-Blocks target ~75 seconds. A batched migration tx must publish before its expiry
-height, or it fails on-chain. Per the call, wallet expiry windows are:
+Blocks target ~75 seconds. A batched crossing tx must publish before its expiry
+height, or it fails on-chain. Because all crossings are batched, queued txs carry a
+range of expiry windows, so the hub must flush before the tightest. Per the call, the
+windows are:
 
-| Wallet family | Migration expiry window |
+| Wallet family | Expiry window (migration case) |
 |---|---|
 | librustzcash | current height + 40 blocks |
 | Zingo | 100 blocks |
@@ -263,7 +281,7 @@ of it. The horizon, deferred until the urgent migration fix ships:
 - **The decoupled query-only / broadcast-only split.** Taylor's proposal: one attested
   instance proves it only answers queries and refuses broadcasts, a separate flavor
   only accepts broadcasts and refuses queries. The shim already realizes a scoped
-  version of this for migrations.
+  version of this for turnstile crossings.
 - **The attested Nym fleet.** Caution's planned global network of TEE-enabled Nym
   nodes (South Africa, Chicago, Brazil, Singapore, mirroring their DNS Cedar). Useful
   for a healthier public mixnet and broader adoption; deprioritized because the
@@ -283,7 +301,7 @@ synced to tip on **testnet**, in an enclave, and demoed on the call. It does not
 have Nym or Tor. Mainnet is gated on Caution enclave memory / disk support.
 
 **Now**
-- [x] This strategy doc (refocused on the migration-privacy system).
+- [x] This strategy doc (refocused on the turnstile-privacy system).
 
 **Next (upstream dependency first)**
 - [ ] Threat-model doc (Taylor + Zooko), reviewed by Mark and Nate. **This gates the
@@ -313,12 +331,15 @@ shim and hub are new Zero-owned software, not forks of the indexer.
 ## 12. Glossary and references
 
 **Glossary**
+- **Turnstile crossing:** a transaction that moves value across a value-pool boundary
+  (transparent to/from shielded, or between shielded pools): a deshield, a shield, or a
+  cross-pool migration. The class of txs the shim isolates.
 - **`zero-indexer-shim`** (shim): the lightweight, attested-TEE router deployed at
-  operators. Passes normal traffic to the operator's existing backend; isolates
-  Orchard migration txs and routes them over Nym to the hub.
+  operators. Passes non-crossing traffic to the operator's existing backend; isolates
+  turnstile-crossing txs and routes them over Nym to the hub.
 - **`zero-broadcaster`** (the hub, aka `zero-indexer-hub`): the central, attested-TEE
-  batcher that accumulates migration txs and publishes them simultaneously on a
-  strict block cadence.
+  batcher that accumulates turnstile-crossing txs and publishes them simultaneously on
+  a strict block cadence.
 - **Nym:** the mixnet, used near-term only between shim and hub, for cover traffic and
   region unlinkability.
 - **"Steve":** Caution's enclave-to-enclave encrypted key-sharing protocol (under
