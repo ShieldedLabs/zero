@@ -8,6 +8,27 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### Fixed
+
+- zebra: `submitblock` no longer discards a solved block when the miner's client
+  disconnects. Verification ran on the RPC connection, so a client timeout
+  cancelled it mid-flight and the block vanished with no commit and no log line.
+  Verification now completes regardless of the client, the block is still gossiped
+  once the client has gone, and every outcome is logged. (50e7e57e05, 92f499b7e1)
+- zebra: `submitblock` answers `duplicate-inconclusive` for a block still being
+  verified, instead of verifying it a second time. A miner retrying after a
+  timeout would otherwise double the work on an already-slow node; `duplicate`
+  would wrongly imply the node holds a validated copy. (46b3926a4d)
+
+### Testing
+
+- Three regression tests cover the submitblock disconnect and resubmission
+  paths, each checked to fail without the fixes above.
+  `zebra-rpc/examples/submitblock_abandon_repro.rs` reproduces it on Regtest: a
+  2,000-input block taking ~350ms was lost 3/3 when abandoned at 43/88/177ms,
+  and commits after the fix. It also shows the block path reuses none of the
+  mempool's verification work. (c9908b5dcc, a3c60db9f8)
+
 ## v24 - 2026-07-28
 
 ### Fixed

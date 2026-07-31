@@ -127,6 +127,10 @@ which = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+# Used only by the submitblock_abandon_repro example, to craft signed transparent spends.
+secp256k1 = { workspace = true }
+ripemd = { workspace = true }
+sha2 = { workspace = true }
 http-body = { workspace = true }
 insta = { workspace = true, features = ["redactions", "json", "ron"] }
 anyhow = { workspace = true }
