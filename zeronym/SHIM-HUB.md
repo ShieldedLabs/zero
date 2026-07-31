@@ -18,14 +18,15 @@ Two small, attested-TEE binaries plus a transport:
 
 - **`zero-indexer-shim`**: a transparent proxy each operator runs in front of their
   existing light-wallet backend. Passes all traffic through untouched, except it
-  intercepts a `SendTransaction` carrying a **turnstile-crossing** tx (deshield, shield, or migration),
-  which it isolates and routes over Nym to the hub.
-- **`zero-broadcaster`** (the hub): one central attested-TEE service that accumulates
-  turnstile-crossing txs from every shim, batches them, and publishes them together on a strict
+  intercepts a `SendTransaction` carrying a transaction, classifies it, and isolates
+  only the **migration** case (cross-pool shielded move), routing it over Nym to a hub;
+  deshields, shields, and everything else pass through.
+- **`zero-broadcaster`** (the hub): an attested-TEE service (run as >=2 with failover) that accumulates
+  migrations from every shim, batches them, and publishes them together on a strict
   block cadence.
 - **Nym** between shim and hub only (the "zeroith step").
 
-The whole point: the operator never sees the crossing tx cleartext, the network
+The whole point: the operator never sees the migration cleartext, the network
 cannot link it to a source IP, and batched publish breaks timing correlation.
 
 ---
@@ -69,17 +70,17 @@ have to track ~20 methods and their streams.
 on request:
   if :path == ".../SendTransaction":
       tx_bytes = decode RawTransaction.data
-      if is_turnstile_crossing(tx_bytes):     # section 3
-          encrypt tx to the hub enclave key   # section 5
-          hand off to the Nym client -> hub   # section 6 (fire-and-forget + ack)
+      if is_migration(tx_bytes):              # section 3 (the migrate case)
+          encrypt tx to a hub enclave key     # section 5
+          hand off to the Nym client -> a hub # section 6 (failover + retry, section 4)
           return synthesized SendResponse{errorCode: 0}   # see section 8 for the honesty cost
-      else:
+      else:                                   # deshields, shields, non-crossings, queries
           forward verbatim to the operator backend
   else:
       forward verbatim (all queries, streams, other methods)
 ```
 
-Everything that is not a turnstile crossing, including all queries and pure
+Everything except a migration, including deshields, shields, all queries, and pure
 transparent or intra-pool shielded payments, reaches the operator's unchanged backend
 exactly as today. The shim adds no query privacy (by
 design; see the README threat model).
@@ -88,12 +89,13 @@ design; see the README threat model).
 
 ## 3. Classifying a turnstile-crossing transaction (the crux)
 
-The shim isolates **any transaction that crosses a value-pool turnstile**: value moving
-between the transparent pool and a shielded pool, or between two shielded pools. The
-Orchard to Ironwood migration is the acute driver, but it is one case of a broader,
-cleaner predicate. Catching every crossing dodges the value-pool ambiguity a
-migration-only rule would have, future-proofs against the next migration, and increases
-batch density (more crossings per flush window = a larger anonymity set).
+The shim **classifies** every transaction that crosses a value-pool turnstile (value
+moving between the transparent pool and a shielded pool, or between two shielded pools).
+Near-term it **batches only the `migrate` case** (a cross-pool shielded move, e.g.
+Orchard to Ironwood); deshields and shields are detected but pass straight through
+(section 2.2). The general predicate is still worth building: it dodges the value-pool
+ambiguity a migration-only rule would have, and future-proofs the batched set as a
+policy knob that cleanly separates `migrate` from the rest.
 
 There is no on-wire "turnstile" or "migration" marker; classification is **structural
 and fee-aware**. The fee subtlety: every shielded transaction has a small value balance
@@ -157,12 +159,13 @@ similarly.
 
 ## 4. `zero-broadcaster`: the hub
 
-A single central attested-TEE service.
+An attested-TEE service, run as at least two instances with shim failover (section 4
+Resilience) so a hub outage never stalls migrations.
 
-- **Ingest:** receives encrypted turnstile-crossing txs from shims over Nym, decrypts them
+- **Ingest:** receives encrypted migrations from shims over Nym, decrypts them
   **inside the enclave** (only the attested hub software sees cleartext; the hub's host
   operator, Caution at launch, stays blind).
-- **Accumulate:** holds pending crossing txs in RAM (the enclave is diskless), keyed
+- **Accumulate:** holds pending migrations in RAM (the enclave is diskless), keyed
   by txid, deduplicated. Tracks each tx's `expiry_height`.
 - **Batch + flush:** publishes all pending txs together on a strict block cadence.
   Because all crossings are batched, queued txs carry a **range** of expiry heights, so
@@ -175,16 +178,21 @@ A single central attested-TEE service.
   lightwallet endpoint (Nate's point: P2P relay is on by default on all full nodes, a
   far larger anonymity set). Concretely, submit to one or more full nodes'
   `sendrawtransaction`, or speak P2P `tx` messages directly. Decide in section 8.
+- **Resilience (a hub outage must not stall migrations):** run **at least two attested
+  hubs with shim failover** (dedup by txid; a double-publish is a harmless on-chain
+  duplicate). The shim holds and retries using each migration's expiry slack, and as a
+  last resort broadcasts a near-expiry migration directly over Nym rather than let it
+  expire. Degrade privacy at the margin, never liveness (README section 5).
 - **Cover traffic (mitigation if a window is still thin):** optionally emit decoy
-  crossing txs so a batch is never size 1. Batching all crossings already raises density
-  a lot; cover traffic is the backstop for low-activity windows. Design decoys to be
-  valid or clearly discardable.
+  migrations so a batch is never size 1. Density is naturally high during the acute
+  migration window; cover traffic is the backstop otherwise. Design decoys to be valid
+  or clearly discardable.
 
 ---
 
 ## 5. Encryption and key model (shim to hub)
 
-Cleartext crossing txs must be visible only inside the two attested enclaves (shim and
+Cleartext migrations must be visible only inside the two attested enclaves (shim and
 hub), never to either host operator.
 
 - The shim (a TEE) decodes the tx to classify it, so it necessarily sees cleartext, but
@@ -197,7 +205,7 @@ hub), never to either host operator.
   lets the key be governed by the multi-sig consortium (Caution / Nym / Shielded Labs /
   ZF). Steve is under review (Zooko, Nate, Taylor); treat its interface as a dependency.
 - **Future (Nym-aware wallets):** a wallet that knows the hub could encrypt the
-  crossing tx end-to-end to the hub key itself, so the shim would only route, not
+  migration end-to-end to the hub key itself, so the shim would only route, not
   decrypt. Near-term wallets are naive TLS, so the shim classifies. Design the shim so
   this future path drops in.
 
@@ -217,8 +225,8 @@ operator a given crossing came from. The Nym client can run outside the shim TEE
 ## 7. Data flow (end to end)
 
 ```
-wallet --SendTransaction(crossing tx)--> shim(TEE)
-   shim: decode, classify crossing, encrypt to hub key
+wallet --SendTransaction(migration)--> shim(TEE)
+   shim: decode, classify; migration -> encrypt to hub key
    shim --SendResponse{0}--> wallet          (accepted; see 8.1)
    shim --encrypted tx over Nym--> hub(TEE)
       hub: decrypt, dedup by txid, queue with expiry
@@ -227,7 +235,7 @@ wallet --SendTransaction(crossing tx)--> shim(TEE)
 tx appears on-chain in the batch, unlinked from the wallet's IP
 ```
 
-Non-crossing traffic: `wallet -> shim -> operator backend -> network`, unchanged.
+Non-migration traffic: `wallet -> shim -> operator backend -> network`, unchanged.
 
 ---
 
@@ -236,31 +244,27 @@ Non-crossing traffic: `wallet -> shim -> operator backend -> network`, unchanged
 These are the non-obvious risks the design must answer before shipping:
 
 1. **Delayed-broadcast visibility.** The shim returns success immediately, but the tx
-   is not in any mempool until the hub flushes (up to ~25 min later). A wallet that
-   polls "is my tx in the mempool / confirmed?" (via queries that pass through to the
+   is not in any mempool until the hub flushes (up to ~25 min later). A wallet
+   polling "is my tx in the mempool / confirmed?" (via queries that pass through to the
    operator backend, which does not know about the queued tx) will see "not found" for
-   minutes. This can confuse UIs or trigger resends. Because we batch **all** turnstile
-   crossings, this now hits time-sensitive deshields too (paying a merchant, an exchange
-   deposit), which **diverges from the call's decision to keep deshields instant**, a
-   deliberate privacy-over-UX choice to confirm with Nate and Zooko. The eventual escape
-   hatch is Nym-aware wallets (already IP-protected, so broadcast instantly, no
-   batching). Near-term options: accept the delay, define the pending-state UX, or have
-   the shim answer pending-status for queued txids. **This is the biggest UX risk.**
+   minutes. This can confuse UIs or trigger resends.
+   Migrations are not time-sensitive, so the delay itself is fine, but the pending-state
+   UX must be defined: accept it, or have the shim answer pending-status for queued
+   txids. **Bounded, since migrations are not urgent, but still real.**
 2. **Resend / idempotency.** If the wallet resends (because the tx did not appear), the
    shim re-queues it. The hub must dedup by txid (it does), and the shim should be
    idempotent per txid within a window.
 3. **Invalid-tx handling.** A normal `sendrawtransaction` validates synchronously and
    returns an error. The shim returns success before the hub publishes, so an invalid
-   crossing tx gets a false success and fails silently at flush. Mitigation: stateless
+   migration gets a false success and fails silently at flush. Mitigation: stateless
    pre-validation at the shim or hub, or accept and surface hub-side failures somehow.
-4. **Classification false negatives leak.** A missed crossing is broadcast in the clear
+4. **Classification false negatives leak.** A missed migration is broadcast in the clear
    (privacy failure), so the predicate should over-capture (section 3, question 2).
-5. **Batch density.** At low crossing volume a batch may be size 1 (no anonymity).
+5. **Batch density.** At low migration volume a batch may be size 1 (no anonymity).
    Cover traffic (section 4) is the lever; report achieved batch size honestly.
-6. **Hub liveness = turnstile-crossing liveness (bigger blast radius now).** If the hub
-   is down, every batched crossing stalls (held, not broadcast). Batching **all**
-   crossings means an outage stalls a large fraction of network shielded activity, not
-   just migrations, raising the priority of failover and eventually >1 hub.
+6. **Hub liveness.** Addressed by the resilience design (section 4 and README section
+   5): >=2 hubs with shim failover, shim retry using expiry slack, and a last-resort
+   direct broadcast so a migration never expires.
 7. **Expiry across the flush window.** Never queue a tx whose expiry is within the next
    flush; publish it immediately or reject, mirroring the Sapling-migration skip rule.
 
@@ -289,8 +293,9 @@ running the shim (Caution counts).
    questions first.
 2. **Shim proxy.** HTTP/2 pass-through with the single `SendTransaction` intercept;
    forward-everything-else; TLS listener from the grpc.rs template.
-3. **Hub.** Ingest (decrypt), dedup, expiry-aware queue, flush-every-N-blocks, publish
-   via P2P / `sendrawtransaction`.
+3. **Hub (run >=2 with failover).** Ingest (decrypt), dedup by txid, expiry-aware queue,
+   flush-every-N-blocks, publish via P2P; plus shim-side retry and a last-resort
+   direct-broadcast fallback (section 4).
 4. **Encryption + Steve.** Shim encrypts to hub key; wire up Steve for key delivery.
 5. **Nym shim to hub.** nym-proxy-client / -server tunnel.
 6. **Attestation + reproducible build** for both, in an enclave.
