@@ -26,6 +26,10 @@ Component and term definitions, then the primary references. Where another chapt
 
 **Expiry height.** The block height past which a transaction is invalid and will not mine. The hub must flush a queued migration before its expiry height, capping the flush cadence (it cannot be widened to grow a batch). Per-wallet windows are aligned in ZIP 318.
 
+**Fail-safe (classification).** The shim's rule that any `SendTransaction` body it cannot confidently read (unparseable bytes, a truncated or compressed gRPC frame, trailing bytes after the transaction) is treated as a migration, never passed through as ordinary traffic. A false negative is a privacy leak; a false positive is only a wasted diversion. See [the shim](./components.md).
+
+**Interception superset rule.** The shim routes on the request path alone, and its interception set must be a superset of every routing predicate any supported backend uses. Being stricter than the backend fails *open*: the backend acts on a request the classifier never saw. See [the shim](./components.md).
+
 **Key consortium.** Proposed multi-org governance of the enclave and hub keys: Caution, Nym, Shielded Labs, and the Zcash Foundation. Long-term trust-distribution goal; a single trusted entity (Caution) stands up the hub at launch, consortium to follow. See [trust](./trust.md).
 
 **Keymaker / locksmith quorum.** Caution's M-of-N quorum mechanism (across three to four consortium orgs) that persists enclave keys across cold boots and upgrades and provisions the single shared hub key to every hub instance. Separate from STEVE. See [trust](./trust.md).

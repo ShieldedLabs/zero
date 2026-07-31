@@ -23,6 +23,16 @@ The [shim + hub system](./introduction.md) is not V1. The ladder is query privac
 - **A scoped version of a deferred idea.** Splitting the crossing broadcast off from the operator to a different counterparty (the hub) is a narrow instance of the query-only / broadcast-only decoupling below.
 - **It sidesteps a decision the full product cannot avoid.** Sitting in front of the operator's existing backend, the shim need not choose an indexer base (lightwalletd vs Zaino) near-term. That decision is deferred, below.
 
+## Near-term status: the first component is built
+
+The [shim](./components.md) now exists as a proof of concept (commit `56394a1a54`, `zeronym/shim/`): a transparent h2c gRPC reverse proxy in front of an operator's existing indexer that forwards every method, stream and trailer verbatim, and decodes exactly one path, `SendTransaction`, classifying it with the real vendored `zebra-chain` parser. Transparency is tested rather than asserted, and the classifier runs on V6 wire bytes serialized by zebra's own codec, though no transaction a wallet produced has been classified yet (see [review](./review.md)). What it feeds is not yet a routing decision: the PoC is **non-destructive**, it logs a detected migration and then still forwards it. None of diversion, the hub, Nym, STEVE, TLS, the enclave, attestation or a reproducible build is in it.
+
+Three milestones turn it into the component this book describes:
+
+1. **Diversion to the hub**, the branch that makes a migration stop at the shim. It carries an ordering constraint the PoC surfaced: classify first, connect second, because a wallet whose transaction is about to be diverted must not cause the operator's indexer to see even a TCP connection.
+2. **The reproducible StageX build**, a prerequisite rather than polish, because the [Auditor Role](./trust.md) rests on rebuild-to-the-same-hash. The PoC is a plain `cargo build`; its three concrete blockers (a repo-root build context, `zaino-proto` feature pinning, a parser not yet identical to the node's) are identified in [trust](./trust.md).
+3. **The enclave and attestation**, the point at which [trust](./trust.md) applies to the shim at all.
+
 ## V2 status: designed, platform-unblocked, transport-validated
 
 As of the 2026-07-30 V2 sync, the three hardest gates of the indexer + Nym + TEE version are answered.
