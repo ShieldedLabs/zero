@@ -8,6 +8,17 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### Added
+
+- zebra: two Prometheus metrics for diagnosing slow block acceptance.
+  `zebra_consensus_transaction_duration_seconds` splits transaction verification
+  into `phase="utxo_fetch"` (one state round trip per transparent input) and
+  `phase="checks"` (scripts, signatures, proofs), each labelled
+  `request="block"` or `"mempool"`; the ratio shows whether a node is bound by
+  state lookups or cryptography. `rpc_submitblock_inflight` gauges how many
+  submitted blocks are being verified at once. Needs the `prometheus` feature
+  and a `[metrics] endpoint_addr`, both already set in our images.
+
 ### Fixed
 
 - zebra: `submitblock` no longer discards a solved block when the miner's client

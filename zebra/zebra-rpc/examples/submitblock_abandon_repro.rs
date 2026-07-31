@@ -1,8 +1,8 @@
 //! Local reproduction of the `submitblock` disconnect-cancel block loss.
 //!
-//! Recreates the incident shape at laptop scale: a block containing fat consolidation
-//! transactions that each spend many transparent inputs, so block verification takes long
-//! enough for a client timeout to land in the middle of it.
+//! Builds the block shape that triggers it, at laptop scale: a block containing fat
+//! consolidation transactions that each spend many transparent inputs, so block verification
+//! takes long enough for a client timeout to land in the middle of it.
 //!
 //! The node is driven over raw TCP so the client connection can be killed at a chosen moment
 //! during `submitblock`. Two equivalent blocks are built:
@@ -57,7 +57,8 @@ const FANOUT_SOURCES: u32 = 40;
 
 /// Transparent inputs per fat consolidation transaction.
 ///
-/// The incident transactions had 1001 inputs each.
+/// Enough that verification takes long enough to interrupt. Consolidation jobs on Mainnet
+/// routinely spend a thousand or more transparent inputs in one transaction.
 const INPUTS_PER_TX: usize = 500;
 
 /// Fat consolidation transactions per test block.
@@ -637,12 +638,11 @@ async fn main() -> Result<(), BoxError> {
         second_elapsed.as_millis()
     );
 
-    // A block that is still being verified is not a validated duplicate yet, so the node
-    // answers `duplicate-inconclusive`.
-    if second_elapsed * 4 < first_elapsed
-        && second_response.as_str() == Some("duplicate-inconclusive")
-    {
-        println!("DEDUPED: the resubmission returned immediately instead of verifying again");
+    // Only the in-flight check answers `duplicate-inconclusive`, so the response alone shows
+    // the resubmission did not start a second verification. The timings above are supporting
+    // evidence rather than part of the verdict, because they move with machine load.
+    if second_response.as_str() == Some("duplicate-inconclusive") {
+        println!("DEDUPED: the resubmission was answered without verifying the block again");
     } else {
         println!("NOT DEDUPED: the resubmission paid full verification cost");
     }

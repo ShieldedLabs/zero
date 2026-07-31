@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -446,11 +446,29 @@ where
             //
             // https://zips.z.cash/zip-0213#specification
 
+            // Which side of the verifier this request came from, so the two phases timed below
+            // can be compared between block validation and mempool admission.
+            let request_kind = if req.is_mempool() { "mempool" } else { "block" };
+
             // Load spent UTXOs from state.
             // The UTXOs are required for almost all the async checks.
+            //
+            // This phase is one awaited state round trip per transparent input, so its share of
+            // the total tells operators whether transaction verification is bound by state
+            // lookups or by the cryptographic checks timed below.
+            let utxo_fetch_start = Instant::now();
             let load_spent_utxos_fut =
                 Self::spent_utxos(tx.clone(), req.clone(), state.clone(), mempool.clone(),);
-            let (spent_utxos, spent_outputs, spent_mempool_outpoints) = load_spent_utxos_fut.await?;
+            let spent_utxos_result = load_spent_utxos_fut.await;
+
+            metrics::histogram!(
+                "zebra.consensus.transaction.duration_seconds",
+                "phase" => "utxo_fetch",
+                "request" => request_kind
+            )
+            .record(utxo_fetch_start.elapsed().as_secs_f64());
+
+            let (spent_utxos, spent_outputs, spent_mempool_outpoints) = spent_utxos_result?;
 
             // WONTFIX: Return an error for Request::Block as well to replace this check in
             //       the state once #2336 has been implemented?
@@ -517,7 +535,19 @@ where
 
             tracing::trace!(?tx_id, "awaiting async checks...");
 
-            async_checks.check().await?;
+            // Script, signature and proof verification. Paired with the UTXO fetch above, these
+            // two phases account for almost all of a transaction's verification time.
+            let checks_start = Instant::now();
+            let checks_result = async_checks.check().await;
+
+            metrics::histogram!(
+                "zebra.consensus.transaction.duration_seconds",
+                "phase" => "checks",
+                "request" => request_kind
+            )
+            .record(checks_start.elapsed().as_secs_f64());
+
+            checks_result?;
 
             tracing::trace!(?tx_id, "finished async checks");
 

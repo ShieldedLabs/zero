@@ -881,10 +881,17 @@ struct SubmittingBlockGuard {
 
 impl Drop for SubmittingBlockGuard {
     fn drop(&mut self) {
-        self.submitting_blocks
-            .lock()
-            .expect("mutex is not poisoned because it is only ever held across set updates")
-            .remove(&self.block_hash);
+        let in_flight = {
+            let mut submitting_blocks = self
+                .submitting_blocks
+                .lock()
+                .expect("mutex is not poisoned because it is only ever held across set updates");
+
+            submitting_blocks.remove(&self.block_hash);
+            submitting_blocks.len()
+        };
+
+        metrics::gauge!("rpc.submitblock.inflight").set(in_flight as f64);
     }
 }
 
@@ -2705,11 +2712,22 @@ where
         // resubmits would otherwise stack another full verification of the same block onto a
         // node that is already too slow to answer in time. Blocks are keyed by hash, so
         // competing blocks at the same height are still verified independently.
-        let is_new_submission = self
-            .submitting_blocks
-            .lock()
-            .expect("mutex is not poisoned because it is only ever held across set updates")
-            .insert(block_hash);
+        let (is_new_submission, in_flight) = {
+            let mut submitting_blocks = self
+                .submitting_blocks
+                .lock()
+                .expect("mutex is not poisoned because it is only ever held across set updates");
+
+            (
+                submitting_blocks.insert(block_hash),
+                submitting_blocks.len(),
+            )
+        };
+
+        // Submissions being verified right now. Verification is detached from the connection
+        // that asked for it, so this is how many blocks the node is working through with no
+        // client necessarily waiting on them.
+        metrics::gauge!("rpc.submitblock.inflight").set(in_flight as f64);
 
         if !is_new_submission {
             tracing::info!(
