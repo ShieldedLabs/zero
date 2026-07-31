@@ -3361,7 +3361,9 @@ fn mock_submit_block_rpc() -> (
     let block_verifier_router: MockService<_, _, _, BoxError> =
         MockService::build().for_unit_tests();
 
-    let (mined_block_sender, mined_block_receiver) = mpsc::channel(1);
+    // Deep enough that tests which commit several blocks don't fill the channel: a full gossip
+    // channel makes a committed block return an error to the caller.
+    let (mined_block_sender, mined_block_receiver) = mpsc::channel(10);
     let (_tx, rx) = tokio::sync::watch::channel(None);
 
     let (rpc, _) = RpcImpl::new(
@@ -3453,7 +3455,7 @@ async fn rpc_submit_block_verifies_each_block_once_at_a_time() {
     });
 
     let first_responder = block_verifier_router
-        .expect_request(zebra_consensus::Request::Commit(block))
+        .expect_request(zebra_consensus::Request::Commit(block.clone()))
         .await;
 
     // A second submission of the same block must be answered without verifying it again.
@@ -3462,15 +3464,15 @@ async fn rpc_submit_block_verifies_each_block_once_at_a_time() {
     // on a mock response that this test never sends.
     let second_submission = tokio::time::timeout(
         Duration::from_secs(10),
-        rpc.submit_block(HexData(block_bytes), None),
+        rpc.submit_block(HexData(block_bytes.clone()), None),
     )
     .await
     .expect("a block that is already being verified should be answered without verifying it again");
 
     assert_eq!(
         second_submission,
-        Ok(SubmitBlockErrorResponse::Duplicate.into()),
-        "a block that is already being verified should be reported as a duplicate"
+        Ok(SubmitBlockErrorResponse::DuplicateInconclusive.into()),
+        "a block that is still being verified is not a validated duplicate yet"
     );
     block_verifier_router.expect_no_requests().await;
 
@@ -3479,6 +3481,81 @@ async fn rpc_submit_block_verifies_each_block_once_at_a_time() {
 
     assert_eq!(
         first_submission
+            .await
+            .expect("submission task should not panic"),
+        Ok(SubmitBlockResponse::Accepted)
+    );
+
+    // Once verification has finished, the block must be released for submission again.
+    // Otherwise one hash would be answered `duplicate-inconclusive` forever, and a block that
+    // needs resubmitting could never be resubmitted.
+    let later_submission = tokio::spawn({
+        let rpc = rpc.clone();
+        async move { rpc.submit_block(HexData(block_bytes), None).await }
+    });
+
+    block_verifier_router
+        .expect_request(zebra_consensus::Request::Commit(block))
+        .await
+        .respond(expected_hash);
+
+    assert_eq!(
+        later_submission
+            .await
+            .expect("submission task should not panic"),
+        Ok(SubmitBlockResponse::Accepted)
+    );
+}
+
+/// Check that a block whose verification failed can be submitted again.
+///
+/// The in-flight entry is released by a guard held by the verifying task, so it must clear on
+/// failure as well as success. If it did not, a single failed submission would make the node
+/// answer `duplicate-inconclusive` for that block forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_submit_block_releases_a_failed_block_for_resubmission() {
+    let _init_guard = zebra_test::init();
+
+    let (rpc, mut block_verifier_router, _mined_block_receiver) = mock_submit_block_rpc();
+
+    let block_bytes = zebra_test::vectors::CONTINUOUS_MAINNET_BLOCKS[&1].to_vec();
+    let block: Arc<Block> = block_bytes
+        .zcash_deserialize_into()
+        .expect("test vector should deserialize");
+    let expected_hash = block.hash();
+
+    // Fail the first submission.
+    let failed_submission = tokio::spawn({
+        let rpc = rpc.clone();
+        let block_bytes = block_bytes.clone();
+        async move { rpc.submit_block(HexData(block_bytes), None).await }
+    });
+
+    block_verifier_router
+        .expect_request(zebra_consensus::Request::Commit(block.clone()))
+        .await
+        .respond(Err(BoxError::from("block verifier is unavailable")));
+
+    assert_eq!(
+        failed_submission
+            .await
+            .expect("submission task should not panic"),
+        Ok(SubmitBlockErrorResponse::Rejected.into())
+    );
+
+    // The same block must be verified again on a later submission.
+    let retried_submission = tokio::spawn({
+        let rpc = rpc.clone();
+        async move { rpc.submit_block(HexData(block_bytes), None).await }
+    });
+
+    block_verifier_router
+        .expect_request(zebra_consensus::Request::Commit(block))
+        .await
+        .respond(expected_hash);
+
+    assert_eq!(
+        retried_submission
             .await
             .expect("submission task should not panic"),
         Ok(SubmitBlockResponse::Accepted)

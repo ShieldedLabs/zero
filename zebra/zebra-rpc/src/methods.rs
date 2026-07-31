@@ -2718,7 +2718,10 @@ where
                 "submit block is already being verified"
             );
 
-            return Ok(SubmitBlockErrorResponse::Duplicate.into());
+            // Not `Duplicate`: that tells the miner the node already has a validated copy, but
+            // this block is still being verified and may yet be rejected. A miner that treats
+            // `duplicate` as success would stop resubmitting a block that never lands.
+            return Ok(SubmitBlockErrorResponse::DuplicateInconclusive.into());
         }
 
         // Dropped when verification finishes, freeing the block for a later submission.
@@ -2746,7 +2749,19 @@ where
                 let block_verifier_router_response = block_verifier_router
                     .ready()
                     .await
-                    .map_err(|error| ErrorObject::owned(0, error.to_string(), None::<()>))?
+                    .map_err(|error| {
+                        // The submitting client may already be gone, so this log is the only
+                        // report that the block was never verified. This is also where a
+                        // shutting-down verifier service surfaces.
+                        tracing::warn!(
+                            ?error,
+                            ?block_hash,
+                            ?height,
+                            "submit block failed: block verifier service is unavailable"
+                        );
+
+                        ErrorObject::owned(0, error.to_string(), None::<()>)
+                    })?
                     .call(zebra_consensus::Request::Commit(Arc::new(block)))
                     .await;
 
@@ -2760,11 +2775,26 @@ where
                     Ok(hash) => {
                         tracing::info!(?hash, ?height, "submit block accepted");
 
-                        gbt.advertise_mined_block(hash, height)
-                            .map_error_with_prefix(
-                                0,
-                                "failed to send mined block to gossip task",
-                            )?;
+                        let advertised = gbt.advertise_mined_block(hash, height);
+
+                        if let Err(error) = &advertised {
+                            // The block is committed either way, so peers will still learn about
+                            // it through ordinary block gossip — just more slowly, which costs
+                            // the miner in orphan risk. Without this log a disconnected client
+                            // leaves no record of it at all.
+                            tracing::warn!(
+                                ?error,
+                                ?hash,
+                                ?height,
+                                "submit block committed, but the mined block could not be sent \
+                                 to the gossip task"
+                            );
+                        }
+
+                        advertised.map_error_with_prefix(
+                            0,
+                            "failed to send mined block to gossip task",
+                        )?;
 
                         return Ok(SubmitBlockResponse::Accepted);
                     }

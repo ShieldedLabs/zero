@@ -637,7 +637,11 @@ async fn main() -> Result<(), BoxError> {
         second_elapsed.as_millis()
     );
 
-    if second_elapsed * 4 < first_elapsed && second_response.as_str() == Some("duplicate") {
+    // A block that is still being verified is not a validated duplicate yet, so the node
+    // answers `duplicate-inconclusive`.
+    if second_elapsed * 4 < first_elapsed
+        && second_response.as_str() == Some("duplicate-inconclusive")
+    {
         println!("DEDUPED: the resubmission returned immediately instead of verifying again");
     } else {
         println!("NOT DEDUPED: the resubmission paid full verification cost");
@@ -653,7 +657,10 @@ async fn main() -> Result<(), BoxError> {
             delays.len(),
             elapsed.as_millis()
         );
-    } else if response.as_str() == Some("duplicate") {
+    } else if matches!(
+        response.as_str(),
+        Some("duplicate") | Some("duplicate-inconclusive")
+    ) {
         println!(
             "INCONCLUSIVE: an abandoned submission committed the block after the grace period."
         );
