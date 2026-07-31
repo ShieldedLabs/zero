@@ -200,10 +200,16 @@ hub), never to either host operator.
 - The shim then **encrypts the tx to the hub's enclave public key** before handing it to
   the (possibly untrusted) Nym client. The hub key is born inside the hub enclave and
   bound into the hub's attestation.
-- **"Steve"** (Caution's enclave-to-enclave encrypted key-sharing protocol) is the
-  mechanism that delivers the hub's public key to each shim enclave and, longer term,
-  lets the key be governed by the multi-sig consortium (Caution / Nym / Shielded Labs /
-  ZF). Steve is under review (Zooko, Nate, Taylor); treat its interface as a dependency.
+- **"Steve" (confirmed by Anton, V2 sync 2026-07-30):** Caution's enclave-to-enclave
+  handshake that verifies a counterpart's attestation and derives a per-session shared
+  key; it delivers the hub's public key to each shim enclave. Attestation binding is
+  achievable three ways (STEVE; injecting the pubkey via `metadata.json` -> `user_data`,
+  which implies a persisted key; or a new runtime `arbitrary_data` field Caution would
+  add). Open: Anton to confirm STEVE-over-Nym carries gRPC / h2.
+- **Key persistence = a keymaker/locksmith M-of-N quorum across 3-4 orgs** (the
+  consortium: Caution / Nym / Shielded Labs / ZF). It reconstitutes the hub key across
+  cold boots *and* upgrades (better than KMS-seal-to-PCR, which breaks on upgrade), which
+  also gives the hub a stable address.
 - **Future (Nym-aware wallets):** a wallet that knows the hub could encrypt the
   migration end-to-end to the hub key itself, so the shim would only route, not
   decrypt. Near-term wallets are naive TLS, so the shim classifies. Design the shim so
@@ -215,10 +221,17 @@ hub), never to either host operator.
 
 Per `deploy/caution-zaino/NYM.md`: nym-sdk `TcpProxy` binaries, `nym-proxy-client` on
 the shim side and `nym-proxy-server` fronting the hub. The shim opens a Nym tunnel to
-the hub's Nym address; the encrypted crossing tx rides inside it. Nym's cover traffic
+the hub's Nym address; the encrypted migration rides inside it. Nym's cover traffic
 is what makes shim-to-hub traffic unlinkable, so the hub cannot tell which region /
-operator a given crossing came from. The Nym client can run outside the shim TEE
+operator a given migration came from. The Nym client can run outside the shim TEE
 (untrusted byte mover) since the payload is already encrypted to the hub key.
+
+**Validated (V2 rehearsal, 2026-07-30):** nym-proxy built from `nymtech/nym` carried
+real CompactTxStreamer gRPC over the live Nym **mainnet** mixnet against the live testnet
+node, end to end. Perf ~10x clearnet (unary ~9-10s, `GetBlockRange` ~19 blk/s,
+latency-bound; the first 1-2 calls warm up then steady), which is fine for
+non-time-sensitive migrations. Nym mainnet uses ticketbook ecash credentials, so the Nym
+client needs Nyx-RPC egress (`rpc.nymtech.net:443`).
 
 ---
 
@@ -278,7 +291,9 @@ Containerfile pattern. Each enclave generates its key at boot and binds the publ
 into the NSM attestation (the RA pattern from `NYM.md`). Verification UX: a wallet dev
 reproduces the build, gets the hash, and matches it against the signed hash at the
 attestation URL, then trusts the endpoint on users' behalf. The shim and hub each
-publish an attestation; the consortium governs the hub key long-term.
+publish an attestation; the consortium governs the hub key long-term. The binding
+mechanism and cross-boot key persistence are confirmed feasible on Caution's platform
+(section 5: Steve + the keymaker quorum), per the 2026-07-30 V2 sync.
 
 ---
 

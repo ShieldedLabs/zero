@@ -262,7 +262,8 @@ off it.
 - Full **consortium** key governance (single trusted launch first).
 
 **Open dependencies:** the threat-model doc (Taylor + Zooko) is the upstream gate;
-Caution's "Steve" key protocol review; hub hosting and funding (Caution may cover a
+Caution's Steve handshake (confirmed feasible; open: does STEVE-over-Nym carry h2);
+hub hosting and funding (Caution may cover a
 demo window; Shielded Labs may subsidize operators or run a donation drive); possibly
 Nym / Nym's Coastline running the hub component.
 
@@ -273,14 +274,27 @@ Nym / Nym's Coastline running the hub component.
 The near-term system is the first step toward a fuller privacy product, not the whole
 of it. The horizon, deferred until the urgent migration fix ships:
 
-- **Indexer + Nym + TEE + PIR.** The full wallet-facing private indexer: queries (not
-  just broadcasts) served over Nym, terminated inside an attested enclave, with
-  **PIR** so the indexer learns nothing about which records a wallet fetches. On the
-  call, Nate framed **TEE and PIR as complementary, not equivalent**: they have
-  distinct failure modes (TEE: hardware-manufacturer or physical-boundary compromise;
-  PIR: cryptographic or software flaws), so the endgame uses **both**, defense in
-  depth. (Anton's "a TEE the hypervisor cannot inspect is functionally PIR" was the
-  view Nate corrected.)
+- **Indexer + Nym + TEE (V2).** The full wallet-facing private indexer: queries (not
+  just broadcasts) served over Nym, terminated inside an attested enclave. **Status (V2
+  sync, 2026-07-30): designed, platform-unblocked, and transport-validated.** Caution
+  (Anton) answered every platform gate: attestation-binding is achievable (Steve
+  handshake, or the pubkey via `metadata/user_data`, or a new runtime `arbitrary_data`
+  field); key persistence via a keymaker/locksmith **M-of-N quorum across 3-4 orgs**
+  surviving cold boots and upgrades; egress just works (broad NAT). The transport was
+  **rehearsed for real**: nym-proxy (from nymtech/nym) ran our actual CompactTxStreamer
+  gRPC over the live Nym **mainnet** mixnet against the live testnet enclave, end to end
+  (~10x slower than clearnet, latency-bound; fine for migrations). The TEE substrate
+  (attested Zebra+Zaino testnet enclave) is live; the remaining build is the in-enclave
+  Nym integration. This directly de-risks the near-term shim-to-hub tunnel and the
+  shim/hub attestation. Spec: `deploy/caution-zaino/NYM.md`.
+- **V3 (PIR) is not redundant with the TEE** (rationale sharpened). V2 is private only
+  *if you trust AWS and the hardware*. V3/PIR is private *via math*, hardware-independent,
+  and closes the access-pattern / IO-pattern leaks a Nitro enclave structurally has when
+  state is parent-mediated at mainnet scale. Nate framed TEE and PIR as **complementary,
+  not equivalent** (distinct failure modes: TEE = hardware-manufacturer or
+  physical-boundary compromise; PIR = cryptographic or software flaws), so the endgame
+  uses **both**, defense in depth, with PIR as the trust-root-removal step. (Anton's "a
+  TEE the hypervisor cannot inspect is functionally PIR" was the view Nate corrected.)
 - **The decoupled query-only / broadcast-only split.** Taylor's proposal: one attested
   instance proves it only answers queries and refuses broadcasts, a separate flavor
   only accepts broadcasts and refuses queries. The shim already realizes a scoped
@@ -299,9 +313,12 @@ of it. The horizon, deferred until the urgent migration fix ships:
 
 ## 10. Status and next steps
 
-**Status:** a live, queryable Zaino instance built with StageX (reproducible) is
-synced to tip on **testnet**, in an enclave, and demoed on the call. It does not yet
-have Nym or Tor. Mainnet is gated on Caution enclave memory / disk support.
+**Status:** a live, queryable Zaino instance built with StageX (reproducible) is synced
+to tip on **testnet**, in an attested enclave (64 GB holds testnet at tip for 24h). The
+enclave itself does not yet run Nym, but the **Nym transport is validated end to end**
+via the V2 rehearsal (real gRPC over the live Nym mainnet mixnet), which de-risks the
+shim-to-hub tunnel too. The Caution platform gates for the attested channel are now
+**answered** (section 9). Mainnet is gated on Caution enclave memory / disk support.
 
 **Now**
 - [x] This strategy doc (refocused on the turnstile-privacy system).
