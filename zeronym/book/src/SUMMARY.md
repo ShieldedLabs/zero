@@ -22,5 +22,6 @@
 
 # Reference
 
+- [For review by Taylor and Zooko](./for-review.md)
 - [Open questions for Caution](./open-questions.md)
 - [Glossary and references](./glossary.md)

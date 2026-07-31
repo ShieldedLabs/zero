@@ -1,6 +1,6 @@
 # Overview
 
-The near-term Zeronym system protects one thing: the broadcast of a turnstile-crossing transaction, starting with the Orchard to Ironwood migration. It leaves everything else, including all queries, exactly as it is today. [Threat model](./threat-model.md) is the precise statement of what is and is not protected; this chapter is the shape of the system and why it is shaped this way.
+The near-term Zeronym system is easy to undersell as protecting one thing, the broadcast of a migration transaction. What it really does is put an **attested, verifiable, tamper-proof front-end at every operator**, the shim running in a TEE, with attested batching hubs behind it. On that primitive it delivers two protections today (both below), and it is the foundation for the rest of the [roadmap](./roadmap.md). This chapter is the shape of the system; [threat model](./threat-model.md) is the precise statement of what is and is not protected.
 
 ## The system at a glance
 
@@ -16,10 +16,22 @@ The [architecture](./architecture.md) chapter has the full data-flow and trust d
 
 Traffic splits at the shim:
 
-- **Non-crossing traffic passes straight through.** Every query, and every broadcast that does not cross a value-pool boundary (transparent-to-transparent payments, pure intra-pool shielded payments), goes to the operator's existing backend instantly, visible to the operator in the clear, exactly as today. The shim does not index it and does not delay it.
+- **Non-crossing traffic passes straight through.** Every query, and every broadcast that does not cross a value-pool boundary (transparent-to-transparent payments, pure intra-pool shielded payments), goes to the operator's existing backend instantly. The shim does not index it and does not delay it. The operator's backend still sees the *contents*, but note it now sees them arriving from the shim, not from the wallet's IP (see the next section).
 - **Migrations are isolated.** A migration (a cross-pool shielded move, for example Orchard to Ironwood) is encrypted to a key the local operator cannot access, and routed over Nym to a hub. The hub batches it with migrations from other operators and publishes the batch simultaneously after a short delay. Because the publish is delayed and co-published with others, an observer holding "IP X connected at time T" cannot time-match it to the migration when it later appears on-chain.
 
 The shim classifies every turnstile crossing (deshields, shields, and migrations alike), but near-term it batches only migrations; deshields and shields pass through like other traffic. The classifier is general on purpose, so the batched set is a policy knob that can widen later without re-architecting.
+
+## What the attested edge protects
+
+Two protections hold today, on top of the deployment primitive itself.
+
+**1. Migration broadcasts, fully.** A migration is encrypted to the hub key, routed over Nym, and published in a cross-operator batch. Its content is hidden from both the operator and the hub host, its source IP is unlinked, and its timing is broken. This is the strong, end-to-end guarantee. The one residual, that the operator can tell *that* one of its clients migrated but not the amount, is stated in [honest limits](./limits.md).
+
+**2. The operator's indexer is blinded to requester IPs, by default and verifiably.** Because the shim proxies, every query reaches the operator's backing lwd from the shim, on the operator's own host, never from a wallet's IP. So the operator's indexer logs no longer bind a source IP to a queried address, the linkage that sits in every lwd's logs today by default. And because the shim is attested, "we do not log the IP" is a checkable property, not a promise. This removes the *passive* IP-logging surface, which is where most real-world risk lives: breaches, subpoenas, careless or sold logs.
+
+The honest boundary on protection 2: the wallet's IP still reaches the operator's *host* at the TCP layer. On AWS Nitro the enclave has no network of its own, so the parent instance terminates the socket and proxies the bytes into the enclave; the parent sees the source IP even though it cannot read the encrypted content. Attestation covers what the shim does, not what the parent does. So a bad-faith operator could still run packet capture on the parent and timing-correlate it against the shim-sourced query stream to re-link IP to query. Protection 2 is a verifiable removal of the *default* leak, not a cryptographic guarantee against an *active* operator; closing that gap needs the wallet to arrive over Nym (Nym-aware wallets) or query-timing shaping in the shim. See [threat model](./threat-model.md) and [honest limits](./limits.md).
+
+Beyond these two, the attested front-end is **tamper-proof and verifiable**: a wallet or auditor can confirm it is talking to exactly the attested shim code, not an operator-controlled impostor or a secretly modified front-end (see [trust](./trust.md)). And it is the **deployment vehicle for the vision**: query shaping, all-broadcast privacy, and eventually PIR can be added to the same attested edge and reach unmodified drop-in wallets, without asking them to change (see [roadmap](./roadmap.md)).
 
 ## Migrations only: Option B, the "zeroith step"
 
@@ -45,4 +57,4 @@ The shim avoids all of it by being a thin router, not an indexer:
 - **Base-agnostic.** The shim sits in front of whatever the operator already runs and passes normal traffic through, so it sidesteps the lightwalletd-versus-Zaino question entirely for the near term. Operators keep their existing backend.
 - **Deployable by the people who already run the infrastructure.** The roughly five to ten existing light-wallet operators add the shim; users and wallets do not have to change their endpoint URL.
 
-In effect the shim realizes a scoped version of the "decouple broadcast from query" idea: the crossing broadcast is split off from the operator entirely and sent to a different counterparty, the hub, while queries stay with the operator as before. [The shim](./shim.md) and [the hub](./hub.md) document how each piece is built, and [Trust: TEE, STEVE, and the quorum](./trust.md) covers why the enclave is what makes operator-blindness real and checkable rather than merely promised.
+In effect the shim realizes a scoped version of the "decouple broadcast from query" idea: the crossing broadcast is split off from the operator entirely and sent to a different counterparty, the hub, while queries still go to the operator's own backend, now blinded to the wallet's IP (above). [The shim](./shim.md) and [the hub](./hub.md) document how each piece is built, and [Trust: TEE, STEVE, and the quorum](./trust.md) covers why the enclave is what makes operator-blindness real and checkable rather than merely promised.

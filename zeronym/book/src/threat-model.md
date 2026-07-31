@@ -26,7 +26,7 @@ operator) against the near-term Zeronym system.
 | **Timing** of the broadcast correlatable to an exposed IP | Yes | No (batched, simultaneous publish breaks the link) |
 | Migration tx contents hidden from the **hub** | n/a | Yes (the hub is an attested TEE; Caution stays blind) |
 | Guarantee is **verifiable** by the wallet | No | Yes (attested shim + hub) |
-| **Query** privacy (which addresses you look up) | No | **No, out of near-term scope** (queries pass through) |
+| **Query** *content* privacy (which addresses you look up) | No | **No** (content passes through; but requester IPs are blinded, see below) |
 
 Row by row:
 
@@ -79,29 +79,41 @@ volume-independent win is the IP unlinking from Nym; the batching is an addition
 layer whose strength varies with migration density. [Honest limits](./limits.md)
 treats this in full.
 
-## Out of scope: queries and non-migration transactions pass through
+## The query path: content passes through, but requester IPs are blinded
 
-The last row of the table is the anchor for the whole system's honesty, so it deserves
-its own statement. The near-term system protects the **migration broadcast** and
-nothing else. Specifically, the following pass through the shim untouched, exactly as
-they do today, with no added privacy:
+The near-term system does not hide query *content*. The following reach the operator's
+existing backend in the clear, exactly as today:
 
-- **All queries.** Which addresses or block ranges a wallet looks up still goes
-  straight to the operator's existing backend. The query leak from ZIP 307 (see
-  [the problem](./problem.md)) is not addressed near-term. It is the deferred vision;
-  see [the roadmap](./roadmap.md).
-- **Deshields and shields.** These are turnstile crossings, and the shim's classifier
-  detects them, but near-term they are not batched. A deshield is time-sensitive
-  commerce; a shield is already privacy-positive because the transparent side is
-  public. Both pass straight through the shim to the operator, so their broadcast
-  metadata leaks exactly as today.
-- **All other broadcasts.** Transparent-to-transparent transactions and pure
-  intra-pool shielded payments are not crossings at all; they pass through instantly.
+- **All queries.** Which addresses or block ranges a wallet looks up still goes straight
+  to the operator's backend. The ZIP 307 query-content leak (see
+  [the problem](./problem.md)) is not closed near-term; it is the deferred vision (see
+  [the roadmap](./roadmap.md)).
+- **Deshields and shields.** These are turnstile crossings the classifier detects but
+  does not batch near-term (a deshield is time-sensitive commerce; a shield is already
+  privacy-positive because the transparent side is public), so their broadcast metadata
+  leaks as today.
+- **All other broadcasts.** Transparent-to-transparent and pure intra-pool shielded
+  payments are not crossings at all; they pass through instantly.
 
-The classifier is general (it detects every crossing), so the protected set is a policy
-knob that can widen later, but near-term only the migration case is isolated and
-batched. See [the overview](./overview.md) for how the pass-through path works and
-[the shim](./shim.md) for the classifier.
+The classifier is general (it detects every crossing), so the batched set is a policy
+knob that can widen later; near-term only the migration case is isolated and batched.
+
+There is, however, one query-path protection, and it is worth stating precisely.
+**The operator's indexer is blinded to requester IPs.** Because the shim proxies, every
+query reaches the operator's backing lwd from the shim, on the operator's own host, not
+from the wallet, so the operator's indexer logs no longer bind a source IP to a queried
+address. Because the shim is attested, "we do not log the IP" is verifiable rather than
+promised. This removes the passive, default IP-logging surface present in every lwd today.
+
+The honest limit on that: the wallet's IP still reaches the operator's *host* at the TCP
+layer (on Nitro the parent proxies all network into the enclave), and attestation covers
+the shim, not the parent. So a bad-faith operator can still capture IPs at the network
+layer and timing-correlate them against the shim-sourced query stream to re-link IP to
+query. It is a verifiable removal of the *default* leak, not a guarantee against an
+*active* operator; closing that gap needs the wallet over Nym (Nym-aware wallets) or
+query-timing shaping. [Honest limits](./limits.md) owns the residual discussion; see also
+[the overview](./overview.md) for the attested-edge framing and [the shim](./shim.md) for
+the classifier.
 
 ## The residual: the operator learns *that* a client migrated
 
