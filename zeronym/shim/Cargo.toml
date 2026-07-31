@@ -1,0 +1,70 @@
+[package]
+name = "zero-indexer-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Zeronym zero-indexer-shim: a transparent CompactTxStreamer reverse proxy that classifies SendTransaction"
+
+# Standalone workspace. There is no Cargo.toml at the repo root, but this stanza
+# makes sure the crate is never absorbed into the vendored zebra/ or zaino/
+# workspaces if one ever appears above it.
+[workspace]
+
+[lib]
+name = "zero_indexer_shim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zero-indexer-shim"
+path = "src/main.rs"
+
+[dependencies]
+# The real Zcash parser, vendored. No features needed: V6/Ironwood support is
+# unconditional in this copy (zebra-chain's default feature set is empty).
+zebra-chain = { path = "../../zebra/zebra-chain" }
+
+# default-features = false is load-bearing, for two independent reasons:
+#  1. The default "heavy" feature lets zaino-proto's build.rs find protoc via
+#     `which` and regenerate its committed src/proto/*.rs IN THE VENDORED TREE.
+#     Vendored subtrees are read-only for us.
+#  2. "heavy" also pulls zebra-chain 11.0 and zebra-state from crates.io, which
+#     would sit alongside the vendored zebra-chain 11.2.0 path dep above as a
+#     second, type-incompatible copy.
+zaino-proto = { path = "../../zaino/packages/zaino-proto", default-features = false }
+prost = "0.14"
+
+# HTTP/2 (h2c) proxy stack. Versions match what zebra and zaino already resolve.
+hyper = { version = "1", features = ["server", "client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "sync",
+    "time",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+# proptest-impl lives ONLY here. It exposes transaction::arbitrary's
+# fake_v6_transaction / fake_v6_orchard_shielded_data, which the generator test
+# uses to build real V6 wire bytes. With resolver 2 (implied by edition 2021)
+# dev-dependency features do not leak into `cargo build`, so the shipped binary
+# does not link proptest.
+zebra-chain = { path = "../../zebra/zebra-chain", features = ["proptest-impl"] }
+hex = "0.4"
+
+# A REAL gRPC stack on both ends of the shim for tests/grpc_transparency.rs: a
+# tonic server standing in for lightwalletd or Zaino, and a tonic client
+# standing in for a wallet. Both use the vendored CompactTxStreamer codegen that
+# zaino-proto already ships, so nothing new enters the graph: zaino-proto itself
+# depends on tonic and tonic-prost, and tonic depends on tokio-stream.
+tonic = "0.14"
+tokio-stream = "0.1"
