@@ -159,6 +159,14 @@ co-publishing, the operator cannot time-match "IP X active at T" to the on-chain
 migration. This is why the shim must be a TEE (to blind the operator to the contents)
 and why the hub must batch (to break the timing link for the majority of wallets).
 
+**One residual, from the drop-in model (Zooko):** the operator running the shim can tell
+*that* one of its clients submitted a migration (it is the one request the shim does not
+forward to the backing lwd), just not *which* on-chain tx or amount, because the batch
+mixes it with migrations from other operators' clients. So "linkable to source IP" is No
+for the amount, but the operator does learn the fact of a migration. This is inherent to
+the drop-in model and is why shim-side batching / cover traffic are rejected (SHIM-HUB
+section 4).
+
 ---
 
 ## 5. Honest limits and open risks
@@ -211,7 +219,9 @@ State these plainly; the blog post should not overclaim.
 - **Verification UX.** A user (or, in practice, a wallet developer acting as trust
   proxy) downloads the source, runs a reproducible build to get a checksum hash, and
   matches it against the signed hashes published at the attestation URL. Wallets
-  verify once and pass the assurance to end users.
+  verify once and pass the assurance to end users. Any independent third party can also audit an endpoint
+via its attestation plus a **Certificate Transparency** check that no shadow cert exists
+(the Auditor Role; steps in `SHIM-HUB.md` section 9).
 
 ---
 

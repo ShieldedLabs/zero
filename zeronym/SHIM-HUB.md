@@ -14,20 +14,27 @@ strategy, threat model, and honest limits. This doc is grounded in the current t
 
 ## 1. Recap: what we are building
 
-Two small, attested-TEE binaries plus a transport:
+Two small, attested-TEE binaries (Zooko's names: **`zero-indexer-shim`** = ZIS,
+**`zero-indexer-hub`** = ZIH, the hub was earlier called `zero-broadcaster`) plus a
+transport:
 
-- **`zero-indexer-shim`**: a transparent proxy each operator runs in front of their
-  existing light-wallet backend. Passes all traffic through untouched, except it
-  intercepts a `SendTransaction` carrying a transaction, classifies it, and isolates
-  only the **migration** case (cross-pool shielded move), routing it over Nym to a hub;
-  deshields, shields, and everything else pass through.
-- **`zero-broadcaster`** (the hub): an attested-TEE service (run as >=2 with failover) that accumulates
-  migrations from every shim, batches them, and publishes them together on a strict
-  block cadence.
+- **`zero-indexer-shim` (ZIS)**: an attested-TEE proxy the operator deploys behind their
+  **existing public URL** (e.g. `zec.rocks:443`). It is a **drop-in LWD** to every client
+  (no wallet change) and acts as an LWD *client* to the operator's own, unmodified backing
+  lwd (the operator just configures the ZIS with that lwd's internal address). It passes
+  all traffic through to the backing lwd untouched, except it isolates the **migration**
+  case (cross-pool shielded move) and routes it over Nym to a hub; deshields, shields, and
+  everything else pass through.
+- **`zero-indexer-hub` (ZIH)**: an attested-TEE service (run as >=2 with failover) that
+  accumulates migrations from many shims, batches them, and publishes them together on a
+  strict block cadence.
 - **Nym** between shim and hub only (the "zeroith step").
 
-The whole point: the operator never sees the migration cleartext, the network
-cannot link it to a source IP, and batched publish breaks timing correlation.
+The whole point: the operator never sees the migration cleartext, and no third party (the
+hub, the public chain, the network) can link a migration to a source IP. One honest
+residual (section 8): the operator running a ZIS can still tell *that* one of its clients
+submitted a migration, just not which on-chain tx or amount, since the batch mixes it with
+other operators' migrations.
 
 ---
 
@@ -183,10 +190,18 @@ Resilience) so a hub outage never stalls migrations.
   duplicate). The shim holds and retries using each migration's expiry slack, and as a
   last resort broadcasts a near-expiry migration directly over Nym rather than let it
   expire. Degrade privacy at the margin, never liveness (README section 5).
-- **Cover traffic (mitigation if a window is still thin):** optionally emit decoy
-  migrations so a batch is never size 1. Density is naturally high during the acute
-  migration window; cover traffic is the backstop otherwise. Design decoys to be valid
-  or clearly discardable.
+- **Anonymity set = the cross-operator batch.** What hides which on-chain migration is a
+  given client's is the batch of migrations from *all* shims (an operator never sees other
+  operators' clients). Density is naturally high during the acute migration window.
+  Hub-generated decoy migrations could pad a globally-thin window, but they cost real
+  on-chain value, so treat them as a last resort, not the primary lever.
+
+**Rejected (Zooko's doc), and why:** do NOT batch migrations a second time inside the ZIS,
+and do NOT send dummy cover traffic from the ZIS to the hub. Both aimed to hide *from the
+operator* that a client submitted a migration, but that is unavoidable: a migration is the
+one request the ZIS does not forward to the backing lwd, so the operator can infer it by
+traffic analysis regardless. The real defense is hub batching (hiding the on-chain
+tx/amount), not hiding the fact of a migration from the operator.
 
 ---
 
@@ -280,10 +295,17 @@ These are the non-obvious risks the design must answer before shipping:
    direct broadcast so a migration never expires.
 7. **Expiry across the flush window.** Never queue a tx whose expiry is within the next
    flush; publish it immediately or reject, mirroring the Sapling-migration skip rule.
+8. **The operator learns *that* a client migrated (not the amount).** A migration is the
+   one request the ZIS does not forward to the backing lwd, so the operator can infer by
+   traffic analysis that a given source IP submitted a migration, and when. The batch
+   hides *which* on-chain tx/amount is that client's (mixed with other operators'
+   migrations), so the residual is "IP X migrated something," not "IP X migrated amount
+   Y." Inherent to the drop-in model (Zooko); state it, and do not try to defeat it in the
+   shim (section 4, Rejected).
 
 ---
 
-## 9. Attestation and reproducible build
+## 9. Attestation, verification, and the Auditor Role
 
 Both binaries are static-musl, built reproducibly (StageX, `SOURCE_DATE_EPOCH=1`), and
 run in Nitro enclaves, following the existing `deploy/caution-zaino/combined/`
@@ -294,6 +316,32 @@ attestation URL, then trusts the endpoint on users' behalf. The shim and hub eac
 publish an attestation; the consortium governs the hub key long-term. The binding
 mechanism and cross-boot key persistence are confirmed feasible on Caution's platform
 (section 5: Steve + the keymaker quorum), per the 2026-07-30 V2 sync.
+
+### The Auditor Role (Zooko)
+
+Any independent third party can verify a public lwd endpoint is really running the ZIS,
+without trusting the operator:
+1. Fetch the endpoint's TLS **public key + certificate** directly over HTTPS.
+2. Load its **attestation** (POST `/attestation` with a nonce -> a COSE_Sign1 doc): it
+   proves the private key was generated **inside the enclave** and carries the **root hash
+   of the software** running there (via Caution's platform).
+3. Use **Certificate Transparency** to confirm no *other* currently-valid certificate
+   exists for that domain, which would otherwise let the operator present a different,
+   non-enclave cert to some clients and MITM them.
+
+Concrete probes (the node IP is the current, ephemeral testnet enclave):
+```
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"nonce":"00112233445566778899aabbccddeeff"}' https://<node-ip>/attestation
+grpcurl -plaintext \
+  -import-path <zaino>/packages/zaino-proto/lightwallet-protocol/walletrpc \
+  -proto service.proto <node-ip>:8137 \
+  cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo
+```
+The `[***]` unknowns Zooko flagged (exactly what can be attested, and how memory peeking is
+prevented) are substantially answered by the V2 sync (Nitro memory isolation + Caution's
+attestation binding, section 5); the CT step closes the cert-substitution gap for the
+public-URL drop-in.
 
 ---
 
