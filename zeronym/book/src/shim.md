@@ -1,9 +1,9 @@
-# zero-indexer-shim (ZIS): design
+# The zero-indexer-shim
 
-The concrete engineering design for the shim. Context and threat model are in
-[../SHIM-HUB.md](../SHIM-HUB.md) and [../README.md](../README.md); this doc is the
-"how it is built." **Decision:** marks a committed choice; genuinely open forks are in
-section 13.
+The concrete engineering design for the shim. See the [overview](./overview.md) and
+[threat model](./threat-model.md) for context, and [trust](./trust.md) for the STEVE and
+attestation deep-dive; this chapter is the "how it is built." **Decision:** marks a
+committed choice; genuinely open forks are in section 13.
 
 The ZIS is an attested-TEE proxy an operator deploys behind their **existing public
 URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no wallet change),
@@ -114,7 +114,7 @@ the ZIS is a single gRPC client.
 
 ## 5. The migration classifier
 
-Reuse the fee-aware turnstile predicate from SHIM-HUB section 3, batching only the
+Reuse the fee-aware turnstile predicate, batching only the
 `migrate` case:
 
 ```
@@ -188,7 +188,7 @@ Auditor Role's Certificate Transparency check relies on.
 This is what makes the drop-in and the Auditor Role coexist: a normal wallet gets a
 normal valid cert; an auditor additionally checks (a) the cert's key is attested as
 enclave-born and (b) CT shows no other valid cert for the domain (no operator shadow
-cert). See SHIM-HUB section 9.
+cert). See [trust](./trust.md).
 
 ---
 
@@ -223,7 +223,7 @@ enclave-held) are not on disk.
 - **Backing lwd down:** pass-through requests fail as they would today; the ZIS is
   transparent, so this is the operator's existing failure mode, not a new one.
 - **Hub unreachable:** hold + retry + fail over across hubs; last-resort direct broadcast
-  before expiry (SHIM-HUB section 4 Resilience). The ZIS keeps a migration until it sees
+  before expiry (see [honest limits](./limits.md)). The ZIS keeps a migration until it sees
   an Ack, and ideally until it observes the tx on-chain, re-submitting if a hub crash
   lost it.
 - **Restart durability:** the enclave is diskless, so in-flight migrations in RAM are
@@ -233,7 +233,7 @@ enclave-held) are not on disk.
   broadcasts, so an invalid tx fails silently at flush. Do stateless sanity at the ZIS
   (parseable, not already expired); full validity is the hub's broadcast result
   (surfacing it to the client is out of near-term scope).
-- **The operator learns *that* a client migrated** (SHIM-HUB section 8 item 8):
+- **The operator learns *that* a client migrated** (see [honest limits](./limits.md)):
   inherent; do not attempt shim-side mitigation (rejected variants).
 
 ---
@@ -276,7 +276,7 @@ zeronym/shim/
    near-term scope. Confirm no operator front-ends migrations via JSON-RPC.
 5. **Attestation delivery for zero-ingress.** The `/attestation` endpoint is public today
    (platform-served). For a true zero-inbound service we either suppress the platform's
-   public endpoint or serve attestation inline over Nym (SHIM-HUB / NYM.md).
+   public endpoint or serve attestation inline over Nym (see [open questions](./open-questions.md)).
 
 ---
 
@@ -289,7 +289,7 @@ zeronym/shim/
   non-migration `SendTransaction` pass through unchanged, and a migration is diverted to
   a mock hub (never reaches the backing lwd).
 - **Enclave:** reproducible StageX build; boot in a Nitro enclave; verify the
-  `/attestation` doc carries the TLS pubkey; run the Auditor Role steps (SHIM-HUB
-  section 9) against it.
+  `/attestation` doc carries the TLS pubkey; run the Auditor Role steps (see
+  [trust](./trust.md)) against it.
 - **End to end:** ZIS in front of the live testnet enclave's Zaino, a real wallet syncs
   (pass-through) and submits a testnet migration that lands in a hub batch.

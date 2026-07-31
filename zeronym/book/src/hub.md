@@ -1,11 +1,11 @@
-# zero-indexer-hub (ZIH): design
+# The zero-indexer-hub
 
-The concrete engineering design for the hub (earlier called `zero-broadcaster`).
-Context and threat model are in [../SHIM-HUB.md](../SHIM-HUB.md) and
-[../README.md](../README.md); the shim design is in [../shim/DESIGN.md](../shim/DESIGN.md).
-This doc and that one are meant to be reviewed together by Anton (Caution) and Zooko;
-section 14 is the STEVE / cross-party agenda. **Decision:** marks a committed choice;
-open forks are in section 14.
+The concrete engineering design for the hub (earlier called `zero-broadcaster`). See
+the [overview](./overview.md) for context and [the shim](./shim.md) for its counterpart;
+[trust](./trust.md) is the STEVE and attestation deep-dive. This chapter and the shim
+chapter are meant to be reviewed together by Anton (Caution) and Zooko; section 14 is
+the STEVE / cross-party agenda (see also [open questions](./open-questions.md)).
+**Decision:** marks a committed choice; open forks are in section 14.
 
 The ZIH is an attested-TEE service that receives encrypted **migration** transactions
 from many shims over Nym, batches them, and publishes them to the Zcash network together
@@ -101,7 +101,7 @@ safe (section 8).
   within a few blocks (node dropped it, or a hub crash lost it). Drop from the set once
   confirmed or expired.
 - **The anonymity set is the batch itself** (cross-operator), so batch size is the key
-  metric; the hub logs achieved batch size honestly (SHIM-HUB section 5). Hub-generated
+  metric; the hub logs achieved batch size honestly (see [honest limits](./limits.md)). Hub-generated
   decoys are a costly last resort, not the primary lever.
 
 ---
@@ -174,7 +174,7 @@ run a validator in-enclave.
 Static-musl, reproducible StageX build, runs in a Nitro enclave. Publishes an attestation
 carrying the hub public key + the software root hash. The shim's STEVE handshake **is**
 the shim auditing the hub before trusting it with migrations; independent auditors run
-the same steps (SHIM-HUB section 9). Reproducibility lets the consortium and third
+the same steps (see [trust](./trust.md)). Reproducibility lets the consortium and third
 parties confirm the running hub is the reviewed hub.
 
 ---

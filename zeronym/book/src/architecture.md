@@ -1,10 +1,10 @@
-# Zeronym architecture (near-term: the turnstile-privacy system)
+# Architecture
 
-The `zero-indexer-shim` (ZIS) + `zero-indexer-hub` (ZIH) system that stops Orchard to
-Ironwood **migration** transactions from leaking a user's IP. Context:
-[README.md](README.md), [SHIM-HUB.md](SHIM-HUB.md), [shim/DESIGN.md](shim/DESIGN.md),
-[hub/DESIGN.md](hub/DESIGN.md). Two diagrams: the data flow, then the trust /
-verification plane (kept separate for readability).
+The [zero-indexer-shim](./shim.md) + [zero-indexer-hub](./hub.md) system that stops
+Orchard to Ironwood **migration** transactions from leaking a user's IP. See the
+[overview](./overview.md) and [trust](./trust.md) chapters for the surrounding context.
+Two diagrams below: the data flow, then the trust / verification plane (kept separate
+for readability).
 
 ---
 
