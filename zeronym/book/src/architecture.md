@@ -1,10 +1,6 @@
 # Architecture
 
-The [zero-indexer-shim](./shim.md) + [zero-indexer-hub](./hub.md) system that stops
-Orchard to Ironwood **migration** transactions from leaking a user's IP. See the
-[overview](./overview.md) and [trust](./trust.md) chapters for the surrounding context.
-Two diagrams below: the data flow, then the trust / verification plane (kept separate
-for readability).
+The [zero-indexer-shim and zero-indexer-hub](./components.md) system that stops Orchard to Ironwood **migration** transactions from leaking a user's IP. See [introduction](./introduction.md) and [trust](./trust.md) for context. Two diagrams: the data flow, then the trust / verification plane (kept separate for readability).
 
 ---
 
@@ -104,18 +100,10 @@ flowchart TB
   style WAL fill:#e8eefc,stroke:#2563eb;
 ```
 
-**Reading it:** thin arrows are the **pass-through path** (all queries and all
-non-migration txs) which go to the operator's unmodified backing lwd as **plaintext the
-operator can read**, exactly as today. Thick arrows are the **migration path**, which
-is encrypted end to end and **never touches the backing lwd**. Green = attested enclave
-processes (the only things that ever see migration cleartext); red = untrusted host
-processes / sidecars (they see only ciphertext on the migration path); gray = external
-networks; blue = the drop-in wallet.
+**Reading it:** thin arrows = the **pass-through path** (all queries and all non-migration txs), which go to the operator's unmodified backing lwd as **plaintext the operator can read**, exactly as today. Thick arrows = the **migration path**: encrypted end to end and **never touches the backing lwd**. Green = attested enclave processes (the only things that ever see migration cleartext); red = untrusted host processes / sidecars (they see only ciphertext on the migration path); gray = external networks; blue = the drop-in wallet.
 
-**Three nested encryption layers on the migration (shim to hub) path**, so only the two
-attested enclaves ever see cleartext:
-1. **Inner:** the tx is encrypted to the **hub key** at the classifier (survives a
-   compromised Nym client or host).
+**Three nested encryption layers on the migration (shim to hub) path**, so only the two attested enclaves ever see cleartext:
+1. **Inner:** the tx is encrypted to the **hub key** at the classifier (survives a compromised Nym client or host).
 2. **Middle:** **STEVE** (AES-256-GCM) terminates inside the hub enclave.
 3. **Outer:** **Nym** Sphinx across the 5-hop mixnet.
 
@@ -168,67 +156,6 @@ flowchart LR
   style HUBH fill:#fbeae7,stroke:#c0392b;
 ```
 
-Each enclave generates its key in-enclave and binds the public key into the **Nitro
-attestation** (root hash from the reproducible **StageX** build). The **keymaker M-of-N
-quorum** persists keys across cold boots and upgrades, and hands the **single shared hub
-key** to every hub instance (which is what makes failover clean). The **Auditor Role**
-is any independent party: verify the attestation + PCRs against the AWS Nitro root, and
-check **Certificate Transparency** that no shadow cert exists for the domain. The shim's
-one-way **STEVE** handshake performs this same enclave-verification against the hub.
+Each enclave generates its key in-enclave and binds the public key into the **Nitro attestation** (root hash from the reproducible **StageX** build). The **keymaker M-of-N quorum** persists keys across cold boots and upgrades, and hands the **single shared hub key** to every hub instance (what makes failover clean). The **Auditor Role** is any independent party: verify the attestation + PCRs against the AWS Nitro root, and check **Certificate Transparency** that no shadow cert exists for the domain. The shim's one-way **STEVE** handshake performs this same enclave-verification against the hub.
 
----
-
-## 3. STEVE (corrected, from git.distrust.co/public/steve)
-
-STEVE = "Secure Transport Encryption Via Enclave" (Distrust; in Caution). Used **only on
-the shim to hub channel**, not on the wallet to shim path. It is **one-way**: the client
-(shim) verifies the enclave (hub). Handshake: verify the hub attestation + PCRs vs the
-Nitro root, extract the hub's Ed25519 key, do an **X25519 ECDH** with an ephemeral key,
-verify the hub's **Ed25519 signature** over its ephemeral key, derive the session key via
-**HKDF-SHA256**; payloads are **CBOR + AES-256-GCM**. It runs as a reverse proxy on
-`:8080`. The Rust SDK is still in development (JS SDK ships today). The keymaker/locksmith
-quorum is a **separate** Caution mechanism, not part of STEVE.
-
----
-
-## 4. Honest caveats (built into the design)
-
-- **The operator learns THAT a client migrated, not the amount.** A migration is the one
-  `SendTransaction` the shim does not forward to the backing lwd, so the operator can
-  infer by traffic analysis that a source IP submitted a migration and when. The
-  cross-operator batch hides *which* on-chain tx / amount is that client's. This is
-  inherent to the drop-in model, so shim-side batching and shim-to-hub cover traffic are
-  rejected (they cannot hide the fact of a migration).
-- **Anonymity set = the cross-operator batch.** The hub aggregates migrations from many
-  operators' shims; the amount's anonymity is the batch size, which can be 1 at low
-  volume. Hub-generated decoys cost real value and are a last resort, not the lever.
-- **Delayed broadcast.** The shim returns "accepted" immediately, but the tx is not in
-  any mempool until the hub flushes (up to ~25 min). Migrations are not time-sensitive,
-  so this is acceptable, but the pending-state UX must be defined.
-- **Retain until confirmed (hard requirement).** The hub is diskless, so a crash loses
-  its in-RAM queue. Safety relies on the shim retaining each migration until it observes
-  on-chain confirmation and re-submitting, plus hub failover.
-- **The trust root is AWS + the hardware, not math.** V2 privacy is contingent on
-  trusting the Nitro manufacturer and platform. PIR (V3) is the hardware-independent
-  alternative that removes this root; TEE and PIR are complementary (distinct failure
-  modes).
-
----
-
-## 5. Open questions for Anton (Caution)
-
-1. **Who terminates the wallet's TLS?** The design needs TLS to terminate **inside the
-   shim enclave** (so the operator cannot read it). Does the enclave own `:443`, or does
-   a platform **Caddy** terminate TLS in front of it? If Caddy terminates it, the
-   operator sees plaintext migrations and the drop-in model fails for non-STEVE wallets.
-   This is the load-bearing question.
-2. **STEVE wire form over Nym:** a raw framed byte stream, or HTTP/gRPC? (Only affects the
-   `SubmitMigration` transport, not its shape.)
-3. **STEVE mutual vs one-way:** one-way is enough for privacy; mutual would additionally
-   gate abuse by requiring shim attestation. Which?
-4. **`nym-proxy-server` placement** on managed Caution: parent-side (untrusted) or must it
-   run in-enclave?
-5. **Zero-ingress + attestation delivery:** suppress the platform's public `/attestation`
-   + Caddy for a true zero-inbound service, or deliver the attestation inline over Nym?
-6. **Rust STEVE SDK timeline** (currently in development), vs us implementing the handshake
-   directly from standard primitives, vs an RA-TLS fallback.
+STEVE mechanics, the honest limits (operator learns THAT not the amount, cross-operator anonymity set, delayed broadcast, retain-until-confirmed, AWS-not-math trust root, hub failover), and the open questions for Anton (Caution) live in [trust](./trust.md) and [review](./review.md).

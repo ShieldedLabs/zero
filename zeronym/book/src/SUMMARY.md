@@ -2,19 +2,12 @@
 
 [Introduction](./introduction.md)
 
-# The problem
-
-- [Light-client IP leakage](./problem.md)
-- [Threat model](./threat-model.md)
-
 # The near-term system
 
-- [Overview](./overview.md)
+- [The problem and threat model](./problem.md)
 - [Architecture](./architecture.md)
-- [The zero-indexer-shim](./shim.md)
-- [The zero-indexer-hub](./hub.md)
-- [Trust: TEE, STEVE, and the quorum](./trust.md)
-- [Honest limits](./limits.md)
+- [The shim and the hub](./components.md)
+- [Trust and honest limits](./trust.md)
 
 # Roadmap
 
@@ -22,6 +15,5 @@
 
 # Reference
 
-- [For review by Taylor and Zooko](./for-review.md)
-- [Open questions for Caution](./open-questions.md)
+- [Open questions and review](./review.md)
 - [Glossary and references](./glossary.md)

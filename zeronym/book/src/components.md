@@ -1,0 +1,250 @@
+# The shim and the hub
+
+The concrete engineering designs for both TEE services. The shim and the hub are meant to be reviewed together by Anton (Caution) and Zooko; the cross-party open forks are collected in [review](./review.md). **Decision:** marks a committed choice. See [trust](./trust.md) for the STEVE and attestation deep-dive and for [honest limits](./trust.md); see [problem](./problem.md) for threat context.
+
+## The zero-indexer-shim (ZIS)
+
+The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no wallet change), forwards all traffic to the operator's unmodified backing lwd, and isolates only **migration** `SendTransaction`s, which it routes over Nym to the hub.
+
+### Topology and process model
+
+```
+                         AWS Nitro enclave (attested, diskless)
+  wallet --TLS/h2-->   +---------------------------------------------------+
+  https://<puburl>:443 |  zero-indexer-shim                                 |
+                       |   1. TLS terminate (enclave-born key + cert)       |
+                       |   2. route by HTTP/2 :path                         |
+                       |        SendTransaction -> classify                 |
+                       |          migration -> encrypt -> hub channel ------+--.
+                       |          non-migration --------------------.       |  |
+                       |        any other method / stream ----------|       |  |
+                       |                                            vv       |  | Nym
+                       |                              proxy to backing lwd   |  | tunnel
+                       +---------------------|-------------------------------+--|--------+
+                                             | internal cleartext gRPC          |
+                                             v                                  v
+                                   operator's existing lwd            local nym-proxy-client
+                                   (unmodified)                               -> hub (ZIH)
+```
+
+- **Enclave contents (the TCB):** the ZIS binary + rustls. The **Nym client is untrusted** (payload is already encrypted to the hub key), so `nym-proxy-client` runs as a sidecar (in-enclave on managed Caution since we do not control the parent; parent-side on BYOC).
+- **The backing lwd is untrusted for migrations** (it never sees them) and trusted for everything else (it already serves those today). From its perspective the ZIS is a single gRPC client.
+- **Supervisor:** a small PID-1 script starts the Nym client then the ZIS, ties their lifecycles, mirrors `deploy/caution-zaino/combined/run-both.sh`.
+
+### Request pipeline (the core)
+
+**Decision: an HTTP/2 reverse proxy, not a full `tonic` server.** After TLS termination the ZIS routes by the `:path` pseudo-header:
+
+- **Every path except `SendTransaction`** (all queries, all streams, unknown/new methods, other services): **proxy verbatim** to the backing lwd. Forward request headers + streaming body, stream the response body and **trailers** (`grpc-status`) back. No decode. This is a generic h2 reverse proxy and is base-agnostic (works for Zaino or lightwalletd; unknown methods pass through).
+- **`/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction`** (unary): buffer the one request message (small), strip the 5-byte gRPC length prefix, `prost`-decode `RawTransaction { data }`, and classify:
+  - **non-migration** -> proxy to the backing lwd exactly like the fallback, return the backing lwd's real `SendResponse` (so the operator's node actually relays it and the client gets the true result).
+  - **migration** -> encrypt to the hub key, hand to the hub channel, and **synthesize** a gRPC response: `SendResponse { errorCode: 0 }`, framed with the 5-byte prefix + `grpc-status: 0` trailer, so the client sees "accepted."
+
+Rationale over a `tonic` server re-exporting all ~20 methods: this touches exactly one message type (smallest auditable TEE surface), and hyper handles h2 framing / flow control / trailers for the pass-through. "Proxy to backing lwd" is a shared helper used by both the fallback and the non-migration `SendTransaction` case.
+
+**Decision (parse-fail / uncertain classification): fail safe for privacy.** If a `SendTransaction` body cannot be parsed or classified, treat it as a **migration** (route to the hub) rather than forward it in the clear. A false positive only delays a normal tx (the hub still broadcasts it); a false negative would leak a real migration. The hub validates and broadcasts, so an unparseable/invalid tx is caught there. (Bounded exception if this proves to break a common well-formed shape; its soundness is a [review](./review.md) item.)
+
+Note: gRPC compression on the intercept path is not supported; advertise `identity` only. If a client sets `grpc-encoding: gzip` on a `SendTransaction`, either decompress or, to stay safe, treat as migration. Everything on the pass-through path is opaque, so client compression there is fine.
+
+### The migration classifier
+
+Reuse the fee-aware turnstile predicate, batching only the `migrate` case:
+
+```
+is_migration(tx) := tx.version == V6
+                 && orchard_value_balance  > 0    # value leaving Orchard
+                 && ironwood_value_balance < 0    # value entering Ironwood
+```
+
+**Decision: parse with `zebra-chain`** (`Transaction::V6`, `orchard_value_balance()` `transaction.rs:1503`, `ironwood_value_balance()` `:1520`, `expiry_height()` `:510`), not a hand-rolled V6 parser. A misclassification is a privacy failure, so correctness outweighs the extra dependency weight; a hand-rolled parser would have to walk most of the tx anyway to reach the bundle value balances. Fast-path pre-V6 txs to pass-through (only V6 can carry Ironwood). Fixture: `zaino/live-tests/e2e/tests/ironwood_activation.rs`.
+
+The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Migration | PassThrough | Unparseable) with unit tests over real deshield / shield / migrate / normal-shielded vectors. It has no I/O and no state, so it is the easy part to audit.
+
+### Language and crates
+
+**Decision: Rust.** Matches the ecosystem, reuses `zebra-chain` for the classifier and `rustls` for TLS, and produces a static-musl binary for a small reproducible enclave image. Key crates: `hyper` + `hyper-util` (HTTP/2 server + client), `tower`, optionally `axum` (its router) for path routing; `rustls` + `tokio-rustls` for TLS; `prost` + the generated `RawTransaction` / `SendResponse` types (depend on `zaino-proto`, or a tiny local `build.rs` over `service.proto`) for the one decoded method; `zebra-chain` for tx parsing / value balances; `aws-nitro-enclaves-nsm-api` for attestation; an ACME client (`instant-acme` or `rustls-acme`) for the cert; the Nym client is a separate process, not a linked crate.
+
+### The hub channel (ZIS -> ZIH)
+
+The encrypted migration travels ZIS -> local `nym-proxy-client` -> Nym mixnet -> `nym-proxy-server` -> ZIH. To the ZIS this is a local TCP endpoint the Nym client exposes.
+
+- **Attested, encrypted channel.** The ZIS verifies the hub's attestation and establishes a shared key (STEVE handshake), then sends each migration as an encrypted message. The payload is end-to-end encrypted to the hub enclave, so the Nym client, the mixnet, and the parent host see only ciphertext. **Decision: the migration is encrypted to the hub key regardless of channel**, so a compromised Nym path yields nothing.
+- **Message:** a small framed record `SubmitMigration { ciphertext, txid, expiry_height }` (txid + expiry in the clear to the hub for dedup and flush scheduling; the tx body encrypted). The hub replies `Ack { txid }`.
+- **Delivery guarantees:** the ZIS holds the migration until it has an Ack from some hub, retrying and failing over across the >=2 hubs using the migration's expiry slack; last-resort direct broadcast before expiry.
+
+### TLS and certificate model
+
+**Decision: ACME-issued cert for the public domain, key born and held in the enclave.** Wallets do standard TLS against `zec.rocks:443`, so the ZIS must present a **valid CA-issued cert** (drop-in, no wallet change). The key must be enclave-born (else the operator holds it and can MITM). So the enclave generates the key and runs an **ACME client** (Let's Encrypt) to get the cert, completing the TLS-ALPN-01 or HTTP-01 challenge itself (it controls the endpoint). The key persists via the keymaker quorum; the cert renews via ACME. All Let's Encrypt certs are **CT-logged**, which is exactly what the Auditor Role's Certificate Transparency check relies on. This is what makes the drop-in and the Auditor Role coexist: a normal wallet gets a normal valid cert; an auditor additionally checks (a) the cert's key is attested as enclave-born and (b) CT shows no other valid cert for the domain (no operator shadow cert). See [trust](./trust.md).
+
+### What the operator does
+
+1. Deploy the ZIS enclave, point the public DNS/URL (`zec.rocks:443`) at it.
+2. Configure the ZIS with the **backing lwd's internal address** (e.g. `10.0.0.5:9067`) and the **hub's Nym address**. The backing lwd is unchanged and stays on its internal address.
+
+### Configuration
+
+```
+public_domain      = "zec.rocks"            # for ACME + the served endpoint
+backing_lwd         = "10.0.0.5:9067"        # operator's existing lwd (internal)
+hubs               = ["<nym-addr-1>", "<nym-addr-2>"]   # >=2 for failover
+network            = "testnet" | "mainnet"   # selects Ironwood branch id / activation
+flush_safety_blocks = 5                       # broadcast direct if expiry within N blocks
+acme               = { provider, contact, challenge = "tls-alpn-01" }
+```
+
+Config is loaded at boot; no secrets are on disk (keys are quorum- or enclave-held).
+
+### Failure modes and correctness
+
+- **Backing lwd down:** pass-through requests fail as they would today; the ZIS is transparent, so this is the operator's existing failure mode, not a new one.
+- **Hub unreachable:** hold + retry + fail over across hubs; last-resort direct broadcast before expiry. The ZIS keeps a migration until it sees an Ack, and ideally until it observes the tx on-chain, re-submitting if a hub crash lost it.
+- **Restart durability:** the enclave is diskless, so in-flight migrations in RAM are lost on a ZIS restart. Mitigation: keep the ACK-pending set small (short retry loop), and rely on the wallet's own resend if needed; the hub dedups by txid.
+- **Invalid migration -> false success:** the ZIS returns success before the hub broadcasts, so an invalid tx fails silently at flush. Do stateless sanity at the ZIS (parseable, not already expired); full validity is the hub's broadcast result (surfacing it to the client is out of near-term scope).
+- **The operator learns *that* a client migrated** (see [honest limits](./trust.md)): inherent; do not attempt shim-side mitigation.
+
+### Crate layout
+
+```
+zeronym/shim/
+  Cargo.toml
+  build.rs                  # prost for RawTransaction/SendResponse (or dep zaino-proto)
+  src/
+    main.rs                 # config load, boot sequence, serve
+    tls.rs                  # in-enclave keygen, ACME, keymaker-quorum persistence
+    attest.rs               # NSM attestation binding; /attestation endpoint
+    proxy.rs                # h2 server, :path routing, reverse-proxy to backing lwd
+    intercept.rs            # SendTransaction decode + gRPC frame + response synth
+    classify.rs             # is_migration over zebra-chain (pure, unit-tested)
+    hub.rs                  # STEVE session, encrypt, SubmitMigration, retry/failover
+    config.rs
+  tests/
+    classify_vectors.rs     # deshield/shield/migrate/normal fixtures
+    proxy_passthrough.rs    # a mock backing lwd; assert non-migration passes through
+```
+
+## The zero-indexer-hub (ZIH)
+
+The ZIH (earlier called `zero-broadcaster`) is an attested-TEE service that receives encrypted **migration** transactions from many shims over Nym, batches them, and publishes them to the Zcash network together on a strict block cadence, so no party can link a migration to the source IP that submitted it. It is run as **>=2 instances with failover**.
+
+### Topology and process model
+
+```
+   shim A ---.                          AWS Nitro enclave (attested, diskless)
+   shim B ----\  Nym mixnet   +-------------------------------------------------+
+   shim C -----+------------->| nym-proxy-server -> zero-indexer-hub            |
+              /   (encrypted  |    decrypt (in enclave) -> validate -> queue    |
+   shim N ---'    migrations) |    flush every <N blocks -> publish batch  -----+---.
+                              |    hub key from keymaker M-of-N quorum          |   |
+                              +---------------------|---------------------------+   | clearnet
+                                                    | clearnet (tip + broadcast)    |
+                                                    v                               v
+                                       full node(s) (zebrad/zcashd)         Zcash P2P network
+                                       getblockchaininfo + sendrawtransaction
+```
+
+- **Enclave contents (TCB):** the hub binary + rustls. It is **lightweight**, like the shim: it does NOT run a validator in-enclave (that is the 400-500 GB problem). It connects OUT to an existing full node for chain tip and for broadcasting.
+- **Sidecars / egress:** `nym-proxy-server` fronts the inbound side (from shims); clearnet egress to full node(s) for tip + broadcast; egress to the keymaker quorum and (if needed) Nyx-RPC for Nym ecash. The Nym server can be parent-side (untrusted; the payload is already encrypted to the hub key).
+- **Supervisor:** small PID-1 script, mirrors the shim's.
+
+### Language and crates
+
+**Decision: Rust**, static-musl, reproducible (StageX), same reasons as the shim. Key crates: `hyper`/`tower` or a minimal framed-TCP server for the inbound `SubmitMigration` channel; `rustls`; `prost` for the tx bytes; `zebra-chain` to re-parse and re-classify migrations (defense in depth); a JSON-RPC client (`jsonrpsee`) for the node's `sendrawtransaction` / `getblockchaininfo`; `aws-nitro-enclaves-nsm-api` for attestation; the keymaker/quorum client.
+
+### Inbound: receiving migrations
+
+The hub is the server end of the shim's channel. Over the Nym tunnel it accepts `SubmitMigration { ciphertext, txid, expiry_height }` and replies `Ack { txid }`.
+
+- **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision (see [review](./review.md)): one-way is enough for privacy, mutual would gate abuse.
+- **Decrypt in-enclave.** Only the attested hub software sees cleartext; the hub host operator (Caution) and the Nym path see ciphertext.
+- **Re-validate (do not trust the shim).** Parse with `zebra-chain`, **re-run the `is_migration` classifier**, and check the tx is well-formed and not already expired. This is stateless: full consensus validity (proofs, nullifiers) needs chain state the hub does not hold, and is confirmed at broadcast. Reject anything that is not a valid-looking, unexpired migration, to keep garbage out of the batch. **Rate-limit** per channel to bound abuse / resource use.
+
+### The batch queue
+
+In-RAM (diskless enclave), keyed by **txid** for dedup. Each entry: `{ txid, expiry_height, tx_bytes, received_at }`. The hub tracks the current chain height `H` from its node connection to schedule flushes and check expiries. Duplicate submissions (same txid) collapse; this is also what makes cross-hub failover safe.
+
+### Flush and publish (the core)
+
+- **Flush trigger:** at every height that is a multiple of **N (N < 20; Decision: target ~10, well under Brave's 20-block migration expiry)**, OR earlier if any queued migration's `expiry_height <= H + safety_margin`. `safety_margin` covers not just expiry but expected time-to-mine, so a flushed tx actually confirms before it expires.
+- **Publish "simultaneously."** On flush: take all pending migrations, **shuffle the order** (never leak arrival order), and submit them to the node(s) as close to simultaneously as possible (parallel `sendrawtransaction`), so they enter the mempool together and land in the same block window. An on-chain / mempool observer then sees N migrations appear together, unordered, from many shims. **Decision: randomize order + parallel submit**; do not drip them out.
+- **Confirmation tracking.** Move flushed migrations to an "awaiting confirmation" set; watch the chain until each is mined; **re-submit** if a tx is not seen within a few blocks (node dropped it, or a hub crash lost it). Drop from the set once confirmed or expired.
+- **The anonymity set is the batch itself** (cross-operator), so batch size is the key metric; the hub logs achieved batch size honestly (see [honest limits](./trust.md)). Hub-generated decoys are a costly last resort, not the primary lever.
+
+### Chain connection (tip + broadcast)
+
+**Decision: connect OUT to existing full node(s) (zebrad/zcashd) over clearnet**, do not run a validator in-enclave.
+
+- **Tip:** poll / subscribe `getblockchaininfo` (or `getbestblockhash` + height) to keep `H` current for flush cadence and expiry checks.
+- **Broadcast:** `sendrawtransaction` for each tx in the flush. Connect to **>=2 nodes** for robustness; optionally speak Zcash **P2P `tx`** to many peers directly (Nate's point: P2P relay reaches a far larger node set than one lwd endpoint, a bigger anonymity set for the broadcast source). The hub's node IP is not user-linked, so clearnet is acceptable near-term; broadcasting over Nym to hide the hub's own IP is an optional enhancement.
+- The node connection is a hard dependency (no tip -> cannot schedule; no node -> cannot broadcast), so >=2 nodes, and node-down is part of the hub's failure handling.
+
+### Key management (hub key, STEVE, keymaker quorum)
+
+- **The hub key** (that shims encrypt migrations to) is generated in-enclave and **persisted via the keymaker/locksmith M-of-N quorum across 3-4 orgs** (Caution / Nym / Shielded Labs / ZF), reconstituted across cold boots and upgrades (better than KMS-seal-to-PCR, which breaks on upgrade). The consortium governs it.
+- **Decision: a single shared hub key across all hub instances**, provisioned to each attested hub by the quorum. This is what makes failover clean: a shim encrypts to "the hub key" and any hub instance can decrypt, dedup, and publish. (Per-hub keys would force the shim to re-encrypt on failover and would strand a migration if its hub died mid-flight.)
+- **STEVE** is the handshake by which a shim verifies a hub's attestation (which binds the hub's public key) and derives a session key. The hub's role: present its attestation and complete the handshake. The exact STEVE wire form over Nym, and whether it is mutual, are cross-party items in [review](./review.md).
+
+### Failover and multiple hubs
+
+- **Run >=2 hubs, shared key.** A shim prefers a **primary** hub (so batches converge there and stay dense) and **fails over** to a standby only when the primary is unreachable. Standbys are hot but mostly idle until failover, so **batch density is preserved** (one active hub) while liveness is covered.
+- **Dedup by txid** within each hub. If failover causes a migration to reach two hubs, both may publish; the second on-chain submission is a **harmless already-known duplicate**. No cross-hub state sync is needed near-term (Decision: accept harmless duplicates over the complexity of a shared published-set).
+- The consortium's multiple orgs are the natural operators of the standby hubs, which also starts decentralization.
+
+### Configuration
+
+```
+listen_nym          = <hub Nym address / proxy-server config>
+nodes               = ["node-a:8232", "node-b:8232"]   # tip + broadcast, >=2
+network             = "testnet" | "mainnet"
+flush_interval_blocks = 10                # < 20 (Brave expiry)
+safety_margin_blocks  = 5                 # flush early if expiry within; covers mining time
+role                = "primary" | "standby"
+keymaker_quorum     = <quorum endpoints / policy>
+peer_hubs           = [...]               # awareness only, no shared state near-term
+```
+
+### Failure modes and correctness
+
+- **Node(s) down:** cannot get tip or broadcast; with >=2 nodes this is rare, but if all are down the hub cannot flush. Since the shim retains + re-submits and fails over, and migrations carry expiry slack, brief node outages self-heal; a sustained one is what the shim's last-resort direct broadcast covers.
+- **Hub crash:** the in-RAM queue and awaiting-confirmation set are lost (diskless). The shim retains each migration until it observes on-chain confirmation and re-submits, and fails over to a standby, so a hub crash does not lose migrations. (This makes the shim-side retain-until-confirmed a hard requirement.)
+- **Expiry pressure:** flush early per `safety_margin`; never let a queued migration expire in the buffer.
+- **Garbage / abuse:** re-validate + rate-limit; optionally require shim attestation (see [review](./review.md)).
+- **Fee too low to mine before expiry:** the fee is in the wallet-signed tx and the hub cannot change it; `safety_margin` gives mining headroom, but a badly-underpaid migration can still fail. That is the wallet's responsibility, not the hub's.
+
+### Crate layout
+
+```
+zeronym/hub/
+  Cargo.toml
+  src/
+    main.rs          # config, boot sequence, run the flush loop
+    inbound.rs       # STEVE server, SubmitMigration decode, decrypt
+    validate.rs      # re-parse + re-classify (zebra-chain) + expiry/well-formed checks
+    queue.rs         # in-RAM dedup queue keyed by txid; expiry tracking
+    flush.rs         # cadence + expiry trigger, shuffle, parallel publish, confirm-track
+    chain.rs         # node connection: tip + sendrawtransaction (+ optional P2P)
+    keys.rs          # keymaker quorum reconstitution; STEVE handshake; decrypt
+    attest.rs        # NSM attestation binding; /attestation
+    config.rs
+  tests/
+    flush_batch.rs   # queue N migrations, assert a single simultaneous shuffled publish
+    expiry.rs        # assert early flush when expiry is within the safety margin
+    dedup.rs         # duplicate txids collapse; cross-hub duplicate is harmless
+```
+
+## Boot, build, and attestation
+
+Both services share the same enclave idioms: a static-musl Rust binary, a reproducible **StageX** build, running in an AWS Nitro enclave (attested, diskless). Both generate and hold keys **in-enclave** and bind a public key into the **NSM attestation**; neither writes secrets to disk. Reproducibility lets the consortium and third parties confirm the running binary is the reviewed binary.
+
+**Attestation binding.** Bind the relevant **public key** into the attestation (shim: the **TLS public key**, not the Nym address; hub: the hub public key), so an auditor (and, later, RA-TLS-aware clients) can check cert-pubkey == attested key. Three feasible mechanisms from the V2 sync: the STEVE handshake, `metadata.json -> user_data` (build-time, implies a persisted key), or a runtime `arbitrary_data` field Caution would add. The same in-enclave-keygen + NSM path Zaino/V2 use applies to both. The shim's STEVE handshake **is** the shim auditing the hub before trusting it with migrations; independent auditors run the same steps. See [trust](./trust.md) for STEVE, the Auditor Role, PCRs, and Certificate Transparency.
+
+**Shim boot sequence.** (1) Key material: reconstitute the TLS keypair from the keymaker M-of-N quorum if one exists, else generate in-enclave and register with the quorum (persists across cold boots/upgrades; the private key never leaves the enclave). (2) Certificate: ensure a valid CA cert for the public domain via ACME, keyed to the enclave-born key. (3) Attestation: bind the TLS public key into the Nitro attestation; serve `/attestation` (or expose over Nym). (4) Hub session: STEVE-handshake each configured hub; cache the shared keys. (5) Backing lwd: open the upstream h2 connection(s); health-check. (6) Listen: bind `:443`, serve.
+
+**Hub boot sequence.** (1) Hub key from the keymaker quorum (reconstitute; private key stays in-enclave). (2) Attestation: bind the hub public key into the Nitro attestation; publish `/attestation` (or over Nym) for the shim's STEVE check + auditors. (3) Chain: connect to the full node(s); sync `H`; verify `sendrawtransaction` works. (4) Inbound: start `nym-proxy-server`; begin accepting `SubmitMigration` over STEVE. (5) Run the flush loop against `H`.
+
+The open forks (cert model, STEVE wire form over Nym, mutual vs one-way STEVE, `nym-proxy-server` placement, zero-ingress attestation delivery, JSON-RPC front-ends, keymaker walkthrough, publish path, batch-density vs failover, flush cadence) are collected in [review](./review.md).
+
+### Build and test
+
+**Shim.** Unit: `classify.rs` against real vectors (the `ironwood_activation.rs` migrate tx, plus constructed deshield/shield/normal-shielded), the correctness-critical piece. Integration: a mock backing lwd; assert every non-`SendTransaction` method and a non-migration `SendTransaction` pass through unchanged, and a migration is diverted to a mock hub (never reaches the backing lwd). Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the TLS pubkey; run the Auditor Role steps. End to end: ZIS in front of the live testnet enclave's Zaino, a real wallet syncs (pass-through) and submits a testnet migration that lands in a hub batch.
+
+**Hub.** Unit: `flush.rs` (N queued migrations -> one shuffled, parallel publish), `expiry.rs` (early flush within the safety margin), `dedup.rs` (txid collapse; harmless cross-hub duplicate), `validate.rs` (reject non-migrations / expired). Integration: a mock shim submitting over a local STEVE-ish channel and a mock node capturing `sendrawtransaction`; assert a batch of migrations is published together, shuffled, once per txid. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the hub key; a shim completes STEVE and submits a migration. End to end: >=1 shim in front of the live testnet Zaino, a testnet migration flows shim -> Nym -> hub -> batch -> testnet chain; confirm it lands and is unlinkable to the submitting shim.
