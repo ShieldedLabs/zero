@@ -256,11 +256,13 @@ common case: any edit under `zeronym/shim/src/`, to `Cargo.toml` or
 `Cargo.lock`, or a subtree pull touching `zebra/zebra-chain` or
 `zaino/packages/zaino-proto`, moves the binary and therefore the published hash.
 The most recent re-baseline (2026-08-01) was of exactly that kind, and is
-written up below. One trap it exposed, worth knowing before you start: because
-`assemble.sh` archives `HEAD`, a source change that is still in the working tree
-is invisible to every script here, and they will cheerfully rebuild and confirm
-the **old** hash. Commit first, or read the provenance caveat below for what to
-do when you deliberately cannot.
+written up below. Two traps it exposed, both worth knowing before you start.
+Because `assemble.sh` archives `HEAD`, a source change that is still in the
+working tree is invisible to every script here, and they will cheerfully rebuild
+and confirm the **old** hash. And a hash measured from anything other than
+committed source is a hash of a tree that may never exist as a commit. **Commit
+first, then measure.** The post-mortem below is what happens when that order is
+reversed.
 
 ## Recorded hashes
 
@@ -277,70 +279,46 @@ machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 >
 > | | binary sha256 |
 > |---|---|
-> | recorded to 2026-07-31 | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` |
-> | recorded from 2026-08-01 (last measured value, pending re-measurement, see the provenance caveat) | `c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a` |
+> | current, from commit `2243adbdce` | `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f` |
+> | superseded, recorded to 2026-07-31 (the pre-2026-08-01 classifier) | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` |
 >
 > This is the tripwire doing its job. A recipe whose published hash survived a
 > change to the compiled predicate would be the alarming outcome, not this. The
 > old value is kept in this document on purpose: an auditor who reproduces
 > `a9c19f2c…` has built the **old** classifier, and should be able to learn that
-> here rather than conclude the recipe is broken. The full transcript is in
-> "Re-baseline, 2026-08-01" below; the two sections after it, from "Independent
-> re-verification, 2026-07-31" through the hardening pass, attest the superseded
-> hash and are kept as history. "What is proven, and what is not" is current.
+> here rather than conclude the recipe is broken. The current value is confirmed
+> on two machines: see "Cross-machine confirmation, 2026-08-01" below. The
+> sections after it are history, and are labelled with the hash each attests.
 
-> **Provenance caveat: the source of the new hash is not committed yet, so
-> `reproduce.sh` will disagree with `EXPECTED_SHA256` until it is.** The
-> predicate change is deliberately left in the working tree, and `assemble.sh`
-> archives `HEAD` by design, so the stock path still compiles the **old**
-> classifier. That is measured, not predicted: a `reproduce.sh` cold build at
-> `22a92f8fe6` with a pristine context produced `a9c19f2c…` on the same day the
-> new hash was recorded. The builds below therefore used a context assembled by
-> `assemble.sh` and then overlaid with the working-tree copy of every tracked
-> file under `zeronym/shim`, which is byte for byte what the commit will record.
-> **Until the change lands, a `reproduce.sh` FAIL against `EXPECTED_SHA256` is
-> the expected result and means nothing is wrong.** The moment it lands, re-run
-> `sh zeronym/shim/deploy/reproduce.sh`: that is what converts this into a
-> commit-pinned hash, and `.github/workflows/zeronym-shim-reproduce.yml` does
-> the same on a native x86_64 runner.
->
-> The exact compiled inputs are pinned here by content, so the hash is checkable
-> even before a commit exists:
->
-> ```
-> c2e4bd90149b9dea56f723e301fd636ca5f86d4a0b08b5e78e669889c69d1521  src/classify.rs
-> 34cbfb69dce4b64da1bcc429e5072e9d36f37065ded9c5779502deb2f6149c33  src/intercept.rs
-> 232c62725c1a56c394cb83e90f5fb4dcc62dfd97526cd7156224dd0ec3dfc973  src/lib.rs
-> f13ae6fbc867a9aa3c711c114fbcd96976f2963899a92f494971e6c178f8e801  src/config.rs
-> eb434e3156009f549f040d70039cbcf96ba9d22b0b0330255f76f756e84d94b1  src/main.rs
-> dea5a85da2b610a491f5709071e741adbed8ff2ebcec13587c4a1641deabdf6b  src/proxy.rs
-> 7f7116e329b9b48432cb2ca5ff12c5d1c58d24632fa3e8813ab0ccf54069ba72  Cargo.toml
-> 8406ed48aef55dde7edf24b61e18a2f76fb13804767c56c3248073f6be936e73  Cargo.lock
-> ```
->
-> **The working tree has since moved past that snapshot, so `c6b7738f…` must be
-> re-measured, not confirmed, when the change lands.** Two of the pinned inputs
-> changed after the builds below were run, in a review pass on 2026-08-01:
->
-> ```
-> 8782d03c9cb8e74ae348b4c474b6587bcd9305eb1a54c3e4ca4f7733c9ecadaa  src/classify.rs   (was c2e4bd90…)
-> 6fe1c1262f9d7486fff1fb81bbe98b81d671e2257cecf43da6adfb0a42d52aff  src/proxy.rs      (was dea5a85d…)
-> ```
->
-> `src/classify.rs` changed in doc comments only (the `== 0` case no longer
-> claims that nothing is revealed, because a net-zero Orchard bundle can still
-> publish legacy nullifiers). `src/proxy.rs` changed in **compiled code**: the
-> near-miss path normalization went from `strip_suffix('/')` to
+> **Post-mortem: the first published hash for this predicate was wrong, and CI
+> caught it.** `EXPECTED_SHA256` briefly recorded
+> `c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a`, a value
+> that never corresponded to any commit. It was measured before the predicate
+> change had landed, from a context that `assemble.sh` had built from `HEAD` and
+> that was then overlaid with the working tree, because `assemble.sh` archives
+> `HEAD` by design and would otherwise have compiled the old classifier. The
+> overlay was recorded at the time as "byte for byte what the commit will
+> record". That was true when written and false by the time the commit was made:
+> a later adversarial-review pass changed `src/proxy.rs` in **compiled code**
+> (the near-miss path normalization went from `strip_suffix('/')` to
 > `trim_end_matches('/')`, so a path with two or more trailing slashes can no
-> longer fall out of `InterceptNearMiss` into `PassThrough`. That is a one-token
-> change in the fail-safe direction, and it is still a change to the binary.
+> longer fall out of `InterceptNearMiss` into `PassThrough`, a one-token change
+> in the fail-safe direction), along with doc-comment edits to
+> `src/classify.rs`.
 >
-> Nobody has rebuilt since. So `c6b7738f…` is the hash of the content-pinned
-> snapshot above and **not** of the current tree, and it is recorded here as
-> that: the last measured value, superseded by whatever the first post-commit
-> `reproduce.sh` run produces. Do not treat a mismatch at that run as a
-> regression, and do not hand-edit `EXPECTED_SHA256` to whatever appears;
-> re-measure, then record the run that produced it.
+> The first CI run against the commit therefore failed, comparing the real
+> binary against a stale expected value. **That failure was the system working.**
+> A published hash had drifted from the committed source, and the tripwire
+> detected it on its first live test. A green run there would have been the
+> alarming outcome.
+>
+> **The rule this establishes:** a hash is only ever measured from *committed*
+> source, or at minimum after the last change to compiled code. Measuring during
+> a review pass that can still touch `src/` produces a number describing a tree
+> that exists on exactly one machine. The corrected value,
+> `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f`, was
+> measured from commit `2243adbdce` on two independent machines and is recorded
+> in the table above.
 
 > **A second, older provenance defect, found while re-baselining.** The commit
 > this section used to record, `f94d194d09`, **is not an ancestor of `HEAD`**
@@ -520,9 +498,10 @@ read it as a reminder that wall clock on a shared desktop measures the desktop.
 > binary hash `a9c19f2c…`, built from the pre-2026-08-01 classifier. The recipe
 > facts in these passes (frontend pin, POSIX rewrite, umask, archived recipe,
 > cross-machine agreement) all still hold; the hash they landed on, and the test
-> count recorded alongside it, are historical. Cross-machine agreement holds
-> **for the recipe on the old source**: no machine outside this host has yet
-> built `c6b7738f…` (see "What is proven, and what is not").
+> count recorded alongside it, are historical. Cross-machine agreement has since
+> been re-measured on the **current** source and holds for `62577649…` (see
+> "What is proven, and what is not"). `c6b7738f…` was never built anywhere but
+> this host, because it was only ever a working-tree overlay.
 
 A second pass rebuilt everything from scratch, deliberately varying every
 dimension a single host lets you vary:
@@ -669,10 +648,10 @@ above.
   the hardening pass above. Every cold build attempted so far, across four
   sessions, has landed on the hash implied by its own source: `a9c19f2c…` for
   the old classifier (every build up to and including the 2026-08-01 control),
-  `c6b7738f…` for the new one (five builds, three contexts, and for the source
-  as pinned by content under "Recorded hashes", which the tree has since moved
-  past). Vendored subtrees untouched (`git status --porcelain zebra/ zaino/`
-  empty after every build).
+  `c6b7738f…` for the uncommitted working-tree overlay (five builds, three
+  contexts, superseded, see the post-mortem under "Recorded hashes"), and
+  `62577649…` for the committed new classifier. Vendored subtrees untouched
+  (`git status --porcelain zebra/ zaino/` empty after every build).
   The binary runs and is a real 4.2 MB static-PIE executable, not a stub.
 - **Proven: the hash tracks the source.** A change to the compiled predicate
   moved the published hash, and a control build of the unchanged tree in the
@@ -693,25 +672,30 @@ above.
 - **Specifically ruled out:** the reproduction scripts needing bash. They run
   under dash, confirmed in a Debian container, which is the shell a third party
   on Ubuntu will actually hand them.
-- **Proven for the recipe, pending re-run for the current hash: determinism
-  across *independent hardware*, and across execution modes.** GitHub Actions
-  run
+- **Proven, for the current hash: determinism across *independent hardware*, and
+  across execution modes.** Two data points on commit `2243adbdce`, measured not
+  argued. GitHub Actions run
+  [30688786506](https://github.com/ShieldedLabs/zero/actions/runs/30688786506)
+  built from that commit on a `blacksmith-16vcpu-ubuntu-2404` runner (native
+  x86_64 Linux) and produced
+  `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f`; its
+  artifact was downloaded and hashed independently rather than trusting the
+  job's own comparison. A local `build.sh` on arm64 macOS, `linux/amd64` under
+  Rosetta, from the same commit, produced the same value. That closes two axes
+  at once: a different machine (CPU, kernel, filesystem, paths, Docker and
+  BuildKit versions), and a different *execution mode* for the compiler, which
+  is a stronger check than two native builds because it also rules out codegen
+  varying with runtime CPU feature detection.
+  **That run is recorded as failed, and that is the point.** It compared the
+  binary against the then-stale `EXPECTED_SHA256` and refused to agree, catching
+  a published hash that had drifted from the committed source on the tripwire's
+  first live test. See the post-mortem under "Recorded hashes".
+  The earlier run
   [30681137118](https://github.com/ShieldedLabs/zero/actions/runs/30681137118)
-  built this recipe twice from cold on a `blacksmith-16vcpu-ubuntu-2404` runner
-  (native x86_64 Linux) and landed on the hash recorded at the time,
-  `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05`. The binary
-  it produced was downloaded and hashed independently, rather than trusting the
-  job's own comparison. Because that hash was originally produced on arm64 macOS
-  under Rosetta emulation, the result closes two axes at once: a different
-  machine (CPU, kernel, filesystem, paths, Docker and BuildKit versions), and a
-  different *execution mode* for the compiler itself. The latter is a stronger
-  check than two native builds would have been, since it also rules out codegen
-  that varies with runtime CPU feature detection. **What that run attests is the
-  recipe, on the old source.** `c6b7738f…` has not yet been produced on hardware
-  we do not control, because its source is not committed and CI cannot see it.
-  The cross-machine claim is inherited by argument, not re-measured, until the
-  predicate change lands and the workflow runs again. Treat re-running it as the
-  closing step of this re-baseline, not as a formality.
+  attests the same properties for `a9c19f2c…`, the old classifier, and is kept
+  as history.
+  Not measured: OCI **image digest** agreement across machines. Only the binary
+  was compared.
 - **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
