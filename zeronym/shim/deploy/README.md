@@ -457,26 +457,32 @@ above.
 - **Specifically ruled out:** the reproduction scripts needing bash. They run
   under dash, confirmed in a Debian container, which is the shell a third party
   on Ubuntu will actually hand them.
-- **Not yet proven, 1: determinism across *independent hardware*.** Same-host
-  repeats control for time, PID, tmpdir, build ordering, BuildKit cache state
-  and host path, but not for CPU feature detection, kernel, or the Docker and
-  BuildKit versions themselves. That is what
-  `.github/workflows/zeronym-shim-reproduce.yml` is for, on a native x86_64
-  runner. **Until a second machine reproduces the recorded hash, the Auditor
-  Role is not yet satisfied**, and this document should not be read as claiming
-  otherwise.
-- **Not yet proven, 2: the enclave half of the chain, which is the larger
+- **Proven: determinism across *independent hardware*, and across execution
+  modes.** GitHub Actions run
+  [30681137118](https://github.com/ShieldedLabs/zero/actions/runs/30681137118)
+  built this recipe twice from cold on a `blacksmith-16vcpu-ubuntu-2404` runner
+  (native x86_64 Linux) and landed on the recorded hash
+  `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05`. The
+  binary it produced was downloaded and hashed independently, rather than
+  trusting the job's own comparison. Because the recorded hash was originally
+  produced on arm64 macOS under Rosetta emulation, that single result closes two
+  axes at once: a different machine (CPU, kernel, filesystem, paths, Docker and
+  BuildKit versions), and a different *execution mode* for the compiler itself.
+  The latter is a stronger check than two native builds would have been, since
+  it also rules out codegen that varies with runtime CPU feature detection.
+- **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
   it, and no attestation document exists. So the hash-to-attestation binding
   that motivates the entire exercise is *designed*, not *demonstrated*. Nothing
   above is false about the build; it is simply half of a two-link chain, and the
   other link is untouched.
-- **Not yet proven, 3: that a third party can run these instructions at all.**
-  The recorded commit and the reproduction procedure are only executable once
-  the recipe is committed and pushed; see the status note under "Recorded
-  hashes". A hash nobody else can recompute is unfalsifiable, which is the
-  opposite of the point.
+- **Proven: that a third party can run these instructions at all.** The recipe
+  is pushed, and CI executed the documented procedure verbatim (`sh
+  zeronym/shim/deploy/reproduce.sh`) on a clean machine that had never seen this
+  repository, reaching the recorded hash. A hash nobody else can recompute would
+  be unfalsifiable, which is the opposite of the point; this one has now been
+  recomputed by a machine we do not control.
 
 ## Reproducing this yourself
 
