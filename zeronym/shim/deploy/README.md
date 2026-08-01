@@ -281,30 +281,45 @@ machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 The hash moved because the **predicate** moved, not because the recipe did: no
 base digest, no flag and no script changed between `62577649…` and `4143ce5f…`.
 
-> **Read the provenance of the current row before you rely on it, because it is
-> not the usual one.** `4143ce5f…` was measured from a **working-tree overlay**,
-> not from a commit, and it is **provisional until CI confirms it**.
+> **How the current row was measured, and how the chicken-and-egg was resolved.**
+> `assemble.sh` archives `git archive HEAD`, so a commit-pinned measurement
+> cannot exist until the commit does; but the rule one line above says
+> `EXPECTED_SHA256` and the source must land in the **same** commit, and this
+> document is part of that commit. Committing first would mean knowingly
+> committing a stale hash.
 >
-> The reason is structural rather than sloppy. `assemble.sh` archives
-> `git archive HEAD`, so measuring from a commit means committing first; but the
-> rule one line above says `EXPECTED_SHA256` and the source must land in the
-> **same** commit, and this document is itself part of that commit. Committing
-> first would mean committing a knowingly stale hash. So the measurement is taken
-> from a context assembled at `HEAD` and then overlaid with the working tree, and
-> the overlay carries **exactly** the compiled file set that commit will contain.
-> It is stated precisely, checked, and re-runnable: see "Re-baseline, 2026-08-01
-> (second)" below.
+> It was resolved in two steps rather than by picking one horn. `4143ce5f…` was
+> first measured from a context assembled at `HEAD` and overlaid with the working
+> tree, carrying exactly the compiled file set the commit would contain, and was
+> recorded as **provisional**. The source then landed as commit `c161012ff2`, and
+> `reproduce.sh` was re-run against the committed tree with no overlay. Two cold
+> builds agreed with each other and with the published value:
+>
+> ```
+> build 1:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+> build 2:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+> expected: 4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+> ```
+>
+> So the row is **no longer provisional**: it describes a real commit, measured
+> the ordinary way. The prose you are reading was written after that build, which
+> is safe only because no document is a compiled input. The `include_bytes!` calls
+> in `src/` are test fixtures inside `#[cfg(test)]` modules and never reach the
+> release binary, so editing this file cannot move the hash it reports.
 >
 > What makes this different from the post-mortem case immediately below, where
-> the same shortcut produced a hash that described no commit at all: that
+> the same overlay shortcut produced a hash that described no commit at all: that
 > measurement was taken while `src/` could still change, and it did. This one was
-> taken after the last change to compiled code, and the compiled-input digest was
-> recomputed after both builds to prove nothing moved underneath it.
+> taken after the last change to compiled code, and then confirmed from the commit
+> itself.
 >
-> **The authoritative confirmation is `.github/workflows/zeronym-shim-reproduce.yml`
-> on the commit that lands this change.** Until that run is green, the current row
-> is one host's word. If it disagrees, the CI value wins and this table is wrong,
-> not the runner.
+> One claim is still outstanding, and it is the interesting one.
+> `.github/workflows/zeronym-shim-reproduce.yml` runs on a **native x86_64**
+> runner, while both builds above ran under Rosetta on one arm64 Mac. Two builds
+> on one host control for time, PID and tmpdir; they do not control for CPU
+> feature detection, kernel, or BuildKit version. Until that run is green,
+> `4143ce5f…` is **one machine's word**, confirmed against a commit but not yet
+> across hardware. If CI disagrees, the CI value wins and this table is wrong.
 
 > **The hash changed on 2026-08-01, and it changed for a source reason.** The
 > classifier predicate was rewritten: the turnstile test became
@@ -437,15 +452,39 @@ whole point:
 4. Re-run the string check below against the new binary, and record the result
    here.
 
-Steps 2, 3 and 4 were followed. **Step 1 was not, and cannot be**, and that is a
-defect in the advance text rather than in the execution: steps 1 and 3
-contradict each other whenever the published hash is itself part of the commit.
-The only commit that satisfies step 3 is one that already carries a value nobody
-has measured yet. Committing first would mean committing an `EXPECTED_SHA256`
-known to be wrong and then amending it, which reaches the same content by a
-longer route while adding one more place to forget. So the measurement was taken
-from a working-tree overlay, and the rest of this section is the provenance that
-makes that legible instead of hand-waved.
+Steps 2, 3 and 4 were followed. **Step 1 could not be followed in that position**,
+and that is a defect in the advance text rather than in the execution: as written,
+steps 1 and 3 contradict each other whenever the published hash is itself part of
+the commit. The only commit that satisfies step 3 is one that already carries a
+value nobody has measured yet. So the measurement was taken from a working-tree
+overlay, and most of this section is the provenance that makes that legible
+instead of hand-waved.
+
+**The order was wrong, not the requirement.** Step 1 exists to guarantee the hash
+describes a real commit, and that guarantee was obtained by doing step 1 *after*
+steps 2 to 4 rather than before them. The source landed as `c161012ff2` carrying
+the provisional value, and `reproduce.sh` was then re-run against that commit with
+no overlay, no `EXPECTED=` override, and therefore a live comparison against the
+published file:
+
+```text
+build 1:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+build 2:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+expected: 4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+SELF-CONSISTENT: two cold builds on this host agree.
+MATCHES PUBLISHED: 4143ce5f...
+zebra/ and zaino/ clean
+zero-indexer-shim: REPRODUCES
+```
+
+That is the whole overlay argument discharged empirically. Everything below about
+which files are and are not build inputs was the *prediction*; this run is the
+check, and the prediction held. **So the advance text should be corrected for next
+time**: the rule is not "commit first", which is impossible, but *measure from an
+overlay, commit, then re-measure from the commit and require the published value
+to match*. Three steps, no contradiction, and the failure mode that produced the
+post-mortem below cannot survive it, because a hash describing no commit fails the
+re-measurement by construction.
 
 **What was measured, and from exactly what.** `HEAD` was `ad20158cde`. At build
 time `git status --porcelain zeronym/shim` showed eleven modified tracked files
@@ -575,23 +614,33 @@ to 33m while cargo's internal timer stayed at 2m15s: there the container was
 fine and the host was thrashing around it, here the container was itself
 CPU-starved throughout. Neither is a property of the build.
 
-**What is still owed, and it is the part that matters.** `4143ce5f…` has been
-built on **one** machine, under Rosetta, from a working-tree overlay. Both
-`62577649…` and `a9c19f2c…` were confirmed on independent x86_64 hardware before
-this document called them settled, and this value has not been. The confirming
-run is `.github/workflows/zeronym-shim-reproduce.yml` on the commit that lands
-this change, which runs `reproduce.sh` against the committed tree and compares it
-to `EXPECTED_SHA256`. Two outcomes, and both are informative:
+**What is still owed, and it is the part that matters.** Half of what this
+section originally listed as owed has since been paid, and the half that remains
+is the more interesting one.
 
-- **Green.** The overlay was faithful, the commit compiles to the published hash,
-  and the value stops being provisional. Delete the provisional caveat under
-  "Recorded hashes" and record the run URL here, beside the two already recorded
-  under "What is proven, and what is not".
-- **Red.** The overlay was not faithful and something reached the compiler that
-  this section says did not. **The CI value is right and this table is wrong.**
-  Re-baseline to the CI value rather than arguing with the runner, and work out
-  which input the overlay missed, because that is a hole in `assemble.sh`'s
-  model of what a build input is.
+*Paid.* The overlay question is closed. `reproduce.sh` was re-run against commit
+`c161012ff2` with no overlay and a live comparison, and it matched. So the
+overlay was faithful, nothing reached the compiler that this section claims did
+not, and `4143ce5f…` describes a real commit.
+
+*Outstanding.* `4143ce5f…` has still only been built on **one machine, under
+Rosetta**. Both `62577649…` and `a9c19f2c…` were confirmed on independent x86_64
+hardware before this document called them settled, and this value has not been.
+Two same-host builds control for time, PID, tmpdir and ordering; they say nothing
+about CPU feature detection, kernel, or BuildKit version. The confirming run is
+`.github/workflows/zeronym-shim-reproduce.yml` on the commit that lands this
+change, which runs `reproduce.sh` on a native x86_64 runner. Two outcomes, and
+both are informative:
+
+- **Green.** The recipe is architecture-independent as claimed, and the value is
+  settled on the same footing as its two predecessors. Record the run URL here,
+  beside the two already recorded under "What is proven, and what is not".
+- **Red.** Now that the overlay has been ruled out, a disagreement can no longer
+  be blamed on it: the remaining explanations are host-dependent codegen or a
+  toolchain difference the digest pins failed to cover, which is a more serious
+  finding than a bad overlay would have been. **The CI value is right and this
+  table is wrong.** Re-baseline to it rather than arguing with the runner, then
+  find which host property leaked into the binary.
 
 **One consequence to expect before the commit lands.** `EXPECTED_SHA256` now
 holds `4143ce5f…` while `HEAD` still compiles `62577649…`, so running
@@ -968,14 +1017,18 @@ above.
   as history.
   Not measured: OCI **image digest** agreement across machines. Only the binary
   was compared.
-- **Not yet proven for the current hash: anything beyond one host.**
-  `4143ce5f…`, the widened presence predicate, has two cold builds behind it on
-  one arm64 Mac under Rosetta, from a working-tree overlay rather than a commit.
-  Cross-machine agreement, native-x86_64 agreement and the CI comparison against
-  `EXPECTED_SHA256` are all still owed for this value, and the bullet above
-  describes the state of the *previous* one. Until that run is green, treat
-  `4143ce5f…` as provisional; see "Re-baseline, 2026-08-01 (second)" for what
-  each outcome means.
+- **Proven for the current hash, but only on one host: commit-pinned
+  self-consistency.** `4143ce5f…`, the widened presence predicate, has two cold
+  builds behind it from commit `c161012ff2` itself, with no working-tree overlay,
+  agreeing with each other and with `EXPECTED_SHA256`. That closes the overlay
+  question but nothing wider: both builds ran on the same arm64 Mac under Rosetta,
+  which controls for time, PID, tmpdir and ordering and for nothing else.
+- **Not yet proven for the current hash: cross-machine agreement.**
+  Native-x86_64 agreement and the CI comparison are still owed for this value,
+  and the bullet two above describes the state of the *previous* one. See
+  "Re-baseline, 2026-08-01 (second)" for what each outcome means, and note that a
+  disagreement now points at host-dependent codegen rather than at the overlay,
+  which has been eliminated.
 - **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
