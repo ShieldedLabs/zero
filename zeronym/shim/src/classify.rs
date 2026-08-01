@@ -168,12 +168,16 @@ pub fn classify_with_evidence(raw: &[u8]) -> Evidence {
     // anyway: it is part of the specified predicate, and it documents that a
     // migration is a V6-only shape.
     //
-    // Note on the strict `> 0`: a migration that netted its Orchard balance to
-    // exactly zero would classify as PassThrough, which is the leaking
-    // direction. Spending an Orchard note always produces a positive Orchard
-    // balance in practice, so this shape should not exist, but the boundary is
-    // an open question for the design owners rather than something this
-    // function is free to widen.
+    // Note on the strict `> 0`. Post-NU6.3 a transaction-level rule forbids new
+    // value entering the Orchard pool (the chain predicate is Orchard pool value
+    // non-increasing), so `orchard_vb >= 0` always and the only shape this
+    // boundary excludes is `orchard_vb == 0`: an Orchard bundle that is pure
+    // same-receiver change with no net withdrawal. Value entering Ironwood
+    // alongside it came from transparent or Sapling, which is a shield into
+    // Ironwood rather than an Orchard migration. So `> 0` is believed correct,
+    // not merely conservative. Whether to batch that case anyway, as cheap
+    // insurance, is a question for the design owners and not one this function
+    // is free to decide.
     let class = if matches!(tx, Transaction::V6 { .. }) && orchard_vb > 0 && ironwood_vb < 0 {
         Class::Migration
     } else {

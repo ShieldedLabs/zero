@@ -209,16 +209,21 @@ here.
    read off. The shim no longer lets the operator *cause* this case at will (it
    normalizes the advertised `grpc-accept-encoding` to `identity`), but a wallet
    that compresses unprompted still lands here.
-2. The predicate's strict `orchard_value_balance > 0`, and the fact that it is a
-   NET rather than a gross test. A V6 transaction whose Orchard spends are
-   exactly offset by Orchard outputs (net zero, or net negative) while value
-   enters Ironwood classifies as pass-through even though Orchard notes were
-   spent in it, which is the leaking direction. Implemented as locked and pinned
-   by a test (`zero_orchard_balance_is_the_known_predicate_boundary`). The
-   question for Taylor and Zooko is not just "widen to `>= 0`?", which would not
-   close the net-negative case, but whether the migration arm should key off
-   "the transaction has an Orchard bundle with at least one spend AND
-   `ironwood_value_balance < 0`", which is gross rather than net.
+2. The predicate's strict `orchard_value_balance > 0`. An earlier version of this
+   note called it a false-negative window at net-zero *or net-negative* Orchard
+   and floated a gross alternative ("an Orchard bundle with at least one spend
+   AND `ironwood_value_balance < 0`"). **That was wrong and is retracted**: it
+   ignored NU6.3's cross-address restriction. Post-activation a
+   transaction-level rule forbids new value entering the Orchard pool, so
+   `orchard_vb >= 0` always and the net-negative case is consensus-invalid. The
+   only excluded shape is `orchard_vb == 0`, a pure same-receiver-change Orchard
+   bundle, where value entering Ironwood came from transparent or Sapling: a
+   shield into Ironwood, not an Orchard migration. The gross alternative is now
+   worse, since Orchard stays open to *activity* (same-receiver change) and it
+   would sweep in ordinary non-migrations. Pinned by
+   `zero_orchard_balance_is_the_known_predicate_boundary`. The remaining question
+   for Taylor and Zooko is narrower: batch the `orchard_vb == 0` case anyway as
+   cheap insurance, accepting false positives?
 3. Depending on `zaino-proto` pulls tonic into the shipped dependency graph for
    two protobuf messages. Hand-writing those two structs (about 20 lines) would
    shrink the enclave's trusted surface before the enclave build.

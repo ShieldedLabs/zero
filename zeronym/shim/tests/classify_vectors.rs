@@ -18,8 +18,18 @@ use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_migration.bin");
 
 /// V6, the same transaction with both balances negated: value entering Orchard,
-/// leaving Ironwood. The turnstile only fires in the Orchard -> Ironwood
-/// direction, so this is a pass-through.
+/// leaving Ironwood.
+///
+/// This shape is **consensus-invalid after NU6.3** and cannot appear on chain:
+/// a transaction-level rule forbids new value entering the Orchard pool, so the
+/// chain predicate is Orchard pool value non-increasing and `orchard_vb >= 0`
+/// always. (Orchard is closed to new *value*, not to activity: same-receiver
+/// change still lands in the pool.)
+///
+/// It is kept deliberately, as a **directionality probe**. It pins that the
+/// predicate is asymmetric rather than merely "both bundles present", which no
+/// realizable transaction can test. Do not read it as a realistic pass-through;
+/// for that see [`V6_ORCHARD_ONLY`].
 const V6_REVERSE: &[u8] = include_bytes!("fixtures/v6_reverse.bin");
 
 /// V6 with an Orchard bundle and NO Ironwood bundle: Orchard value balance
@@ -44,8 +54,9 @@ fn v6_orchard_to_ironwood_is_a_migration() {
     assert!(evidence.class.treat_as_migration());
 }
 
+/// Directionality probe on a consensus-invalid shape, see [`V6_REVERSE`].
 #[test]
-fn v6_ironwood_to_orchard_is_pass_through() {
+fn the_predicate_is_directional_not_symmetric() {
     let evidence = classify_with_evidence(V6_REVERSE);
     println!("{evidence:?}");
 

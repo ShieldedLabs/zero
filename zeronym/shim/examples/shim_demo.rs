@@ -35,7 +35,10 @@ use zero_indexer_shim::BoxError;
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
 
 const V6_MIGRATION: &[u8] = include_bytes!("../tests/fixtures/v6_migration.bin");
-const V6_REVERSE: &[u8] = include_bytes!("../tests/fixtures/v6_reverse.bin");
+/// An Orchard withdrawal with no Ironwood bundle. Deshield-shaped, and a shape
+/// that is actually realizable post-NU6.3, unlike the negated `v6_reverse.bin`
+/// fixture (value entering Orchard is consensus-invalid after activation).
+const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_orchard_only.bin");
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -58,8 +61,9 @@ async fn main() -> Result<(), BoxError> {
     // 1. A real V6 Orchard -> Ironwood migration. The privacy-critical case.
     send_tx(&mut sender, shim, V6_MIGRATION, false).await?;
 
-    // 2. The same shape reversed, which is not a migration.
-    send_tx(&mut sender, shim, V6_REVERSE, false).await?;
+    // 2. An Orchard withdrawal with no Ironwood bundle: a real, realizable
+    //    non-migration (deshield-shaped), so it passes through.
+    send_tx(&mut sender, shim, V6_ORCHARD_ONLY, false).await?;
 
     // 3. Bytes that are not a transaction at all. Fail-safe for privacy.
     send_tx(&mut sender, shim, &[0xff; 64], false).await?;
