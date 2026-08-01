@@ -313,13 +313,16 @@ base digest, no flag and no script changed between `62577649…` and `4143ce5f�
 > taken after the last change to compiled code, and then confirmed from the commit
 > itself.
 >
-> One claim is still outstanding, and it is the interesting one.
-> `.github/workflows/zeronym-shim-reproduce.yml` runs on a **native x86_64**
-> runner, while both builds above ran under Rosetta on one arm64 Mac. Two builds
-> on one host control for time, PID and tmpdir; they do not control for CPU
-> feature detection, kernel, or BuildKit version. Until that run is green,
-> `4143ce5f…` is **one machine's word**, confirmed against a commit but not yet
-> across hardware. If CI disagrees, the CI value wins and this table is wrong.
+> **Cross-machine agreement is now also confirmed, so no claim is outstanding.**
+> The builds above ran under Rosetta on one arm64 Mac, which controls for time,
+> PID and tmpdir and for nothing else.
+> `.github/workflows/zeronym-shim-reproduce.yml` then ran the same script on a
+> **native x86_64** runner, on different hardware, a different kernel and a
+> different BuildKit, and reached `4143ce5f…` again:
+> [run 30720417584](https://github.com/ShieldedLabs/zero/actions/runs/30720417584).
+> Since the two hosts differ in architecture and in emulation, the agreement also
+> rules out CPU-feature-detection-dependent codegen, which is the failure mode
+> digest pinning alone would not catch.
 
 > **The hash changed on 2026-08-01, and it changed for a source reason.** The
 > classifier predicate was rewritten: the turnstile test became
@@ -623,24 +626,21 @@ is the more interesting one.
 overlay was faithful, nothing reached the compiler that this section claims did
 not, and `4143ce5f…` describes a real commit.
 
-*Outstanding.* `4143ce5f…` has still only been built on **one machine, under
-Rosetta**. Both `62577649…` and `a9c19f2c…` were confirmed on independent x86_64
-hardware before this document called them settled, and this value has not been.
-Two same-host builds control for time, PID, tmpdir and ordering; they say nothing
-about CPU feature detection, kernel, or BuildKit version. The confirming run is
-`.github/workflows/zeronym-shim-reproduce.yml` on the commit that lands this
-change, which runs `reproduce.sh` on a native x86_64 runner. Two outcomes, and
-both are informative:
+*Also paid.* Cross-machine agreement, which was the last thing owed.
+`.github/workflows/zeronym-shim-reproduce.yml` ran `reproduce.sh` on a **native
+x86_64** runner and reached `4143ce5f…`, matching `EXPECTED_SHA256`:
+[run 30720417584](https://github.com/ShieldedLabs/zero/actions/runs/30720417584).
+The two hosts differ in architecture, in emulation (Rosetta versus native),
+in kernel and in BuildKit build, so the agreement covers more than a rerun on
+similar hardware would: it rules out CPU-feature-detection-dependent codegen,
+which digest pinning alone does not address. `4143ce5f…` is therefore settled on
+the same footing as `62577649…` and `a9c19f2c…` before it.
 
-- **Green.** The recipe is architecture-independent as claimed, and the value is
-  settled on the same footing as its two predecessors. Record the run URL here,
-  beside the two already recorded under "What is proven, and what is not".
-- **Red.** Now that the overlay has been ruled out, a disagreement can no longer
-  be blamed on it: the remaining explanations are host-dependent codegen or a
-  toolchain difference the digest pins failed to cover, which is a more serious
-  finding than a bad overlay would have been. **The CI value is right and this
-  table is wrong.** Re-baseline to it rather than arguing with the runner, then
-  find which host property leaked into the binary.
+**Nothing about the build is outstanding.** What remains untested is the enclave
+half of the chain, which is a different claim entirely and is recorded under
+"What is proven, and what is not": no PCR has been computed from this binary and
+no attestation document exists, so the hash-to-attestation binding that motivates
+the whole exercise is designed rather than demonstrated.
 
 **One consequence to expect before the commit lands.** `EXPECTED_SHA256` now
 holds `4143ce5f…` while `HEAD` still compiles `62577649…`, so running
@@ -1017,18 +1017,17 @@ above.
   as history.
   Not measured: OCI **image digest** agreement across machines. Only the binary
   was compared.
-- **Proven for the current hash, but only on one host: commit-pinned
-  self-consistency.** `4143ce5f…`, the widened presence predicate, has two cold
+- **Proven for the current hash: commit-pinned reproducibility across two
+  architectures.** `4143ce5f…`, the widened presence predicate, has two cold
   builds behind it from commit `c161012ff2` itself, with no working-tree overlay,
-  agreeing with each other and with `EXPECTED_SHA256`. That closes the overlay
-  question but nothing wider: both builds ran on the same arm64 Mac under Rosetta,
-  which controls for time, PID, tmpdir and ordering and for nothing else.
-- **Not yet proven for the current hash: cross-machine agreement.**
-  Native-x86_64 agreement and the CI comparison are still owed for this value,
-  and the bullet two above describes the state of the *previous* one. See
-  "Re-baseline, 2026-08-01 (second)" for what each outcome means, and note that a
-  disagreement now points at host-dependent codegen rather than at the overlay,
-  which has been eliminated.
+  agreeing with each other and with `EXPECTED_SHA256`; and a third on a **native
+  x86_64** GitHub runner reaching the same value
+  ([run 30720417584](https://github.com/ShieldedLabs/zero/actions/runs/30720417584)).
+  The two hosts differ in architecture, emulation, kernel and BuildKit, so this
+  also rules out CPU-feature-detection-dependent codegen. Same footing as
+  `62577649…` and `a9c19f2c…`.
+  Not measured, as for those: OCI **image digest** agreement. Only the binary was
+  compared.
 - **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
