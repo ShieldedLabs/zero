@@ -1,0 +1,67 @@
+name: zeronym-shim-reproduce
+
+# Answers "does zero-indexer-shim reproduce?" on an independent machine.
+#
+# This runner is the INDEPENDENT SECOND MACHINE. The recipe was first proven on
+# an arm64 Mac under Rosetta emulation; a matching hash on a native x86_64
+# runner is what upgrades the claim from "deterministic on one host" to
+# "deterministic across hosts", which is the property the Auditor Role actually
+# needs. Sibling of caution-z3-reproduce.yml, which does the same for zebrad and
+# zainod.
+#
+# The job runs zeronym/shim/deploy/reproduce.sh rather than re-implementing it,
+# for two reasons. First, CI then exercises the exact command auditors are told
+# to run, including --platform linux/amd64, so the two cannot drift. Second,
+# reproduce.sh compares against the published hash in deploy/EXPECTED_SHA256,
+# not merely build 1 against build 2. Comparing the two builds only to each
+# other would make cross-machine divergence, the single failure this job exists
+# to catch, exit GREEN: both builds on this runner would agree with each other
+# while both differed from the published value.
+#
+# The recipe deliberately uses no BuildKit cache mounts, because `docker build
+# --no-cache` does not clear them and a warm target/ would make this test a lie.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/zeronym-shim-reproduce.yml"
+      - "zeronym/shim/**"
+      # The vendored path dependencies. These are what assemble.sh archives into
+      # the build context, so a subtree pull touching any of them changes the
+      # compiled binary and stales the published hash. Keep in sync with the
+      # archive list in zeronym/shim/deploy/assemble.sh.
+      - "zebra/Cargo.toml"
+      - "zebra/zebra-chain/**"
+      - "zebra/zebra-test/**"
+      - "zaino/Cargo.toml"
+      - "zaino/packages/zaino-proto/**"
+
+concurrency:
+  group: zeronym-shim-reproduce-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reproduce:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # assemble.sh runs `git archive HEAD`, so the checked-out commit is
+          # the source of truth and no history is needed.
+          fetch-depth: 1
+
+      - name: Build twice from cold and compare against the published hash
+        env:
+          CTX: ${{ runner.temp }}/zis-ctx
+          OUT: ${{ runner.temp }}/zis-out
+        run: sh zeronym/shim/deploy/reproduce.sh
+
+      - name: Record the artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-indexer-shim-binaries
+          path: ${{ runner.temp }}/zis-out/out1/zero-indexer-shim
+          if-no-files-found: warn

@@ -85,6 +85,14 @@ compression itself (`grpc-encoding`) is relayed untouched.
 | `src/proxy.rs` | The h2c reverse proxy. Everything else is opaque. |
 | `src/config.rs` | Two socket addresses. |
 | `tests/` | Transparency and classifier vectors. See below. |
+| `deploy/` | The StageX reproducible build. See `deploy/README.md`. |
+
+The `cargo build` above is for development. The **audited** artifact is the
+static-musl binary produced by `deploy/`, whose whole purpose is that two
+independent builds of a commit yield the same hash, so an auditor can match it
+against the hash bound into an enclave attestation. Without that, an attestation
+proves only that some binary runs in a genuine enclave, not that it is the
+binary anyone reviewed.
 
 ## Running it
 
