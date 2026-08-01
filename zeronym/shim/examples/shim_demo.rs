@@ -4,16 +4,23 @@
 //! cargo run --example shim_demo
 //! ```
 //!
-//! Starts a stub backing indexer, puts a shim in front of it, and sends six
-//! calls through: an Orchard exit into Ironwood, an Orchard exit with no
-//! Ironwood bundle at all, a real mainnet transparent transaction, an
-//! unparseable body, a compressed body, and one ordinary proxied method. Watch
-//! the `zis::classify` and `zis::proxy` lines. Every one of the six is forwarded
-//! to the stub indexer, because this proof of concept is non-destructive.
+//! Starts a stub backing indexer, puts a shim in front of it, and sends eight
+//! calls through: three transactions carrying Orchard actions, two that carry
+//! none, an unparseable body, a compressed body, and one ordinary proxied
+//! method. Watch the `zis::classify` and `zis::proxy` lines. Every one of the
+//! eight is forwarded to the stub indexer, because this proof of concept is
+//! non-destructive.
 //!
-//! The first two are both MIGRATION: the predicate is `orchard_value_balance >
-//! 0`, so where the value lands does not change the verdict. Only the third one
-//! passes through, because it moves no Orchard value at all.
+//! The predicate is the presence of Orchard actions, nothing else. So the first
+//! three are all MIGRATION even though their Orchard value balances are
+//! +250_000, +250_000 with no Ironwood bundle, and exactly +0. That last one is
+//! the case Zooko's widening added: an internal shuffle whose fee was paid from
+//! another pool moves no Orchard value, and is diverted anyway.
+//!
+//! Calls 4 and 5 pass through, and they are the boundary that keeps the rule
+//! from swallowing ordinary commerce: an Ironwood-only transaction (the new
+//! pool, where time-sensitive payments will live) and a real mainnet transparent
+//! transaction. Neither carries an Orchard bundle.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -39,20 +46,33 @@ use zero_indexer_shim::BoxError;
 
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
 
-/// V6, Orchard +250_000, Ironwood -240_000: an Orchard exit into Ironwood.
+/// V6, Orchard actions with Orchard +250_000 and Ironwood -240_000: legacy
+/// funds moving into the new pool.
 const V6_MIGRATION: &[u8] = include_bytes!("../tests/fixtures/v6_migration.bin");
 
-/// V6, Orchard +250_000, no Ironwood bundle at all: an Orchard withdrawal to
-/// transparent or Sapling. Also an Orchard exit, and the case the shim used to
-/// hand to the operator's indexer in the clear.
+/// V6, Orchard actions with Orchard +250_000 and no Ironwood bundle at all: an
+/// Orchard withdrawal to transparent or Sapling. Same verdict, because the
+/// destination is not part of the rule.
 const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_orchard_only.bin");
 
+/// V6, Orchard actions with a value balance of exactly ZERO, alongside an
+/// Ironwood bundle. The internal shuffle whose fee was paid from another pool:
+/// no Orchard value moves, legacy notes are still spent and their nullifiers
+/// still published. This is the case the shim used to hand to the operator's
+/// indexer in the clear, and the gap Zooko's ruling closes.
+const V6_ORCHARD_ZERO: &[u8] = include_bytes!("../tests/fixtures/v6_orchard_zero.bin");
+
+/// V6 with an Ironwood bundle at -240_000 and NO Orchard bundle: value shielding
+/// into the new pool. Ordinary time-sensitive commerce, which passes through.
+/// The rule stops at Orchard on purpose.
+const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_ironwood_only.bin");
+
 /// A real mainnet V4 coinbase transaction, the same bytes
-/// `tests/classify_vectors.rs` pins. Transparent only, so its Orchard value
-/// balance is zero: this is what a genuine pass-through looks like. It is a
-/// coinbase because that is the mainnet transaction whose bytes are committed
-/// here; what the classifier reads is `orchard_vb == 0`, which any ordinary
-/// transparent or Sapling payment shares.
+/// `tests/classify_vectors.rs` pins. Transparent only, so it carries no Orchard
+/// bundle: the other genuine pass-through. It is a coinbase because that is the
+/// mainnet transaction whose bytes are committed here; what the classifier reads
+/// is the absent Orchard bundle, which any ordinary transparent or Sapling
+/// payment shares.
 const V4_COINBASE_HEX: &str = "0400008085202f89010000000000000000000000000000000000000000000000000000000000000000ffffffff0503b0e72100ffffffff04e8bbe60e000000001976a914ba92ff06081d5ff6542af8d3b2d209d29ba6337c88ac40787d010000000017a914931fec54c1fea86e574462cc32013f5400b891298738c94d010000000017a914c7a4285ed7aed78d8c0e28d7f1839ccb4046ab0c87286bee000000000017a914d45cb1adffb5215a42720532a076f02c7c778c908700000000b0e721000000000000000000000000";
 
 #[tokio::main]
@@ -73,26 +93,35 @@ async fn main() -> Result<(), BoxError> {
 
     let mut sender = connect(shim).await?;
 
-    // 1. An Orchard exit into Ironwood. The privacy-critical case.
+    // 1. Orchard actions, value moving into Ironwood. The privacy-critical case.
     send_tx(&mut sender, shim, V6_MIGRATION, false).await?;
 
-    // 2. An Orchard exit with NO Ironwood bundle: the value went to transparent
+    // 2. Orchard actions with NO Ironwood bundle: the value went to transparent
     //    or Sapling. Same leak, same verdict. Watch for ironwood_vb=+0 on a line
     //    that still says MIGRATION.
     send_tx(&mut sender, shim, V6_ORCHARD_ONLY, false).await?;
 
-    // 3. A real mainnet transparent transaction: no Orchard value moves, so it
-    //    passes through.
+    // 3. Orchard actions with a value balance of exactly zero. Watch for
+    //    orchard_vb=+0 on a line that still says MIGRATION: this is the gap
+    //    Zooko's ruling closes, and the old exit predicate passed it through.
+    send_tx(&mut sender, shim, V6_ORCHARD_ZERO, false).await?;
+
+    // 4. An Ironwood-only transaction: no Orchard bundle, so it is ordinary
+    //    commerce in the new pool and it passes through. The rule stops here.
+    send_tx(&mut sender, shim, V6_IRONWOOD_ONLY, false).await?;
+
+    // 5. A real mainnet transparent transaction: no Orchard bundle either, so it
+    //    passes through too.
     let v4_coinbase = hex::decode(V4_COINBASE_HEX).expect("vector is valid hex");
     send_tx(&mut sender, shim, &v4_coinbase, false).await?;
 
-    // 4. Bytes that are not a transaction at all. Fail-safe for privacy.
+    // 6. Bytes that are not a transaction at all. Fail-safe for privacy.
     send_tx(&mut sender, shim, &[0xff; 64], false).await?;
 
-    // 5. A compressed body. Not parseable, so also fail-safe.
+    // 7. A compressed body. Not parseable, so also fail-safe.
     send_tx(&mut sender, shim, V6_MIGRATION, true).await?;
 
-    // 6. An ordinary proxied method: opaque, never decoded.
+    // 8. An ordinary proxied method: opaque, never decoded.
     let request = Request::builder()
         .method("POST")
         .uri(format!("http://{shim}{GET_LIGHTD_INFO}"))
@@ -107,7 +136,7 @@ async fn main() -> Result<(), BoxError> {
         .collect()
         .await?;
 
-    tracing::info!("demo complete: all six calls were forwarded to the stub indexer");
+    tracing::info!("demo complete: all eight calls were forwarded to the stub indexer");
     Ok(())
 }
 

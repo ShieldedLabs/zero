@@ -31,11 +31,12 @@ use zebra_chain::{
 };
 use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 
-/// Real V6 wire bytes with the given pool value balances.
+/// Real V6 wire bytes carrying an Orchard bundle with the given value balance,
+/// and optionally an Ironwood bundle.
 ///
-/// Sign convention, the whole point of the predicate: a POSITIVE balance is
-/// value LEAVING that pool, a NEGATIVE balance is value ENTERING it. So an
-/// Orchard exit is `orchard > 0`, whatever the Ironwood balance is.
+/// Sign convention, which the predicate no longer reads but the evidence still
+/// reports: a POSITIVE balance is value LEAVING that pool, a NEGATIVE balance is
+/// value ENTERING it.
 ///
 /// `ironwood_zats: None` omits the Ironwood bundle entirely.
 fn v6_bytes(orchard_zats: i64, ironwood_zats: Option<i64>) -> Vec<u8> {
@@ -51,18 +52,40 @@ fn v6_bytes(orchard_zats: i64, ironwood_zats: Option<i64>) -> Vec<u8> {
         1,
     ));
 
-    let ironwood = ironwood_zats.map(|zats| {
-        let vb: Amount<NegativeAllowed> = zats.try_into().expect("valid amount");
-        ironwood::ShieldedData::new(ShieldedDataV6::new(fake_v6_orchard_shielded_data(
-            Flags::ENABLE_SPENDS | Flags::ENABLE_OUTPUTS,
-            vb,
-            1,
-        )))
-    });
+    fake_v6_transaction(
+        NetworkUpgrade::Nu6_3,
+        Some(orchard),
+        ironwood_zats.map(ironwood_bundle),
+    )
+    .zcash_serialize_to_vec()
+    .expect("v6 transaction serializes")
+}
 
-    fake_v6_transaction(NetworkUpgrade::Nu6_3, Some(orchard), ironwood)
-        .zcash_serialize_to_vec()
-        .expect("v6 transaction serializes")
+/// Real V6 wire bytes with an Ironwood bundle and NO Orchard bundle at all.
+///
+/// This is the boundary the rule must not cross. Ironwood is the new pool where
+/// ordinary time-sensitive commerce lives, so a transaction that touches only
+/// Ironwood has to keep passing through.
+fn v6_ironwood_only_bytes(ironwood_zats: i64) -> Vec<u8> {
+    fake_v6_transaction(
+        NetworkUpgrade::Nu6_3,
+        None,
+        Some(ironwood_bundle(ironwood_zats)),
+    )
+    .zcash_serialize_to_vec()
+    .expect("v6 transaction serializes")
+}
+
+/// One Ironwood bundle with the given value balance. Ironwood reuses the Orchard
+/// bundle shape, so it is built from the same helper.
+fn ironwood_bundle(ironwood_zats: i64) -> ironwood::ShieldedData {
+    let vb: Amount<NegativeAllowed> = ironwood_zats.try_into().expect("valid amount");
+
+    ironwood::ShieldedData::new(ShieldedDataV6::new(fake_v6_orchard_shielded_data(
+        Flags::ENABLE_SPENDS | Flags::ENABLE_OUTPUTS,
+        vb,
+        1,
+    )))
 }
 
 /// Real V5 wire bytes carrying an Orchard bundle with the given value balance.
@@ -93,22 +116,25 @@ fn v5_orchard_bytes(orchard_zats: i64) -> Vec<u8> {
 }
 
 #[test]
-fn generated_orchard_exit_into_ironwood_is_a_migration() {
+fn generated_orchard_actions_into_ironwood_are_a_migration() {
     let bytes = v6_bytes(250_000, Some(-240_000));
     let evidence = classify_with_evidence(&bytes);
     println!("{evidence:?}");
 
     assert_eq!(evidence.class, Class::Migration);
     assert_eq!(evidence.version, "V6");
+    // The deciding fact.
+    assert_eq!(evidence.orchard_actions, 1);
+    // Evidence, reported and not read by the predicate.
     assert_eq!(evidence.orchard_vb, 250_000);
     assert_eq!(evidence.ironwood_vb, -240_000);
 }
 
 #[test]
-fn every_orchard_exit_is_a_migration_whatever_the_destination() {
-    // The destination pool does not gate the verdict. Each of these moves value
-    // out of a pool that NU6.3 closed to new value, which is the identifying
-    // event, and each one used to pass through in the clear.
+fn every_orchard_touching_transaction_is_a_migration_whatever_the_destination() {
+    // The destination pool does not gate the verdict. Each of these carries
+    // Orchard actions, which is the identifying event on a pool NU6.3 closed to
+    // new value, so each is diverted.
 
     // Out to transparent or Sapling: no Ironwood bundle at all.
     assert_eq!(classify(&v6_bytes(250_000, None)), Class::Migration);
@@ -129,58 +155,89 @@ fn every_orchard_exit_is_a_migration_whatever_the_destination() {
 
 #[test]
 fn a_v5_orchard_spend_is_a_migration() {
-    // The version guard is gone, and this is why it can be. zebra-chain's
-    // orchard_value_balance() reads orchard_shielded_data(), which is
-    // version-agnostic, so a pre-Ironwood V5 Orchard spend is caught by exactly
-    // the same predicate. Under the old `tx.version == V6` conjunct this was a
-    // PassThrough.
+    // There is no version guard, and this is why it can be absent.
+    // zebra-chain's orchard_shielded_data() is version-agnostic, so a
+    // pre-Ironwood V5 Orchard spend is caught by exactly the same line.
     let evidence = classify_with_evidence(&v5_orchard_bytes(250_000));
     println!("{evidence:?}");
 
     assert_eq!(evidence.class, Class::Migration);
     assert_eq!(evidence.version, "V5");
-    assert_eq!(evidence.orchard_vb, 250_000);
+    assert_eq!(evidence.orchard_actions, 1);
     assert_eq!(evidence.ironwood_vb, 0, "a V5 has no Ironwood bundle");
 }
 
 #[test]
-fn value_entering_orchard_is_pass_through() {
-    // Consensus-invalid post-NU6.3 and kept as a directionality probe: nothing
-    // left the Orchard pool, so nothing was revealed about legacy holdings.
+fn the_direction_of_the_orchard_balance_does_not_change_the_verdict() {
+    // Value ENTERING Orchard is consensus-invalid post-NU6.3 and cannot appear
+    // on chain. It is generated here as a probe that the predicate has no
+    // directionality left in it at all: same Orchard actions, opposite sign,
+    // same verdict. Under the old exit predicate all three of these passed
+    // through.
     assert_eq!(
         classify(&v6_bytes(-250_000, Some(240_000))),
-        Class::PassThrough
+        Class::Migration
     );
     assert_eq!(
         classify(&v6_bytes(-250_000, Some(-240_000))),
-        Class::PassThrough
+        Class::Migration
     );
-    assert_eq!(classify(&v5_orchard_bytes(-250_000)), Class::PassThrough);
+    assert_eq!(classify(&v5_orchard_bytes(-250_000)), Class::Migration);
 }
 
 #[test]
-fn a_fee_sized_orchard_exit_still_classifies() {
-    // The predicate is sign-based, not magnitude-based: a one-zatoshi withdrawal
-    // from a closed pool is as identifying as a large one.
+fn the_magnitude_of_the_orchard_balance_does_not_change_the_verdict() {
+    // Not sign-based and not magnitude-based: a one-zatoshi movement in a
+    // bundle is as identifying as a large one, because what identifies is the
+    // bundle.
     assert_eq!(classify(&v6_bytes(1, Some(-1))), Class::Migration);
     assert_eq!(classify(&v6_bytes(1, None)), Class::Migration);
 }
 
 #[test]
-fn zero_orchard_balance_is_correctly_a_pass_through() {
-    // Under Zooko's rule the risk is that value LEFT the Orchard pool; an
-    // Orchard bundle that nets to exactly zero moved no value out of it (pure
-    // same-receiver change, which is still possible post-NU6.3 because Orchard
-    // is closed to new VALUE, not to activity). Whatever entered Ironwood
-    // alongside it came from transparent or Sapling. So this is the behaviour
-    // the ruling's criterion specifies, and this test pins it.
+fn zero_orchard_value_balance_with_orchard_actions_is_a_migration() {
+    // THE GAP ZOOKO'S RULING CLOSES, stated as a test.
     //
-    // It is not a claim that the case leaks nothing: a net-zero bundle can
-    // still spend legacy notes and publish their nullifiers. Whether the
-    // predicate should widen to cover that is Zooko's call, open in the shim
-    // README, and it would change this expectation if he says yes.
-    assert_eq!(classify(&v6_bytes(0, Some(-240_000))), Class::PassThrough);
-    assert_eq!(classify(&v6_bytes(0, None)), Class::PassThrough);
+    // A transaction must pay a fee, and unless it is paid from another pool the
+    // fee comes out of Orchard, so most internal shuffling already showed
+    // orchard_vb > 0 and the old exit predicate caught it. The one that got
+    // through was the shuffle whose fee is paid from a DIFFERENT pool: Orchard
+    // actions present, legacy notes spent, nullifiers published, and
+    // orchard_vb == 0. It used to be handed to the operator's indexer in the
+    // clear. Now the actions alone divert it.
+    let evidence = classify_with_evidence(&v6_bytes(0, Some(-240_000)));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::Migration);
+    assert_eq!(evidence.orchard_vb, 0, "no value left the Orchard pool");
+    assert_eq!(evidence.orchard_actions, 1, "and it is diverted anyway");
+
+    assert_eq!(classify(&v6_bytes(0, None)), Class::Migration);
+    assert_eq!(classify(&v5_orchard_bytes(0)), Class::Migration);
+}
+
+#[test]
+fn an_ironwood_only_transaction_is_a_pass_through() {
+    // The boundary that keeps the rule from swallowing ordinary commerce. Value
+    // ENTERS Ironwood (a shield into the new pool) and there is no Orchard
+    // bundle, so nothing about legacy Orchard holdings is on the wire and the
+    // transaction is forwarded. Zooko's time-insensitivity rationale is what
+    // stops here: Ironwood is where time-sensitive payments will live.
+    let evidence = classify_with_evidence(&v6_ironwood_only_bytes(-240_000));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::PassThrough);
+    assert_eq!(evidence.version, "V6");
+    assert_eq!(evidence.orchard_actions, 0, "no Orchard bundle at all");
+    assert_eq!(evidence.orchard_vb, 0);
+    assert_eq!(evidence.ironwood_vb, -240_000, "value entering Ironwood");
+    assert!(!evidence.class.treat_as_migration());
+
+    // Whichever way the Ironwood value points. Ironwood is not the rule.
+    assert_eq!(
+        classify(&v6_ironwood_only_bytes(240_000)),
+        Class::PassThrough
+    );
 }
 
 #[test]
@@ -189,6 +246,9 @@ fn generated_bytes_survive_the_full_consumption_check() {
     // classifier's trailing-bytes guard would reject every real transaction.
     let bytes = v6_bytes(250_000, Some(-240_000));
     assert!(classify_with_evidence(&bytes).error.is_none());
+
+    let ironwood_only = v6_ironwood_only_bytes(-240_000);
+    assert!(classify_with_evidence(&ironwood_only).error.is_none());
 }
 
 /// Rewrite the committed fixtures in `tests/fixtures/`. Ignored by default.
@@ -209,6 +269,8 @@ fn regenerate_fixtures() {
         ("v6_migration", v6_bytes(250_000, Some(-240_000))),
         ("v6_reverse", v6_bytes(-250_000, Some(240_000))),
         ("v6_orchard_only", v6_bytes(250_000, None)),
+        ("v6_orchard_zero", v6_bytes(0, Some(-240_000))),
+        ("v6_ironwood_only", v6_ironwood_only_bytes(-240_000)),
     ] {
         std::fs::write(dir.join(format!("{name}.bin")), &bytes).expect("fixture written");
         println!("{name}: {} bytes", bytes.len());

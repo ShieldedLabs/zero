@@ -5,9 +5,10 @@
 //! Every CompactTxStreamer method, stream, and gRPC trailer is forwarded to the
 //! backing indexer unchanged. The single exception is `SendTransaction`, whose
 //! body is decoded and classified by [`classify`]. In production a transaction
-//! that moves value OUT of the Orchard pool, to any destination, is diverted
-//! away from the operator's indexer; in this proof of concept the verdict is
-//! only logged, and the transaction is still forwarded.
+//! that carries ANY Orchard actions is diverted away from the operator's
+//! indexer, whatever its value balances say and wherever the value went; in this
+//! proof of concept the verdict is only logged, and the transaction is still
+//! forwarded. Ironwood-only transactions are ordinary commerce and pass through.
 //!
 //! Layering, smallest and highest-stakes first:
 //!

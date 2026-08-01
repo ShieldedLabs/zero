@@ -33,7 +33,21 @@ use tracing_subscriber::fmt::MakeWriter;
 use zaino_proto::proto::service::{RawTransaction, SendResponse};
 use zero_indexer_shim::proxy::SEND_TRANSACTION;
 
+/// V6 carrying Orchard actions: Orchard(+250_000), Ironwood(-240_000).
 const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_migration.bin");
+
+/// V6 with an Ironwood bundle at -240_000 and NO Orchard bundle: ordinary
+/// commerce in the new pool, which is what a pass-through looks like now.
+const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("fixtures/v6_ironwood_only.bin");
+
+/// V6 with an Orchard bundle whose value balance is exactly zero: the internal
+/// shuffle whose fee came from another pool, and the gap Zooko's ruling closes.
+const V6_ORCHARD_ZERO: &[u8] = include_bytes!("fixtures/v6_orchard_zero.bin");
+
+/// V6 carrying Orchard actions with the balances negated: Orchard(-250_000),
+/// Ironwood(+240_000). Consensus-invalid post-NU6.3 and kept as a probe. It is
+/// driven through the full path here because this is the only layer where the
+/// `{:+}` sign formatting that renders `orchard_vb` actually runs.
 const V6_REVERSE: &[u8] = include_bytes!("fixtures/v6_reverse.bin");
 
 const LIMIT: StdDuration = StdDuration::from_secs(10);
@@ -204,7 +218,9 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
     });
 
     send_tx(&mut sender, shim, V6_MIGRATION).await;
+    send_tx(&mut sender, shim, V6_ORCHARD_ZERO).await;
     send_tx(&mut sender, shim, V6_REVERSE).await;
+    send_tx(&mut sender, shim, V6_IRONWOOD_ONLY).await;
     send_tx(&mut sender, shim, &[0xff; 64]).await;
     // A migration sent with a method the shim used to ignore. The tonic server
     // Zaino is built from dispatches on path alone, so this one reaches the
@@ -214,44 +230,67 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
 
     let log = capture.text();
 
-    // 1. The Orchard exit. The verdict, the evidence it rests on, and the
-    //    routing decision production would take. `orchard_vb` is the predicate;
-    //    `ironwood_vb` is logged as evidence of where the value went and no
-    //    longer gates anything.
+    // 1. Orchard actions with value leaving the pool. The verdict, the evidence
+    //    it rests on, and the routing decision production would take.
+    //    `orchard_actions` is the predicate; the value balances are logged as
+    //    evidence of what moved and where, and gate nothing.
     assert!(log.contains("MIGRATION detected"), "log was:\n{log}");
+    assert!(log.contains("orchard_actions=1"), "log was:\n{log}");
     assert!(log.contains("orchard_vb=+250000"), "log was:\n{log}");
     assert!(log.contains("ironwood_vb=-240000"), "log was:\n{log}");
     assert!(log.contains("version=V6"), "log was:\n{log}");
 
-    // 2. The reverse shape: value ENTERING Orchard, so nothing left the pool
-    //    and there is nothing to divert.
+    // 2. The gap Zooko's ruling closes, visible in the log: a MIGRATION line
+    //    that reports orchard_vb=+0. The actions diverted it, not the balance.
     assert!(
-        log.contains("passthrough: SendTransaction moved no value out of Orchard"),
+        log.lines()
+            .any(|line| line.contains("MIGRATION detected") && line.contains("orchard_vb=+0")),
+        "a net-zero Orchard bundle must log as a MIGRATION, log was:\n{log}"
+    );
+
+    // 3. The direction of the Orchard balance changes nothing, asserted where
+    //    the sign is actually rendered. `format!("{:+}", ...)` lives in the log
+    //    formatter and nowhere else, so a sign-rendering regression is only
+    //    visible from here.
+    assert!(
+        log.lines()
+            .any(|line| line.contains("MIGRATION detected") && line.contains("orchard_vb=-250000")),
+        "an Orchard bundle with a negative balance must log as a MIGRATION, log was:\n{log}"
+    );
+
+    // 4. The Ironwood-only transaction: no Orchard bundle at all, so ordinary
+    //    commerce in the new pool reaches the operator's indexer.
+    assert!(
+        log.contains("passthrough: SendTransaction carries no Orchard actions"),
         "log was:\n{log}"
     );
-    assert!(log.contains("orchard_vb=-250000"), "log was:\n{log}");
+    assert!(
+        log.lines()
+            .any(|line| line.contains("passthrough") && line.contains("orchard_actions=0")),
+        "log was:\n{log}"
+    );
     assert!(
         log.contains("diverted_in_production=false"),
         "log was:\n{log}"
     );
 
-    // 3. Bytes that are not a transaction. Fail-safe for privacy: a body the
+    // 5. Bytes that are not a transaction. Fail-safe for privacy: a body the
     //    shim could not read is treated as a migration, never as a pass-through.
     assert!(log.contains("MIGRATION-FAILSAFE"), "log was:\n{log}");
 
-    // 4. The GET. It must produce a verdict of its own, not silence: two
-    //    migrations were detected, not one.
+    // 6. The GET. It must produce a verdict of its own, not silence: four
+    //    migrations were detected, not three.
     assert_eq!(
         log.matches("MIGRATION detected").count(),
-        2,
+        4,
         "a SendTransaction with a non-POST method skipped the classifier, log was:\n{log}"
     );
 
-    // Three of the four would be diverted in production: two migrations and
-    // the unreadable body.
+    // Five of the six would be diverted in production: four transactions
+    // carrying Orchard actions, and the unreadable body.
     assert_eq!(
         log.matches("diverted_in_production=true").count(),
-        3,
+        5,
         "log was:\n{log}"
     );
 }

@@ -43,13 +43,14 @@ use zaino_proto::proto::service::{
 };
 use zero_indexer_shim::classify::{classify, Class};
 
-/// A real V6 Orchard exit, Orchard(+250_000) with Ironwood(-240_000): the
-/// privacy-critical case. Same fixture the classifier's own vector tests use.
+/// A real V6 carrying Orchard actions, Orchard(+250_000) with
+/// Ironwood(-240_000): the privacy-critical case. Same fixture the classifier's
+/// own vector tests use.
 const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_migration.bin");
 
-/// The same shape reversed, Orchard(-250_000) with Ironwood(+240_000). Value
-/// enters Orchard rather than leaving it, so the predicate does not fire.
-const V6_REVERSE: &[u8] = include_bytes!("fixtures/v6_reverse.bin");
+/// A real V6 with an Ironwood bundle at -240_000 and NO Orchard bundle:
+/// ordinary commerce in the new pool, so the predicate does not fire.
+const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("fixtures/v6_ironwood_only.bin");
 
 /// How many blocks `GetBlockRange` yields. Enough that a proxy which reordered
 /// or dropped frames would be caught, small enough to stay instant.
@@ -408,11 +409,11 @@ async fn a_server_streaming_call_delivers_every_message_in_order() {
 #[tokio::test]
 async fn a_non_migration_send_transaction_is_forwarded_unchanged() {
     // The shim reaches this verdict through the same function.
-    assert_eq!(classify(V6_REVERSE), Class::PassThrough);
+    assert_eq!(classify(V6_IRONWOOD_ONLY), Class::PassThrough);
 
     let mut stack = Stack::up().await;
     let raw = RawTransaction {
-        data: V6_REVERSE.to_vec(),
+        data: V6_IRONWOOD_ONLY.to_vec(),
         height: 0,
     };
 
@@ -425,7 +426,7 @@ async fn a_non_migration_send_transaction_is_forwarded_unchanged() {
     assert_eq!(proxied.error_code, 0);
     assert_eq!(
         proxied.error_message,
-        format!("accepted {} bytes", V6_REVERSE.len())
+        format!("accepted {} bytes", V6_IRONWOOD_ONLY.len())
     );
 
     assert_eq!(stack.sent(), vec![raw]);

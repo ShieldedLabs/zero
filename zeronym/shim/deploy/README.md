@@ -255,14 +255,16 @@ must never drift apart.
 common case: any edit under `zeronym/shim/src/`, to `Cargo.toml` or
 `Cargo.lock`, or a subtree pull touching `zebra/zebra-chain` or
 `zaino/packages/zaino-proto`, moves the binary and therefore the published hash.
-The most recent re-baseline (2026-08-01) was of exactly that kind, and is
-written up below. Two traps it exposed, both worth knowing before you start.
+Both 2026-08-01 re-baselines were of exactly that kind (two classifier rulings in
+one day), and both are written up below. Two traps the first one exposed, both
+worth knowing before you start.
 Because `assemble.sh` archives `HEAD`, a source change that is still in the
 working tree is invisible to every script here, and they will cheerfully rebuild
 and confirm the **old** hash. And a hash measured from anything other than
 committed source is a hash of a tree that may never exist as a commit. **Commit
 first, then measure.** The post-mortem below is what happens when that order is
-reversed.
+reversed, and the second re-baseline explains what to do when the two cannot be
+ordered that way because the hash and the source have to land in one commit.
 
 ## Recorded hashes
 
@@ -270,25 +272,57 @@ Do not populate this section by hand, and never with a plausible-looking
 placeholder. A wrong hash in an audit document is worse than a missing one. The
 machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 
+| | binary sha256 | what it was built from |
+|---|---|---|
+| **current**, the widened presence predicate | `4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a` | `is_orchard_touching(tx) := tx has at least one Orchard action`. Zooko's second ruling: every Orchard-touching transaction is diverted, whatever `orchard_value_balance` says. |
+| superseded, commit `2243adbdce` | `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f` | the first 2026-08-01 predicate, `is_orchard_exit(tx) := orchard_value_balance > 0`. |
+| superseded, recorded to 2026-07-31 | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` | the pre-2026-08-01 classifier, with the `V6` and `ironwood_value_balance < 0` conjuncts still in the predicate. |
+
+The hash moved because the **predicate** moved, not because the recipe did: no
+base digest, no flag and no script changed between `62577649…` and `4143ce5f…`.
+
+> **Read the provenance of the current row before you rely on it, because it is
+> not the usual one.** `4143ce5f…` was measured from a **working-tree overlay**,
+> not from a commit, and it is **provisional until CI confirms it**.
+>
+> The reason is structural rather than sloppy. `assemble.sh` archives
+> `git archive HEAD`, so measuring from a commit means committing first; but the
+> rule one line above says `EXPECTED_SHA256` and the source must land in the
+> **same** commit, and this document is itself part of that commit. Committing
+> first would mean committing a knowingly stale hash. So the measurement is taken
+> from a context assembled at `HEAD` and then overlaid with the working tree, and
+> the overlay carries **exactly** the compiled file set that commit will contain.
+> It is stated precisely, checked, and re-runnable: see "Re-baseline, 2026-08-01
+> (second)" below.
+>
+> What makes this different from the post-mortem case immediately below, where
+> the same shortcut produced a hash that described no commit at all: that
+> measurement was taken while `src/` could still change, and it did. This one was
+> taken after the last change to compiled code, and the compiled-input digest was
+> recomputed after both builds to prove nothing moved underneath it.
+>
+> **The authoritative confirmation is `.github/workflows/zeronym-shim-reproduce.yml`
+> on the commit that lands this change.** Until that run is green, the current row
+> is one host's word. If it disagrees, the CI value wins and this table is wrong,
+> not the runner.
+
 > **The hash changed on 2026-08-01, and it changed for a source reason.** The
-> classifier predicate was rewritten: the turnstile test is now
+> classifier predicate was rewritten: the turnstile test became
 > `orchard_value_balance > 0` alone, with both the `tx.version == V6` and the
 > `ironwood_value_balance < 0` conjuncts dropped. `src/classify.rs`,
 > `src/intercept.rs` and `src/lib.rs` all changed, so the compiled binary
-> changed with them.
->
-> | | binary sha256 |
-> |---|---|
-> | current, from commit `2243adbdce` | `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f` |
-> | superseded, recorded to 2026-07-31 (the pre-2026-08-01 classifier) | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` |
+> changed with them. (That predicate has since been superseded by the widening
+> described above. This paragraph explains the `62577649…` row, and is history
+> from here on.)
 >
 > This is the tripwire doing its job. A recipe whose published hash survived a
 > change to the compiled predicate would be the alarming outcome, not this. The
 > old value is kept in this document on purpose: an auditor who reproduces
-> `a9c19f2c…` has built the **old** classifier, and should be able to learn that
-> here rather than conclude the recipe is broken. The current value is confirmed
-> on two machines: see "Cross-machine confirmation, 2026-08-01" below. The
-> sections after it are history, and are labelled with the hash each attests.
+> `a9c19f2c…` has built the **oldest** classifier, and should be able to learn
+> that here rather than conclude the recipe is broken. The `62577649…` value is
+> confirmed on two machines: see "Cross-machine confirmation, 2026-08-01" below.
+> The sections after it are history, and are labelled with the hash each
+> attests.
 
 > **Post-mortem: the first published hash for this predicate was wrong, and CI
 > caught it.** `EXPECTED_SHA256` briefly recorded
@@ -328,27 +362,252 @@ machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 > is that a provenance line pointing at a rewritable branch commit is worth less
 > than the content hashes above. Both are recorded now.
 
-Source: `zeronym/shim` at zero commit `22a92f8fe6` **plus the uncommitted
-classifier change**, content-pinned by the table above. Target
-`x86_64-unknown-linux-musl`, built `linux/amd64` under Rosetta on an arm64 Mac
-(Docker 29.5.3, buildx v0.34.1, `desktop-linux` builder, 16 vCPU).
+Source: `zeronym/shim` at zero commit `ad20158cde` **plus the working-tree
+classifier change that lands with this document**, content-pinned by the table
+above. Target `x86_64-unknown-linux-musl`, built `linux/amd64` under Rosetta on
+an arm64 Mac (Docker 29.5.3, `desktop-linux` builder, 16 vCPU).
 
 ```
-binary sha256:  c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a
-size:           4392728 bytes
-ELF:            x86-64 static-PIE, 35 sections, no INTERP, no build-id,
-                no DT_NEEDED
+binary sha256:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+size:           4393048 bytes
+ELF:            x86-64 static-PIE, 35 sections, no INTERP, no NOTE segment
+                (hence no build-id), no DT_NEEDED
 
-OCI manifest:   sha256:33c0f4f12bdeb9b47f77d5cea7e479c2bddc6ef7067e790072115221d0bb9460
-OCI tar sha256: 2c97d8f4f7a8cb82284d2b500c4ca3ae5c7da00b5b3a9973471dfd9cc5b3df14
+OCI manifest:   sha256:e95a8de686a08686a1640b628727b575d4002d4e117fa810c83a1b5a390db070
+OCI tar sha256: 23bbce863d957e9b1becea9ef766c86b2f019a5580407b096cc0caecf662fa51
 ```
 
-The size is unchanged from the old binary, to the byte. That is a coincidence of
-a small edit in a 4.2 MB static binary, not a sign that nothing was rebuilt:
-`cmp` puts the first difference at byte 209, and the string checks below
-distinguish the two directly.
+4393048 bytes is 320 more than the 4392728 this document records for `a9c19f2c…`
+and `c6b7738f…`, which is the sort of difference a handful of changed log strings
+and one simplified predicate makes. No size was ever recorded for `62577649…`,
+so the delta against the immediately preceding binary is unknown and is not being
+guessed at here. Size is weak evidence in either direction anyway: the first
+re-baseline changed the predicate and the size did not move by a single byte. The
+string checks below are what actually distinguish the binaries.
 
-### Re-baseline, 2026-08-01: the classifier predicate changed
+**The two OCI values are weaker claims than the binary hash, and were measured
+differently.** The binary was built twice from cold with `--no-cache`. The
+runtime image was packaged once, from a build that reused the second cold
+build's cached builder layer, so it attests packaging determinism not at all and
+is recorded only so the numbers exist. What it does attest, checked rather than
+assumed, is routing: the runtime layer was unpacked out of the OCI tar and its
+`/zero-indexer-shim` hashes to `4143ce5f…`, byte-identical to the exported
+binary, so `COPY --from=export` still ships what it claims.
+
+### Re-baseline, 2026-08-01 (second): the predicate widened
+
+> Measured, not pending. This section was written **before** the build, with the
+> procedure and the string assertions stated in advance so they could not be
+> retrofitted to whatever came out. The results are recorded underneath each one,
+> and the advance text is left standing so the two can be compared.
+
+**Why the hash moved.** Zooko ruled a second time and widened the turnstile
+predicate. It was `is_orchard_exit(tx) := orchard_value_balance > 0`. It is now
+
+```text
+is_orchard_touching(tx) := tx has at least one Orchard action
+```
+
+implemented as `tx.orchard_shielded_data().is_some()`, because an Orchard bundle
+is an `AtLeastOne` and so presence and a non-zero action count are the same fact.
+`orchard_value_balance` is demoted to evidence and gates nothing. Orchard only:
+a transaction carrying only Ironwood actions still passes through, deliberately,
+and no Ironwood arm may be added. `src/classify.rs`, `src/intercept.rs` and
+`src/lib.rs` changed, so compiled code changed and the binary changed with it.
+Nothing about the *recipe* changed: not a base digest, not a flag, not a script.
+That matters for reading the result, because it isolates the source edit as the
+only moving part. The crate's own `README.md` records the ruling and its
+rationale.
+
+**The procedure written in advance, and the one step that could not be
+followed.** The advance text called for this order, and said the order was the
+whole point:
+
+1. Commit the source change. Do not measure first. `assemble.sh` archives
+   `git archive HEAD`, so a hash measured from a working tree describes a tree
+   that may never exist as a commit, and the post-mortem above is what happened
+   the one time that rule was bent.
+2. `EXPECTED= sh zeronym/shim/deploy/reproduce.sh` from the commit. The empty
+   `EXPECTED` skips the comparison against the now-stale published value for
+   exactly that run, and the script still builds twice from cold and compares the
+   two builds against each other.
+3. Write the resulting value into `deploy/EXPECTED_SHA256` and into the table
+   under "Recorded hashes", moving `62577649…` down to the superseded row, in
+   **the same commit**. Those two must never drift apart.
+4. Re-run the string check below against the new binary, and record the result
+   here.
+
+Steps 2, 3 and 4 were followed. **Step 1 was not, and cannot be**, and that is a
+defect in the advance text rather than in the execution: steps 1 and 3
+contradict each other whenever the published hash is itself part of the commit.
+The only commit that satisfies step 3 is one that already carries a value nobody
+has measured yet. Committing first would mean committing an `EXPECTED_SHA256`
+known to be wrong and then amending it, which reaches the same content by a
+longer route while adding one more place to forget. So the measurement was taken
+from a working-tree overlay, and the rest of this section is the provenance that
+makes that legible instead of hand-waved.
+
+**What was measured, and from exactly what.** `HEAD` was `ad20158cde`. At build
+time `git status --porcelain zeronym/shim` showed eleven modified tracked files
+and two untracked fixtures, of which the compiled set is exactly three:
+
+```
+ M zeronym/shim/src/classify.rs
+ M zeronym/shim/src/intercept.rs
+ M zeronym/shim/src/lib.rs
+```
+
+`Cargo.toml` and `Cargo.lock` were byte-identical to `HEAD`, `zebra/` and
+`zaino/` were clean, and `deploy/Containerfile` was byte-identical to `HEAD`'s
+(asserted with `cmp`, not eyeballed). The other eight modified files are
+`README.md`, `demo.sh`, `deploy/README.md`, `examples/shim_demo.rs` and four
+files under `tests/`; the two untracked files are `tests/fixtures/*.bin`. **None
+of those is a build input.** The Containerfile compiles `cargo build --release
+--frozen --target ${TARGET_ARCH} --bin zero-indexer-shim`, which builds the lib
+and that one binary: `tests/`, `examples/` and `deploy/` are never compiled, the
+crate has no `build.rs`, and `grep -rn 'include_str!\|include!' src/` finds
+nothing, so no Markdown file reaches the compiler. The only `include_bytes!` uses
+are the four fixtures, all inside `#[cfg(test)] mod tests`, which is why the two
+untracked `.bin` files cannot affect a release build.
+
+Three files changed **after** the build, and they are named here rather than
+left for someone to notice: `deploy/EXPECTED_SHA256` (which now holds
+`4143ce5f…`), this `deploy/README.md`, and the crate `README.md`. All three are
+in the non-compiled set above, so the context that produced the measurement
+carries their pre-edit contents and the binary is unaffected. That is not an
+assumption: the first re-baseline measured builds with four different revisions
+of `deploy/` in the context and the binary hash did not move, and the
+compiled-input digest recorded below covers `src/`, `Cargo.toml` and
+`Cargo.lock` precisely so that this claim can be checked rather than believed.
+
+**The overlay, verbatim, so it can be re-run rather than trusted.** It is the
+block recorded under the first re-baseline with one change, marked below:
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+CTX=$(mktemp -d)/ctx
+sh zeronym/shim/deploy/assemble.sh "$CTX"
+
+# Refuse if a vendored tree is dirty: that is a build input this overlay does
+# not carry, so the context would correspond to no possible commit.
+test -z "$(git status --porcelain -- zebra/ zaino/)" || exit 1
+
+# CHANGED from the first re-baseline, which instead REFUSED when any untracked
+# file existed under the crate. Untracked-but-not-ignored files are carried too,
+# so the context is exactly what `git add -A zeronym/shim` would record. The old
+# refusal would have blocked this pass outright over two test fixtures.
+STAGE=$(mktemp -d)
+{ git ls-files -z -- zeronym/shim
+  git ls-files -z --others --exclude-standard -- zeronym/shim; } > "$STAGE/list"
+tar --null -T "$STAGE/list" -cf "$STAGE/shim-wt.tar"
+rm -rf "$CTX/zeronym/shim"
+umask 022 && tar -xpf "$STAGE/shim-wt.tar" -C "$CTX"
+
+# The recipe must still be HEAD's. Assert it rather than trust it.
+git show HEAD:zeronym/shim/deploy/Containerfile | cmp - "$CTX/zeronym/shim/deploy/Containerfile"
+
+SOURCE_DATE_EPOCH=1 docker build -f "$CTX/zeronym/shim/deploy/Containerfile" "$CTX" \
+  --platform linux/amd64 --target export --no-cache --output "type=local,dest=$OUT"
+sha256sum < "$OUT/zero-indexer-shim"
+```
+
+**Two cold builds, both `--no-cache`, from that one context**, byte-identical to
+each other (`cmp` reports no difference):
+
+```
+build 1:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+build 2:  4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a
+size:     4393048 bytes
+```
+
+**The measurement did not move underneath itself**, which is the specific
+failure the post-mortem above records. A digest of the compiled input set
+(`src/**` plus `Cargo.toml` and `Cargo.lock`) was taken before build 1 and again
+after build 2, and it is unchanged: `9cb6922a9a475d401ba4d1f6e749714aefe0973da28f972e11e9d336a035e87c`.
+That is the mechanical form of the rule the post-mortem established, and it is
+also the check a reviewer should re-run: if `find zeronym/shim/src -type f | sort
+| xargs shasum -a 256` plus the two manifests no longer digests to that value,
+then `4143ce5f…` describes source that no longer exists and must be re-measured.
+`git status --porcelain zebra/ zaino/` was empty before and after.
+
+**The string check, run exactly as stated in advance.** A hash that changes is
+not by itself evidence that it changed for the stated reason. The advance text
+required, and `strings` on `4143ce5f…` found:
+
+| Required | Found |
+|---|---|
+| one occurrence of `MIGRATION detected: the transaction carries Orchard actions, so it is diverted whatever its Orchard value balance` | 1 |
+| one occurrence of `passthrough: SendTransaction carries no Orchard actions` | 1 |
+| **zero** of `an Orchard exit, value LEAVING the Orchard pool` | 0 |
+| **zero** of `moved no value out of Orchard` | 0 |
+
+The last two are what the `62577649…` binary contains, as recorded under the
+first re-baseline, so the two binaries are distinguishable by inspection and not
+only by digest. The older `value leaving Orchard and entering Ironwood`, which
+belonged to `a9c19f2c…`, is also absent (0). Those counts were measured on this
+binary; the claims about what `62577649…` contains are carried over from the
+first re-baseline's own measurement and were not re-measured here, since
+rebuilding the superseded predicate to re-count a string it was already recorded
+as containing would cost another cold build for nothing.
+
+**The usual not-for-a-stupid-reason checks:**
+
+- **Not a stub.** 4393048 bytes, `ELF 64-bit LSB pie executable, x86-64, version
+  1 (SYSV), static-pie linked, not stripped`. `e_shnum` 35, ten program headers,
+  no `PT_INTERP`, no `PT_NOTE` (hence no build-id), zero `DT_NEEDED` entries.
+  The same shape every previous pass recorded.
+- **No host paths leak in.** `strings` finds zero occurrences of `/Users/mark`,
+  `claude-501`, `scratchpad`, the worktree name `wonderful-villani`, or the
+  context directory name `ctx-widened`.
+- **The shipped bytes are the audited bytes.** The runtime image's layer was
+  unpacked out of the OCI tar and its `/zero-indexer-shim` hashes to
+  `4143ce5f…`, `cmp`-identical to the exported binary.
+
+**Timings, and an honest note about them.** Build 1 took 2475 s wall clock and
+build 2 took 891 s, about 56 minutes for the pair, with `cargo fetch` at 11.6 s
+and 8.3 s. Cargo's own compile timer reported 40m58s and 14m41s, against the
+1m34s to 3m16s this recipe records everywhere else. That is host contention, not
+a recipe regression: `uptime` reported load averages above 29 for the whole of
+build 1 and 5.07 by the time build 2 finished, and the two builds produced
+identical bytes despite a 2.8x spread in how long they took. Note the difference
+from the outlier recorded under the first re-baseline, where wall clock blew out
+to 33m while cargo's internal timer stayed at 2m15s: there the container was
+fine and the host was thrashing around it, here the container was itself
+CPU-starved throughout. Neither is a property of the build.
+
+**What is still owed, and it is the part that matters.** `4143ce5f…` has been
+built on **one** machine, under Rosetta, from a working-tree overlay. Both
+`62577649…` and `a9c19f2c…` were confirmed on independent x86_64 hardware before
+this document called them settled, and this value has not been. The confirming
+run is `.github/workflows/zeronym-shim-reproduce.yml` on the commit that lands
+this change, which runs `reproduce.sh` against the committed tree and compares it
+to `EXPECTED_SHA256`. Two outcomes, and both are informative:
+
+- **Green.** The overlay was faithful, the commit compiles to the published hash,
+  and the value stops being provisional. Delete the provisional caveat under
+  "Recorded hashes" and record the run URL here, beside the two already recorded
+  under "What is proven, and what is not".
+- **Red.** The overlay was not faithful and something reached the compiler that
+  this section says did not. **The CI value is right and this table is wrong.**
+  Re-baseline to the CI value rather than arguing with the runner, and work out
+  which input the overlay missed, because that is a hole in `assemble.sh`'s
+  model of what a build input is.
+
+**One consequence to expect before the commit lands.** `EXPECTED_SHA256` now
+holds `4143ce5f…` while `HEAD` still compiles `62577649…`, so running
+`reproduce.sh` in this working tree **fails right now**, and that is the correct
+reading rather than a regression. It is strictly more useful than the state this
+replaced: with the old value the script passed while describing code that had
+already been rewritten, which is the "confirmed for the wrong tree" case named
+under "What is proven, and what is not". A red run here means "you have not
+committed yet", and it goes green with the commit.
+
+### Re-baseline, 2026-08-01 (first): the classifier predicate changed
+
+> Superseded. This section attests `62577649…` and the predicate
+> `orchard_value_balance > 0`, which the widening above replaces. The recipe
+> facts in it (control build, mtime and context-path independence, the
+> five-cold-build pass) all still hold.
 
 **Why the hash moved.** The turnstile predicate became
 `is_orchard_exit(tx) := orchard_value_balance > 0`, dropping the `V6` and
@@ -455,14 +714,22 @@ OCI manifest:   sha256:33c0f4f12bdeb9b47f77d5cea7e479c2bddc6ef7067e790072115221d
 two OCI tars.
 
 **It is the new classifier, checked rather than assumed.** A hash that changes is
-not by itself evidence that it changed for the stated reason, so:
+not by itself evidence that it changed for the stated reason, so, *as measured at
+the time on the first-predicate binary*:
 
-- The new binary contains the new operator-visible log strings (`an Orchard
+- That binary contains the then-new operator-visible log strings (`an Orchard
   exit, value LEAVING the Orchard pool`, and `moved no value out of Orchard`),
   one occurrence each.
-- It contains **zero** occurrences of the old `value leaving Orchard and
-  entering Ironwood`, which the control binary from `HEAD` does contain. The two
-  binaries are distinguishable by inspection, not only by digest.
+- It contains **zero** occurrences of the older `value leaving Orchard and
+  entering Ironwood`, which the control binary from `HEAD` at the time does
+  contain. The two binaries are distinguishable by inspection, not only by
+  digest.
+
+> Both of those strings are **gone from the source** as of the widening. They are
+> what an auditor should expect to find in `62577649…` and to find zero of in
+> `4143ce5f…`, which was measured and holds: see the string-check table under
+> "Re-baseline, 2026-08-01 (second)". Do not read this pair of bullets as a claim
+> about the current `src/`.
 
 **The usual not-for-a-stupid-reason checks, re-run on the new binary:**
 
@@ -628,8 +895,11 @@ of `deploy/` were in play across them (this README changed between builds). The
 binary hash did not move. So committing this directory will not re-baseline
 anything, which is the sort of thing that is easy to assume and cheap to check.
 
-`cargo test --locked` passed 56 tests **at that time**; the current tree passes
-59, because the predicate change brought its own tests. `git status --porcelain
+`cargo test --locked` passed 56 tests **at that time**. Do not read that as a
+current figure; it has now gone stale twice, because each predicate change
+brought its own tests with it. The invariant worth recording is that the suite
+passes with **one** ignored test, `regenerate_fixtures`, which rewrites
+`tests/fixtures/` and is meant to be run explicitly. `git status --porcelain
 zebra/ zaino/` is empty after every build and after the host test run.
 
 Timings for this pass, cold, on the same arm64 Mac under Rosetta: `cargo fetch`
@@ -649,10 +919,12 @@ above.
   sessions, has landed on the hash implied by its own source: `a9c19f2c…` for
   the old classifier (every build up to and including the 2026-08-01 control),
   `c6b7738f…` for the uncommitted working-tree overlay (five builds, three
-  contexts, superseded, see the post-mortem under "Recorded hashes"), and
-  `62577649…` for the committed new classifier. Vendored subtrees untouched
-  (`git status --porcelain zebra/ zaino/` empty after every build).
-  The binary runs and is a real 4.2 MB static-PIE executable, not a stub.
+  contexts, superseded, see the post-mortem under "Recorded hashes"),
+  `62577649…` for the committed `orchard_value_balance > 0` classifier, and
+  `4143ce5f…` for the widened presence predicate (two cold builds, one context,
+  one host). Vendored subtrees untouched (`git status --porcelain zebra/ zaino/`
+  empty after every build). The binary runs and is a real 4.2 MB static-PIE
+  executable, not a stub.
 - **Proven: the hash tracks the source.** A change to the compiled predicate
   moved the published hash, and a control build of the unchanged tree in the
   same session did not. The recipe is therefore sensitive to what it is supposed
@@ -696,6 +968,14 @@ above.
   as history.
   Not measured: OCI **image digest** agreement across machines. Only the binary
   was compared.
+- **Not yet proven for the current hash: anything beyond one host.**
+  `4143ce5f…`, the widened presence predicate, has two cold builds behind it on
+  one arm64 Mac under Rosetta, from a working-tree overlay rather than a commit.
+  Cross-machine agreement, native-x86_64 agreement and the CI comparison against
+  `EXPECTED_SHA256` are all still owed for this value, and the bullet above
+  describes the state of the *previous* one. Until that run is green, treat
+  `4143ce5f…` as provisional; see "Re-baseline, 2026-08-01 (second)" for what
+  each outcome means.
 - **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
@@ -708,18 +988,31 @@ above.
   zeronym/shim/deploy/reproduce.sh`) on a clean machine that had never seen this
   repository, reaching the hash recorded at that time. A hash nobody else can
   recompute would be unfalsifiable, which is the opposite of the point.
-- **Not currently true, and temporary: `reproduce.sh` passes.** It will FAIL
-  against `EXPECTED_SHA256` for as long as the predicate change sits
-  uncommitted, because it builds `git archive HEAD` and `HEAD` is still the old
-  classifier. That is the documented, expected state described under "Recorded
-  hashes", not a regression, and it clears the moment the change is committed.
-- **Not currently true either: `EXPECTED_SHA256` is the hash of the current
-  tree.** A later review pass changed `src/proxy.rs`, which is compiled, so the
-  published value is the hash of the content-pinned snapshot recorded under
-  "Recorded hashes" rather than of what is on disk now. The commit-time
-  `reproduce.sh` run therefore **re-baselines** the published hash; it does not
-  confirm it. Everything above about the recipe is unaffected: no base digest,
-  flag or script moved, only source did.
+- **An invariant, not a snapshot: `EXPECTED_SHA256` is the hash of `HEAD`, never
+  of your working tree.** Every script here builds `git archive HEAD`, so an
+  uncommitted change under `src/`, or to `Cargo.toml` or `Cargo.lock`, is simply
+  absent from the build and `reproduce.sh` will pass while describing code you
+  did not change. The two states that follow from that are worth naming
+  separately, because they look identical from the outside and mean opposite
+  things:
+  - `reproduce.sh` **passes** and `HEAD` has no pending compiled change: the
+    published hash is confirmed. This is the steady state.
+  - `reproduce.sh` **passes** and a compiled change is sitting in the working
+    tree: the published hash is confirmed *for the wrong tree*. The commit-time
+    run then **re-baselines** the published value rather than confirming it, and
+    `EXPECTED_SHA256` must move in that same commit. `git status --porcelain
+    zeronym/shim/src zeronym/shim/Cargo.toml zeronym/shim/Cargo.lock` is the
+    check that tells the two apart.
+  - `reproduce.sh` **fails** and a compiled change is sitting in the working
+    tree, with `EXPECTED_SHA256` already re-baselined ahead of the commit: the
+    published value describes the tree you are about to commit, not `HEAD`. This
+    is the state as of 2026-08-01 for the widened predicate, and it is
+    deliberate; see "Re-baseline, 2026-08-01 (second)". It resolves the moment
+    the change is committed, and it is preferable to the case above, which is
+    silent.
+  A red `reproduce.sh` after a commit that touched compiled source is the
+  tripwire working, and it has already caught one drifted hash on its first live
+  test.
 
 ## Reproducing this yourself
 
@@ -728,12 +1021,15 @@ recompute the hash. Nothing else is needed: no network beyond the base-image
 pull and `cargo fetch`, no toolchain install, no protoc, and no bash (the
 scripts are POSIX sh and run under dash).
 
-> **Read the provenance caveat under "Recorded hashes" first.** As of
-> 2026-08-01 the source of the published hash is not committed, so this
-> procedure reproduces `a9c19f2c…` (the previous classifier) and reports a FAIL
-> against `EXPECTED_SHA256`. Nothing is broken; there is simply no commit to
-> check out yet. Everything below becomes true again as soon as the predicate
-> change lands.
+> **Read the provenance note under "Recorded hashes" first.** This procedure
+> reproduces whatever the commit you check out compiles, and compares it to that
+> commit's `EXPECTED_SHA256`. At a commit whose compiled source matches its
+> published hash it passes, and that is the steady state. Two commits reproduce
+> older values on purpose: `ad20158cde` and `2243adbdce` both compile
+> `62577649…`, the superseded `orchard_value_balance > 0` predicate, because the
+> widening had not been committed yet. The one case where a PASS means nothing is
+> a commit whose classifier change is still sitting in a working tree, since
+> `git archive HEAD` cannot see it.
 
 ```sh
 git clone https://github.com/ShieldedLabs/zero && cd zero

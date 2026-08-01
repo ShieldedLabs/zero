@@ -6,7 +6,7 @@
 #   ./demo.sh HOST:PORT       live demo in front of a real lightwalletd or Zaino.
 #
 # The offline demo stands up a stub indexer, puts a real shim in front of it,
-# and sends six calls through, so you see the classifier's verdicts and the
+# and sends eight calls through, so you see the classifier's verdicts and the
 # proxy's log lines without a node, a chain, or grpcurl. It then runs the test
 # suite, which is where the transparency properties are actually asserted.
 #
@@ -36,12 +36,17 @@ note() { printf '   %s\n' "$1"; }
 run_offline() {
     rule "1/2  The shim, end to end, with a stub indexer behind it"
     note "cargo run --example shim_demo"
-    note "Six calls: an Orchard exit into Ironwood, an Orchard exit with NO"
-    note "Ironwood bundle (the case the old predicate passed through in the"
-    note "clear, watch for MIGRATION on a line reading ironwood_vb=+0), a real"
-    note "transparent tx, garbage, a compressed body, and one ordinary proxied"
-    note "method. Watch the zis::classify verdicts. All six are forwarded: this"
-    note "PoC does not divert."
+    note "Eight calls. The predicate is the presence of Orchard actions, so the"
+    note "first three are all MIGRATION: Orchard into Ironwood, Orchard with NO"
+    note "Ironwood bundle, and Orchard netting to exactly zero. That last one is"
+    note "the case the old exit predicate passed through in the clear: watch for"
+    note "MIGRATION on a line reading orchard_vb=+0. Then the boundary in the"
+    note "other direction, an Ironwood-only tx (passthrough on a line reading"
+    note "orchard_actions=0, because Ironwood is the new pool where ordinary"
+    note "time-sensitive commerce lives), a real transparent tx, garbage, a"
+    note "compressed body, and one ordinary proxied method. Watch the"
+    note "zis::classify verdicts. All eight are forwarded: this PoC does not"
+    note "divert."
     echo
     cargo run --quiet --example shim_demo
 
@@ -111,7 +116,7 @@ run_live() {
     echo
     grpc_call "$LISTEN" GetLightdInfo '{}'
 
-    rule "2/3  SendTransaction carrying a real V6 Orchard exit (into Ironwood)"
+    rule "2/3  SendTransaction carrying a real V6 that carries Orchard actions"
     note "This is the intercepted path. The shim decodes the body, classifies it,"
     note "logs MIGRATION, and then forwards it anyway (non-destructive PoC)."
     note "The fixture is a synthetic transaction, so your node will reject it."

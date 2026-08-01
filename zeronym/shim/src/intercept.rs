@@ -237,6 +237,8 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
             Class::Migration => tracing::info!(
                 target: "zis::classify",
                 version = %evidence.version,
+                // The deciding fact, first on the line.
+                orchard_actions = evidence.orchard_actions,
                 orchard_vb = %format!("{:+}", evidence.orchard_vb),
                 ironwood_vb = %format!("{:+}", evidence.ironwood_vb),
                 sapling_vb = %format!("{:+}", evidence.sapling_vb),
@@ -245,15 +247,17 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 outputs = evidence.outputs,
                 tx_len = evidence.len,
                 diverted_in_production,
-                // orchard_vb is the predicate; ironwood_vb rides along as
-                // evidence of where the value went, and gates nothing.
-                "MIGRATION detected: an Orchard exit, value LEAVING the Orchard pool \
-                 for any destination (this PoC still forwards it; production diverts \
-                 it to the hub)"
+                // orchard_actions is the predicate; the value balances ride
+                // along as evidence and gate nothing. orchard_vb=+0 on a line
+                // that says MIGRATION is the case Zooko's widening added.
+                "MIGRATION detected: the transaction carries Orchard actions, so it is \
+                 diverted whatever its Orchard value balance (this PoC still forwards \
+                 it; production diverts it to the hub)"
             ),
             Class::PassThrough => tracing::info!(
                 target: "zis::classify",
                 version = %evidence.version,
+                orchard_actions = evidence.orchard_actions,
                 orchard_vb = %format!("{:+}", evidence.orchard_vb),
                 ironwood_vb = %format!("{:+}", evidence.ironwood_vb),
                 sapling_vb = %format!("{:+}", evidence.sapling_vb),
@@ -262,7 +266,7 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 outputs = evidence.outputs,
                 tx_len = evidence.len,
                 diverted_in_production,
-                "passthrough: SendTransaction moved no value out of Orchard"
+                "passthrough: SendTransaction carries no Orchard actions"
             ),
             Class::Unparseable => tracing::warn!(
                 target: "zis::classify",
@@ -341,13 +345,17 @@ impl Body for ReplayBody {
 mod tests {
     use super::*;
 
-    /// A real V6 Orchard exit: Orchard(+250_000), Ironwood(-240_000). Same
-    /// fixture the classifier's own vector tests use.
+    /// A real V6 carrying Orchard actions: Orchard(+250_000),
+    /// Ironwood(-240_000). Same fixture the classifier's own vector tests use.
     const V6_MIGRATION: &[u8] = include_bytes!("../tests/fixtures/v6_migration.bin");
 
-    /// The same shape reversed: Orchard(-250_000), Ironwood(+240_000). Value
-    /// enters Orchard rather than leaving it, so it is not an Orchard exit.
+    /// The same shape reversed: Orchard(-250_000), Ironwood(+240_000). The
+    /// Orchard actions are still there, so the verdict is unchanged.
     const V6_REVERSE: &[u8] = include_bytes!("../tests/fixtures/v6_reverse.bin");
+
+    /// V6 with an Ironwood bundle and NO Orchard bundle: ordinary commerce in
+    /// the new pool, and the pass-through case at this layer.
+    const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_ironwood_only.bin");
 
     /// Wrap transaction bytes in a `RawTransaction` inside a gRPC length prefix,
     /// the way a wallet's gRPC client does.
@@ -380,12 +388,22 @@ mod tests {
     }
 
     #[test]
-    fn a_framed_non_migration_is_a_pass_through() {
-        // The same transaction shape in reverse: value entering Orchard, so no
-        // value left the pool and there is nothing to divert.
-        let inspection = inspect(&HeaderMap::new(), &framed(V6_REVERSE));
+    fn a_framed_ironwood_only_transaction_is_a_pass_through() {
+        // No Orchard bundle, so nothing about legacy Orchard holdings is on the
+        // wire and the transaction is forwarded. This is ordinary commerce in
+        // the new pool, which the widened rule must not swallow.
+        let inspection = inspect(&HeaderMap::new(), &framed(V6_IRONWOOD_ONLY));
         assert_eq!(classified(&inspection), Class::PassThrough);
         assert!(!inspection.treat_as_migration());
+    }
+
+    #[test]
+    fn a_framed_orchard_bundle_is_a_migration_whichever_way_its_balance_points() {
+        // Same fixture pair, opposite Orchard value balances, one verdict. The
+        // sign stopped mattering when the predicate became presence of actions.
+        let inspection = inspect(&HeaderMap::new(), &framed(V6_REVERSE));
+        assert_eq!(classified(&inspection), Class::Migration);
+        assert!(inspection.treat_as_migration());
     }
 
     #[test]
