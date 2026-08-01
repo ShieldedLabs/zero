@@ -17,7 +17,7 @@
 # The binary under audit is the one recorded in deploy/EXPECTED_SHA256, built
 # from the same commit this deploy repo was assembled from.
 
-enclave "zeronym-shim" {
+enclave "__ENCLAVE_NAME__" {
   build {
     # Assembled by assemble-caution.sh, which copies it out of the
     # `git archive HEAD` context rather than the working tree, so the recipe is
@@ -59,8 +59,8 @@ enclave "zeronym-shim" {
     # parse), so the enclave never resolves DNS and cannot be redirected by a
     # poisoned answer. Update the CIDR here whenever the backend IP changes.
     egress {
-      cidr_ipv4   = "15.152.68.236/32"
-      port        = 8137
+      cidr_ipv4   = "__BACKEND_CIDR__"
+      port        = __BACKEND_PORT__
       ip_protocol = "tcp"
     }
   }
@@ -78,8 +78,9 @@ enclave "zeronym-shim" {
       # enclave would accept only connections that cannot exist.
       ZIS_LISTEN = "0.0.0.0:8137"
 
-      # The backing indexer. Currently the attested testnet zebra+zaino
-      # enclave, which means both ends of this hop are attested workloads.
+      # The backing indexer: one of Shielded Labs' own nodes, reached at the
+      # cluster's load-balancer IP on a per-backend port (zaino and lightwalletd
+      # each get their own shim, so each enclave points at exactly one).
       #
       # Unlike ZEBRA_* and ZAINO_*, this prefix is safe to set here: ZIS_ is
       # the shim's own clap env namespace and these two names are the whole of
@@ -88,7 +89,7 @@ enclave "zeronym-shim" {
       # the enclave into a reboot loop. The lesson was not "never use env
       # vars", it was "never hand a binary a variable in its own config
       # namespace that it does not define". These two it defines.
-      ZIS_BACKEND = "15.152.68.236:8137"
+      ZIS_BACKEND = "__BACKEND_ADDR__"
 
       # Default is `info`, which deliberately omits the per-request zis::proxy
       # line naming the method each wallet called. That line is exactly the

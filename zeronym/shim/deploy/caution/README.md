@@ -58,13 +58,29 @@ Assemble the deploy repository. This refuses to run against a dirty
 `zeronym/shim`, because it builds from `git archive HEAD` and would otherwise
 deploy something other than what you are looking at:
 
+One enclave fronts exactly one indexer, so each backend gets its own app. Both
+arguments are required rather than defaulted: a wrong backend yields an enclave
+that boots, serves, and quietly proxies for something nobody intended, which is
+worse than one that refuses to start.
+
 ```bash
-sh zeronym/shim/deploy/caution/assemble-caution.sh
+sh zeronym/shim/deploy/caution/assemble-caution.sh \
+  --name zeronym-shim-zaino --backend 66.42.124.202:8137
+sh zeronym/shim/deploy/caution/assemble-caution.sh \
+  --name zeronym-shim-lwd --backend 66.42.124.202:9067
 ```
 
-That writes `../zeronym-shim-enclave`: the build context, `caution.hcl`, a
-root `Containerfile` copied out of the commit-pinned context, and a `PROVENANCE`
-file recording the source commit and expected binary hash.
+`66.42.124.202` is the cluster load balancer; the port selects which indexer.
+`--backend` must be a literal IPv4 address and port, and the script rejects
+anything else, because `ZIS_BACKEND` parses as a `SocketAddr` and a hostname
+would not fail at assembly time but inside an enclave with no console.
+
+Each writes `../<name>/`: the build context, a rendered `caution.hcl`, a root
+`Containerfile` copied out of the commit-pinned context, and a `PROVENANCE` file
+recording the source commit, backend and expected binary hash. `caution.hcl` is
+rendered from `caution.hcl.tmpl` rather than hand-copied, so the egress `/32`
+and `ZIS_BACKEND` cannot drift apart; when they do, every dial fails and it
+looks like a shim bug rather than a firewall one.
 
 Then, from that directory. The first command is needed more often than you
 expect; the CLI session expires quietly and every other command then fails with
@@ -78,7 +94,7 @@ caution login --username <name> --qr
 authenticator and gives no hint that a phone-based FIDO2 flow exists.
 
 ```bash
-caution apps create --name zeronym-shim
+caution apps create --name <name>
 caution init <app-id>
 git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git
 git push caution main

@@ -14,15 +14,49 @@
 # dash on Debian and Ubuntu, dash has no `-o pipefail`, and a pipeline without
 # it hides the exit status of everything but the last command.
 #
-# Usage: sh zeronym/shim/deploy/caution/assemble-caution.sh [dest-dir]
+# Usage:
+#   sh .../assemble-caution.sh --name <enclave> --backend <ip:port> [dest-dir]
+#
+# One enclave fronts exactly one indexer, so each backend gets its own app and
+# its own assembled repo. Both arguments are required rather than defaulted: a
+# wrong backend produces an enclave that boots, serves, and quietly proxies for
+# something nobody intended, which is worse than one that fails to start.
 
 set -eu
 
 umask 022
 
+NAME=""
+BACKEND=""
+DEST=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--name)    NAME=$2; shift 2 ;;
+		--backend) BACKEND=$2; shift 2 ;;
+		-*) echo "unknown option: $1" >&2; exit 2 ;;
+		*)  DEST=$1; shift ;;
+	esac
+done
+
+[ -n "$NAME" ] || { echo "error: --name is required (e.g. zeronym-shim-zaino)" >&2; exit 2; }
+[ -n "$BACKEND" ] || { echo "error: --backend is required (e.g. 66.42.124.202:8137)" >&2; exit 2; }
+
+# ZIS_BACKEND parses as a Rust SocketAddr, so a hostname does not merely
+# degrade, it fails to parse and the enclave never starts. Catch that here,
+# where the error is readable, rather than inside an enclave with no console.
+BACKEND_IP=${BACKEND%:*}
+BACKEND_PORT=${BACKEND##*:}
+echo "$BACKEND_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
+	echo "error: --backend must be a literal IPv4 address and port, got '$BACKEND'." >&2
+	echo "       ZIS_BACKEND is a SocketAddr; a hostname will not parse." >&2
+	exit 2
+}
+echo "$BACKEND_PORT" | grep -qE '^[0-9]+$' || {
+	echo "error: --backend port '$BACKEND_PORT' is not numeric" >&2; exit 2; }
+
 ZERO_ROOT=$(git rev-parse --show-toplevel)
 HERE="$ZERO_ROOT/zeronym/shim/deploy/caution"
-DEST=${1:-"$(dirname "$ZERO_ROOT")/zeronym-shim-enclave"}
+DEST=${DEST:-"$(dirname "$ZERO_ROOT")/$NAME"}
 SHA=$(git -C "$ZERO_ROOT" rev-parse HEAD)
 SHORT=$(git -C "$ZERO_ROOT" rev-parse --short HEAD)
 
@@ -63,7 +97,26 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 	exit 1
 }
 
-cp "$HERE/caution.hcl" "$DEST/caution.hcl"
+# Render the enclave definition. The committed file is a template because the
+# only things that vary between the zaino shim and the lightwalletd shim are the
+# name and the backend, and hand-editing two near-identical copies is how the
+# egress CIDR ends up disagreeing with ZIS_BACKEND: the enclave would then boot,
+# fail every dial, and look like a shim bug rather than a firewall one.
+sed \
+	-e "s|__ENCLAVE_NAME__|$NAME|g" \
+	-e "s|__BACKEND_ADDR__|$BACKEND|g" \
+	-e "s|__BACKEND_CIDR__|$BACKEND_IP/32|g" \
+	-e "s|__BACKEND_PORT__|$BACKEND_PORT|g" \
+	"$HERE/caution.hcl.tmpl" > "$DEST/caution.hcl"
+
+# No placeholder may survive. An unsubstituted token would be pushed as literal
+# HCL and rejected by Caution's parser at build time, minutes later and with a
+# message that does not mention this script.
+if grep -q '__[A-Z_]*__' "$DEST/caution.hcl"; then
+	echo "error: unsubstituted placeholder left in caution.hcl:" >&2
+	grep -n '__[A-Z_]*__' "$DEST/caution.hcl" >&2
+	exit 1
+fi
 
 # Record what this was built from, inside the repo that gets pushed. The whole
 # deploy argues that a particular commit is running in the enclave; that claim
@@ -71,8 +124,9 @@ cp "$HERE/caution.hcl" "$DEST/caution.hcl"
 # history somewhere.
 EXPECTED=$(cat "$ZERO_ROOT/zeronym/shim/deploy/EXPECTED_SHA256" 2>/dev/null || echo "unrecorded")
 cat > "$DEST/PROVENANCE" <<EOF
-zero-indexer-shim Caution enclave
+zero-indexer-shim Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
+backend:         $BACKEND
 source commit:   $SHA
 expected binary: $EXPECTED
 
@@ -97,7 +151,7 @@ echo "==> assembled: $DEST ($(du -sh "$DEST" | cut -f1))"
 echo
 echo "Next, from $DEST:"
 echo "  caution login --username <name> --qr     # FIDO2; session expires often"
-echo "  caution apps create --name zeronym-shim  # NEW app; do not reuse the z3 node's"
+echo "  caution apps create --name '"$NAME"'"
 echo "  caution init <app-id>"
 echo "  git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git"
 echo "  git push caution main"
