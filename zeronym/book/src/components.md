@@ -6,6 +6,18 @@ The concrete engineering designs for both TEE services. The shim and the hub are
 
 The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)), forwards all traffic to the operator's unmodified backing lwd, and isolates only **Orchard-exit** `SendTransaction`s (transactions moving value out of the Orchard pool, the class the code and the hub protocol still call a *migration*), which it routes over Nym to the hub.
 
+### Why a shim, not the whole indexer in a TEE
+
+An earlier plan put the entire indexer (a full Zebra node plus the indexer) inside the enclave, so the operator could see nothing at all. That is expensive: until the enclave platform ships disk support, it runs entirely in RAM at roughly 400 to 500 GB, on the order of $2,000 per operator per month, with about a four-day resync on every restart. That cost wall makes operator adoption unrealistic.
+
+The shim avoids it by being a thin router, not an indexer:
+
+- **Cheap and fast to restart.** No heavy chain state lives inside the TEE, so the RAM and cost wall disappears and restarts are quick.
+- **Base-agnostic.** It sits in front of whatever the operator already runs, sidestepping the lightwalletd-versus-Zaino question entirely for the near term.
+- **Deployable by the people who already run the infrastructure.** The roughly five to ten existing operators add the shim; users and wallets do not change their endpoint URL.
+
+In effect the shim realizes a scoped "decouple broadcast from query": the crossing broadcast is split off from the operator entirely and sent to a different counterparty, the hub, while queries still go to the operator's own backend, now blinded to the wallet's IP. [Trust and honest limits](./trust.md) covers why the enclave makes operator-blindness real and checkable rather than merely promised.
+
 ### PoC status
 
 A working proof of concept exists at `zeronym/shim` (commit `56394a1a54`): a transparent h2c gRPC reverse proxy that fronts an operator's existing indexer, forwards every method, stream and trailer verbatim, and decodes exactly one path (`SendTransaction`) to classify it with the real vendored `zebra-chain` parser and **log** the verdict. It is **non-destructive**: it still forwards migrations, it does not divert. Not built: diversion, the hub, Nym, STEVE, TLS/ACME, the enclave, attestation, the reproducible build. Everything in this chapter is the production **design** unless marked **(built)**.

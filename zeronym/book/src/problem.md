@@ -32,7 +32,7 @@ Migrations are the acute case for three compounding reasons:
 - **Mass:** a large population migrates, so the leak is broad rather than isolated.
 - **Concentrated:** the window is bounded, so many correlatable broadcasts land close together in time.
 
-The same properties make migrations the ideal thing to protect first: because they are mandatory, mass, and not time-sensitive, a large population of them can be batched together and published at once, which is exactly what the near-term system does (see [the introduction](./introduction.md)).
+The same properties make migrations the ideal thing to protect first: because they are mandatory, mass, and not time-sensitive, a large population of them can be batched together and published at once, which is exactly what the near-term system does (see [the architecture](./architecture.md)).
 
 ## Every turnstile crossing leaks
 
@@ -97,7 +97,7 @@ The reason is an **anchor-linkage attack**. A migration transaction commits to a
 
 So the protection is for **ZIP-318-like wallets whose users have opted out of Tor or Nym**, not for completely unmodified wallets. Coordinating this requirement with wallet authors, and aligning the hub's batch granularity to the granularity at which wallets pick anchors and expiries, are open items (see [review](./review.md)).
 
-## The query path: content passes through, requester IPs blinded
+## The query path: content passes through
 
 The near-term system does not hide query *content*. The following reach the operator's existing backend in the clear, exactly as today:
 
@@ -105,11 +105,19 @@ The near-term system does not hide query *content*. The following reach the oper
 - **Shields, and deshields that do not spend Orchard.** Crossings the classifier detects but does not batch (a shield is already privacy-positive because the transparent side is public; a deshield out of Ironwood or Sapling is time-sensitive commerce that reveals nothing about legacy Orchard funds), so their broadcast metadata leaks as today. A deshield **from Orchard** is batched, as above.
 - **All other broadcasts.** Transparent-to-transparent and pure intra-pool shielded payments are not crossings at all; they pass through instantly.
 
-The classifier is general, so the batched set is a policy knob that can widen later; near-term the batched set is exactly the transactions that move value out of Orchard.
+The classifier is general, so the batched set is a policy knob that can widen later; near-term the batched set is exactly the transactions that move value out of Orchard (see [the shim](./components.md) for the classifier).
 
-There is one query-path protection, and it is worth stating precisely. **The operator's indexer is blinded to requester IPs.** Because the shim proxies, every query reaches the operator's backing lwd from the shim, on the operator's own host, not from the wallet, so the operator's indexer logs no longer bind a source IP to a queried address. Because the shim is attested, "we do not log the IP" is verifiable rather than promised. This removes the passive, default IP-logging surface present in every lwd today.
+## What the attested edge protects
 
-The honest limit: the wallet's IP still reaches the operator's *host* at the TCP layer (on Nitro the parent proxies all network into the enclave), and attestation covers the shim, not the parent. So a bad-faith operator can still capture IPs at the network layer and timing-correlate them against the shim-sourced query stream to re-link IP to query. It is a verifiable removal of the *default* leak, not a guarantee against an *active* operator; closing that gap needs the wallet over Nym (Nym-aware wallets) or query-timing shaping. [Honest limits](./trust.md) owns the residual discussion; see also [the shim](./components.md) for the classifier.
+Two protections hold today, on top of the deployment primitive itself.
+
+**1. Migration broadcasts, fully** (and every other Orchard exit, which gets the same treatment). A migration's content is hidden from both the operator and the hub host, its source IP is unlinked, and its timing is broken: the strong, end-to-end guarantee, row by row in the table above. The one residual, that the operator can tell *that* one of its clients migrated but not the amount, is the next section.
+
+**2. The operator's indexer is blinded to requester IPs, by default and verifiably.** Because the shim proxies, every query reaches the operator's backing lwd from the shim, on the operator's own host, never from a wallet's IP, so the operator's indexer logs no longer bind a source IP to a queried address, the linkage that sits in every lwd's logs today by default. And because the shim is attested, "we do not log the IP" is a checkable property, not a promise. This removes the *passive* IP-logging surface, where most real-world risk lives: breaches, subpoenas, careless or sold logs.
+
+The honest boundary on protection 2: the wallet's IP still reaches the operator's *host* at the TCP layer (on Nitro the parent proxies all network into the enclave, and attestation covers the shim, not the parent). So a bad-faith operator can still capture IPs at the network layer and timing-correlate them against the shim-sourced query stream to re-link IP to query. It is a verifiable removal of the *default* leak, not a guarantee against an *active* operator; closing that gap needs the wallet over Nym (Nym-aware wallets) or query-timing shaping. [Honest limits](./trust.md) owns the residual discussion.
+
+Beyond the two, the front-end is **tamper-proof and verifiable**: a wallet or auditor can confirm it is talking to exactly the attested shim code, not an operator-controlled impostor (see [trust](./trust.md)). And it is the **deployment vehicle for the vision**: query shaping, all-broadcast privacy, and eventually PIR can be added to the same attested edge and reach the same drop-in wallets (see [the roadmap](./roadmap.md)).
 
 ## The residual: the operator learns *that* a client migrated
 

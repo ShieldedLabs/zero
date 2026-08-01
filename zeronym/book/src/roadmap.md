@@ -1,6 +1,6 @@
 # Roadmap
 
-The near-term shim + hub system is the first step toward a fuller private indexer, not the whole of it. See the [introduction](./introduction.md) for what ships now; this chapter is the horizon behind it, deferred until the migration fix lands.
+The near-term shim + hub system is the first step toward a fuller private indexer, not the whole of it. See [the architecture](./architecture.md) for what ships now; this chapter is the horizon behind it, deferred until the migration fix lands.
 
 ## The three-version vision
 
@@ -16,7 +16,7 @@ The ladder walks the trust root down: operator (V1), hardware manufacturer (V2),
 
 ## Where the near-term system sits: the zeroith step
 
-The [shim + hub system](./introduction.md) is not V1. The ladder is query privacy for the full indexer; the near-term system addresses what the ladder does not urgently cover, the turnstile-crossing **broadcast** leak, driven by the Orchard to Ironwood migration and its ~Aug 10 deadline. So it sits alongside and ahead of the ladder: the **zeroith step**. Why it is a step toward the vision, not a detour:
+The [shim + hub system](./architecture.md) is not V1. The ladder is query privacy for the full indexer; the near-term system addresses what the ladder does not urgently cover, the turnstile-crossing **broadcast** leak, driven by the Orchard to Ironwood migration and its ~Aug 10 deadline. So it sits alongside and ahead of the ladder: the **zeroith step**. Why it is a step toward the vision, not a detour:
 
 - **Same machinery, smaller surface.** It already uses Nym (only shim to hub) and an attested TEE (both the [shim and hub](./components.md) are Nitro enclaves), on a narrow, urgent, auditable problem first. Building them here de-risks the full indexer and vice versa: the V2 transport rehearsal directly de-risked the shim-to-hub tunnel and the shim/hub attestation.
 - **A deliberate 80% first step.** IP unlinking for the migration is the bulk of the practical privacy at stake in the acute window; query privacy, and the shield and non-Orchard deshield cases, are the remaining margin, which costs exponentially more to close.
