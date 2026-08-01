@@ -413,10 +413,13 @@ pub fn route_for(path: &str) -> Route {
         return Route::Intercept;
     }
 
-    // A single trailing slash is tolerated here, not because tonic accepts it
-    // (it answers UNIMPLEMENTED), but because normalizing it is one line and
-    // guessing wrong about a future backend is not recoverable.
-    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    // Trailing slashes are tolerated here, not because tonic accepts them (it
+    // answers UNIMPLEMENTED), but because normalizing them is one line and
+    // guessing wrong about a future backend is not recoverable. ANY number of
+    // them: stripping only one left `SendTransaction//` falling out of this arm
+    // into PassThrough, which is the fail-OPEN direction rule 3 forbids, in the
+    // one arm that exists to absorb exactly this class of mistake.
+    let trimmed = path.trim_end_matches('/');
     match trimmed.rsplit('/').next() {
         Some(last) if last.eq_ignore_ascii_case("sendtransaction") => Route::InterceptNearMiss,
         _ => Route::PassThrough,
@@ -632,6 +635,9 @@ mod tests {
             "/cash.z.wallet.sdk.rpc.CompactTxStreamer/sendtransaction",
             "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SENDTRANSACTION",
             "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction/",
+            // Two trailing slashes, and any number: normalizing only one used to
+            // drop this into PassThrough, unclassified.
+            "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction//",
             "/some.other.Service/SendTransaction",
         ] {
             assert_eq!(

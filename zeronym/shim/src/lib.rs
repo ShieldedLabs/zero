@@ -4,10 +4,10 @@
 //! An operator puts the shim in front of their existing lightwalletd or Zaino.
 //! Every CompactTxStreamer method, stream, and gRPC trailer is forwarded to the
 //! backing indexer unchanged. The single exception is `SendTransaction`, whose
-//! body is decoded and classified by [`classify`]. In production an
-//! Orchard -> Ironwood migration is diverted away from the operator's indexer;
-//! in this proof of concept the verdict is only logged, and the transaction is
-//! still forwarded.
+//! body is decoded and classified by [`classify`]. In production a transaction
+//! that moves value OUT of the Orchard pool, to any destination, is diverted
+//! away from the operator's indexer; in this proof of concept the verdict is
+//! only logged, and the transaction is still forwarded.
 //!
 //! Layering, smallest and highest-stakes first:
 //!

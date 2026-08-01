@@ -42,7 +42,7 @@ The migration is the acute driver, but the underlying leak is general. Any **tur
 - **Shield:** transparent input moving into a shielded pool.
 - **Migration:** shielded value moving from one shielded pool into a different shielded pool (Orchard to Ironwood).
 
-The shim's classifier detects **every** crossing. Near-term, the system isolates and protects only the migration case; deshields and shields pass straight through, because deshields are time-sensitive commerce and shields are already privacy-positive (the transparent side is public regardless). Treating the batched set as a policy knob, rather than hardcoding "migration," means the protected set can widen later without re-architecting. Deshield and shield crossings exist on mainnet today, independent of Ironwood, so the leak is real for current mainnet traffic, not only for the future migration.
+The shim's classifier detects **every** crossing, but what it isolates is drawn by pool, not by crossing shape: near-term it protects every transaction moving value **out of Orchard**, and everything else passes straight through. So an Orchard-to-transparent deshield is batched exactly like an Orchard-to-Ironwood migration, because after NU6.3 closes Orchard to new value both reveal the same fact, that this IP controls legacy Orchard funds ([the shim](./components.md) has the predicate and the argument). Shields, and deshields out of any other pool, pass through: a shield is privacy-positive already (the transparent side is public regardless), and a non-Orchard deshield is time-sensitive commerce that says nothing about legacy Orchard holdings. The batched set is a policy knob rather than a hardcoded shape, so it can widen later without re-architecting. Deshield and shield crossings exist on mainnet today, independent of Ironwood, so the leak is real for current mainnet traffic, not only for the future migration.
 
 The all-hands judgment was that IP protection for the migration broadcast is the bulk of the practical privacy at stake right now; query privacy is the deferred vision (see [the roadmap](./roadmap.md)).
 
@@ -102,10 +102,10 @@ So the protection is for **ZIP-318-like wallets whose users have opted out of To
 The near-term system does not hide query *content*. The following reach the operator's existing backend in the clear, exactly as today:
 
 - **All queries.** Which addresses or block ranges a wallet looks up still goes straight to the operator's backend. The ZIP 307 query-content leak is not closed near-term; it is the deferred vision (see [the roadmap](./roadmap.md)).
-- **Deshields and shields.** Turnstile crossings the classifier detects but does not batch near-term (a deshield is time-sensitive commerce; a shield is already privacy-positive because the transparent side is public), so their broadcast metadata leaks as today.
+- **Shields, and deshields that do not spend Orchard.** Crossings the classifier detects but does not batch (a shield is already privacy-positive because the transparent side is public; a deshield out of Ironwood or Sapling is time-sensitive commerce that reveals nothing about legacy Orchard funds), so their broadcast metadata leaks as today. A deshield **from Orchard** is batched, as above.
 - **All other broadcasts.** Transparent-to-transparent and pure intra-pool shielded payments are not crossings at all; they pass through instantly.
 
-The classifier is general, so the batched set is a policy knob that can widen later; near-term only the migration case is isolated and batched.
+The classifier is general, so the batched set is a policy knob that can widen later; near-term the batched set is exactly the transactions that move value out of Orchard.
 
 There is one query-path protection, and it is worth stating precisely. **The operator's indexer is blinded to requester IPs.** Because the shim proxies, every query reaches the operator's backing lwd from the shim, on the operator's own host, not from the wallet, so the operator's indexer logs no longer bind a source IP to a queried address. Because the shim is attested, "we do not log the IP" is verifiable rather than promised. This removes the passive, default IP-logging surface present in every lwd today.
 

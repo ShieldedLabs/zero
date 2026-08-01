@@ -20,11 +20,14 @@
 
 use zebra_chain::{
     amount::{Amount, NegativeAllowed},
-    ironwood,
+    block, ironwood,
     orchard::{Flags, ShieldedDataV6},
     parameters::NetworkUpgrade,
     serialization::ZcashSerialize,
-    transaction::arbitrary::{fake_v6_orchard_shielded_data, fake_v6_transaction},
+    transaction::{
+        arbitrary::{fake_v6_orchard_shielded_data, fake_v6_transaction},
+        LockTime, Transaction,
+    },
 };
 use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 
@@ -32,7 +35,7 @@ use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 ///
 /// Sign convention, the whole point of the predicate: a POSITIVE balance is
 /// value LEAVING that pool, a NEGATIVE balance is value ENTERING it. So an
-/// Orchard -> Ironwood migration is `orchard > 0` and `ironwood < 0`.
+/// Orchard exit is `orchard > 0`, whatever the Ironwood balance is.
 ///
 /// `ironwood_zats: None` omits the Ironwood bundle entirely.
 fn v6_bytes(orchard_zats: i64, ironwood_zats: Option<i64>) -> Vec<u8> {
@@ -62,8 +65,35 @@ fn v6_bytes(orchard_zats: i64, ironwood_zats: Option<i64>) -> Vec<u8> {
         .expect("v6 transaction serializes")
 }
 
+/// Real V5 wire bytes carrying an Orchard bundle with the given value balance.
+///
+/// V5 is where Orchard bundles first appeared, and a V5 Orchard spend leaks the
+/// same fact as a V6 one, so the classifier must catch it with no version guard
+/// to help it. Built by constructing the variant directly, because zebra-chain's
+/// arbitrary helpers only offer a V6 constructor; the Orchard bundle helper is
+/// shared, since V6 wraps the same `orchard::ShieldedData` this takes.
+fn v5_orchard_bytes(orchard_zats: i64) -> Vec<u8> {
+    let orchard_vb: Amount<NegativeAllowed> = orchard_zats.try_into().expect("valid amount");
+
+    Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        sapling_shielded_data: None,
+        orchard_shielded_data: Some(fake_v6_orchard_shielded_data(
+            Flags::ENABLE_SPENDS | Flags::ENABLE_OUTPUTS,
+            orchard_vb,
+            1,
+        )),
+    }
+    .zcash_serialize_to_vec()
+    .expect("v5 transaction serializes")
+}
+
 #[test]
-fn generated_migration_is_classified_as_migration() {
+fn generated_orchard_exit_into_ironwood_is_a_migration() {
     let bytes = v6_bytes(250_000, Some(-240_000));
     let evidence = classify_with_evidence(&bytes);
     println!("{evidence:?}");
@@ -75,49 +105,82 @@ fn generated_migration_is_classified_as_migration() {
 }
 
 #[test]
-fn generated_shield_and_deshield_shapes_are_pass_through() {
-    // Shield-shaped: value enters Orchard, leaves Ironwood. Wrong direction.
+fn every_orchard_exit_is_a_migration_whatever_the_destination() {
+    // The destination pool does not gate the verdict. Each of these moves value
+    // out of a pool that NU6.3 closed to new value, which is the identifying
+    // event, and each one used to pass through in the clear.
+
+    // Out to transparent or Sapling: no Ironwood bundle at all.
+    assert_eq!(classify(&v6_bytes(250_000, None)), Class::Migration);
+
+    // Out of Orchard and out of Ironwood in the same transaction, landing
+    // somewhere transparent or Sapling.
+    assert_eq!(
+        classify(&v6_bytes(250_000, Some(240_000))),
+        Class::Migration
+    );
+
+    // Into Ironwood, the original migration shape.
+    assert_eq!(
+        classify(&v6_bytes(250_000, Some(-240_000))),
+        Class::Migration
+    );
+}
+
+#[test]
+fn a_v5_orchard_spend_is_a_migration() {
+    // The version guard is gone, and this is why it can be. zebra-chain's
+    // orchard_value_balance() reads orchard_shielded_data(), which is
+    // version-agnostic, so a pre-Ironwood V5 Orchard spend is caught by exactly
+    // the same predicate. Under the old `tx.version == V6` conjunct this was a
+    // PassThrough.
+    let evidence = classify_with_evidence(&v5_orchard_bytes(250_000));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::Migration);
+    assert_eq!(evidence.version, "V5");
+    assert_eq!(evidence.orchard_vb, 250_000);
+    assert_eq!(evidence.ironwood_vb, 0, "a V5 has no Ironwood bundle");
+}
+
+#[test]
+fn value_entering_orchard_is_pass_through() {
+    // Consensus-invalid post-NU6.3 and kept as a directionality probe: nothing
+    // left the Orchard pool, so nothing was revealed about legacy holdings.
     assert_eq!(
         classify(&v6_bytes(-250_000, Some(240_000))),
         Class::PassThrough
     );
-
-    // Deshield-shaped: value leaves Orchard, no Ironwood bundle at all.
-    assert_eq!(classify(&v6_bytes(250_000, None)), Class::PassThrough);
-
-    // Both pools losing value: not a turnstile crossing.
-    assert_eq!(
-        classify(&v6_bytes(250_000, Some(240_000))),
-        Class::PassThrough
-    );
-
-    // Both pools gaining value.
     assert_eq!(
         classify(&v6_bytes(-250_000, Some(-240_000))),
         Class::PassThrough
     );
+    assert_eq!(classify(&v5_orchard_bytes(-250_000)), Class::PassThrough);
 }
 
 #[test]
-fn a_fee_sized_migration_still_classifies() {
-    // The predicate is sign-based, not magnitude-based: a one-zatoshi crossing
-    // is as much a migration as a large one.
-    let bytes = v6_bytes(1, Some(-1));
-    assert_eq!(classify(&bytes), Class::Migration);
+fn a_fee_sized_orchard_exit_still_classifies() {
+    // The predicate is sign-based, not magnitude-based: a one-zatoshi withdrawal
+    // from a closed pool is as identifying as a large one.
+    assert_eq!(classify(&v6_bytes(1, Some(-1))), Class::Migration);
+    assert_eq!(classify(&v6_bytes(1, None)), Class::Migration);
 }
 
 #[test]
-fn zero_orchard_balance_is_the_known_predicate_boundary() {
-    // Documented, deliberate behaviour, not an accident. The locked predicate
-    // requires orchard_value_balance STRICTLY > 0, so a V6 transaction that
-    // nets its Orchard balance to exactly zero while value enters Ironwood
-    // classifies as PassThrough. Spending an Orchard note always yields a
-    // positive Orchard balance, so this shape should not occur in practice, but
-    // it is the one false-negative path in the predicate and it is an open
-    // question for the design owners. If the predicate is ever widened to
-    // `>= 0`, this test is the thing that must change with it.
-    let bytes = v6_bytes(0, Some(-240_000));
-    assert_eq!(classify(&bytes), Class::PassThrough);
+fn zero_orchard_balance_is_correctly_a_pass_through() {
+    // Under Zooko's rule the risk is that value LEFT the Orchard pool; an
+    // Orchard bundle that nets to exactly zero moved no value out of it (pure
+    // same-receiver change, which is still possible post-NU6.3 because Orchard
+    // is closed to new VALUE, not to activity). Whatever entered Ironwood
+    // alongside it came from transparent or Sapling. So this is the behaviour
+    // the ruling's criterion specifies, and this test pins it.
+    //
+    // It is not a claim that the case leaks nothing: a net-zero bundle can
+    // still spend legacy notes and publish their nullifiers. Whether the
+    // predicate should widen to cover that is Zooko's call, open in the shim
+    // README, and it would change this expectation if he says yes.
+    assert_eq!(classify(&v6_bytes(0, Some(-240_000))), Class::PassThrough);
+    assert_eq!(classify(&v6_bytes(0, None)), Class::PassThrough);
 }
 
 #[test]

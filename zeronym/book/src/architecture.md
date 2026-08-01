@@ -1,6 +1,6 @@
 # Architecture
 
-The [zero-indexer-shim and zero-indexer-hub](./components.md) system that stops Orchard to Ironwood **migration** transactions from leaking a user's IP. See [introduction](./introduction.md) and [trust](./trust.md) for context. Two diagrams: the data flow, then the trust / verification plane (kept separate for readability).
+The [zero-indexer-shim and zero-indexer-hub](./components.md) system that stops **Orchard exits**, any transaction moving value out of the Orchard pool (typically but not only the Orchard to Ironwood migration), from leaking a user's IP. See [introduction](./introduction.md) and [trust](./trust.md) for context. Two diagrams: the data flow, then the trust / verification plane (kept separate for readability).
 
 ---
 
@@ -100,7 +100,7 @@ flowchart TB
   style WAL fill:#e8eefc,stroke:#2563eb;
 ```
 
-**Reading it:** thin arrows = the **pass-through path** (all queries and all non-migration txs), which go to the operator's unmodified backing lwd as **plaintext the operator can read**, exactly as today. Thick arrows = the **migration path**: encrypted end to end and **never touches the backing lwd**. Green = attested enclave processes (the only things that ever see migration cleartext); red = untrusted host processes / sidecars (they see only ciphertext on the migration path); gray = external networks; blue = the drop-in wallet.
+**Reading it:** *migration* in both diagrams is the code's label for the diverted class, which is every **Orchard exit**, any transaction taking value out of the Orchard pool whatever its destination ([the shim](./components.md) has the predicate). Thin arrows = the **pass-through path** (all queries and all non-migration txs), which go to the operator's unmodified backing lwd as **plaintext the operator can read**, exactly as today. Thick arrows = the **migration path**: encrypted end to end and **never touches the backing lwd**. Green = attested enclave processes (the only things that ever see migration cleartext); red = untrusted host processes / sidecars (they see only ciphertext on the migration path); gray = external networks; blue = the drop-in wallet.
 
 **Three nested encryption layers on the migration (shim to hub) path**, so only the two attested enclaves ever see cleartext:
 1. **Inner:** the tx is encrypted to the **hub key** at the classifier (survives a compromised Nym client or host).

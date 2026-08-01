@@ -4,13 +4,13 @@ The concrete engineering designs for both TEE services. The shim and the hub are
 
 ## The zero-indexer-shim (ZIS)
 
-The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)), forwards all traffic to the operator's unmodified backing lwd, and isolates only **migration** `SendTransaction`s, which it routes over Nym to the hub.
+The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)), forwards all traffic to the operator's unmodified backing lwd, and isolates only **Orchard-exit** `SendTransaction`s (transactions moving value out of the Orchard pool, the class the code and the hub protocol still call a *migration*), which it routes over Nym to the hub.
 
 ### PoC status
 
 A working proof of concept exists at `zeronym/shim` (commit `56394a1a54`): a transparent h2c gRPC reverse proxy that fronts an operator's existing indexer, forwards every method, stream and trailer verbatim, and decodes exactly one path (`SendTransaction`) to classify it with the real vendored `zebra-chain` parser and **log** the verdict. It is **non-destructive**: it still forwards migrations, it does not divert. Not built: diversion, the hub, Nym, STEVE, TLS/ACME, the enclave, attestation, the reproducible build. Everything in this chapter is the production **design** unless marked **(built)**.
 
-**What it proves, tested rather than asserted** (56 passing tests, plus one ignored by design, the fixture regenerator; the indexer behind them is a hand-rolled h2c mock and a real tonic `CompactTxStreamer` server, never yet a live lightwalletd or Zaino, which for these properties is the stronger evidence: the mock records the exact bytes it received and can stall a stream on command): unknown method paths pass through carrying the *backend's* own status, so the proxy is path-agnostic and forward-compatible with methods it has never heard of; a `SendTransaction` reaches the indexer byte-for-byte with `te`, `grpc-timeout` and custom metadata intact and only the origin retargeted; gRPC trailers survive in both response shapes (a real trailers frame, and trailers-only responses where `grpc-status` rides in the headers); the streaming tests fail by *timeout* if a body is ever buffered, in both directions; an unreachable indexer answers `grpc-status 14 UNAVAILABLE` rather than dropping the connection; and the shim redials after the backing indexer restarts.
+**What it proves, tested rather than asserted** (59 passing tests, plus one ignored by design, the fixture regenerator; the indexer behind them is a hand-rolled h2c mock and a real tonic `CompactTxStreamer` server, never yet a live lightwalletd or Zaino, which for these properties is the stronger evidence: the mock records the exact bytes it received and can stall a stream on command): unknown method paths pass through carrying the *backend's* own status, so the proxy is path-agnostic and forward-compatible with methods it has never heard of; a `SendTransaction` reaches the indexer byte-for-byte with `te`, `grpc-timeout` and custom metadata intact and only the origin retargeted; gRPC trailers survive in both response shapes (a real trailers frame, and trailers-only responses where `grpc-status` rides in the headers); the streaming tests fail by *timeout* if a body is ever buffered, in both directions; an unreachable indexer answers `grpc-status 14 UNAVAILABLE` rather than dropping the connection; and the shim redials after the backing indexer restarts.
 
 The PoC is fully transparent only *because* it is non-destructive. The production shim is transparent to the wallet by design and deliberately **not** transparent to the operator: a diverted migration never reaches their indexer, and that asymmetry is the documented residual (the operator learns *that* a client migrated, see [honest limits](./trust.md)).
 
@@ -45,8 +45,8 @@ The PoC is fully transparent only *because* it is non-destructive. The productio
 
 - **Every path except `SendTransaction`** (all queries, all streams, unknown/new methods, other services): **proxy verbatim** to the backing lwd. Forward request headers + streaming body, stream the response body and **trailers** (`grpc-status`) back. No decode. This is a generic h2 reverse proxy and is base-agnostic (works for Zaino or lightwalletd; unknown methods pass through).
 - **`/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction`** (unary): buffer the one request message (small), strip the 5-byte gRPC length prefix, `prost`-decode `RawTransaction { data }`, and classify:
-  - **non-migration** -> proxy to the backing lwd exactly like the fallback, return the backing lwd's real `SendResponse` (so the operator's node actually relays it and the client gets the true result).
-  - **migration** -> encrypt to the hub key, hand to the hub channel, and **synthesize** a gRPC response: `SendResponse { errorCode: 0 }`, framed with the 5-byte prefix + `grpc-status: 0` trailer, so the client sees "accepted."
+  - **pass-through** (no value left the Orchard pool) -> proxy to the backing lwd exactly like the fallback, return the backing lwd's real `SendResponse` (so the operator's node actually relays it and the client gets the true result).
+  - **Orchard exit** (or a fail-safe verdict) -> encrypt to the hub key, hand to the hub channel, and **synthesize** a gRPC response: `SendResponse { errorCode: 0 }`, framed with the 5-byte prefix + `grpc-status: 0` trailer, so the client sees "accepted."
 
 Rationale over a `tonic` server re-exporting all ~20 methods: this touches exactly one message type (smallest auditable TEE surface), and hyper handles h2 framing / flow control / trailers for the pass-through. "Proxy to backing lwd" is a shared helper used by both the fallback and the non-migration `SendTransaction` case.
 
@@ -58,25 +58,42 @@ Rationale over a `tonic` server re-exporting all ~20 methods: this touches exact
 
 **Compression must be controlled, not relayed.** gRPC compression is not supported on the intercept path: a compressed `SendTransaction` cannot be parsed, so it fails safe to migration. That alone is not enough, because compression is *negotiated*. The backing indexer advertises `grpc-accept-encoding` on responses, so an operator who switches compression on in their own indexer makes wallets compress every `SendTransaction` and pushes every migration into the fail-safe arm instead of genuine classification: an operator-controlled lever on the classifier, in a component whose threat model is that the operator is the adversary. The shim therefore rewrites the indexer's advertised `grpc-accept-encoding` to `identity` on every response it relays, in one place, and leaves the request direction alone, where that header is the wallet's own statement **(built)**. Response compression (`grpc-encoding`) is relayed untouched, and the pass-through path stays opaque, so client compression there is fine. A wallet that compresses unprompted still lands in the fail-safe; whether that stays the shipped policy is a [review](./review.md) item.
 
-### The migration classifier
+### The classifier: detecting an Orchard exit
 
-Reuse the fee-aware turnstile predicate, batching only the `migrate` case:
+**Decision (Zooko): the predicate is the sign of the Orchard value balance and nothing else (built).**
 
 ```
-is_migration(tx) := tx.version == V6
-                 && orchard_value_balance  > 0    # value leaving Orchard
-                 && ironwood_value_balance < 0    # value entering Ironwood
+is_orchard_exit(tx) := orchard_value_balance(tx) > 0    # value LEAVING the Orchard pool
 ```
 
-**Decision: parse with `zebra-chain`** (`Transaction::V6`, `orchard_value_balance()` `transaction.rs:1503`, `ironwood_value_balance()` `:1520`, `expiry_height()` `:510`), not a hand-rolled V6 parser. A misclassification is a privacy failure, so correctness outweighs the extra dependency weight; a hand-rolled parser would have to walk most of the tx anyway to reach the bundle value balances. Fast-path pre-V6 txs to pass-through (only V6 can carry Ironwood). Fixture: `zaino/live-tests/e2e/tests/ironwood_activation.rs`.
+One conjunct. No transaction-version guard, no test on where the value lands. Zooko's rule: **any transaction with an Orchard value balance above zero is a privacy risk to the user, regardless of the destination pool.** NU6.3 closes Orchard to new *value* (a transaction-level rule forbids value entering, so the chain predicate is Orchard pool value non-increasing and `orchard_value_balance >= 0` post-activation). Anyone still holding Orchard notes has therefore held them since before activation, which makes **spending Orchard at all** the identifying event: it reveals that this IP controls legacy Orchard funds, against a finite and shrinking set. Where the value lands afterwards changes nothing about that inference. Keep the precision: Orchard is closed to new value, **not to activity**, because same-receiver change still lands in the pool and the note-commitment tree keeps growing.
 
-The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Migration | PassThrough | Unparseable) with unit tests over real deshield / shield / migrate / normal-shielded vectors. It has no I/O and no state, so it is the easy part to audit. Built as `classify.rs`, which returns the evidence a verdict rests on (version, both value balances, expiry, lengths) alongside the verdict itself, so a log line can never disagree with the routing decision.
+This replaces a three-conjunct predicate (`tx.version == V6 && orchard_value_balance > 0 && ironwood_value_balance < 0`). Both dropped conjuncts were real gaps, not redundancy:
+
+- **The Ironwood conjunct** handed an Orchard withdrawal to transparent or to Sapling straight to the operator's indexer in the clear, though it leaks exactly the same fact. Demonstrated, not theorized: the PoC demo used to print `passthrough ... orchard_vb=+250000 ironwood_vb=+0` for precisely that shape, and the same fixture now lands in the diverted class.
+- **The V6 conjunct** passed V5 Orchard spends, which are equally real Orchard exits. Nothing replaces it: `orchard_value_balance()` reads the Orchard bundle, is version-agnostic, and returns zero when there is no bundle (`transaction.rs:1503`), so a V1-V4 transparent transaction reads `0` and passes by the predicate itself.
+
+Three cases, exhaustively:
+
+| `orchard_value_balance` | Verdict | Why |
+|---|---|---|
+| `> 0` | divert (batch) | Legacy value left a closed pool: the identifying event |
+| `== 0` | pass through | No Orchard value left the pool, which is the ruling's criterion (see the caveat below the table) |
+| `< 0` | pass through | Value entering Orchard, consensus-invalid post-NU6.3; kept only as a directionality probe in tests |
+
+**One caveat on the `== 0` row, open rather than closed.** A transaction can spend legacy Orchard notes and still net to zero (fee from transparent or Sapling, change back to the same receiver), and spending them publishes those notes' nullifiers. The ruling's rationale is that *spending Orchard at all* is the identifying event, so that shape is an identifying event the ruling's criterion (`> 0`, value **leaving**) does not catch. The predicate follows the criterion as written; whether to widen it to "an Orchard bundle with at least one spend" is Zooko's call, tracked as open question 4 in `zeronym/shim/README.md` and in front of him and Taylor. Widening is not free: it would sweep in ordinary same-receiver-change activity, which is why the old *gross* alternative was rejected on its own terms.
+
+That **dissolves** the old net-versus-gross boundary question rather than answering it; [review](./review.md) keeps the retracted analysis visible, because the history is what the rest of that checklist is read against. Each case has its own vector (including an Orchard exit with no Ironwood bundle at all, and a V5 Orchard spend), so a regression back toward the narrower predicate fails the suite rather than passing quietly.
+
+**A naming note, rather than papering over it.** The diverted class is still `Class::Migration` in the code, the routing helper is still `treat_as_migration()`, and the wire message is still `SubmitMigration`, but an Orchard-to-transparent deshield is not literally a migration. Post-NU6.3 every Orchard exit is legacy-fund movement, so the behaviour is right and only the name is imprecise. This book says **Orchard exit** for the concept and treats *migration* as the legacy label for the same class.
+
+**Decision: parse with `zebra-chain`** (`orchard_value_balance()` `transaction.rs:1503`, `ironwood_value_balance()` `:1520`, `expiry_height()` `:510`), not a hand-rolled parser. A misclassification is a privacy failure, so correctness outweighs the extra dependency weight; a hand-rolled parser would have to walk most of the tx anyway to reach the bundle value balances. Fixture: `zaino/live-tests/e2e/tests/ironwood_activation.rs`.
+
+The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Migration | PassThrough | Unparseable) with unit tests over real vectors. No I/O, no state, no clock, no config, so it is the easy part to audit. Built as `classify.rs`, which returns the evidence a verdict rests on (version, the Orchard, Ironwood and Sapling value balances, expiry, lengths) alongside the verdict itself, so a log line can never disagree with the routing decision. The Ironwood balance is now **evidence only**: it gates nothing, and it is logged because it is what shows an operator where an Orchard exit went, which is how you see the classifier catching the destinations it used to miss.
 
 **Full consumption is part of the parse (built).** `Transaction::zcash_deserialize` stops at the end of the transaction and ignores trailing bytes, so a valid tx followed by junk parses `Ok`. Without a cursor-position check the shim would classify a *prefix* of what the backing node acts on, meaning the shim and the node could disagree about what the transaction even is. Trailing bytes are therefore `Unparseable`, which fails safe toward migration.
 
 **The fail-safe taxonomy (built).** Every body the shim cannot confidently classify fails safe *toward* migration, never toward pass-through, and that rule is written exactly once (`Class::treat_as_migration`). Cases now covered by tests: unparseable protobuf, a truncated or over-long gRPC frame, trailing bytes after the unary message, an empty transaction, the gRPC compression flag set, a `grpc-encoding` that is not `identity` (`identity` itself is correctly not treated as compression), and a declared message length that would overflow the frame bounds. A body the shim could neither read nor reproduce (over the 4 MiB buffer cap, or a client stream that broke mid-upload) is refused outright rather than forwarded unclassified.
-
-**The predicate's boundary is an open spec question.** The Orchard arm is a strict *net* test, which leaves a false-negative window at and below zero. It is implemented as locked and pinned by a test; whether the migration arm should be gross rather than net is a decision for Taylor and Zooko, stated in [review](./review.md).
 
 ### Language and crates
 
@@ -132,11 +149,11 @@ zeronym/shim/
     attest.rs               # NSM attestation binding; /attestation endpoint
     proxy.rs                # h2 server, :path routing, reverse-proxy to backing lwd
     intercept.rs            # SendTransaction decode + gRPC frame + response synth
-    classify.rs             # is_migration over zebra-chain (pure, unit-tested)
+    classify.rs             # is_orchard_exit over zebra-chain (pure, unit-tested)
     hub.rs                  # STEVE session, encrypt, SubmitMigration, retry/failover
     config.rs
   tests/
-    classify_vectors.rs     # deshield/shield/migrate/normal fixtures
+    classify_vectors.rs     # Orchard-exit / into-Orchard / transparent fixtures
     proxy_passthrough.rs    # a mock backing lwd; assert non-migration passes through
 ```
 
@@ -176,7 +193,7 @@ The hub is the server end of the shim's channel. Over the Nym tunnel it accepts 
 
 - **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision (see [review](./review.md)): one-way is enough for privacy, mutual would gate abuse.
 - **Decrypt in-enclave.** Only the attested hub software sees cleartext; the hub host operator (Caution) and the Nym path see ciphertext.
-- **Re-validate (do not trust the shim).** Parse with `zebra-chain`, **re-run the `is_migration` classifier**, and check the tx is well-formed and not already expired. This is stateless: full consensus validity (proofs, nullifiers) needs chain state the hub does not hold, and is confirmed at broadcast. Reject anything that is not a valid-looking, unexpired migration, to keep garbage out of the batch. **Rate-limit** per channel to bound abuse / resource use.
+- **Re-validate (do not trust the shim).** Parse with `zebra-chain`, **re-run the `is_orchard_exit` classifier**, and check the tx is well-formed and not already expired. This is stateless: full consensus validity (proofs, nullifiers) needs chain state the hub does not hold, and is confirmed at broadcast. Reject anything that is not a valid-looking, unexpired Orchard exit, to keep garbage out of the batch. **Rate-limit** per channel to bound abuse / resource use.
 
 ### The batch queue
 
@@ -265,6 +282,6 @@ The open forks (cert model, STEVE wire form over Nym, mutual vs one-way STEVE, `
 
 ### Build and test
 
-**Shim.** Unit: `classify.rs` against real vectors (the `ironwood_activation.rs` migrate tx, plus constructed deshield/shield/normal-shielded), the correctness-critical piece. Integration: a mock backing lwd; assert every non-`SendTransaction` method and a non-migration `SendTransaction` pass through unchanged, and a migration is diverted to a mock hub (never reaches the backing lwd). Built so far: the classifier vectors, the wire-level transparency suite, and the logging assertions that are the only evidence the classifier ran at all in a non-destructive PoC. Still open, and the largest gap in the evidence: the fixtures are generated with zebra's own serializer, so no transaction a wallet actually produced has been classified; capturing the `orchard_note_spends_to_ironwood_across_boundary` tx from `ironwood_activation.rs` closes it and needs a running regtest node. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the TLS pubkey; run the Auditor Role steps. End to end: ZIS in front of the live testnet enclave's Zaino, a real wallet syncs (pass-through) and submits a testnet migration that lands in a hub batch.
+**Shim.** Unit: `classify.rs` against real vectors (the `ironwood_activation.rs` migrate tx, an Orchard exit with no Ironwood bundle, a V5 Orchard spend, value entering Orchard, and a mainnet transparent tx), the correctness-critical piece. Integration: a mock backing lwd; assert every non-`SendTransaction` method and a pass-through `SendTransaction` reach it unchanged, and an Orchard exit is diverted to a mock hub (never reaches the backing lwd). Built so far: the classifier vectors, the wire-level transparency suite, and the logging assertions that are the only evidence the classifier ran at all in a non-destructive PoC. Still open, and the largest gap in the evidence: the fixtures are generated with zebra's own serializer, so no transaction a wallet actually produced has been classified; capturing the `orchard_note_spends_to_ironwood_across_boundary` tx from `ironwood_activation.rs` closes it and needs a running regtest node. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the TLS pubkey; run the Auditor Role steps. End to end: ZIS in front of the live testnet enclave's Zaino, a real wallet syncs (pass-through) and submits a testnet migration that lands in a hub batch.
 
 **Hub.** Unit: `flush.rs` (N queued migrations -> one shuffled, parallel publish), `expiry.rs` (early flush within the safety margin), `dedup.rs` (txid collapse; harmless cross-hub duplicate), `validate.rs` (reject non-migrations / expired). Integration: a mock shim submitting over a local STEVE-ish channel and a mock node capturing `sendrawtransaction`; assert a batch of migrations is published together, shuffled, once per txid. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the hub key; a shim completes STEVE and submits a migration. End to end: >=1 shim in front of the live testnet Zaino, a testnet migration flows shim -> Nym -> hub -> batch -> testnet chain; confirm it lands and is unlinkable to the submitting shim.

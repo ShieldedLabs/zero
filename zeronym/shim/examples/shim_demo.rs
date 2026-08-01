@@ -4,11 +4,16 @@
 //! cargo run --example shim_demo
 //! ```
 //!
-//! Starts a stub backing indexer, puts a shim in front of it, and sends five
-//! calls through: a migration, a non-migration, an unparseable body, a
-//! compressed body, and one ordinary proxied method. Watch the `zis::classify`
-//! and `zis::proxy` lines. Every one of the five is forwarded to the stub
-//! indexer, because this proof of concept is non-destructive.
+//! Starts a stub backing indexer, puts a shim in front of it, and sends six
+//! calls through: an Orchard exit into Ironwood, an Orchard exit with no
+//! Ironwood bundle at all, a real mainnet transparent transaction, an
+//! unparseable body, a compressed body, and one ordinary proxied method. Watch
+//! the `zis::classify` and `zis::proxy` lines. Every one of the six is forwarded
+//! to the stub indexer, because this proof of concept is non-destructive.
+//!
+//! The first two are both MIGRATION: the predicate is `orchard_value_balance >
+//! 0`, so where the value lands does not change the verdict. Only the third one
+//! passes through, because it moves no Orchard value at all.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -34,11 +39,21 @@ use zero_indexer_shim::BoxError;
 
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
 
+/// V6, Orchard +250_000, Ironwood -240_000: an Orchard exit into Ironwood.
 const V6_MIGRATION: &[u8] = include_bytes!("../tests/fixtures/v6_migration.bin");
-/// An Orchard withdrawal with no Ironwood bundle. Deshield-shaped, and a shape
-/// that is actually realizable post-NU6.3, unlike the negated `v6_reverse.bin`
-/// fixture (value entering Orchard is consensus-invalid after activation).
+
+/// V6, Orchard +250_000, no Ironwood bundle at all: an Orchard withdrawal to
+/// transparent or Sapling. Also an Orchard exit, and the case the shim used to
+/// hand to the operator's indexer in the clear.
 const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_orchard_only.bin");
+
+/// A real mainnet V4 coinbase transaction, the same bytes
+/// `tests/classify_vectors.rs` pins. Transparent only, so its Orchard value
+/// balance is zero: this is what a genuine pass-through looks like. It is a
+/// coinbase because that is the mainnet transaction whose bytes are committed
+/// here; what the classifier reads is `orchard_vb == 0`, which any ordinary
+/// transparent or Sapling payment shares.
+const V4_COINBASE_HEX: &str = "0400008085202f89010000000000000000000000000000000000000000000000000000000000000000ffffffff0503b0e72100ffffffff04e8bbe60e000000001976a914ba92ff06081d5ff6542af8d3b2d209d29ba6337c88ac40787d010000000017a914931fec54c1fea86e574462cc32013f5400b891298738c94d010000000017a914c7a4285ed7aed78d8c0e28d7f1839ccb4046ab0c87286bee000000000017a914d45cb1adffb5215a42720532a076f02c7c778c908700000000b0e721000000000000000000000000";
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -58,20 +73,26 @@ async fn main() -> Result<(), BoxError> {
 
     let mut sender = connect(shim).await?;
 
-    // 1. A real V6 Orchard -> Ironwood migration. The privacy-critical case.
+    // 1. An Orchard exit into Ironwood. The privacy-critical case.
     send_tx(&mut sender, shim, V6_MIGRATION, false).await?;
 
-    // 2. An Orchard withdrawal with no Ironwood bundle: a real, realizable
-    //    non-migration (deshield-shaped), so it passes through.
+    // 2. An Orchard exit with NO Ironwood bundle: the value went to transparent
+    //    or Sapling. Same leak, same verdict. Watch for ironwood_vb=+0 on a line
+    //    that still says MIGRATION.
     send_tx(&mut sender, shim, V6_ORCHARD_ONLY, false).await?;
 
-    // 3. Bytes that are not a transaction at all. Fail-safe for privacy.
+    // 3. A real mainnet transparent transaction: no Orchard value moves, so it
+    //    passes through.
+    let v4_coinbase = hex::decode(V4_COINBASE_HEX).expect("vector is valid hex");
+    send_tx(&mut sender, shim, &v4_coinbase, false).await?;
+
+    // 4. Bytes that are not a transaction at all. Fail-safe for privacy.
     send_tx(&mut sender, shim, &[0xff; 64], false).await?;
 
-    // 4. A compressed body. Not parseable, so also fail-safe.
+    // 5. A compressed body. Not parseable, so also fail-safe.
     send_tx(&mut sender, shim, V6_MIGRATION, true).await?;
 
-    // 5. An ordinary proxied method: opaque, never decoded.
+    // 6. An ordinary proxied method: opaque, never decoded.
     let request = Request::builder()
         .method("POST")
         .uri(format!("http://{shim}{GET_LIGHTD_INFO}"))
@@ -86,7 +107,7 @@ async fn main() -> Result<(), BoxError> {
         .collect()
         .await?;
 
-    tracing::info!("demo complete: all five calls were forwarded to the stub indexer");
+    tracing::info!("demo complete: all six calls were forwarded to the stub indexer");
     Ok(())
 }
 

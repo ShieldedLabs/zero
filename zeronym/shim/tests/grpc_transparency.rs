@@ -43,12 +43,12 @@ use zaino_proto::proto::service::{
 };
 use zero_indexer_shim::classify::{classify, Class};
 
-/// A real V6 Orchard(+250_000) -> Ironwood(-240_000) transaction: the
+/// A real V6 Orchard exit, Orchard(+250_000) with Ironwood(-240_000): the
 /// privacy-critical case. Same fixture the classifier's own vector tests use.
 const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_migration.bin");
 
-/// The same shape reversed, Orchard(-250_000) -> Ironwood(+240_000), which is
-/// not a migration.
+/// The same shape reversed, Orchard(-250_000) with Ironwood(+240_000). Value
+/// enters Orchard rather than leaving it, so the predicate does not fire.
 const V6_REVERSE: &[u8] = include_bytes!("fixtures/v6_reverse.bin");
 
 /// How many blocks `GetBlockRange` yields. Enough that a proxy which reordered

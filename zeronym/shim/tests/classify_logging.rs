@@ -214,16 +214,19 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
 
     let log = capture.text();
 
-    // 1. The migration. The verdict, the evidence it rests on, and the routing
-    //    decision production would take.
+    // 1. The Orchard exit. The verdict, the evidence it rests on, and the
+    //    routing decision production would take. `orchard_vb` is the predicate;
+    //    `ironwood_vb` is logged as evidence of where the value went and no
+    //    longer gates anything.
     assert!(log.contains("MIGRATION detected"), "log was:\n{log}");
     assert!(log.contains("orchard_vb=+250000"), "log was:\n{log}");
     assert!(log.contains("ironwood_vb=-240000"), "log was:\n{log}");
     assert!(log.contains("version=V6"), "log was:\n{log}");
 
-    // 2. The reverse shape: same pools, opposite signs, not a migration.
+    // 2. The reverse shape: value ENTERING Orchard, so nothing left the pool
+    //    and there is nothing to divert.
     assert!(
-        log.contains("passthrough: SendTransaction non-migration"),
+        log.contains("passthrough: SendTransaction moved no value out of Orchard"),
         "log was:\n{log}"
     );
     assert!(log.contains("orchard_vb=-250000"), "log was:\n{log}");

@@ -245,8 +245,11 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 outputs = evidence.outputs,
                 tx_len = evidence.len,
                 diverted_in_production,
-                "MIGRATION detected: value leaving Orchard and entering Ironwood \
-                 (this PoC still forwards it; production diverts it to the hub)"
+                // orchard_vb is the predicate; ironwood_vb rides along as
+                // evidence of where the value went, and gates nothing.
+                "MIGRATION detected: an Orchard exit, value LEAVING the Orchard pool \
+                 for any destination (this PoC still forwards it; production diverts \
+                 it to the hub)"
             ),
             Class::PassThrough => tracing::info!(
                 target: "zis::classify",
@@ -259,7 +262,7 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 outputs = evidence.outputs,
                 tx_len = evidence.len,
                 diverted_in_production,
-                "passthrough: SendTransaction non-migration"
+                "passthrough: SendTransaction moved no value out of Orchard"
             ),
             Class::Unparseable => tracing::warn!(
                 target: "zis::classify",
@@ -338,12 +341,12 @@ impl Body for ReplayBody {
 mod tests {
     use super::*;
 
-    /// A real V6 Orchard(+250_000) -> Ironwood(-240_000) transaction. Same
+    /// A real V6 Orchard exit: Orchard(+250_000), Ironwood(-240_000). Same
     /// fixture the classifier's own vector tests use.
     const V6_MIGRATION: &[u8] = include_bytes!("../tests/fixtures/v6_migration.bin");
 
-    /// The same shape reversed: Orchard(-250_000) -> Ironwood(+240_000), which
-    /// is not a migration.
+    /// The same shape reversed: Orchard(-250_000), Ironwood(+240_000). Value
+    /// enters Orchard rather than leaving it, so it is not an Orchard exit.
     const V6_REVERSE: &[u8] = include_bytes!("../tests/fixtures/v6_reverse.bin");
 
     /// Wrap transaction bytes in a `RawTransaction` inside a gRPC length prefix,
@@ -378,8 +381,8 @@ mod tests {
 
     #[test]
     fn a_framed_non_migration_is_a_pass_through() {
-        // The same transaction shape in reverse: value entering Orchard and
-        // leaving Ironwood, which is not a migration.
+        // The same transaction shape in reverse: value entering Orchard, so no
+        // value left the pool and there is nothing to divert.
         let inspection = inspect(&HeaderMap::new(), &framed(V6_REVERSE));
         assert_eq!(classified(&inspection), Class::PassThrough);
         assert!(!inspection.treat_as_migration());

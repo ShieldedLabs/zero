@@ -251,58 +251,278 @@ the published-hash comparison for exactly that run), then update
 `EXPECTED_SHA256` and the recorded hashes below in the same commit. Those two
 must never drift apart.
 
+**Changing the compiled source means re-baselining too**, and that is the more
+common case: any edit under `zeronym/shim/src/`, to `Cargo.toml` or
+`Cargo.lock`, or a subtree pull touching `zebra/zebra-chain` or
+`zaino/packages/zaino-proto`, moves the binary and therefore the published hash.
+The most recent re-baseline (2026-08-01) was of exactly that kind, and is
+written up below. One trap it exposed, worth knowing before you start: because
+`assemble.sh` archives `HEAD`, a source change that is still in the working tree
+is invisible to every script here, and they will cheerfully rebuild and confirm
+the **old** hash. Commit first, or read the provenance caveat below for what to
+do when you deliberately cannot.
+
 ## Recorded hashes
 
 Do not populate this section by hand, and never with a plausible-looking
 placeholder. A wrong hash in an audit document is worse than a missing one. The
 machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 
-> **Status, and the one thing an auditor cannot do yet.** At the time of
-> writing, `zeronym/shim/deploy/` and the reproduce workflow are **not yet
-> committed**. `assemble.sh` says so loudly when that is true, and until they
-> are committed and pushed, the checkout-and-run procedure above has nothing to
-> check out: a third party at the recorded commit finds no `deploy/` directory.
-> The compiled *binary* provenance is unaffected, because `assemble.sh` archives
-> `HEAD` and the Rust sources really are at that commit, but **the hash below is
-> not yet independently recomputable by anyone.** Two follow-ups, in order:
-> commit and push, then update the commit recorded here to the SHA that actually
-> lands (a rebase or squash on merge changes it, which silently invalidates both
-> the checkout instruction and the provenance line).
+> **The hash changed on 2026-08-01, and it changed for a source reason.** The
+> classifier predicate was rewritten: the turnstile test is now
+> `orchard_value_balance > 0` alone, with both the `tx.version == V6` and the
+> `ironwood_value_balance < 0` conjuncts dropped. `src/classify.rs`,
+> `src/intercept.rs` and `src/lib.rs` all changed, so the compiled binary
+> changed with them.
 >
-> Committing `deploy/` does not change the hash, and that is measured rather
-> than assumed: the uncommitted-fallback path in `assemble.sh` puts the whole of
-> `deploy/` into the context exactly where the archive will, and the build below
-> produced the same binary hash as builds made before `deploy/` existed. Nothing
-> under `deploy/` is compiled; cargo builds `src/` and the manifest.
+> | | binary sha256 |
+> |---|---|
+> | recorded to 2026-07-31 | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` |
+> | recorded from 2026-08-01 (last measured value, pending re-measurement, see the provenance caveat) | `c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a` |
+>
+> This is the tripwire doing its job. A recipe whose published hash survived a
+> change to the compiled predicate would be the alarming outcome, not this. The
+> old value is kept in this document on purpose: an auditor who reproduces
+> `a9c19f2c…` has built the **old** classifier, and should be able to learn that
+> here rather than conclude the recipe is broken. The full transcript is in
+> "Re-baseline, 2026-08-01" below; the two sections after it, from "Independent
+> re-verification, 2026-07-31" through the hardening pass, attest the superseded
+> hash and are kept as history. "What is proven, and what is not" is current.
 
-Source: `zeronym/shim` at zero commit `f94d194d09`. Target
+> **Provenance caveat: the source of the new hash is not committed yet, so
+> `reproduce.sh` will disagree with `EXPECTED_SHA256` until it is.** The
+> predicate change is deliberately left in the working tree, and `assemble.sh`
+> archives `HEAD` by design, so the stock path still compiles the **old**
+> classifier. That is measured, not predicted: a `reproduce.sh` cold build at
+> `22a92f8fe6` with a pristine context produced `a9c19f2c…` on the same day the
+> new hash was recorded. The builds below therefore used a context assembled by
+> `assemble.sh` and then overlaid with the working-tree copy of every tracked
+> file under `zeronym/shim`, which is byte for byte what the commit will record.
+> **Until the change lands, a `reproduce.sh` FAIL against `EXPECTED_SHA256` is
+> the expected result and means nothing is wrong.** The moment it lands, re-run
+> `sh zeronym/shim/deploy/reproduce.sh`: that is what converts this into a
+> commit-pinned hash, and `.github/workflows/zeronym-shim-reproduce.yml` does
+> the same on a native x86_64 runner.
+>
+> The exact compiled inputs are pinned here by content, so the hash is checkable
+> even before a commit exists:
+>
+> ```
+> c2e4bd90149b9dea56f723e301fd636ca5f86d4a0b08b5e78e669889c69d1521  src/classify.rs
+> 34cbfb69dce4b64da1bcc429e5072e9d36f37065ded9c5779502deb2f6149c33  src/intercept.rs
+> 232c62725c1a56c394cb83e90f5fb4dcc62dfd97526cd7156224dd0ec3dfc973  src/lib.rs
+> f13ae6fbc867a9aa3c711c114fbcd96976f2963899a92f494971e6c178f8e801  src/config.rs
+> eb434e3156009f549f040d70039cbcf96ba9d22b0b0330255f76f756e84d94b1  src/main.rs
+> dea5a85da2b610a491f5709071e741adbed8ff2ebcec13587c4a1641deabdf6b  src/proxy.rs
+> 7f7116e329b9b48432cb2ca5ff12c5d1c58d24632fa3e8813ab0ccf54069ba72  Cargo.toml
+> 8406ed48aef55dde7edf24b61e18a2f76fb13804767c56c3248073f6be936e73  Cargo.lock
+> ```
+>
+> **The working tree has since moved past that snapshot, so `c6b7738f…` must be
+> re-measured, not confirmed, when the change lands.** Two of the pinned inputs
+> changed after the builds below were run, in a review pass on 2026-08-01:
+>
+> ```
+> 8782d03c9cb8e74ae348b4c474b6587bcd9305eb1a54c3e4ca4f7733c9ecadaa  src/classify.rs   (was c2e4bd90…)
+> 6fe1c1262f9d7486fff1fb81bbe98b81d671e2257cecf43da6adfb0a42d52aff  src/proxy.rs      (was dea5a85d…)
+> ```
+>
+> `src/classify.rs` changed in doc comments only (the `== 0` case no longer
+> claims that nothing is revealed, because a net-zero Orchard bundle can still
+> publish legacy nullifiers). `src/proxy.rs` changed in **compiled code**: the
+> near-miss path normalization went from `strip_suffix('/')` to
+> `trim_end_matches('/')`, so a path with two or more trailing slashes can no
+> longer fall out of `InterceptNearMiss` into `PassThrough`. That is a one-token
+> change in the fail-safe direction, and it is still a change to the binary.
+>
+> Nobody has rebuilt since. So `c6b7738f…` is the hash of the content-pinned
+> snapshot above and **not** of the current tree, and it is recorded here as
+> that: the last measured value, superseded by whatever the first post-commit
+> `reproduce.sh` run produces. Do not treat a mismatch at that run as a
+> regression, and do not hand-edit `EXPECTED_SHA256` to whatever appears;
+> re-measure, then record the run that produced it.
+
+> **A second, older provenance defect, found while re-baselining.** The commit
+> this section used to record, `f94d194d09`, **is not an ancestor of `HEAD`**
+> (`git merge-base --is-ancestor f94d194d09 HEAD` returns false). The branch was
+> rebased under it. That is exactly the failure the previous status note warned
+> about, and it happened. The lesson is not "record the SHA more carefully", it
+> is that a provenance line pointing at a rewritable branch commit is worth less
+> than the content hashes above. Both are recorded now.
+
+Source: `zeronym/shim` at zero commit `22a92f8fe6` **plus the uncommitted
+classifier change**, content-pinned by the table above. Target
 `x86_64-unknown-linux-musl`, built `linux/amd64` under Rosetta on an arm64 Mac
-(Docker 29.5.3, BuildKit v0.30.0, 16 vCPU).
+(Docker 29.5.3, buildx v0.34.1, `desktop-linux` builder, 16 vCPU).
 
 ```
-binary sha256:  a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05
+binary sha256:  c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a
 size:           4392728 bytes
-ELF:            x86-64 static-PIE, no INTERP, no build-id, no DT_NEEDED
+ELF:            x86-64 static-PIE, 35 sections, no INTERP, no build-id,
+                no DT_NEEDED
 
-OCI manifest:   sha256:c657f0c87fc879e941455ecf2750eb47ca6833c398af142e078d8308b8c9db2a
-OCI tar sha256: 8a19102ed78277f54cb97a43dad7725d8dcf98c1392c7ae811dfb10fc449b651
+OCI manifest:   sha256:33c0f4f12bdeb9b47f77d5cea7e479c2bddc6ef7067e790072115221d0bb9460
+OCI tar sha256: 2c97d8f4f7a8cb82284d2b500c4ca3ae5c7da00b5b3a9973471dfd9cc5b3df14
 ```
 
-**Three cold builds produced that binary hash.** One via `build.sh`, two via
-`reproduce.sh --no-cache`, using two different host context directories. The
-context path not mattering is worth noting separately: only the *in-image*
-paths are pinned, so the host location of the context is free.
+The size is unchanged from the old binary, to the byte. That is a coincidence of
+a small edit in a 4.2 MB static binary, not a sign that nothing was rebuilt:
+`cmp` puts the first difference at byte 209, and the string checks below
+distinguish the two directly.
 
-**The OCI packaging reproduced too.** Two independent cold `--target runtime`
-builds produced byte-identical tars (`8a19102e...`) and the same manifest
-digest, which is the stronger of the two packaging outcomes and not something
-to assume: `rewrite-timestamp` normalises layer mtimes, but compression and
-layer ordering also have to land the same way.
+### Re-baseline, 2026-08-01: the classifier predicate changed
 
-Timings, cold: 78 s `cargo fetch`, 96 s to compile all 276 crates, under three
-minutes end to end. `reproduce.sh` took 5m25s for both builds.
+**Why the hash moved.** The turnstile predicate became
+`is_orchard_exit(tx) := orchard_value_balance > 0`, dropping the `V6` and
+`ironwood_value_balance < 0` conjuncts. Compiled code changed, so the binary
+changed. Nothing about the *recipe* changed: not a base digest, not a flag, not
+a script. That matters for reading the result, because it isolates the source
+edit as the only moving part.
+
+**Control build first.** Before touching anything, one cold `reproduce.sh` build
+ran against a pristine `git archive HEAD` context at `22a92f8fe6` and produced
+
+```
+a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05   (the old hash, unchanged)
+```
+
+This is the load-bearing control, and it establishes two things at once. This
+host still reproduces the published hash, so the pipeline and the machine are
+sound and any later difference is attributable to the source edit rather than to
+drift. And `HEAD` genuinely still compiles the old classifier, which is what the
+provenance caveat above asserts. It also settles a real question raised by the
+history: `zebra/Cargo.toml` lost its `[patch.crates-io] orchard = { path =
+"../orchard" }` block between the previously recorded commit and `HEAD`, and
+`zebra/Cargo.toml` **is** a context input. The hash did not move, which
+empirically confirms `assemble.sh`'s claim that zebra's workspace patch does not
+reach the shim's own workspace.
+
+That `reproduce.sh` invocation was stopped after its first cold build rather than
+run to completion. Build 1 had already answered the only question being asked of
+it, and the second build would have re-proven same-host self-consistency of a
+hash that three prior sessions and a CI run already attest. So this pass contains
+**one** control build, not two.
+
+**How the uncommitted source got into the context**, in full, because a
+procedure that only one session can run is not a reproduction. `assemble.sh` is
+used unmodified, then the crate directory is replaced with the working-tree copy
+of the same tracked file set:
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+CTX=$(mktemp -d)/ctx
+sh zeronym/shim/deploy/assemble.sh "$CTX"
+
+# Two refusals, because either condition means the context corresponds to no
+# possible commit and its hash would be meaningless. A dirty vendored tree is a
+# build input this overlay does not carry; an untracked file under the crate
+# would land in the commit but not in `git ls-files` below.
+test -z "$(git status --porcelain -- zebra/ zaino/)" || exit 1
+test -z "$(git ls-files --others --exclude-standard -- zeronym/shim)" || exit 1
+
+# Same file set `git archive` would take, current contents, tracked files only.
+STAGE=$(mktemp -d)
+git ls-files -z -- zeronym/shim | tar --null -T - -cf "$STAGE/shim-wt.tar"
+rm -rf "$CTX/zeronym/shim"
+umask 022 && tar -xpf "$STAGE/shim-wt.tar" -C "$CTX"
+
+# The recipe must still be HEAD's. deploy/ is unmodified here, so these are
+# byte-identical; assert it rather than trust it.
+git show HEAD:zeronym/shim/deploy/Containerfile | cmp - "$CTX/zeronym/shim/deploy/Containerfile"
+
+# Artifacts outside the checkout, so `git status` stays a clean signal.
+OUT=$(mktemp -d)
+SOURCE_DATE_EPOCH=1 docker build -f "$CTX/zeronym/shim/deploy/Containerfile" "$CTX" \
+  --platform linux/amd64 --target export --no-cache --output "type=local,dest=$OUT"
+sha256sum < "$OUT/zero-indexer-shim"
+```
+
+That block was then executed **verbatim, as extracted from this file**, from a
+third working directory and with a third context path (`mktemp -d` under
+`/var/folders/…`), and printed `c6b7738f…`. The only adaptation was
+`sha256sum` to `shasum -a 256`, because the host is macOS; the block is written
+for the Linux audience the rest of this document addresses. Compile 2m06s,
+`cargo fetch` 41.6s.
+
+This is a stopgap for a deliberately uncommitted change, not a supported mode.
+It is not wired into any script, because a context that can silently include
+working-tree state is exactly the hole `assemble.sh` was written to close. After
+the commit lands, `reproduce.sh` is the only correct path and this block is
+history.
+
+**Five cold builds of the new source in total**, all `--no-cache`: the verbatim
+run just described, plus the four below, from two more separately assembled
+contexts, varying the two dimensions a single host lets you vary here:
+
+| | build A | build B |
+|---|---|---|
+| Host context path | `…/scratchpad/ctx-newA` | `…/scratchpad/b/deeply/nested/differently/sized/host/path/for/context-b/ctx` |
+| Context file mtimes | working-tree mtimes (wall clock, all different) | every entry forced to `2000-01-01 00:00` |
+| Targets built | `export`, then `runtime` (OCI) | `export`, then `runtime` (OCI) |
+
+The mtime axis is the one worth explaining. `git archive` stamps every file with
+the commit timestamp, so a committed context has uniform mtimes that these
+working-tree contexts do not have, and the commit that eventually lands will
+stamp its own. Forcing build B's entire context to a fixed, wildly different
+timestamp tests that the compiler output does not depend on any of that. It does
+not:
+
+```
+binary sha256:  c6b7738f6ac2f6f2e6cb58c5b63d4c40b7e4903d057c5a44adcf7b0e01fe1a6a   (A == B)
+OCI tar sha256: 2c97d8f4f7a8cb82284d2b500c4ca3ae5c7da00b5b3a9973471dfd9cc5b3df14   (A == B)
+OCI manifest:   sha256:33c0f4f12bdeb9b47f77d5cea7e479c2bddc6ef7067e790072115221d0bb9460   (A == B)
+```
+
+`cmp` reports no difference between the two exported binaries, or between the
+two OCI tars.
+
+**It is the new classifier, checked rather than assumed.** A hash that changes is
+not by itself evidence that it changed for the stated reason, so:
+
+- The new binary contains the new operator-visible log strings (`an Orchard
+  exit, value LEAVING the Orchard pool`, and `moved no value out of Orchard`),
+  one occurrence each.
+- It contains **zero** occurrences of the old `value leaving Orchard and
+  entering Ironwood`, which the control binary from `HEAD` does contain. The two
+  binaries are distinguishable by inspection, not only by digest.
+
+**The usual not-for-a-stupid-reason checks, re-run on the new binary:**
+
+- **Not a stub.** 4392728 bytes, `ELF 64-bit LSB pie executable, x86-64,
+  static-pie linked`, `e_shnum` 35, no `INTERP` segment, no `NOTE` segment
+  (hence no build-id), zero `DT_NEEDED` entries. Loaded from the OCI tar and
+  run: `--version` prints `zero-indexer-shim 0.1.0` and `--help` prints the real
+  `--listen` / `--backend` flag set with their `ZIS_*` env bindings.
+- **No host paths leak in.** `strings` finds zero occurrences of `/Users/mark`,
+  `claude-501`, `scratchpad`, the worktree name, or any of the context directory
+  names. The three very different context paths above are the live test of it.
+- **The shipped bytes are the audited bytes.** The runtime image's last layer was
+  unpacked out of the OCI tar and its `/zero-indexer-shim` hashes to
+  `c6b7738f…`, the same value as the exported binary, so `COPY --from=export`
+  still routes what it claims.
+- **Vendored subtrees untouched.** `git status --porcelain zebra/ zaino/` is
+  empty after every build.
+
+**Timings, and an honest note about them.** Host wall clock for the A/B pass:
+export A 3m02s, OCI A 6m02s, export B 33m10s, OCI B 3m43s, 45m57s in total. The
+export B outlier is machine contention, not a property of the recipe (host load
+average was above 30 for most of it, and Spotlight was indexing concurrently);
+cargo's own timer inside that same step reported 2m15s, in line with every other
+build. `cargo fetch` took 41.6s, 46s and 58s across the pass. Cargo's
+self-reported compile times were 2m06s, 2m08s, 2m13s, 2m15s and 3m16s, so the
+standing "under three minutes to compile" claim above still holds wherever the
+host is not oversubscribed. Do not read the 33m figure as a recipe regression;
+read it as a reminder that wall clock on a shared desktop measures the desktop.
 
 ### Independent re-verification, 2026-07-31
+
+> Everything from here to the end of the hardening pass attests the **superseded**
+> binary hash `a9c19f2c…`, built from the pre-2026-08-01 classifier. The recipe
+> facts in these passes (frontend pin, POSIX rewrite, umask, archived recipe,
+> cross-machine agreement) all still hold; the hash they landed on, and the test
+> count recorded alongside it, are historical. Cross-machine agreement holds
+> **for the recipe on the old source**: no machine outside this host has yet
+> built `c6b7738f…` (see "What is proven, and what is not").
 
 A second pass rebuilt everything from scratch, deliberately varying every
 dimension a single host lets you vary:
@@ -319,9 +539,9 @@ invalidates the builder stage for each, so the pass contains **four independent
 cold compiles** of all 276 crates. All four produced the same bytes:
 
 ```
-binary sha256:  a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05  (A == B == recorded)
-OCI tar sha256: 8a19102ed78277f54cb97a43dad7725d8dcf98c1392c7ae811dfb10fc449b651  (A == B == recorded)
-OCI manifest:   sha256:c657f0c87fc879e941455ecf2750eb47ca6833c398af142e078d8308b8c9db2a  (A == B == recorded)
+binary sha256:  a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05  (A == B == then-recorded)
+OCI tar sha256: 8a19102ed78277f54cb97a43dad7725d8dcf98c1392c7ae811dfb10fc449b651  (A == B == then-recorded)
+OCI manifest:   sha256:c657f0c87fc879e941455ecf2750eb47ca6833c398af142e078d8308b8c9db2a  (A == B == then-recorded)
 ```
 
 `cmp` reports no differences between the two exported binaries or the two OCI
@@ -429,8 +649,9 @@ of `deploy/` were in play across them (this README changed between builds). The
 binary hash did not move. So committing this directory will not re-baseline
 anything, which is the sort of thing that is easy to assume and cheap to check.
 
-`cargo test --locked` passes 56 tests, and `git status --porcelain zebra/
-zaino/` is empty after every build and after the host test run.
+`cargo test --locked` passed 56 tests **at that time**; the current tree passes
+59, because the predicate change brought its own tests. `git status --porcelain
+zebra/ zaino/` is empty after every build and after the host test run.
 
 Timings for this pass, cold, on the same arm64 Mac under Rosetta: `cargo fetch`
 54 s and 65 s, compile 106 s and 104 s, so under three minutes per build and
@@ -442,34 +663,55 @@ above.
 
 - **Proven:** deterministic across repeated cold builds on this host, including
   across a fresh BuildKit instance with an empty cache and its own image store,
-  across two very different host context paths, across two working directories,
-  across both the scripted and the hand-run invocation, and across the recipe
-  rewrite in the hardening pass above. Every cold build attempted so far, across
-  three sessions, has produced `a9c19f2c…`. Vendored subtrees untouched
-  (`git status --porcelain zebra/ zaino/` empty after every build). The binary
-  runs and is a real 4.2 MB static-PIE executable, not a stub.
-- **Specifically ruled out:** host-path leakage. Two builds whose context paths
-  differ in length, depth and content produced identical bytes, and `strings`
-  finds no host path in the binary at all.
+  across several very different host context paths, across two working
+  directories, across both the scripted and the hand-run invocation, across
+  context file mtimes differing by 26 years, and across the recipe rewrite in
+  the hardening pass above. Every cold build attempted so far, across four
+  sessions, has landed on the hash implied by its own source: `a9c19f2c…` for
+  the old classifier (every build up to and including the 2026-08-01 control),
+  `c6b7738f…` for the new one (five builds, three contexts, and for the source
+  as pinned by content under "Recorded hashes", which the tree has since moved
+  past). Vendored subtrees untouched (`git status --porcelain zebra/ zaino/`
+  empty after every build).
+  The binary runs and is a real 4.2 MB static-PIE executable, not a stub.
+- **Proven: the hash tracks the source.** A change to the compiled predicate
+  moved the published hash, and a control build of the unchanged tree in the
+  same session did not. The recipe is therefore sensitive to what it is supposed
+  to be sensitive to, which is the property that makes a stale hash detectable
+  at all. It is easy to demonstrate determinism and never demonstrate this one.
+- **Specifically ruled out:** host-path leakage. Builds whose context paths
+  differ in length, depth and content produced identical bytes, on both the old
+  and the new source, and `strings` finds no host path in the binary at all.
+- **Specifically ruled out:** context file mtimes affecting the artifact. A
+  context with wall-clock mtimes and one forced entirely to `2000-01-01`
+  produced identical binaries and identical OCI tars. This is what lets a hash
+  measured from a working tree stand once the same content is committed, since
+  `git archive` will then stamp everything with the commit timestamp.
 - **Specifically ruled out:** `deploy/` content affecting the artifact. Builds
   with and without this directory in the context, and with three different
   revisions of it, all produced the same binary. Nothing here is compiled.
 - **Specifically ruled out:** the reproduction scripts needing bash. They run
   under dash, confirmed in a Debian container, which is the shell a third party
   on Ubuntu will actually hand them.
-- **Proven: determinism across *independent hardware*, and across execution
-  modes.** GitHub Actions run
+- **Proven for the recipe, pending re-run for the current hash: determinism
+  across *independent hardware*, and across execution modes.** GitHub Actions
+  run
   [30681137118](https://github.com/ShieldedLabs/zero/actions/runs/30681137118)
   built this recipe twice from cold on a `blacksmith-16vcpu-ubuntu-2404` runner
-  (native x86_64 Linux) and landed on the recorded hash
-  `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05`. The
-  binary it produced was downloaded and hashed independently, rather than
-  trusting the job's own comparison. Because the recorded hash was originally
-  produced on arm64 macOS under Rosetta emulation, that single result closes two
-  axes at once: a different machine (CPU, kernel, filesystem, paths, Docker and
-  BuildKit versions), and a different *execution mode* for the compiler itself.
-  The latter is a stronger check than two native builds would have been, since
-  it also rules out codegen that varies with runtime CPU feature detection.
+  (native x86_64 Linux) and landed on the hash recorded at the time,
+  `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05`. The binary
+  it produced was downloaded and hashed independently, rather than trusting the
+  job's own comparison. Because that hash was originally produced on arm64 macOS
+  under Rosetta emulation, the result closes two axes at once: a different
+  machine (CPU, kernel, filesystem, paths, Docker and BuildKit versions), and a
+  different *execution mode* for the compiler itself. The latter is a stronger
+  check than two native builds would have been, since it also rules out codegen
+  that varies with runtime CPU feature detection. **What that run attests is the
+  recipe, on the old source.** `c6b7738f…` has not yet been produced on hardware
+  we do not control, because its source is not committed and CI cannot see it.
+  The cross-machine claim is inherited by argument, not re-measured, until the
+  predicate change lands and the workflow runs again. Treat re-running it as the
+  closing step of this re-baseline, not as a formality.
 - **Not yet proven: the enclave half of the chain, which is now the only
   untested link.** This binary has never run inside a Nitro enclave. No PCR0,
   PCR1 or PCR2 has been computed from this image, no EIF has been assembled from
@@ -480,9 +722,20 @@ above.
 - **Proven: that a third party can run these instructions at all.** The recipe
   is pushed, and CI executed the documented procedure verbatim (`sh
   zeronym/shim/deploy/reproduce.sh`) on a clean machine that had never seen this
-  repository, reaching the recorded hash. A hash nobody else can recompute would
-  be unfalsifiable, which is the opposite of the point; this one has now been
-  recomputed by a machine we do not control.
+  repository, reaching the hash recorded at that time. A hash nobody else can
+  recompute would be unfalsifiable, which is the opposite of the point.
+- **Not currently true, and temporary: `reproduce.sh` passes.** It will FAIL
+  against `EXPECTED_SHA256` for as long as the predicate change sits
+  uncommitted, because it builds `git archive HEAD` and `HEAD` is still the old
+  classifier. That is the documented, expected state described under "Recorded
+  hashes", not a regression, and it clears the moment the change is committed.
+- **Not currently true either: `EXPECTED_SHA256` is the hash of the current
+  tree.** A later review pass changed `src/proxy.rs`, which is compiled, so the
+  published value is the hash of the content-pinned snapshot recorded under
+  "Recorded hashes" rather than of what is on disk now. The commit-time
+  `reproduce.sh` run therefore **re-baselines** the published hash; it does not
+  confirm it. Everything above about the recipe is unaffected: no base digest,
+  flag or script moved, only source did.
 
 ## Reproducing this yourself
 
@@ -490,6 +743,13 @@ Anyone with Docker and a checkout of this repo at the recorded commit can
 recompute the hash. Nothing else is needed: no network beyond the base-image
 pull and `cargo fetch`, no toolchain install, no protoc, and no bash (the
 scripts are POSIX sh and run under dash).
+
+> **Read the provenance caveat under "Recorded hashes" first.** As of
+> 2026-08-01 the source of the published hash is not committed, so this
+> procedure reproduces `a9c19f2c…` (the previous classifier) and reports a FAIL
+> against `EXPECTED_SHA256`. Nothing is broken; there is simply no commit to
+> check out yet. Everything below becomes true again as soon as the predicate
+> change lands.
 
 ```sh
 git clone https://github.com/ShieldedLabs/zero && cd zero
@@ -544,6 +804,13 @@ If your hash differs, check these in order:
    different source. Confirm `git rev-parse HEAD`. If `assemble.sh` prints a
    `deploy/ is NOT COMMITTED` warning, stop: your context is not commit-pinned
    and its hash is not comparable to a published one.
+7. **Uncommitted source, the quiet one.** There is no warning for this case, and
+   it is the one that actually bit us. `git archive HEAD` ignores your working
+   tree entirely, so an edit under `src/` that you have not committed is simply
+   absent from the build, and every script here will confirm the hash of the
+   code you did **not** change. `git status --porcelain zeronym/shim` before you
+   trust a result. Note the asymmetry with item 6: a modified `Containerfile`
+   gets you a warning, a modified `classify.rs` gets you silence.
 
 If the **binary** matches but the **OCI tar** does not, that is a packaging-layer
 difference (Docker or BuildKit version), not a build-determinism failure. The
