@@ -47,6 +47,7 @@ type Options struct {
 	RPCPassword         string `json:"rpcpassword"`
 	RPCHost             string `json:"rpchost"`
 	RPCPort             string `json:"rpcport"`
+	NoBackendCheck      bool   `json:"no_backend_check,omitempty"`
 	NoTLSVeryInsecure   bool   `json:"no_tls_very_insecure,omitempty"`
 	GenCertVeryInsecure bool   `json:"gen_cert_very_insecure,omitempty"`
 	Redownload          bool   `json:"redownload"`
@@ -59,9 +60,9 @@ type Options struct {
 }
 
 // RawRequest points to the function to send an RPC request to zcashd;
-// in production, it points to btcsuite/btcd/rpcclient/rawrequest.go:RawRequest();
+// in production, it points to frontend.NewContextRawRequest();
 // in unit tests it points to a function to mock RPCs to zcashd.
-var RawRequest func(method string, params []json.RawMessage) (json.RawMessage, error)
+var RawRequest func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error)
 
 // Time allows time-related functions to be mocked for testing,
 // so that tests can be deterministic and so they don't require
@@ -131,6 +132,12 @@ type (
 			}
 			SkipHash string
 		}
+		Ironwood struct {
+			Commitments struct {
+				FinalState string
+			}
+			SkipHash string
+		}
 	}
 
 	// zcashd rpc "getrawtransaction txid 1" (1 means verbose), there are
@@ -170,6 +177,9 @@ type (
 				Size uint32
 			}
 			Orchard struct {
+				Size uint32
+			}
+			Ironwood struct {
 				Size uint32
 			}
 		}
@@ -246,7 +256,7 @@ func FirstRPC() {
 }
 
 func GetBlockChainInfo() (*ZcashdRpcReplyGetblockchaininfo, error) {
-	result, rpcErr := RawRequest("getblockchaininfo", []json.RawMessage{})
+	result, rpcErr := RawRequest(context.Background(), "getblockchaininfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -259,7 +269,7 @@ func GetBlockChainInfo() (*ZcashdRpcReplyGetblockchaininfo, error) {
 }
 
 func GetLightdInfo() (*walletrpc.LightdInfo, error) {
-	result, rpcErr := RawRequest("getinfo", []json.RawMessage{})
+	result, rpcErr := RawRequest(context.Background(), "getinfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -269,7 +279,7 @@ func GetLightdInfo() (*walletrpc.LightdInfo, error) {
 		return nil, err
 	}
 
-	result, rpcErr = RawRequest("getblockchaininfo", []json.RawMessage{})
+	result, rpcErr = RawRequest(context.Background(), "getblockchaininfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -318,7 +328,7 @@ func GetLightdInfo() (*walletrpc.LightdInfo, error) {
 	}, nil
 }
 
-func getBlockFromRPC(height int) (*walletrpc.CompactBlock, error) {
+func getBlockFromRPC(ctx context.Context, height int) (*walletrpc.CompactBlock, error) {
 	// `block.ParseFromSlice` correctly parses blocks containing v5
 	// transactions, but incorrectly computes the IDs of the v5 transactions.
 	// We temporarily paper over this bug by fetching the correct txids via a
@@ -334,12 +344,12 @@ func getBlockFromRPC(height int) (*walletrpc.CompactBlock, error) {
 	}
 	// Fetch the block using the verbose option ("1") because it provides
 	// both the list of txids, which we're not yet able to compute for
-	// Orchard (V5) transactions, and the block hash (block ID), which
+	// v5 and later transactions, and the block hash (block ID), which
 	// we need to fetch the raw data format of the same block. Don't fetch
 	// by height in case a reorg occurs between the two getblock calls;
 	// using block hash ensures that we're fetching the same block.
 	params := []json.RawMessage{heightJSON, json.RawMessage("1")}
-	result, rpcErr := RawRequest("getblock", params)
+	result, rpcErr := RawRequest(ctx, "getblock", params)
 	if rpcErr != nil {
 		// Check to see if we are requesting a height the zcashd doesn't have yet
 		if (strings.Split(rpcErr.Error(), ":"))[0] == "-8" {
@@ -356,9 +366,12 @@ func getBlockFromRPC(height int) (*walletrpc.CompactBlock, error) {
 	if err != nil {
 		Log.Fatal("getBlockFromRPC bad block hash", block1.Hash)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// non-verbose (raw hex) version of block
 	params = []json.RawMessage{blockHash, json.RawMessage("0")}
-	result, rpcErr = RawRequest("getblock", params)
+	result, rpcErr = RawRequest(ctx, "getblock", params)
 
 	// For some reason, the error responses are not JSON
 	if rpcErr != nil {
@@ -398,6 +411,7 @@ func getBlockFromRPC(height int) (*walletrpc.CompactBlock, error) {
 	r := block.ToCompact()
 	r.ChainMetadata.SaplingCommitmentTreeSize = block1.Trees.Sapling.Size
 	r.ChainMetadata.OrchardCommitmentTreeSize = block1.Trees.Orchard.Size
+	r.ChainMetadata.IronwoodCommitmentTreeSize = block1.Trees.Ironwood.Size
 	return r, nil
 }
 
@@ -434,7 +448,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 		default:
 		}
 
-		result, err := RawRequest("getbestblockhash", []json.RawMessage{})
+		result, err := RawRequest(context.Background(), "getbestblockhash", []json.RawMessage{})
 		if err != nil {
 			Log.WithFields(logrus.Fields{
 				"error": err,
@@ -463,7 +477,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 			continue
 		}
 		var block *walletrpc.CompactBlock
-		block, err = getBlockFromRPC(height)
+		block, err = getBlockFromRPC(context.Background(), height)
 		if err != nil {
 			Log.Info("getblock ", height, " failed, will retry: ", err)
 			Time.Sleep(8 * time.Second)
@@ -496,7 +510,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 // the cache, then, if not found, will request the block from zcashd. It returns
 // nil if no block exists at this height.
 // This returns gRPC-compatible errors.
-func GetBlock(cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
+func GetBlock(ctx context.Context, cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
 	// First, check the cache to see if we have the block
 	var block *walletrpc.CompactBlock
 	if cache != nil {
@@ -507,7 +521,7 @@ func GetBlock(cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
 	}
 
 	// Not in the cache
-	block, err := getBlockFromRPC(height)
+	block, err := getBlockFromRPC(ctx, height)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"GetBlock: getblock failed, error: %s", err.Error())
@@ -540,11 +554,15 @@ func FilterTxPool(tx *walletrpc.CompactTx, poolTypes []walletrpc.PoolType) *wall
 	if slices.Contains(poolTypes, walletrpc.PoolType_ORCHARD) {
 		r.Actions = tx.Actions
 	}
+	if slices.Contains(poolTypes, walletrpc.PoolType_IRONWOOD) {
+		r.IronwoodActions = tx.IronwoodActions
+	}
 	if len(r.Vin) > 0 ||
 		len(r.Vout) > 0 ||
 		len(r.Spends) > 0 ||
 		len(r.Outputs) > 0 ||
-		len(r.Actions) > 0 {
+		len(r.Actions) > 0 ||
+		len(r.IronwoodActions) > 0 {
 		return r
 	}
 	return nil
@@ -556,10 +574,11 @@ func FilterTxPool(tx *walletrpc.CompactTx, poolTypes []walletrpc.PoolType) *wall
 // don't bother to return empty transactions).
 func filterBlockPool(vtx []*walletrpc.CompactTx, poolTypes []walletrpc.PoolType) []*walletrpc.CompactTx {
 	if len(poolTypes) == 0 {
-		// legacy behavior: return only blocks containing shielded components.
+		// Return all shielded pools when no explicit pool filter is requested.
 		poolTypes = []walletrpc.PoolType{
 			walletrpc.PoolType_SAPLING,
 			walletrpc.PoolType_ORCHARD,
+			walletrpc.PoolType_IRONWOOD,
 		}
 	}
 	trimmedVtx := []*walletrpc.CompactTx{}
@@ -599,7 +618,7 @@ func GetBlockRange(ctx context.Context, cache *BlockCache, blockOut chan<- *wall
 			j = high - (i - low)
 		}
 
-		block, err := GetBlock(cache, j)
+		block, err := GetBlock(ctx, cache, j)
 		if err != nil {
 			select {
 			case errOut <- err:
