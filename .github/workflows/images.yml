@@ -9,6 +9,7 @@ name: Images
 #                                 plaintext so it can bind non-loopback on a
 #                                 private network; see deploy/z3-stack/README.md)
 #   ghcr.io/<owner>/zero-zallet
+#   ghcr.io/<owner>/zero-lightwalletd
 #
 # First publish: the GHCR packages are created private. Set them to Public once
 # (Org -> Packages -> each package -> Package settings) so users can pull without
@@ -67,6 +68,19 @@ jobs:
             # gRPC and a shared state volume (see deploy/z3-stack/README.md).
             build_args: |
               FEATURES=zaino,rpc-cli,zcashd-import
+          - name: zero-lightwalletd
+            context: lightwalletd
+            # Zero's own Dockerfile, not the vendored lightwalletd/Dockerfile.
+            # Upstream's has a single stage (`lightwalletd_base`) and so cannot
+            # satisfy the `target: runtime` below, and it ships the whole Go
+            # toolchain in the final image: 1.84 GB against 173 MB for this one.
+            dockerfile: docker/lightwalletd/Dockerfile
+            build_args: ""
+            # Go, not Rust: the version stamps the Makefile would normally take
+            # from `git describe` are supplied by "Resolve build args" instead,
+            # because the build context is the lightwalletd subdirectory and is
+            # not a git repository.
+            stamp_go_version: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -102,6 +116,17 @@ jobs:
                 exit 1
               fi
               echo "RUST_VERSION=${rv}"
+            fi
+            if [ -n "${{ matrix.stamp_go_version }}" ]; then
+              # Without these the binary reports `version ""`: the Makefile
+              # derives them with `git describe` / `git rev-parse`, which return
+              # empty here because the build context is a subdirectory of the
+              # repo rather than a repository. An image that cannot say which
+              # commit it came from is not much use for deciding whether a
+              # deployed node carries a given fix.
+              echo "LWD_VERSION=${{ inputs.tag || github.ref_name }}"
+              echo "LWD_GIT_COMMIT=${{ github.sha }}"
+              echo "LWD_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             fi
             echo "BUILD_ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
