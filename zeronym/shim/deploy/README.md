@@ -274,7 +274,8 @@ machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 
 | | binary sha256 | what it was built from |
 |---|---|---|
-| **current**, the widened presence predicate | `4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a` | `is_orchard_touching(tx) := tx has at least one Orchard action`. Zooko's second ruling: every Orchard-touching transaction is diverted, whatever `orchard_value_balance` says. |
+| **current**, TLS on both hops | `cd72daf30956fbdbeb76d9e55c723aad7d9d928d09213c37fed8a66d55b3b5a7` | rustls (`ring`) linked in and wired into the serving path: ACME-terminated wallet TLS, WebPKI-verified backend TLS. The binary grows 4.4 MB to 7.6 MB, which is the TLS stack and is the expected shape of this change. |
+| superseded, commit `c161012ff2` | `4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a` | `is_orchard_touching(tx) := tx has at least one Orchard action`. Zooko's second ruling: every Orchard-touching transaction is diverted, whatever `orchard_value_balance` says. |
 | superseded, commit `2243adbdce` | `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f` | the first 2026-08-01 predicate, `is_orchard_exit(tx) := orchard_value_balance > 0`. |
 | superseded, recorded to 2026-07-31 | `a9c19f2c3c878da0e2048ff05c075e017a960b3c81c43b631be53f424462ce05` | the pre-2026-08-01 classifier, with the `V6` and `ironwood_value_balance < 0` conjuncts still in the predicate. |
 
