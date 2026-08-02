@@ -100,11 +100,25 @@ git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git
 git push caution main
 ```
 
-Create a **new** app rather than reusing the z3 node's. They are one app per
-enclave, so pushing this into `ab354b1f…` would replace the zebra+zaino node,
-and since enclave state is RAM-only that would discard a fully synced testnet
-chain and cost roughly a day to rebuild. It would also leave this shim with no
-backend to proxy to.
+`caution apps create` takes no `--name`; it reads the repo it is run in and
+assigns a generated name, so run it from inside the assembled directory. It adds
+the `caution` git remote for you.
+
+Create a **new** app per shim rather than reusing an existing one. They are one
+app per enclave, so pushing into another app's repo replaces that enclave.
+
+### Currently deployed
+
+| shim | backend | app | enclave IP |
+|---|---|---|---|
+| `zeronym-shim-zaino` | `66.42.124.202:8137` (zaino) | `17943535-4a0b-40c6-9e7c-fb1c18a4a46e` | `43.200.160.155` |
+| `zeronym-shim-lwd` | `66.42.124.202:9067` (lightwalletd) | `8e842ba2-64bd-482b-9b95-895cfd46fc81` | `13.202.251.192` |
+
+Enclave IPs change on most redeploys, and they appear in the cluster's
+`MiddlewareTCP` allowlist (`shim-plaintext-routes.yaml` in shielded-infra). A
+stale entry there fails closed, and the symptom is the shim hanging on every
+upstream dial with no way to see why, because attested mode has no console.
+Update both together.
 
 Redeploying later is just `git push caution main` against the same app; no
 re-init.
