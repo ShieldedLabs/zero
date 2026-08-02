@@ -1,10 +1,17 @@
 //! Binary wrapper around [`zero_indexer_shim::serve_with_shutdown`].
 //!
-//! Plaintext h2c only: no TLS in the proof of concept.
+//! Both hops are optionally TLS, and independently so: the wallet-facing link
+//! is terminated here when `--tls-domain` is set, and the backend link is
+//! originated here when `--backend-tls` is set. With neither, the shim is
+//! plaintext h2c end to end, which is what a local demo and the tests use.
+
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
 use zero_indexer_shim::config::Config;
+use zero_indexer_shim::proxy::Backend;
+use zero_indexer_shim::tls::{BackendTls, ServerTls};
 use zero_indexer_shim::BoxError;
 
 #[tokio::main]
@@ -22,16 +29,66 @@ async fn main() -> Result<(), BoxError> {
 
     let config = Config::parse();
 
+    // Built before binding, so a malformed TLS name is a startup failure the
+    // operator sees rather than a per-request one they have to infer.
+    let backend_tls = match config.backend_tls.as_deref() {
+        Some(name) => Some(BackendTls::new(name)?),
+        None => None,
+    };
+    let backend = Backend {
+        addr: config.backend,
+        tls: backend_tls,
+    };
+
+    let server_tls = config.tls_domain.as_deref().map(|domain| {
+        Arc::new(ServerTls::start(
+            domain,
+            config.tls_email.as_deref(),
+            config.tls_production,
+        ))
+    });
+
     // Bind before serving so EADDRINUSE / EACCES is a startup failure the
     // operator sees, not a silent death inside a spawned task.
     let listener = TcpListener::bind(config.listen).await?;
-    tracing::info!(
-        listen = %listener.local_addr()?,
-        backend = %config.backend,
-        "zero-indexer-shim starting (plaintext h2c, non-destructive: migrations are logged, not diverted)"
-    );
+    let local = listener.local_addr()?;
 
-    zero_indexer_shim::serve_with_shutdown(listener, config.backend, shutdown()).await
+    match &server_tls {
+        Some(tls) => tracing::info!(
+            listen = %local,
+            backend = %backend,
+            domain = tls.domain(),
+            acme = if config.tls_production {
+                "letsencrypt-production"
+            } else {
+                "letsencrypt-staging"
+            },
+            "zero-indexer-shim starting (TLS terminated here; non-destructive: \
+             migrations are logged, not diverted)"
+        ),
+        None => tracing::info!(
+            listen = %local,
+            backend = %backend,
+            "zero-indexer-shim starting (plaintext h2c; non-destructive: \
+             migrations are logged, not diverted)"
+        ),
+    }
+
+    // Said once and loudly at startup, rather than left for someone to work out
+    // from the absence of a flag. A listener with no certificate serves wallet
+    // queries in the clear, and those queries are exactly the metadata this
+    // component exists to keep from the operator.
+    if server_tls.is_none() {
+        tracing::warn!(
+            "no --tls-domain: wallet traffic is PLAINTEXT. Reasonable on loopback \
+             beside an indexer, not across a network."
+        );
+    }
+    if backend.tls.is_none() {
+        tracing::warn!("no --backend-tls: the hop to the backing indexer is PLAINTEXT.");
+    }
+
+    zero_indexer_shim::serve_with_shutdown(listener, backend, server_tls, shutdown()).await
 }
 
 /// Resolves on the first ctrl-c, which stops the accept loop and drains.

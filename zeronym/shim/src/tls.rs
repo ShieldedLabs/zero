@@ -221,6 +221,24 @@ impl BackendTls {
         })
     }
 
+    /// The HTTP `:authority` a request to this backend should carry.
+    ///
+    /// The verified name, not the dialled address, and the default port is
+    /// elided as HTTP requires. A backend that routes by host (any ingress
+    /// controller) matches on this, so getting it wrong produces a 404 from a
+    /// connection that is otherwise perfectly healthy.
+    pub fn authority(&self, port: u16) -> String {
+        let name = match &self.server_name {
+            ServerName::DnsName(name) => name.as_ref().to_owned(),
+            other => format!("{other:?}"),
+        };
+        if port == 443 {
+            name
+        } else {
+            format!("{name}:{port}")
+        }
+    }
+
     /// Dial `addr` and authenticate it as the configured name.
     pub async fn connect(
         &self,
@@ -247,6 +265,17 @@ mod tests {
     #[test]
     fn backend_tls_accepts_a_dns_name() {
         assert!(BackendTls::new("zaino.shieldedinfra.net").is_ok());
+    }
+
+    #[test]
+    fn authority_is_the_verified_name_not_the_address() {
+        // Regression test for a real failure: with the dialled address as the
+        // :authority, our Traefik ingress matched no host rule and returned
+        // 404 over a TLS connection that had succeeded.
+        let tls = BackendTls::new("lwd.shieldedinfra.net").unwrap();
+        assert_eq!(tls.authority(443), "lwd.shieldedinfra.net");
+        // Non-default ports are kept, as HTTP requires.
+        assert_eq!(tls.authority(8443), "lwd.shieldedinfra.net:8443");
     }
 
     #[test]

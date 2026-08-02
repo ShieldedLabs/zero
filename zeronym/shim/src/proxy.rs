@@ -58,6 +58,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::intercept;
+use crate::tls::{BackendTls, ServerTls};
 use crate::BoxError;
 
 /// One body type for both legs and both paths, so [`forward`] is shared
@@ -113,35 +114,106 @@ pub struct Upstream {
     authority: Authority,
 }
 
+/// Where the backing indexer is, and how to authenticate it.
+///
+/// The address and the verified name are separate on purpose. The enclave dials
+/// a literal address and never resolves DNS, so a poisoned answer cannot
+/// redirect it; the TLS name is what the certificate must actually say. See
+/// `crate::tls`.
+#[derive(Clone)]
+pub struct Backend {
+    pub addr: SocketAddr,
+    pub tls: Option<BackendTls>,
+}
+
+impl From<SocketAddr> for Backend {
+    /// Plaintext h2c, which is what the tests and a local demo use.
+    fn from(addr: SocketAddr) -> Self {
+        Backend { addr, tls: None }
+    }
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.tls {
+            Some(_) => write!(f, "{} (tls)", self.addr),
+            None => write!(f, "{} (plaintext)", self.addr),
+        }
+    }
+}
+
+/// Drive an upstream connection to completion in the background.
+///
+/// This spawn is mandatory. The connection future is what moves bytes on the
+/// socket; without it every request hangs forever with no error, which looks
+/// exactly like a proxy deadlock. Generic because the TLS and plaintext
+/// handshakes produce different connection types.
+fn spawn_connection_driver<C, E>(conn: C)
+where
+    C: Future<Output = Result<(), E>> + Send + 'static,
+    E: std::fmt::Display,
+{
+    tokio::spawn(async move {
+        if let Err(err) = conn.await {
+            tracing::debug!(%err, "backing indexer connection closed");
+        }
+    });
+}
+
 impl Upstream {
     /// Dial the backing indexer and spawn its connection task.
-    pub async fn connect(addr: SocketAddr) -> Result<Self, BoxError> {
-        let stream = TcpStream::connect(addr).await?;
+    pub async fn connect(backend: &Backend) -> Result<Self, BoxError> {
+        let stream = TcpStream::connect(backend.addr).await?;
         stream.set_nodelay(true)?;
 
-        let (sender, conn) = client_h2::Builder::new(TokioExecutor::new())
-            .initial_stream_window_size(STREAM_WINDOW)
-            .initial_connection_window_size(CONNECTION_WINDOW)
-            .handshake(TokioIo::new(stream))
-            .await?;
-
-        // This spawn is mandatory. The connection future is what drives bytes
-        // on the socket; without it every request hangs forever with no error,
-        // which looks exactly like a proxy deadlock.
-        tokio::spawn(async move {
-            if let Err(err) = conn.await {
-                tracing::debug!(%err, "backing indexer connection closed");
+        // The handshake is the same in both arms, but its connection future is
+        // a different concrete type per stream type, so the arms cannot be
+        // unified into one value. Each spawns its own driver and yields only
+        // the sender, which IS the same type either way; past this point
+        // nothing knows whether the hop is encrypted.
+        let sender = match &backend.tls {
+            Some(tls) => {
+                let stream = tls.connect(backend.addr, stream).await?;
+                let (sender, conn) = client_h2::Builder::new(TokioExecutor::new())
+                    .initial_stream_window_size(STREAM_WINDOW)
+                    .initial_connection_window_size(CONNECTION_WINDOW)
+                    .handshake(TokioIo::new(stream))
+                    .await?;
+                spawn_connection_driver(conn);
+                sender
             }
-        });
+            None => {
+                let (sender, conn) = client_h2::Builder::new(TokioExecutor::new())
+                    .initial_stream_window_size(STREAM_WINDOW)
+                    .initial_connection_window_size(CONNECTION_WINDOW)
+                    .handshake(TokioIo::new(stream))
+                    .await?;
+                spawn_connection_driver(conn);
+                sender
+            }
+        };
+
+        // The :authority must be the TLS name when there is one, not the
+        // address. Found by testing rather than by reading: with the address
+        // here, a host-routing backend (our Traefik ingress) matched no rule
+        // and answered 404, because ":authority: 66.42.124.202:443" is not
+        // "lwd.shieldedinfra.net". TLS had succeeded; the request was simply
+        // addressed to nobody. Plaintext backends keep the address, which is
+        // what a directly-dialled indexer expects.
+        let authority = match &backend.tls {
+            Some(tls) => tls.authority(backend.addr.port()),
+            None => backend.addr.to_string(),
+        };
 
         Ok(Upstream {
             sender,
-            authority: addr.to_string().parse()?,
+            authority: authority.parse()?,
         })
     }
 
     /// Whether the underlying connection is gone. [`UpstreamPool::get`] redials
     /// on this.
+    ///
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
@@ -165,7 +237,7 @@ impl Upstream {
 ///   application-level status rather than a transport error, the wallet's own
 ///   reconnect logic never fires and it stays stuck.
 struct UpstreamPool {
-    backend: SocketAddr,
+    backend: Backend,
     state: tokio::sync::Mutex<PoolState>,
 }
 
@@ -178,7 +250,7 @@ struct PoolState {
 }
 
 impl UpstreamPool {
-    fn new(backend: SocketAddr) -> Self {
+    fn new(backend: Backend) -> Self {
         UpstreamPool {
             backend,
             state: tokio::sync::Mutex::new(PoolState::default()),
@@ -199,7 +271,7 @@ impl UpstreamPool {
                 return Ok(upstream);
             }
             tracing::debug!(
-                backend = %self.backend,
+                backend = %self.backend.addr,
                 "backing indexer connection is gone, redialling"
             );
         }
@@ -210,7 +282,7 @@ impl UpstreamPool {
             }
         }
 
-        let dialled = match tokio::time::timeout(DIAL_TIMEOUT, Upstream::connect(self.backend))
+        let dialled = match tokio::time::timeout(DIAL_TIMEOUT, Upstream::connect(&self.backend))
             .await
         {
             Ok(dialled) => dialled,
@@ -235,8 +307,8 @@ impl UpstreamPool {
 
 /// Serve until the listener errors. Equivalent to [`serve_with_shutdown`] with
 /// a shutdown signal that never fires.
-pub async fn serve(listener: TcpListener, backend: SocketAddr) -> Result<(), BoxError> {
-    serve_with_shutdown(listener, backend, std::future::pending::<()>()).await
+pub async fn serve(listener: TcpListener, backend: impl Into<Backend>) -> Result<(), BoxError> {
+    serve_with_shutdown(listener, backend, None, std::future::pending::<()>()).await
 }
 
 /// Serve until `shutdown` resolves, then stop accepting and drain.
@@ -244,14 +316,20 @@ pub async fn serve(listener: TcpListener, backend: SocketAddr) -> Result<(), Box
 /// The listener is bound by the caller so a bind failure (EADDRINUSE, EACCES)
 /// surfaces as a clean startup error instead of dying inside a spawned task,
 /// and so tests can bind port 0.
+/// `tls` terminates the wallet-facing link. When it is `None` the shim serves
+/// plaintext h2c; there is deliberately no fallback in the other direction,
+/// because a TLS listener that quietly downgraded on handshake failure would
+/// serve wallet traffic in the clear while looking healthy.
 pub async fn serve_with_shutdown<S>(
     listener: TcpListener,
-    backend: SocketAddr,
+    backend: impl Into<Backend>,
+    tls: Option<Arc<ServerTls>>,
     shutdown: S,
 ) -> Result<(), BoxError>
 where
     S: Future<Output = ()>,
 {
+    let backend = backend.into();
     // Connection tracker: every connection task holds a clone of the sender and
     // nothing is ever sent, so `recv()` resolves to `None` exactly when the last
     // connection has finished.
@@ -282,9 +360,26 @@ where
                     Err(err) => return Err(err.into()),
                 };
                 let live = live_tx.clone();
+                let backend = backend.clone();
+                let tls = tls.clone();
                 tokio::spawn(async move {
                     let _live = live;
-                    serve_connection(stream, peer, backend).await;
+                    match tls {
+                        None => serve_connection(stream, peer, backend).await,
+                        Some(tls) => match tls.accept(stream).await {
+                            // A TLS-ALPN-01 validation, already answered and
+                            // closed by the acceptor. Not wallet traffic.
+                            Ok(None) => {}
+                            Ok(Some(stream)) => serve_connection(stream, peer, backend).await,
+                            // Handshake failures are ordinary on a public
+                            // listener (scanners, a wallet that gave up, or a
+                            // certificate that has not been issued yet) and
+                            // must not be retried in the clear.
+                            Err(err) => {
+                                tracing::debug!(%peer, %err, "tls handshake failed");
+                            }
+                        },
+                    }
                 });
             }
         }
@@ -320,10 +415,12 @@ fn is_fd_exhaustion(err: &std::io::Error) -> bool {
 }
 
 /// Serve one inbound client connection.
-async fn serve_connection(stream: TcpStream, peer: SocketAddr, backend: SocketAddr) {
-    if let Err(err) = stream.set_nodelay(true) {
-        tracing::debug!(%peer, %err, "set_nodelay failed");
-    }
+async fn serve_connection<IO>(stream: IO, peer: SocketAddr, backend: Backend)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // set_nodelay moved to the accept site: once the stream may be a TLS
+    // wrapper there is no TcpStream here to set it on.
 
     // One upstream connection per inbound connection, dialled lazily and
     // redialled when it dies. If the backing indexer is down we still serve the
