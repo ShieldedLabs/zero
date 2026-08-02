@@ -35,13 +35,16 @@ enclave "__ENCLAVE_NAME__" {
   }
 
   network {
-    # Wallet-facing gRPC. Deliberately the same port the combined zebra+zaino
-    # enclave serves on, so any client or script already pointed at a Zero
-    # enclave works unchanged when pointed here: that interchangeability IS the
-    # transparency claim the shim makes.
+    # Wallet-facing gRPC over TLS.
+    #
+    # 443 is not a preference, it is a requirement. The certificate is obtained
+    # by ACME TLS-ALPN-01, and Let's Encrypt always validates by connecting to
+    # port 443; there is no way to point it elsewhere. So the port that serves
+    # wallets and the port that proves domain control are necessarily the same
+    # one, and closing it would silently break renewal as well as traffic.
     ingress {
       cidr_ipv4   = "0.0.0.0/0"
-      port        = 8137
+      port        = 443
       ip_protocol = "tcp"
     }
 
@@ -54,10 +57,13 @@ enclave "__ENCLAVE_NAME__" {
     # make exfiltration to a third party a network-level impossibility rather
     # than a promise about the code.
     #
-    # Note what is absent: no port 53. The backend is configured as a literal
-    # IP (ZIS_BACKEND parses as a SocketAddr, so a hostname would not even
-    # parse), so the enclave never resolves DNS and cannot be redirected by a
-    # poisoned answer. Update the CIDR here whenever the backend IP changes.
+    # Note what is absent: still no port 53, even though the backend is now
+    # authenticated by NAME. That combination is the point rather than an
+    # oversight. ZIS_BACKEND stays a literal address, so the enclave dials an IP
+    # and never resolves DNS; ZIS_BACKEND_TLS names what the certificate must
+    # say. A poisoned DNS answer has nothing to poison, and a hijacked address
+    # cannot present a valid certificate for the name. Update the CIDR here
+    # whenever the backend IP changes.
     egress {
       cidr_ipv4   = "__BACKEND_CIDR__"
       port        = __BACKEND_PORT__
@@ -76,7 +82,7 @@ enclave "__ENCLAVE_NAME__" {
     env = {
       # Bind all interfaces: the default is 127.0.0.1:9068, which inside an
       # enclave would accept only connections that cannot exist.
-      ZIS_LISTEN = "0.0.0.0:8137"
+      ZIS_LISTEN = "0.0.0.0:443"
 
       # The backing indexer: one of Shielded Labs' own nodes, reached at the
       # cluster's load-balancer IP on a per-backend port (zaino and lightwalletd
@@ -90,6 +96,26 @@ enclave "__ENCLAVE_NAME__" {
       # vars", it was "never hand a binary a variable in its own config
       # namespace that it does not define". These two it defines.
       ZIS_BACKEND = "__BACKEND_ADDR__"
+
+      # Authenticate the backend as this name while still dialling the literal
+      # address above. Also becomes the request :authority, which is what the
+      # ingress in front of the indexer routes on; with the address there it
+      # matches no host rule and answers 404 over a healthy TLS connection.
+      ZIS_BACKEND_TLS = "__BACKEND_TLS_NAME__"
+
+      # Terminate wallet-facing TLS for this name. The ACME account key and the
+      # certificate key are generated in here and never leave: that is what
+      # stops the attestation from being defeated by whoever holds a key minted
+      # somewhere else.
+      ZIS_TLS_DOMAIN = "__TLS_DOMAIN__"
+      ZIS_TLS_EMAIL  = "__TLS_EMAIL__"
+
+      # Let's Encrypt production. Absent or empty means staging, which is where
+      # a new deployment should prove itself: the enclave is diskless, so every
+      # restart is a fresh order against a limit of 5 duplicate certificates per
+      # week per name. See RESTARTS.md, and record every production issuance
+      # there.
+      ZIS_TLS_PRODUCTION = "__TLS_PRODUCTION__"
 
       # Default is `info`, which deliberately omits the per-request zis::proxy
       # line naming the method each wallet called. That line is exactly the

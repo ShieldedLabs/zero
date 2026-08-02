@@ -28,18 +28,39 @@ umask 022
 
 NAME=""
 BACKEND=""
+BACKEND_TLS=""
+TLS_DOMAIN=""
+TLS_EMAIL="security@shieldedlabs.com"
+TLS_PRODUCTION="false"
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--name)    NAME=$2; shift 2 ;;
-		--backend) BACKEND=$2; shift 2 ;;
+		--name)        NAME=$2; shift 2 ;;
+		--backend)     BACKEND=$2; shift 2 ;;
+		--backend-tls) BACKEND_TLS=$2; shift 2 ;;
+		--tls-domain)  TLS_DOMAIN=$2; shift 2 ;;
+		--tls-email)   TLS_EMAIL=$2; shift 2 ;;
+		--production)  TLS_PRODUCTION="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
 	esac
 done
 
 [ -n "$NAME" ] || { echo "error: --name is required (e.g. zeronym-shim-zaino)" >&2; exit 2; }
-[ -n "$BACKEND" ] || { echo "error: --backend is required (e.g. 66.42.124.202:8137)" >&2; exit 2; }
+[ -n "$BACKEND" ] || { echo "error: --backend is required (e.g. 66.42.124.202:443)" >&2; exit 2; }
+[ -n "$BACKEND_TLS" ] || { echo "error: --backend-tls is required (the DNS name the backend's cert carries)" >&2; exit 2; }
+[ -n "$TLS_DOMAIN" ] || { echo "error: --tls-domain is required (the name wallets connect to)" >&2; exit 2; }
+
+# Production is opt-in and announced, because it spends one of five weekly
+# duplicate-certificate issuances for this name and there is no way to get it
+# back. Staging has no meaningful ceiling and is where a change should first
+# prove itself.
+if [ "$TLS_PRODUCTION" = "true" ]; then
+	echo "==> Let's Encrypt PRODUCTION for $TLS_DOMAIN."
+	echo "    This spends one of 5 weekly issuances. Record it in RESTARTS.md."
+else
+	echo "==> Let's Encrypt STAGING for $TLS_DOMAIN (certificates will not be trusted by clients)."
+fi
 
 # ZIS_BACKEND parses as a Rust SocketAddr, so a hostname does not merely
 # degrade, it fails to parse and the enclave never starts. Catch that here,
@@ -107,6 +128,10 @@ sed \
 	-e "s|__BACKEND_ADDR__|$BACKEND|g" \
 	-e "s|__BACKEND_CIDR__|$BACKEND_IP/32|g" \
 	-e "s|__BACKEND_PORT__|$BACKEND_PORT|g" \
+	-e "s|__BACKEND_TLS_NAME__|$BACKEND_TLS|g" \
+	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
+	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
+	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
 	"$HERE/caution.hcl.tmpl" > "$DEST/caution.hcl"
 
 # No placeholder may survive. An unsubstituted token would be pushed as literal
@@ -126,7 +151,9 @@ EXPECTED=$(cat "$ZERO_ROOT/zeronym/shim/deploy/EXPECTED_SHA256" 2>/dev/null || e
 cat > "$DEST/PROVENANCE" <<EOF
 zero-indexer-shim Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
-backend:         $BACKEND
+serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME)
+backend:         $BACKEND verified as $BACKEND_TLS
+acme directory:  $([ "$TLS_PRODUCTION" = "true" ] && echo "letsencrypt PRODUCTION" || echo "letsencrypt staging")
 source commit:   $SHA
 expected binary: $EXPECTED
 

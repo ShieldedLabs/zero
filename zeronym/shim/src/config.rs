@@ -63,7 +63,18 @@ pub struct Config {
     /// 5 duplicate certificates per week. Staging has no such ceiling and is
     /// where a new deployment should prove itself; flip this only when the
     /// deployment is known good.
-    #[arg(long, env = "ZIS_TLS_PRODUCTION")]
+    /// Takes an explicit `true`/`false` rather than being a bare flag, which
+    /// matters because it is usually set from the environment. A bare flag with
+    /// `env` treats the variable as set whenever it EXISTS, so
+    /// `ZIS_TLS_PRODUCTION=""` or `=false` would both mean production, and a
+    /// deploy meant for staging would quietly spend one of the five weekly
+    /// production issuances. Requiring a value makes that unrepresentable.
+    #[arg(
+        long,
+        env = "ZIS_TLS_PRODUCTION",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
     pub tls_production: bool,
 }
 
@@ -91,5 +102,30 @@ mod tests {
         ]);
         assert_eq!(config.listen.to_string(), "0.0.0.0:443");
         assert_eq!(config.backend.to_string(), "10.0.0.5:9067");
+    }
+}
+
+#[cfg(test)]
+mod production_flag_tests {
+    use super::*;
+
+    /// The whole point of `action = Set`: an empty or false-y environment value
+    /// must NOT select the production ACME directory. As a bare flag, clap
+    /// treats mere presence as true and both of these would have meant
+    /// production, silently spending one of five weekly issuances on a deploy
+    /// intended for staging.
+    #[test]
+    fn production_requires_an_explicit_true() {
+        let off = Config::parse_from(["zero-indexer-shim", "--tls-production", "false"]);
+        assert!(!off.tls_production);
+
+        let on = Config::parse_from(["zero-indexer-shim", "--tls-production", "true"]);
+        assert!(on.tls_production);
+
+        let defaulted = Config::parse_from(["zero-indexer-shim"]);
+        assert!(
+            !defaulted.tls_production,
+            "staging must be the default; production is an act, not an omission"
+        );
     }
 }
