@@ -21,8 +21,14 @@
 //!   relayed frame for frame, trailers included.
 //! * [`config`] is two socket addresses.
 //!
-//! Out of scope for the proof of concept: diversion, the hub, Nym, STEVE,
-//! TLS/ACME, the enclave, and attestation. Transport is plaintext h2c.
+//! * [`tls`] terminates the wallet-facing link (ACME, key born in the enclave)
+//!   and originates the backend link (WebPKI). Both are optional: with no TLS
+//!   configured the shim serves plaintext h2c, which is what the tests and a
+//!   local demo use.
+//!
+//! Out of scope for the proof of concept: diversion, the hub, Nym and STEVE.
+//! The enclave and attestation are no longer out of scope; see
+//! `deploy/caution/`.
 //!
 //! The crate is a library with a thin binary wrapper so tests can bind
 //! ephemeral ports and drive the proxy in-process.
@@ -33,6 +39,7 @@ pub mod classify;
 pub mod config;
 pub mod intercept;
 pub mod proxy;
+pub mod tls;
 
 /// Boxed error type shared by the proxy paths.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

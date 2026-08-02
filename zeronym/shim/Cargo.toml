@@ -33,6 +33,22 @@ zebra-chain = { path = "../../zebra/zebra-chain" }
 zaino-proto = { path = "../../zaino/packages/zaino-proto", default-features = false }
 prost = "0.14"
 
+# TLS. rustls with the `ring` provider rather than the default aws-lc-rs: ring
+# is the provider proven to build in the StageX musl image (measured, see
+# deploy/README.md), and aws-lc-rs additionally wants cmake, which that image
+# does not carry. default-features = false keeps aws-lc-rs out of the graph
+# entirely rather than merely unused.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+# webpki-roots and tls12 are NOT optional extras here: AcmeConfig::new and
+# new_with_provider are both cfg-gated on `webpki-roots`, so without it the
+# crate compiles but offers no way to construct a config. default-features is
+# off only to keep aws-lc-rs (and its cmake requirement) out of the graph.
+rustls-acme = { version = "0.14", default-features = false, features = ["ring", "tokio", "webpki-roots", "tls12"] }
+futures-util = "0.3"
+
 # HTTP/2 (h2c) proxy stack. Versions match what zebra and zaino already resolve.
 hyper = { version = "1", features = ["server", "client", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
