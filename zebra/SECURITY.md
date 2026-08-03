@@ -36,16 +36,21 @@ disclose the vulnerability, and then remove you from the waiting room.
 
 ## Sending Disclosures
 
-In the case where we become aware of security issues affecting other projects that have never affected Zebra or Zcash, our intention is to inform those projects of security issues on a best effort basis.
+In the case where we become aware of security issues affecting other projects that have never
+affected Zebra or Zcash, our intention is to inform those projects of security issues on a best
+effort basis.
 
-In the case where we fix a security issue in Zebra or Zcash that also affects the following neighboring projects, our intention is to engage in responsible disclosures with them as described in <https://github.com/RD-Crypto-Spec/Responsible-Disclosure>, subject to the deviations described in the section at the bottom of this document.
+In the case where we fix a security issue in Zebra or Zcash that also affects the following
+neighboring projects, our intention is to engage in responsible disclosures with them as described
+in <https://github.com/RD-Crypto-Spec/Responsible-Disclosure>.
 
-## Related Responsible Disclosure
-
-Specifically, we have committed to engage in responsible disclosures for security issues affecting Zebra or Zcash technology with the following contacts:
+Specifically, we have committed to responsible disclosure for security issues affecting Zebra or
+Zcash technology with the following contacts:
 
 - Zcash Open Development Lab (ZODL), which maintains the `zcash/zcash` core
   node, `librustzcash`, `zallet`, and related software, via its security
   disclosure process at <https://github.com/zcash/.github/blob/main/SECURITY.md>
 - The maintainers of zakura-core/zakura, via their security disclosure process at
   https://github.com/zakura-core/zakura/blob/main/SECURITY.md
+- Zcash Foundation, which maintains the `ZcashFoundation/zebra` code, via its security disclosure
+  process at https://github.com/ZcashFoundation/zebra/blob/main/SECURITY.md
