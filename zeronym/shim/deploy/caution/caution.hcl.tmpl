@@ -69,7 +69,7 @@ enclave "__ENCLAVE_NAME__" {
 
     # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
     #
-    # `e2e_encryption { mode = "tls" }` is Caution's in-enclave TLS
+    # `e2e_encryption { enabled = true }` is Caution's in-enclave TLS
     # termination, shipped 2026-08-03. The platform runs a Caddy INSIDE the
     # enclave: it obtains the certificate for `domain`, terminates the wallet's
     # TLS in there, and forwards to our process on `port`. So the private key is
@@ -96,7 +96,10 @@ enclave "__ENCLAVE_NAME__" {
       port   = 8080
 
       e2e_encryption {
-        mode = "tls"
+        # `enabled`, not `mode = "tls"`. Anton's message showed the latter but
+        # the shipped CLI rejects it: "unknown field `mode`, expected `enabled`
+        # or `cors_origins`". Worth trusting the parser over the changelog.
+        enabled = true
       }
     }
   }
