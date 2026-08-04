@@ -35,39 +35,69 @@ enclave "__ENCLAVE_NAME__" {
   }
 
   network {
-    # Wallet-facing gRPC over TLS.
-    #
-    # 443 is not a preference, it is a requirement. The certificate is obtained
-    # by ACME TLS-ALPN-01, and Let's Encrypt always validates by connecting to
-    # port 443; there is no way to point it elsewhere. So the port that serves
-    # wallets and the port that proves domain control are necessarily the same
-    # one, and closing it would silently break renewal as well as traffic.
+    # Wallet-facing gRPC. 8080, not 443, and the platform maps the domain onto
+    # it: see the http block below. The enclave cannot own 443 (Caution's parent
+    # Caddy holds it), which is what blocked this deploy until Caution shipped
+    # in-enclave termination on 2026-08-03.
     ingress {
       cidr_ipv4   = "0.0.0.0/0"
-      port        = 443
+      port        = 8080
       ip_protocol = "tcp"
     }
 
-    # Egress to exactly one host: the backing indexer, and nothing else.
+    # Egress to exactly one host and port: the backing indexer, nothing else.
     #
-    # This narrowness is a security property, not tidiness. The shim sees every
-    # wallet's queries in the clear, which is precisely the exposure Zeronym
-    # exists to contain, so the enclave should be incapable of shipping that
-    # anywhere except the one indexer it proxies for. A /32 and a single port
-    # make exfiltration to a third party a network-level impossibility rather
-    # than a promise about the code.
+    # Deliberately narrower than the platform's example, which allows all
+    # egress. This narrowness is a security property rather than tidiness. The
+    # shim sees every wallet's queries in the clear, which is precisely the
+    # exposure Zeronym exists to contain, so the enclave should be structurally
+    # incapable of shipping that anywhere except the one indexer it fronts. A
+    # /32 and a single port make exfiltration to a third party a network-level
+    # impossibility instead of a promise about the code.
     #
-    # Note what is absent: still no port 53, even though the backend is now
-    # authenticated by NAME. That combination is the point rather than an
-    # oversight. ZIS_BACKEND stays a literal address, so the enclave dials an IP
-    # and never resolves DNS; ZIS_BACKEND_TLS names what the certificate must
-    # say. A poisoned DNS answer has nothing to poison, and a hijacked address
-    # cannot present a valid certificate for the name. Update the CIDR here
-    # whenever the backend IP changes.
+    # Note what is absent: no port 53, even though the backend is authenticated
+    # by NAME. That combination is the point. ZIS_BACKEND stays a literal
+    # address, so the enclave dials an IP and never resolves DNS;
+    # ZIS_BACKEND_TLS names what the certificate must say. A poisoned DNS answer
+    # has nothing to poison, and a hijacked address cannot present a valid
+    # certificate for the name. Update the CIDR whenever the backend IP moves.
     egress {
       cidr_ipv4   = "__BACKEND_CIDR__"
       port        = __BACKEND_PORT__
       ip_protocol = "tcp"
+    }
+
+    # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
+    #
+    # `e2e_encryption { mode = "tls" }` is Caution's in-enclave TLS
+    # termination, shipped 2026-08-03. The platform runs a Caddy INSIDE the
+    # enclave: it obtains the certificate for `domain`, terminates the wallet's
+    # TLS in there, and forwards to our process on `port`. So the private key is
+    # generated and held inside the enclave and the operator never holds it,
+    # which is the property the whole attestation argument depends on. Without
+    # this the parent's Caddy terminated on 443 with its own self-signed
+    # certificate, meaning wallet traffic was decrypted OUTSIDE the enclave and
+    # no amount of software of ours could fix it.
+    #
+    # Consequence for the shim: it serves PLAINTEXT h2c here and does not run
+    # its own TLS. Its rustls and ACME code stays in the binary but unused on
+    # this platform (ZIS_TLS_DOMAIN is unset below), because ACME from inside
+    # the enclave was never possible here: Let's Encrypt validates on 80 or 443
+    # and the platform owns both. That code is the path for a non-Caution
+    # deployment, and it is what proves the design does not depend on one
+    # vendor.
+    #
+    # The open question is h2c. gRPC is HTTP/2, so if this Caddy proxies
+    # HTTP/1.1 to `port` then every gRPC call fails even though TLS is correct.
+    # That is the first thing to check after deploying, and it is a platform
+    # configuration question rather than something we can fix from here.
+    http {
+      domain = "__TLS_DOMAIN__"
+      port   = 8080
+
+      e2e_encryption {
+        mode = "tls"
+      }
     }
   }
 
@@ -80,9 +110,10 @@ enclave "__ENCLAVE_NAME__" {
     command = "/zero-indexer-shim"
 
     env = {
-      # Bind all interfaces: the default is 127.0.0.1:9068, which inside an
-      # enclave would accept only connections that cannot exist.
-      ZIS_LISTEN = "0.0.0.0:443"
+      # Bind all interfaces on the port the in-enclave Caddy forwards to. The
+      # default is 127.0.0.1:9068, which inside an enclave would accept only
+      # connections that cannot exist.
+      ZIS_LISTEN = "0.0.0.0:8080"
 
       # The backing indexer: one of Shielded Labs' own nodes, reached at the
       # cluster's load-balancer IP on a per-backend port (zaino and lightwalletd
@@ -103,19 +134,22 @@ enclave "__ENCLAVE_NAME__" {
       # matches no host rule and answers 404 over a healthy TLS connection.
       ZIS_BACKEND_TLS = "__BACKEND_TLS_NAME__"
 
-      # Terminate wallet-facing TLS for this name. The ACME account key and the
-      # certificate key are generated in here and never leave: that is what
-      # stops the attestation from being defeated by whoever holds a key minted
-      # somewhere else.
-      ZIS_TLS_DOMAIN = "__TLS_DOMAIN__"
-      ZIS_TLS_EMAIL  = "__TLS_EMAIL__"
-
-      # Let's Encrypt production. Absent or empty means staging, which is where
-      # a new deployment should prove itself: the enclave is diskless, so every
-      # restart is a fresh order against a limit of 5 duplicate certificates per
-      # week per name. See RESTARTS.md, and record every production issuance
-      # there.
-      ZIS_TLS_PRODUCTION = "__TLS_PRODUCTION__"
+      # ZIS_TLS_DOMAIN is deliberately UNSET, so the shim serves plaintext h2c
+      # and its own TLS stack stays dormant. The in-enclave Caddy declared in
+      # the http block above owns the certificate and terminates the wallet's
+      # TLS, and the key it generates lives inside the enclave, which is the
+      # property that matters. Two terminators would be one too many.
+      #
+      # This is not the shim's TLS being abandoned. It is tested, reproducible,
+      # and the only option for a deployment that is not on Caution; it simply
+      # cannot work HERE, because ACME needs to answer a challenge on 80 or 443
+      # and the platform owns both ports. If this ever runs somewhere the
+      # enclave owns 443, set ZIS_TLS_DOMAIN and ZIS_TLS_PRODUCTION and delete
+      # the http block instead.
+      #
+      #   ZIS_TLS_DOMAIN     = "__TLS_DOMAIN__"
+      #   ZIS_TLS_EMAIL      = "__TLS_EMAIL__"
+      #   ZIS_TLS_PRODUCTION = "__TLS_PRODUCTION__"
 
       # Default is `info`, which deliberately omits the per-request zis::proxy
       # line naming the method each wallet called. That line is exactly the
