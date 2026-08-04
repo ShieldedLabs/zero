@@ -14,7 +14,7 @@ Component and term definitions, then the primary references. Where another chapt
 
 **Backing lwd.** The operator's own unmodified light-wallet indexer (lightwalletd or Zaino) that the [shim](./components.md) fronts as a client. Queries and pass-through broadcasts reach it in cleartext as today; a diverted Orchard exit never does.
 
-**Batch / flush cadence.** The hub accumulates migrations (a batch) and publishes them together on a strict block cadence (a flush), targeting roughly every ten blocks, under Brave's tight twenty-block migration expiry. See [the hub](./components.md) and [honest limits](./trust.md).
+**Batch / flush cadence.** The hub accumulates migrations (a batch) and publishes them together on a strict block cadence (a flush), every twenty blocks (about twenty-five minutes). The interval is capped by the least generous transaction expiry among the wallets in scope, which is forty blocks now that Brave is out of scope for v1. See [the hub](./components.md) and [honest limits](./trust.md).
 
 **Certificate Transparency (CT).** Public append-only logs of issued TLS certificates. All Let's Encrypt certificates are CT-logged, letting the Auditor Role confirm no second, non-enclave certificate exists for a domain (no shadow cert to MITM clients). See [trust](./trust.md).
 
