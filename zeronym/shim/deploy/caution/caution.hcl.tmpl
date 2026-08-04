@@ -35,13 +35,21 @@ enclave "__ENCLAVE_NAME__" {
   }
 
   network {
-    # Wallet-facing gRPC. 8080, not 443, and the platform maps the domain onto
-    # it: see the http block below. The enclave cannot own 443 (Caution's parent
+    # Wallet-facing gRPC. 8083, not 443, and the platform maps the domain onto
+    # it: see the http block below.
+    #
+    # 8083 is not a choice, it is the platform's undocumented default. The
+    # in-enclave proxy IGNORES `http { port }` and forwards to
+    # 127.0.0.1:8083 whatever is declared, which surfaces as every request
+    # returning 502 with `Upstream error: error sending request for url
+    # (http://127.0.0.1:8083/)`. Declaring 8083 here AND below means this works
+    # against the current behaviour and keeps working once the declaration is
+    # honoured, because both values already agree. Reported to Caution. The enclave cannot own 443 (Caution's parent
     # Caddy holds it), which is what blocked this deploy until Caution shipped
     # in-enclave termination on 2026-08-03.
     ingress {
       cidr_ipv4   = "0.0.0.0/0"
-      port        = 8080
+      port        = 8083
       ip_protocol = "tcp"
     }
 
@@ -87,13 +95,14 @@ enclave "__ENCLAVE_NAME__" {
     # deployment, and it is what proves the design does not depend on one
     # vendor.
     #
-    # The open question is h2c. gRPC is HTTP/2, so if this Caddy proxies
-    # HTTP/1.1 to `port` then every gRPC call fails even though TLS is correct.
-    # That is the first thing to check after deploying, and it is a platform
-    # configuration question rather than something we can fix from here.
+    # The open question is h2c, and it sits directly behind the port bug above.
+    # gRPC is HTTP/2 and needs trailers, which HTTP/1.1 cannot carry, so if this
+    # Caddy proxies HTTP/1.1 upstream then every call fails even with TLS
+    # perfect. Unlike the port, that one cannot be worked around on our side:
+    # the shim would have to speak a protocol that cannot express gRPC.
     http {
       domain = "__TLS_DOMAIN__"
-      port   = 8080
+      port   = 8083
 
       e2e_encryption {
         # `enabled`, not `mode = "tls"`. Anton's message showed the latter but
@@ -116,7 +125,7 @@ enclave "__ENCLAVE_NAME__" {
       # Bind all interfaces on the port the in-enclave Caddy forwards to. The
       # default is 127.0.0.1:9068, which inside an enclave would accept only
       # connections that cannot exist.
-      ZIS_LISTEN = "0.0.0.0:8080"
+      ZIS_LISTEN = "0.0.0.0:8083"
 
       # The backing indexer: one of Shielded Labs' own nodes, reached at the
       # cluster's load-balancer IP on a per-backend port (zaino and lightwalletd
