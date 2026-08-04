@@ -16,6 +16,12 @@ The risk is a managed platform that puts a **Caddy** (or any reverse proxy) in f
 
 **The question for Anton:** does the enclave own `:443` directly, or does a platform Caddy terminate TLS in front of it? If Caddy terminates, we need a supported path to move termination into the enclave, or the drop-in model fails for non-STEVE wallets. Everything downstream (the three encryption layers in [architecture](./architecture.md)) assumes the answer is "the enclave."
 
+**ANSWERED, 2026-08-02, and it is the bad answer.** A platform Caddy terminates. Measured rather than asked: declaring `ingress { port = 443 }` fails Caution's own provisioning step (`Failed to run tofu apply`) while the identical config on port 8443 deploys cleanly; and a running app answers on both 80 and 443 even when its config declares neither, with 443 presenting a **self-signed certificate for the instance IP** and the `Server: Caddy` header. So traffic on 443 is decrypted on the parent before it reaches the enclave.
+
+Two consequences, and the second is the one that surprises people. First, in-enclave TLS termination is impossible today, which is what this question feared. Second, **in-enclave ACME is impossible too**: Let's Encrypt validates TLS-ALPN-01 by connecting to 443 and HTTP-01 by connecting to 80, and the platform owns both, so the enclave cannot prove control of its own domain and cannot obtain a certificate at all. Running our own Caddy inside the enclave does not help either, for the reason that makes this structural rather than a software gap: whatever runs inside receives bytes that were already decrypted outside.
+
+Anton is implementing in-enclave termination (a Caddy inside the enclave, plus certificate pinning) and had a PR in review on 2026-08-02, with no ship date given. Until it lands the shim's TLS is written, tested and reproducible but cannot be deployed: it sits on 8443 with no certificate, refusing handshakes rather than downgrading. That refusal is the intended fail-closed behaviour, not a bug.
+
 ### 2. STEVE wire form over Nym
 
 [STEVE](./trust.md) is used only on the shim-to-hub channel. The `SubmitMigration { ciphertext, txid, expiry_height }` request and `Ack { txid }` reply are a fixed shape (see [components](./components.md)). Open is the **transport** that carries that shape over the Nym TCP tunnel:

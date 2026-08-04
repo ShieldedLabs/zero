@@ -70,15 +70,27 @@ Rationale over a `tonic` server re-exporting all ~20 methods: this touches exact
 
 **Compression must be controlled, not relayed.** gRPC compression is not supported on the intercept path: a compressed `SendTransaction` cannot be parsed, so it fails safe to migration. That alone is not enough, because compression is *negotiated*. The backing indexer advertises `grpc-accept-encoding` on responses, so an operator who switches compression on in their own indexer makes wallets compress every `SendTransaction` and pushes every migration into the fail-safe arm instead of genuine classification: an operator-controlled lever on the classifier, in a component whose threat model is that the operator is the adversary. The shim therefore rewrites the indexer's advertised `grpc-accept-encoding` to `identity` on every response it relays, in one place, and leaves the request direction alone, where that header is the wallet's own statement **(built)**. Response compression (`grpc-encoding`) is relayed untouched, and the pass-through path stays opaque, so client compression there is fine. A wallet that compresses unprompted still lands in the fail-safe; whether that stays the shipped policy is a [review](./review.md) item.
 
-### The classifier: detecting an Orchard exit
+### The classifier: detecting an Orchard-touching transaction
 
-**Decision (Zooko): the predicate is the sign of the Orchard value balance and nothing else (built).**
+**Decision (Zooko, second ruling): the predicate is the mere PRESENCE of Orchard actions, and the value balance decides nothing (built).**
+
+```
+is_orchard_touching(tx) := tx.orchard_shielded_data().is_some()   # ANY Orchard actions
+```
+
+Zooko's words: any transaction carrying Orchard actions is *potentially* security-sensitive, because it could leak something the user did not intend to disclose, and *probably* time-insensitive, because people and their tooling already expect Orchard to be slow. So the safe default is to divert it whatever `orchard_value_balance` says.
+
+The gap this closes over the previous rule is the internal shuffle that pays its fee from another pool: Orchard actions present, legacy notes spent and their nullifiers published, and yet a value balance of exactly zero. The earlier predicate handed precisely that to the operator's indexer in the clear. Note the measured cost of the widening, which is nil: across 144 mainnet blocks at tip 3,433,105, **all 111 Orchard-touching transactions already had `orchard_value_balance > 0`**, so the wider rule diverted not one extra transaction. It is prospective cover, not new load.
+
+The balance is still parsed and still logged, as *evidence* beside the deciding fact (the action count). Orchard only, never Ironwood, and that boundary is load-bearing rather than incidental: the time-insensitivity half of the rationale holds for Orchard, the closing legacy pool, and fails for Ironwood, the new pool where ordinary time-sensitive commerce lives.
+
+The prior ruling, superseded, was the sign of the value balance alone:
 
 ```
 is_orchard_exit(tx) := orchard_value_balance(tx) > 0    # value LEAVING the Orchard pool
 ```
 
-One conjunct. No transaction-version guard, no test on where the value lands. Zooko's rule: **any transaction with an Orchard value balance above zero is a privacy risk to the user, regardless of the destination pool.** NU6.3 closes Orchard to new *value* (a transaction-level rule forbids value entering, so the chain predicate is Orchard pool value non-increasing and `orchard_value_balance >= 0` post-activation). Anyone still holding Orchard notes has therefore held them since before activation, which makes **spending Orchard at all** the identifying event: it reveals that this IP controls legacy Orchard funds, against a finite and shrinking set. Where the value lands afterwards changes nothing about that inference. Keep the precision: Orchard is closed to new value, **not to activity**, because same-receiver change still lands in the pool and the note-commitment tree keeps growing.
+Its reasoning still explains why Orchard is the pool in question: **any transaction touching Orchard is a privacy risk to the user, regardless of the destination pool.** NU6.3 closes Orchard to new *value* (a transaction-level rule forbids value entering, so the chain predicate is Orchard pool value non-increasing and `orchard_value_balance >= 0` post-activation). Anyone still holding Orchard notes has therefore held them since before activation, which makes **spending Orchard at all** the identifying event: it reveals that this IP controls legacy Orchard funds, against a finite and shrinking set. Where the value lands afterwards changes nothing about that inference. Keep the precision: Orchard is closed to new value, **not to activity**, because same-receiver change still lands in the pool and the note-commitment tree keeps growing.
 
 This replaces a three-conjunct predicate (`tx.version == V6 && orchard_value_balance > 0 && ironwood_value_balance < 0`). Both dropped conjuncts were real gaps, not redundancy:
 
@@ -161,7 +173,7 @@ zeronym/shim/
     attest.rs               # NSM attestation binding; /attestation endpoint
     proxy.rs                # h2 server, :path routing, reverse-proxy to backing lwd
     intercept.rs            # SendTransaction decode + gRPC frame + response synth
-    classify.rs             # is_orchard_exit over zebra-chain (pure, unit-tested)
+    classify.rs             # is_orchard_touching over zebra-chain (pure, unit-tested)
     hub.rs                  # STEVE session, encrypt, SubmitMigration, retry/failover
     config.rs
   tests/
@@ -205,7 +217,7 @@ The hub is the server end of the shim's channel. Over the Nym tunnel it accepts 
 
 - **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision (see [review](./review.md)): one-way is enough for privacy, mutual would gate abuse.
 - **Decrypt in-enclave.** Only the attested hub software sees cleartext; the hub host operator (Caution) and the Nym path see ciphertext.
-- **Re-validate (do not trust the shim).** Parse with `zebra-chain`, **re-run the `is_orchard_exit` classifier**, and check the tx is well-formed and not already expired. This is stateless: full consensus validity (proofs, nullifiers) needs chain state the hub does not hold, and is confirmed at broadcast. Reject anything that is not a valid-looking, unexpired Orchard exit, to keep garbage out of the batch. **Rate-limit** per channel to bound abuse / resource use.
+- **Re-parse, but as telemetry only, never as a drop reason.** The hub parses with `zebra-chain` and re-runs `is_orchard_touching` so a disagreement with the shim is *visible*, and it stops there. An earlier version of this design said "reject anything that is not a valid-looking, unexpired Orchard exit, to keep garbage out of the batch." That is backwards, and the adversarial review of the batching design, recorded in `zeronym/hub/REVIEW.md`, is where it was caught. The shim fail-safes for privacy: a body it cannot read cleanly routes to the migration arm precisely *because* it could not read it. So the transactions most likely to fail the hub's parse are exactly the ones the shim deliberately diverted, and a hub that rejects them converts the shim's fail-safe into a leak, handing an adversary who can characterise the parser skew an on-demand way to force a transaction back onto the direct-broadcast path. An unparseable payload is therefore queued and published; `sendrawtransaction` at the node is the only authority on validity, and the cost of being wrong is one wasted batch slot. The permitted refusals are narrow and structural: authentication failure, a malformed frame, byte-budget exhaustion, and the expiry admission rule. **Rate-limit** per channel to bound resource use.
 
 ### The batch queue
 
