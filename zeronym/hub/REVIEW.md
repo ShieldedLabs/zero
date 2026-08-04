@@ -22,7 +22,10 @@ The lead finding is not a bug to fix. At the measured mainnet rate the modal
 published batch is 0 or 1 transactions, and at batch size 1 the anonymity set is
 the transaction itself, which makes the shuffle, the simultaneous publish, Nym
 and the TEE all irrelevant *to that transaction*. It is a property of volume,
-not of code, and no amount of implementation care removes it. It changes what
+not of code, and no amount of implementation care removes it. (The numbers below
+assume the reviewed `N = 10`; shipping `N = 20` doubles the window and so
+roughly doubles the expected batch, which helps and does not change the
+conclusion. See the note under finding 3.) It changes what
 the product may honestly claim, so it belongs in front of Mark, Zooko and Taylor
 rather than in an engineering backlog.
 
@@ -45,6 +48,33 @@ rather than in an engineering backlog.
 **Why.** The 20-block ceiling is real and every mitigation in this space silently spends it. Making the budget an explicit assertion means a future N or margin change fails at startup instead of quietly pushing a percentage of real traffic into last-resort direct broadcast.
 
 **Replaces.** N and safety_margin as independently chosen constants (N=10, margin~5) with no stated arithmetic against the 20-block wallet expiry.
+
+**SUPERSEDED IN ITS INPUTS, 2026-08-03: ship `N = 20`.** The invariant is exactly
+right and stands; the numbers fed into it were wrong, because the review took 20
+blocks to be *the* wallet expiry when it is only Brave's. The librustzcash
+default is 40 (`DEFAULT_TX_EXPIRY_DELTA`, zcash_primitives/src/transaction/builder.rs:54,
+following ZIP 203's Blossom change) and Zingo uses 100, so 20 was the lowest
+value in the ecosystem rather than the norm.
+
+Brave is out of scope for v1 (Mark, 2026-08-03), and the ask to them is to raise
+their default to 40. So `min_wallet_expiry` is 40, not 20, and the budget
+becomes:
+
+    N (20) + mining_margin (4) + delivery_lag (6) = 30 <= 40
+
+That leaves 14 blocks of headroom instead of zero, so the constraint is no
+longer tight. Keep the startup assertion, keep `mining_margin = 4`, and keep the
+admission rule unchanged: only the constant moves.
+
+This is not merely more comfortable, it is the cheapest available improvement to
+the k=1 problem below, and it costs no wallet any change. A 20-block window
+accumulates twice what a 10-block window does: roughly 15 Orchard-touching
+transactions network-wide per window instead of 8, at the measured 0.77 per
+block. It does not solve k=1 at low adoption, because the limiting factor is the
+participating fraction rather than the window, but it doubles the batch for
+free. If Brave later raises to 40 and stays in scope, nothing here changes; if a
+wallet with an expiry below 40 comes into scope, N must come back down and the
+startup assertion is what will say so.
 
 ### 4. Key the queue on `sha256(decrypted tx_bytes)`, not on the txid. Keep the computed txid as a separate `Option<transaction::Hash>` field used only for confirmation tracking.
 
