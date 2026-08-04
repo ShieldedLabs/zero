@@ -31,10 +31,28 @@ Each row is one certificate actually issued by the production directory. A
 restart that failed to obtain one still consumed an order, so record it too and
 say so.
 
-| # | date | enclave | domain | commit | note |
-|---|---|---|---|---|---|
-| 1 | *pending* | `zeronym-shim-zaino` | `zis-zaino.shieldedinfra.net` | | first TLS deploy |
-| 2 | *pending* | `zeronym-shim-lwd` | `zis-lwd.shieldedinfra.net` | | first TLS deploy |
+Count is per **domain** (see the note below), so the two shims number their own
+rows independently.
+
+**zis-zaino.shieldedinfra.net**
+
+| # | date | commit | note |
+|---|---|---|---|
+| 1 | 2026-08-04 | `82b72980`-era | first e2e deploy (8080 config); cert issued, then 502 on the port bug |
+| 2 | 2026-08-04 | `16656476` | 8083 config, app `00ee815c` at 15.164.71.196. Cert issued clean, in-enclave Caddy, `Verify return code: 0`. gRPC still 502s: Caddy proxies HTTP/1.1 to the h2c-only shim (Caution-side h2c-upstream fix pending). |
+
+Roughly two more this week before the 5/7-day duplicate-certificate limit binds
+for this name; the window rolls, so #1 frees up ~2026-08-11.
+
+**zis-lwd.shieldedinfra.net**
+
+| # | date | commit | note |
+|---|---|---|---|
+| 1 | 2026-08-04 | `82b72980`-era | first e2e deploy (8080 config) |
+
+Deliberately NOT redeployed to 8083 yet: it would hit the identical Caddy h2c
+wall and spend an issuance to learn nothing zaino has not already shown. Held
+until the Caution-side h2c fix lands.
 
 Note that the two shims hold **different** names, so they have independent
 duplicate-certificate budgets: five each, not five between them. Redeploying one

@@ -111,8 +111,8 @@ app per enclave, so pushing into another app's repo replaces that enclave.
 
 | shim | backend | app | enclave IP |
 |---|---|---|---|
-| `zeronym-shim-zaino` | `66.42.124.202:8137` (zaino) | `17943535-4a0b-40c6-9e7c-fb1c18a4a46e` | `43.200.160.155` |
-| `zeronym-shim-lwd` | `66.42.124.202:9067` (lightwalletd) | `8e842ba2-64bd-482b-9b95-895cfd46fc81` | `13.202.251.192` |
+| `zeronym-shim-zaino` | `66.42.124.202:443` (zaino, TLS) | `00ee815c-9d61-4349-9792-298a4581524c` | `15.164.71.196` |
+| `zeronym-shim-lwd` | `66.42.124.202:443` (lightwalletd, TLS) | (held for h2c fix) | (not deployed) |
 
 Enclave IPs change on most redeploys, and they appear in the cluster's
 `MiddlewareTCP` allowlist (`shim-plaintext-routes.yaml` in shielded-infra). A
