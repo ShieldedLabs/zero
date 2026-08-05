@@ -95,11 +95,13 @@ enclave "__ENCLAVE_NAME__" {
     # deployment, and it is what proves the design does not depend on one
     # vendor.
     #
-    # The open question is h2c, and it sits directly behind the port bug above.
-    # gRPC is HTTP/2 and needs trailers, which HTTP/1.1 cannot carry, so if this
-    # Caddy proxies HTTP/1.1 upstream then every call fails even with TLS
-    # perfect. Unlike the port, that one cannot be worked around on our side:
-    # the shim would have to speak a protocol that cannot express gRPC.
+    # h2c was the last real risk here and it is now closed. gRPC is HTTP/2 and
+    # needs trailers, which HTTP/1.1 cannot carry, so a Caddy proxying HTTP/1.1
+    # upstream would fail every call even with TLS perfect. Caution shipped the
+    # `upstream_protocol = "h2c"` field (declared below) on 2026-08-05, and the
+    # full path is verified end to end: wallet TLS -> in-enclave Caddy -> h2c ->
+    # shim -> TLS -> backend, with GetLightdInfo returning HTTP 200 and the
+    # grpc-status trailer intact.
     http {
       domain = "__TLS_DOMAIN__"
       port   = 8083

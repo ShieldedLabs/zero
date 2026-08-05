@@ -12,6 +12,26 @@ handshake fails until the oldest order ages out of the window. There is no
 console in an attested enclave to explain it, so the symptom is a shim that
 accepts TCP and completes no TLS.
 
+## Resolution (2026-08-05): the gRPC path is proven end to end
+
+Two things had to land, and the second was misdiagnosed for a while below.
+
+1. Caution shipped `upstream_protocol = "h2c"`, so the in-enclave Caddy speaks
+   cleartext HTTP/2 to the shim instead of HTTP/1.1. Wired into the template the
+   same day.
+2. The 500 that survived (1) was NOT a Caddy-to-shim fault, which is what the
+   dated rows further down guessed. It was our own backend ingress: Traefik
+   v3.7.1 silently ignores the Kubernetes Ingress `serversscheme: h2c` annotation
+   and forwards HTTP/1.1 to the h2c-only indexer, so every gRPC call returns a
+   bare 500. Fixed in shielded-infra with an IngressRoute carrying an explicit
+   `scheme: h2c`.
+
+With both in place the lwd shim was deployed to `zis-lwd-test-1.shieldedinfra.net`
+(attested build, in-enclave Caddy, trusted Let's Encrypt cert): a live
+`GetLightdInfo` returns HTTP 200 with the grpc-status trailer intact, through the
+shim, over TLS. The "held until the h2c fix" notes below are kept as the record
+of how the diagnosis actually went, not as current status.
+
 ## Iteration strategy: throwaway test hostnames (Mark, 2026-08-05)
 
 The limit is keyed on the hostname set, so **each distinct name has its own
@@ -28,8 +48,8 @@ Mechanics per test name: pass `--tls-domain zis-zaino-test-N.shieldedinfra.net`
 to `assemble-caution.sh` (already parameterised), and add an ExternalDNS-driven
 Service so the record follows the enclave IP (mirror `zis-zaino-dns` in
 shielded-infra's `zis-enclave-dns.yaml`). Note this only sidesteps the LE budget;
-a hostname change does not fix a hostname-independent failure like the
-Caddy-to-shim 500.
+a hostname change does not fix a hostname-independent failure like the backend
+gRPC-ingress 500 that actually blocked this (see Resolution above).
 
 Two habits keep this from biting:
 
