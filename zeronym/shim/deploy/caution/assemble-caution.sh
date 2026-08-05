@@ -32,6 +32,7 @@ BACKEND_TLS=""
 TLS_DOMAIN=""
 TLS_EMAIL="security@shieldedlabs.com"
 TLS_PRODUCTION="false"
+DEBUG="false"
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -41,6 +42,7 @@ while [ $# -gt 0 ]; do
 		--tls-domain)  TLS_DOMAIN=$2; shift 2 ;;
 		--tls-email)   TLS_EMAIL=$2; shift 2 ;;
 		--production)  TLS_PRODUCTION="true"; shift ;;
+		--debug)       DEBUG="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
 	esac
@@ -133,6 +135,23 @@ sed \
 	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
 	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
 	"$HERE/caution.hcl.tmpl" > "$DEST/caution.hcl"
+
+# --debug: flip the enclave into debug mode and turn on per-request shim logging.
+# This is a DIAGNOSTIC build, not a shippable one, for two reasons stated in the
+# template: debug mode disables attestation (so nothing it runs is provable), and
+# RUST_LOG=zis::proxy=debug logs the gRPC method each caller invokes, which is the
+# exact metadata the shim exists to deny an operator. Use it on a throwaway host
+# to read the enclave console (SSH opens on the parent in debug mode), never for
+# real traffic. The shim BINARY is identical to the attested build, so a failure
+# reproduced here is the same failure.
+if [ "$DEBUG" = "true" ]; then
+	sed -i.bak \
+		-e 's|^      # RUST_LOG = "zis::proxy=debug,info"|      RUST_LOG = "zis::proxy=debug,info"|' \
+		-e 's|^    enabled  = false|    enabled  = true|' \
+		"$DEST/caution.hcl"
+	rm -f "$DEST/caution.hcl.bak"
+	echo "==> DEBUG build: attestation OFF, SSH console ON, per-request logging ON. Diagnostic only."
+fi
 
 # No placeholder may survive. An unsubstituted token would be pushed as literal
 # HCL and rejected by Caution's parser at build time, minutes later and with a
