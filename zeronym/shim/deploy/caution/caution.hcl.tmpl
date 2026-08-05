@@ -113,10 +113,12 @@ enclave "__ENCLAVE_NAME__" {
       upstream_protocol = "h2c"
 
       e2e_encryption {
-        # `enabled`, not `mode = "tls"`. Anton's message showed the latter but
-        # the shipped CLI rejects it: "unknown field `mode`, expected `enabled`
-        # or `cors_origins`". Worth trusting the parser over the changelog.
-        enabled = true
+        # `mode = "tls"`, per the current schema (caution-config E2eMode is
+        # steve|tls). An earlier CLI lacked `mode` and I used `enabled = true`,
+        # but in the shipped schema `enabled = true` maps to the DEPRECATED
+        # `mode = "steve"`, not TLS (E2eEncryption::effective_mode). So TLS must
+        # be named explicitly, exactly as Anton's docs example shows.
+        mode = "tls"
       }
     }
   }
