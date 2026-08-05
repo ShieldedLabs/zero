@@ -104,6 +104,14 @@ enclave "__ENCLAVE_NAME__" {
       domain = "__TLS_DOMAIN__"
       port   = 8083
 
+      # gRPC is HTTP/2. This tells Caution's in-enclave Caddy to speak cleartext
+      # HTTP/2 (h2c) to the shim on `port`, not HTTP/1.1. Without it the deploy
+      # gets a valid cert and then 502s every call, because the shim is an
+      # h2-only server (hyper server::conn::http2) and drops an HTTP/1.1 request
+      # that does not match the HTTP/2 preface. Caution shipped this field
+      # 2026-08-05; see https://docs.caution.co/reference/deployment-configuration/#grpc-services
+      upstream_protocol = "h2c"
+
       e2e_encryption {
         # `enabled`, not `mode = "tls"`. Anton's message showed the latter but
         # the shipped CLI rejects it: "unknown field `mode`, expected `enabled`
