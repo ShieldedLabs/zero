@@ -12,6 +12,25 @@ handshake fails until the oldest order ages out of the window. There is no
 console in an attested enclave to explain it, so the symptom is a shim that
 accepts TCP and completes no TLS.
 
+## Iteration strategy: throwaway test hostnames (Mark, 2026-08-05)
+
+The limit is keyed on the hostname set, so **each distinct name has its own
+independent 5/week budget**. While iterating on a deploy that is not yet green,
+use throwaway names: `zis-zaino-test-1.shieldedinfra.net`,
+`zis-zaino-test-2.shieldedinfra.net`, and so on. Redeploy against `-test-N` as
+many times as needed; when one budget is spent, move to `-test-(N+1)`. The real
+name is never touched, so its budget is preserved for launch.
+
+When the config is proven green, promote it to the production endpoint
+**`zis.shieldedinfra.net`** (its own fresh budget), and stop redeploying it.
+
+Mechanics per test name: pass `--tls-domain zis-zaino-test-N.shieldedinfra.net`
+to `assemble-caution.sh` (already parameterised), and add an ExternalDNS-driven
+Service so the record follows the enclave IP (mirror `zis-zaino-dns` in
+shielded-infra's `zis-enclave-dns.yaml`). Note this only sidesteps the LE budget;
+a hostname change does not fix a hostname-independent failure like the
+Caddy-to-shim 500.
+
 Two habits keep this from biting:
 
 * **Prove a change against Let's Encrypt staging first.** Staging has no
