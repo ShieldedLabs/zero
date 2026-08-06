@@ -480,25 +480,6 @@ where
                 // doing expensive script verification, to avoid DoS attacks on
                 // the script interpreter.
                 check::mempool_standard_input_scripts(tx.as_ref(), &spent_outputs)?;
-
-                // Apply ZIP-317 policy before expensive cryptographic verification.
-                //
-                // Without this gate, an unauthenticated peer can force full proof
-                // verification on transactions that could never be mined: the
-                // CPU-exhaustion vector in GHSA-2p4c-3q4q-p463. Upstream #11053 places
-                // the same check immediately after the standard-input-script check.
-                //
-                // The fee is recomputed below by `compute_fee_and_sigops`. That
-                // duplicate work is integer arithmetic over the value balance, and is
-                // negligible next to the proof verification it now guards. Upstream
-                // avoids it by splitting the block and mempool paths (#10843), which we
-                // do not carry.
-                let unmined_tx = req
-                    .mempool_transaction()
-                    .expect("mempool requests always carry an unmined transaction");
-                let miner_fee = Self::miner_fee(tx.as_ref(), &spent_utxos)?;
-                let unpaid_actions = transaction::zip317::unpaid_actions(&unmined_tx, miner_fee);
-                transaction::zip317::mempool_checks(unpaid_actions, miner_fee, unmined_tx.size)?;
             }
 
             let nu = req.upgrade(&network);
@@ -1412,22 +1393,6 @@ where
         }
 
         async_checks
-    }
-
-    /// Calculate the miner fee from the transaction's value balance.
-    ///
-    /// Callers must not pass a coinbase transaction: coinbase has no miner fee, and
-    /// `remaining_transaction_value` is not meaningful for it.
-    fn miner_fee(
-        tx: &Transaction,
-        spent_utxos: &HashMap<transparent::OutPoint, transparent::Utxo>,
-    ) -> Result<Amount<NonNegative>, TransactionError> {
-        match tx.value_balance(spent_utxos) {
-            Ok(value_balance) => value_balance
-                .remaining_transaction_value()
-                .map_err(|_| TransactionError::IncorrectFee),
-            Err(_) => Err(TransactionError::IncorrectFee),
-        }
     }
 
     /// Computes the miner fee and transaction sigop count for `tx`.
