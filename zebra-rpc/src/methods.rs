@@ -194,6 +194,28 @@ pub trait Rpc {
     #[method(name = "getinfo")]
     async fn get_info(&self) -> Result<GetInfoResponse>;
 
+    /// Returns end of support information for this node release, as a
+    /// [`GetDeprecationInfoResponse`] JSON struct.
+    ///
+    /// zcashd reference: [`getdeprecationinfo`](https://zcash.github.io/rpc/getdeprecationinfo.html)
+    /// method: post
+    /// tags: network
+    ///
+    /// # Notes
+    ///
+    /// As in zcashd, the `end_of_service` object is only present on Mainnet, where end of
+    /// support is enforced. Zebra reports the estimated last height this release supports in
+    /// `end_of_service.block_height`; the node halts when the tip goes past it.
+    ///
+    /// Some fields from the zcashd reference are missing from Zebra's response: `version` and
+    /// `subversion` are available from `getinfo`, `deprecationheight` is deprecated in zcashd,
+    /// and Zebra does not have zcashd's feature deprecation framework.
+    ///
+    /// The estimate assumes the node is synced to the network tip; during initial sync it is
+    /// significantly overestimated.
+    #[method(name = "getdeprecationinfo")]
+    async fn get_deprecation_info(&self) -> Result<GetDeprecationInfoResponse>;
+
     /// Returns blockchain state information, as a [`GetBlockchainInfoResponse`] JSON struct.
     ///
     /// zcashd reference: [`getblockchaininfo`](https://zcash.github.io/rpc/getblockchaininfo.html)
@@ -836,6 +858,10 @@ where
     /// no matter what the estimated height or local clock is.
     debug_force_finished_sync: bool,
 
+    /// The estimated last height this node release supports before its end of support halt,
+    /// if end of support is enforced on `network`. Reported by the `getdeprecationinfo` RPC.
+    end_of_support_height: Option<Height>,
+
     // Services
     //
     /// A handle to the mempool service.
@@ -950,6 +976,7 @@ where
             user_agent,
             network: network.clone(),
             debug_force_finished_sync,
+            end_of_support_height: None,
             mempool: mempool.clone(),
             state: state.clone(),
             read_state: read_state.clone(),
@@ -973,6 +1000,14 @@ where
     /// Returns a reference to the configured network.
     pub fn network(&self) -> &Network {
         &self.network
+    }
+
+    /// Sets the estimated end of support height reported by the `getdeprecationinfo` RPC.
+    ///
+    /// When unset, or set to `None`, `getdeprecationinfo` omits the `end_of_service` object.
+    pub fn with_end_of_support_height(mut self, end_of_support_height: Option<Height>) -> Self {
+        self.end_of_support_height = end_of_support_height;
+        self
     }
 }
 
@@ -1037,6 +1072,44 @@ where
         };
 
         Ok(response)
+    }
+
+    async fn get_deprecation_info(&self) -> Result<GetDeprecationInfoResponse> {
+        let end_of_service = self
+            .end_of_support_height
+            // End of support is only enforced on Mainnet, and the zcashd-compatible response
+            // omits `end_of_service` on other networks, even if a height was configured.
+            .filter(|_| self.network == Network::Mainnet)
+            .map(|end_of_support_height| {
+                // Estimate the halt time from the current tip and target block spacing. If the
+                // tip is not available yet, fall back to the highest compiled-in checkpoint,
+                // which is close to the network tip at release time.
+                let tip_height = self
+                    .latest_chain_tip
+                    .best_tip_height()
+                    .unwrap_or_else(|| self.network.checkpoint_list().max_height());
+                // Use the spacing at the end of support height: it is always post-Blossom, so
+                // this stays correct even when the tip is missing or before Blossom.
+                let target_block_spacing =
+                    NetworkUpgrade::target_spacing_for_height(&self.network, end_of_support_height);
+                // If the tip is already past the end of support height, the estimate is in the
+                // past, but never negative.
+                let remaining_blocks = i64::from(end_of_support_height.0) - i64::from(tip_height.0);
+                let estimated_time = Utc::now()
+                    .timestamp()
+                    .saturating_add(
+                        remaining_blocks.saturating_mul(target_block_spacing.num_seconds()),
+                    )
+                    .saturating_sub(END_OF_SERVICE_ESTIMATE_SAFETY_MARGIN)
+                    .max(0);
+
+                EndOfService {
+                    block_height: end_of_support_height.0,
+                    estimated_time,
+                }
+            });
+
+        Ok(GetDeprecationInfoResponse { end_of_service })
     }
 
     #[allow(clippy::unwrap_in_result)]
@@ -1267,14 +1340,6 @@ where
     ) -> Result<GetBlockResponse> {
         let verbosity = verbosity.unwrap_or(1);
         let network = self.network.clone();
-        let original_hash_or_height = hash_or_height.clone();
-
-        // If verbosity requires a call to `get_block_header`, resolve it here
-        let get_block_header_future = if matches!(verbosity, 1 | 2) {
-            Some(self.get_block_header(original_hash_or_height.clone(), Some(true)))
-        } else {
-            None
-        };
 
         let hash_or_height =
             HashOrHeight::new(&hash_or_height, self.latest_chain_tip.best_tip_height())
@@ -1300,9 +1365,16 @@ where
                 }
                 _ => unreachable!("unmatched response to a block request"),
             }
-        } else if let Some(get_block_header_future) = get_block_header_future {
-            let get_block_header_result: Result<GetBlockHeaderResponse> =
-                get_block_header_future.await;
+        } else if matches!(verbosity, 1 | 2) {
+            // Reuse the already-resolved `hash_or_height` (rather than the
+            // caller-supplied string) so `get_block_header` resolves to the same
+            // block this call resolved above, even for tip-relative inputs like a
+            // negative height. Resolving the caller string a second time here would
+            // re-sample the best chain at a different instant and could pick a
+            // different block after a reorg or tip advance. See issue #10550.
+            let get_block_header_result: Result<GetBlockHeaderResponse> = self
+                .get_block_header(hash_or_height.to_string(), Some(true))
+                .await;
 
             let GetBlockHeaderResponse::Object(block_header) = get_block_header_result? else {
                 panic!("must return Object")
@@ -1326,17 +1398,25 @@ where
                 next_block_hash,
             } = *block_header;
 
+            // # Concurrency
+            //
+            // We look up by block hash so the hash, transaction IDs, and confirmations
+            // are consistent. Bind every follow-up read to the resolved block hash
+            // rather than the caller-supplied hash-or-height, so a reorg between the
+            // header lookup and these reads cannot mix block A's header with block B's
+            // contents. See issue #10550.
+            let hash_or_height = hash.into();
             let transactions_request = match verbosity {
                 1 => zebra_state::ReadRequest::TransactionIdsForBlock(hash_or_height),
                 2 => zebra_state::ReadRequest::BlockAndSize(hash_or_height),
                 _other => panic!("get_block_header_fut should be none"),
             };
 
-            // # Concurrency
-            //
-            // We look up by block hash so the hash, transaction IDs, and confirmations
-            // are consistent.
-            let hash_or_height = hash.into();
+            // Confirmations is `-1` when the resolved header is no longer on the
+            // best chain. Avoid panicking on `try_into()` in the verbosity-2 path,
+            // and label such transactions as not in the active chain.
+            let in_active_chain = confirmations >= 0;
+
             let requests = vec![
                 // Get transaction IDs from the transaction index by block hash
                 //
@@ -1386,7 +1466,7 @@ where
                                     &network,
                                     Some(block_time),
                                     Some(hash),
-                                    Some(true),
+                                    Some(in_active_chain),
                                     tx.hash(),
                                 ),
                             ))
@@ -1541,10 +1621,15 @@ where
         let response = if !verbose {
             GetBlockHeaderResponse::Raw(HexData(header.zcash_serialize_to_vec().map_misc_error()?))
         } else {
+            // Bind follow-up reads to the resolved block hash so the SaplingTree
+            // and Depth lookups are taken from the same chain view as the header.
+            // Using the caller-supplied `hash_or_height` here would re-sample the
+            // best chain and could mix a header from block A with a Sapling tree
+            // from block B at the same height. See issue #10550.
             let zebra_state::ReadResponse::SaplingTree(sapling_tree) = self
                 .read_state
                 .clone()
-                .oneshot(zebra_state::ReadRequest::SaplingTree(hash_or_height))
+                .oneshot(zebra_state::ReadRequest::SaplingTree(hash.into()))
                 .await
                 .map_misc_error()?
             else {
@@ -1927,7 +2012,7 @@ where
             }),
 
             zebra_state::ReadResponse::AnyChainTransaction(None) => {
-                Err("No such mempool or main chain transaction")
+                Err("Transaction not found in mempool or best chain")
                     .map_error(server::error::LegacyCode::InvalidAddressOrKey)
             }
 
@@ -2944,7 +3029,8 @@ where
                 .position(|zcashd_receiver| zcashd_receiver == receiver)
         });
 
-        let is_nu6 = NetworkUpgrade::current(&net, height) == NetworkUpgrade::Nu6;
+        // NU6.1 and later minor upgrades keep the NU6 funding stream structure (ZIP 1015).
+        let is_post_nu6 = NetworkUpgrade::current(&net, height) >= NetworkUpgrade::Nu6;
 
         // Format the funding streams and lockbox streams
         let [funding_streams, lockbox_streams] =
@@ -2954,7 +3040,10 @@ where
                     .map(|(receiver, value)| {
                         let address = funding_stream_address(height, &net, receiver);
                         types::subsidy::FundingStream::new_internal(
-                            is_nu6, receiver, value, address,
+                            is_post_nu6,
+                            receiver,
+                            value,
+                            address,
                         )
                     })
                     .collect()
@@ -3254,23 +3343,12 @@ where
             };
         }
 
-        // TODO: Ensure that the returned tip hash is always valid for the response, i.e. that Zebra can't return a tip that
-        //       hadn't yet included the queried transaction output.
-
-        // Get the best block tip hash
-        let tip_rsp = self
-            .read_state
-            .clone()
-            .oneshot(zebra_state::ReadRequest::Tip)
-            .await
-            .map_misc_error()?;
-
-        let best_block_hash = match tip_rsp {
-            zebra_state::ReadResponse::Tip(tip) => tip.ok_or_misc_error("No blocks in state")?.1,
-            _ => unreachable!("unmatched response to a `Tip` request"),
-        };
-
-        // State path
+        // Issue the Transaction query first and reuse the best-chain tip hash
+        // captured in that same chain snapshot, instead of doing a separate Tip
+        // query that re-samples the chain. The follow-up IsTransparentOutputSpent
+        // query may still observe a later tip, but the response's `bestblock`
+        // field is now anchored to the same view used to compute confirmations.
+        // See issue #10550.
         let rsp = self
             .read_state
             .clone()
@@ -3280,6 +3358,7 @@ where
 
         match rsp {
             zebra_state::ReadResponse::Transaction(Some(tx)) => {
+                let best_block_hash = tx.best_chain_tip_hash;
                 let outputs = tx.tx.outputs();
                 let index: usize = n.try_into().expect("u32 always fits in usize");
                 let output = match outputs.get(index) {
@@ -3504,6 +3583,41 @@ impl GetInfoResponse {
 
         Some(version_number)
     }
+}
+
+/// The number of seconds subtracted from the `end_of_service.estimated_time` reported by
+/// `getdeprecationinfo`.
+///
+/// Block times vary, so the halt can happen earlier than a spacing-based estimate. Reporting the
+/// estimate a day early gives consumers time to act before the actual halt.
+const END_OF_SERVICE_ESTIMATE_SAFETY_MARGIN: i64 = 24 * 60 * 60;
+
+/// Response to a `getdeprecationinfo` RPC request.
+///
+/// See the notes for the [`Rpc::get_deprecation_info` method].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, Getters, new)]
+pub struct GetDeprecationInfoResponse {
+    /// End of service information for this node release. Only present on Mainnet, where end of
+    /// support is enforced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_of_service: Option<EndOfService>,
+}
+
+/// The `end_of_service` object in a [`GetDeprecationInfoResponse`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, Getters, new)]
+pub struct EndOfService {
+    /// The estimated last height this server version supports, matching zcashd's threshold
+    /// semantics. The node halts when the chain tip goes past this height.
+    #[getter(copy)]
+    block_height: u32,
+
+    /// The approximate time of the end of support halt, in seconds since epoch, estimated from
+    /// the current chain tip height and the target block spacing.
+    ///
+    /// Reported 24 hours earlier than the spacing-based estimate, so consumers are warned early
+    /// rather than late when block times vary.
+    #[getter(copy)]
+    estimated_time: i64,
 }
 
 /// Type alias for the array of `GetBlockchainInfoBalance` objects
