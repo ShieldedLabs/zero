@@ -420,6 +420,7 @@ impl StartCmd {
 
         info!("initializing mempool");
         let (mempool, mempool_transaction_subscriber) = Mempool::new(
+            &config.network.network,
             &config.mempool,
             peer_set.clone(),
             state.clone(),
@@ -474,6 +475,9 @@ impl StartCmd {
             address_book.clone(),
             LAST_WARN_ERROR_LOG_SENDER.subscribe(),
             Some(submit_block_channel.sender()),
+        );
+        let rpc_impl = rpc_impl.with_end_of_support_height(
+            sync::end_of_support::end_of_support_height(&config.network.network),
         );
 
         let rpc_task_handle = if config.rpc.listen_addr.is_some() {
