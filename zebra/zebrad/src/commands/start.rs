@@ -414,6 +414,7 @@ impl StartCmd {
             peer_set.clone(),
             block_verifier_router.clone(),
             state.clone(),
+            read_only_state_service.clone(),
             latest_chain_tip.clone(),
             misbehavior_sender.clone(),
         );
@@ -475,6 +476,9 @@ impl StartCmd {
             address_book.clone(),
             LAST_WARN_ERROR_LOG_SENDER.subscribe(),
             Some(submit_block_channel.sender()),
+        );
+        let rpc_impl = rpc_impl.with_end_of_support_height(
+            sync::end_of_support::end_of_support_height(&config.network.network),
         );
 
         let rpc_task_handle = if config.rpc.listen_addr.is_some() {
