@@ -34,7 +34,6 @@ use zebra_chain::{
     block::{self, Height},
     chain_sync_status::ChainSyncStatus,
     chain_tip::ChainTip,
-    parameters::{Network, NetworkUpgrade},
     transaction::UnminedTxId,
 };
 use zebra_consensus::{error::TransactionError, transaction};
@@ -85,41 +84,6 @@ type TxVerifier = Buffer<
     transaction::Request,
 >;
 type InboundTxDownloads = TxDownloads<Timeout<Outbound>, Timeout<TxVerifier>, State>;
-
-/// The number of NU6.3 heights where stale NU6.2 branch IDs receive no peer score.
-const NU6_3_BRANCH_ID_GRACE_PERIOD: i64 = 40;
-
-/// Returns the mempool peer score after applying branch ID activation policy.
-fn adjusted_mempool_misbehavior_score(
-    error: &TransactionError,
-    transaction_upgrade: Option<NetworkUpgrade>,
-    verification_height: Height,
-    network: &Network,
-) -> u32 {
-    let is_nu6_3_grace_mismatch = matches!(error, TransactionError::WrongConsensusBranchId)
-        && NetworkUpgrade::Nu6_3
-            .activation_height(network)
-            .is_some_and(|activation_height| {
-                let expected_upgrade = NetworkUpgrade::current(network, verification_height);
-                let height_offset = verification_height - activation_height;
-
-                match (transaction_upgrade, expected_upgrade) {
-                    (Some(NetworkUpgrade::Nu6_2), NetworkUpgrade::Nu6_3) => {
-                        (0..NU6_3_BRANCH_ID_GRACE_PERIOD).contains(&height_offset)
-                    }
-                    (Some(NetworkUpgrade::Nu6_3), NetworkUpgrade::Nu6_2) => {
-                        (-NU6_3_BRANCH_ID_GRACE_PERIOD..0).contains(&height_offset)
-                    }
-                    _ => false,
-                }
-            });
-
-    if is_nu6_3_grace_mismatch {
-        0
-    } else {
-        error.mempool_misbehavior_score()
-    }
-}
 
 /// The state of the mempool.
 ///
@@ -243,9 +207,6 @@ impl ActiveState {
 /// of that have yet to be confirmed by the Zcash network. A transaction is
 /// confirmed when it has been included in a block ('mined').
 pub struct Mempool {
-    /// The configured Zcash network.
-    network: Network,
-
     /// The configurable options for the mempool, persisted between states.
     config: Config,
 
@@ -310,7 +271,6 @@ pub struct Mempool {
 impl Mempool {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        network: &Network,
         config: &Config,
         outbound: Outbound,
         state: State,
@@ -325,7 +285,6 @@ impl Mempool {
         let transaction_subscriber = MempoolTxSubscriber::new(transaction_sender.clone());
 
         let mut service = Mempool {
-            network: network.clone(),
             config: config.clone(),
             active_state: ActiveState::Disabled,
             sync_status,
@@ -727,19 +686,13 @@ impl Service<Request> for Mempool {
                         if let TransactionDownloadVerifyError::Invalid {
                             error,
                             advertiser_addr: Some(advertiser_addr),
-                            transaction_upgrade,
-                            verification_height,
                         } = &error
                         {
-                            let score = adjusted_mempool_misbehavior_score(
-                                error,
-                                *transaction_upgrade,
-                                *verification_height,
-                                &self.network,
-                            );
-
-                            if score != 0 {
-                                let _ = self.misbehavior_sender.try_send((*advertiser_addr, score));
+                            if error.mempool_misbehavior_score() != 0 {
+                                let _ = self.misbehavior_sender.try_send((
+                                    *advertiser_addr,
+                                    error.mempool_misbehavior_score(),
+                                ));
                             }
                         };
 
