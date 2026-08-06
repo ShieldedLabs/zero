@@ -6,7 +6,47 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
-## Unreleased
+## v25 - 2026-08-06
+
+### Security
+
+- zebra: three fixes from the Zcash Foundation's upcoming security release,
+  applied ahead of it as `[upstream-pending]` carries on top of upstream
+  `main` (all drop on the next zebra subtree pull):
+  - Blocks above the sync lookahead limit no longer score the peer that served
+    them. The far-ahead hash comes from a malicious `FindBlocks` response that
+    carries no peer attribution, so the follow-up download is answered by an
+    independently chosen honest peer, and scoring it let an attacker get honest
+    peers banned throughout initial block download (GHSA-qhr3-cvch-5fh2).
+  - A block download answered with a canonical header and a rewritten coinbase
+    height is re-requested immediately instead of being rediscovered a sync
+    round later, and the serving peer is scored when a parent block Zebra
+    already holds proves the claimed height wrong (GHSA-g95h-hw6g-pvgv,
+    reported upstream by @zakura-security).
+  - Peers that gossip consensus-invalid blocks are scored for misbehavior
+    again. The inbound download cleanup downcast errors to `VerifyBlockError`,
+    but the gossip verifier is a `BlockVerifierRouter` returning `RouterError`,
+    so the downcast never matched and such peers were never banned
+    (GHSA-8hh2-hrf2-cqf4).
+
+### Changed
+
+- zebra: subtree updated from v6.2.0 to upstream `main` (8e9ff3b2cb, past
+  v6.2.3), the exact base of the Foundation's upcoming release. Brings the
+  6.2.1 to 6.2.3 hardening releases (NU6.3 activation-window and peer
+  connectivity fixes) plus unreleased work: MAX_MONEY value-pool enforcement
+  (#10817), the block/mempool transaction-verifier split (#11095), singleton
+  FindBlocks downloads (#11165), inbound address canonicalization (#11129),
+  bans that clear the whole address book for an IP (#11173), zec.rocks default
+  seeders (#11096), `getdeprecationinfo` (#11097), `getblocksubsidy` NU6-era
+  metadata (#11172), indexer gRPC stream limits (#10980), and a
+  `getblocktemplate` coinbase-cache fix (#10954). State format is unchanged
+  (28); no resync needed. Binaries self-report zebrad 6.2.3 until upstream's
+  release bumps the version.
+- Dropped six zebra carries that merged or were superseded upstream: #11113,
+  #11050, #11053, #11061 (superseded by the narrower require-while-syncing
+  rule), GHSA-2p4c-3q4q-p463 (#11054), and GHSA-8gxx-hc65-vv82 (#11052).
+  Still carried: #10732 FindBlocks stall gating.
 
 ### Added
 
