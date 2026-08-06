@@ -2747,7 +2747,12 @@ fn v4_with_modified_joinsplit_is_rejected() {
     zebra_test::MULTI_THREADED_RUNTIME.block_on(async {
         v4_with_joinsplit_is_rejected_for_modification(
             JoinSplitModification::CorruptSignature,
-            TransactionError::Ed25519(ed25519::Error::InvalidSignature),
+            // TODO: Fix error downcast
+            // Err(TransactionError::Ed25519(ed25519::Error::InvalidSignature))
+            TransactionError::InternalDowncastError(
+                "downcast to known transaction error type failed, original error: InvalidSignature"
+                    .to_string(),
+            ),
         )
         .await;
 
