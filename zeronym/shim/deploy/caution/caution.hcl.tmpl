@@ -1,0 +1,201 @@
+# zero-indexer-shim as a standalone attested Nitro enclave on Caution.
+#
+# This is the small sibling of deploy/caution-zaino/combined/caution.hcl. That
+# one ships zebrad + zainod and needs 64 GB because the whole chain state lives
+# in enclave RAM. This one ships a single 4.4 MB static binary that holds no
+# state at all, so it is cheap enough to run continuously.
+#
+# WHAT IT PROVES, which is the entire reason to deploy it. The Zeronym trust
+# model asks an auditor to rebuild the shim from source, reach the published
+# hash, and check that hash against the one bound into the enclave attestation.
+# Reproducibility alone proves only that source and binary agree; attestation
+# alone proves only that SOME binary runs in a genuine enclave. Together they
+# say: the code you read is the code that is running, and the operator cannot
+# see the traffic. Neither half is worth much without the other, and until this
+# deploy exists the attestation half has never been demonstrated for the shim.
+#
+# The binary under audit is the one recorded in deploy/EXPECTED_SHA256, built
+# from the same commit this deploy repo was assembled from.
+
+enclave "__ENCLAVE_NAME__" {
+  build {
+    # Assembled by assemble-caution.sh, which copies it out of the
+    # `git archive HEAD` context rather than the working tree, so the recipe is
+    # pinned to the same commit as the sources it compiles. See the README.
+    containerfile = "Containerfile"
+  }
+
+  resources {
+    # The shim is stateless: it parses one protobuf field out of each
+    # SendTransaction body and forwards bytes. There is no chain state, no
+    # database, no cache. 2 GB is almost entirely EnclaveOS; the process itself
+    # sits in single-digit MB.
+    cpu       = 2
+    memory_mb = 2048
+  }
+
+  network {
+    # Wallet-facing gRPC. 8083, not 443, and the platform maps the domain onto
+    # it: see the http block below.
+    #
+    # 8083 is not a choice, it is the platform's undocumented default. The
+    # in-enclave proxy IGNORES `http { port }` and forwards to
+    # 127.0.0.1:8083 whatever is declared, which surfaces as every request
+    # returning 502 with `Upstream error: error sending request for url
+    # (http://127.0.0.1:8083/)`. Declaring 8083 here AND below means this works
+    # against the current behaviour and keeps working once the declaration is
+    # honoured, because both values already agree. Reported to Caution. The enclave cannot own 443 (Caution's parent
+    # Caddy holds it), which is what blocked this deploy until Caution shipped
+    # in-enclave termination on 2026-08-03.
+    ingress {
+      cidr_ipv4   = "0.0.0.0/0"
+      port        = 8083
+      ip_protocol = "tcp"
+    }
+
+    # Egress to exactly one host and port: the backing indexer, nothing else.
+    #
+    # Deliberately narrower than the platform's example, which allows all
+    # egress. This narrowness is a security property rather than tidiness. The
+    # shim sees every wallet's queries in the clear, which is precisely the
+    # exposure Zeronym exists to contain, so the enclave should be structurally
+    # incapable of shipping that anywhere except the one indexer it fronts. A
+    # /32 and a single port make exfiltration to a third party a network-level
+    # impossibility instead of a promise about the code.
+    #
+    # Note what is absent: no port 53, even though the backend is authenticated
+    # by NAME. That combination is the point. ZIS_BACKEND stays a literal
+    # address, so the enclave dials an IP and never resolves DNS;
+    # ZIS_BACKEND_TLS names what the certificate must say. A poisoned DNS answer
+    # has nothing to poison, and a hijacked address cannot present a valid
+    # certificate for the name. Update the CIDR whenever the backend IP moves.
+    egress {
+      cidr_ipv4   = "__BACKEND_CIDR__"
+      port        = __BACKEND_PORT__
+      ip_protocol = "tcp"
+    }
+
+    # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
+    #
+    # `e2e_encryption { enabled = true }` is Caution's in-enclave TLS
+    # termination, shipped 2026-08-03. The platform runs a Caddy INSIDE the
+    # enclave: it obtains the certificate for `domain`, terminates the wallet's
+    # TLS in there, and forwards to our process on `port`. So the private key is
+    # generated and held inside the enclave and the operator never holds it,
+    # which is the property the whole attestation argument depends on. Without
+    # this the parent's Caddy terminated on 443 with its own self-signed
+    # certificate, meaning wallet traffic was decrypted OUTSIDE the enclave and
+    # no amount of software of ours could fix it.
+    #
+    # Consequence for the shim: it serves PLAINTEXT h2c here and does not run
+    # its own TLS. Its rustls and ACME code stays in the binary but unused on
+    # this platform (ZIS_TLS_DOMAIN is unset below), because ACME from inside
+    # the enclave was never possible here: Let's Encrypt validates on 80 or 443
+    # and the platform owns both. That code is the path for a non-Caution
+    # deployment, and it is what proves the design does not depend on one
+    # vendor.
+    #
+    # h2c was the last real risk here and it is now closed. gRPC is HTTP/2 and
+    # needs trailers, which HTTP/1.1 cannot carry, so a Caddy proxying HTTP/1.1
+    # upstream would fail every call even with TLS perfect. Caution shipped the
+    # `upstream_protocol = "h2c"` field (declared below) on 2026-08-05, and the
+    # full path is verified end to end: wallet TLS -> in-enclave Caddy -> h2c ->
+    # shim -> TLS -> backend, with GetLightdInfo returning HTTP 200 and the
+    # grpc-status trailer intact.
+    http {
+      domain = "__TLS_DOMAIN__"
+      port   = 8083
+
+      # gRPC is HTTP/2. This tells Caution's in-enclave Caddy to speak cleartext
+      # HTTP/2 (h2c) to the shim on `port`, not HTTP/1.1. Without it the deploy
+      # gets a valid cert and then 502s every call, because the shim is an
+      # h2-only server (hyper server::conn::http2) and drops an HTTP/1.1 request
+      # that does not match the HTTP/2 preface. Caution shipped this field
+      # 2026-08-05; see https://docs.caution.co/reference/deployment-configuration/#grpc-services
+      upstream_protocol = "h2c"
+
+      e2e_encryption {
+        # `mode = "tls"`, per the current schema (caution-config E2eMode is
+        # steve|tls). An earlier CLI lacked `mode` and I used `enabled = true`,
+        # but in the shipped schema `enabled = true` maps to the DEPRECATED
+        # `mode = "steve"`, not TLS (E2eEncryption::effective_mode). So TLS must
+        # be named explicitly, exactly as Anton's docs example shows.
+        mode = "tls"
+      }
+    }
+  }
+
+  unit "default" {
+    # The runtime stage's ENTRYPOINT is this binary at the image root. Stated
+    # explicitly because a previous enclave failed to boot on exactly this: the
+    # unit command was /run-both.sh while the file was installed at
+    # /usr/local/bin/run-both.sh, and the enclave paniced with nothing to say
+    # why. Keep it agreeing with the Containerfile.
+    command = "/zero-indexer-shim"
+
+    env = {
+      # Bind all interfaces on the port the in-enclave Caddy forwards to. The
+      # default is 127.0.0.1:9068, which inside an enclave would accept only
+      # connections that cannot exist.
+      ZIS_LISTEN = "0.0.0.0:8083"
+
+      # The backing indexer: one of Shielded Labs' own nodes, reached at the
+      # cluster's load-balancer IP on a per-backend port (zaino and lightwalletd
+      # each get their own shim, so each enclave points at exactly one).
+      #
+      # Unlike ZEBRA_* and ZAINO_*, this prefix is safe to set here: ZIS_ is
+      # the shim's own clap env namespace and these two names are the whole of
+      # it. The rule that burned us before was passing ZEBRA_CONF to zebrad,
+      # which parsed it as an unknown config field `conf` and exited, panicking
+      # the enclave into a reboot loop. The lesson was not "never use env
+      # vars", it was "never hand a binary a variable in its own config
+      # namespace that it does not define". These two it defines.
+      ZIS_BACKEND = "__BACKEND_ADDR__"
+
+      # Authenticate the backend as this name while still dialling the literal
+      # address above. Also becomes the request :authority, which is what the
+      # ingress in front of the indexer routes on; with the address there it
+      # matches no host rule and answers 404 over a healthy TLS connection.
+      ZIS_BACKEND_TLS = "__BACKEND_TLS_NAME__"
+
+      # ZIS_TLS_DOMAIN is deliberately UNSET, so the shim serves plaintext h2c
+      # and its own TLS stack stays dormant. The in-enclave Caddy declared in
+      # the http block above owns the certificate and terminates the wallet's
+      # TLS, and the key it generates lives inside the enclave, which is the
+      # property that matters. Two terminators would be one too many.
+      #
+      # This is not the shim's TLS being abandoned. It is tested, reproducible,
+      # and the only option for a deployment that is not on Caution; it simply
+      # cannot work HERE, because ACME needs to answer a challenge on 80 or 443
+      # and the platform owns both ports. If this ever runs somewhere the
+      # enclave owns 443, set ZIS_TLS_DOMAIN and ZIS_TLS_PRODUCTION and delete
+      # the http block instead.
+      #
+      #   ZIS_TLS_DOMAIN     = "__TLS_DOMAIN__"
+      #   ZIS_TLS_EMAIL      = "__TLS_EMAIL__"
+      #   ZIS_TLS_PRODUCTION = "__TLS_PRODUCTION__"
+
+      # Default is `info`, which deliberately omits the per-request zis::proxy
+      # line naming the method each wallet called. That line is exactly the
+      # metadata this component exists to deny an operator, so it stays off in
+      # a deployed enclave. Turn it on only for a local demo, never here.
+      # RUST_LOG = "zis::proxy=debug,info"
+    }
+  }
+
+  debug {
+    # FALSE is the point of the exercise: debug mode disables attestation, and
+    # an unattested shim proves nothing that running it on a laptop would not.
+    #
+    # If the enclave boots but never serves, flip this to true and redeploy;
+    # that opens port 22 on the parent so the console can be read at
+    # /var/log/nitro_enclaves/enclave-console.log. Every previous "boots but
+    # never serves" bug here was diagnosed that way and none was diagnosable
+    # without it, because the Caution CLI has no logs command. The key is
+    # already listed so the flip is one boolean.
+    enabled  = false
+    ssh_keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINcRkPvdbZJ4PJMTT6rjAsmeWO84rp8TAfSURX4Scjq4 shieldedmark@Mac",
+    ]
+  }
+}

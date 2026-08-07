@@ -1,0 +1,4 @@
+# Build artifacts for this standalone crate. Cargo.lock IS committed on
+# purpose: it pins the exact parser the classifier uses, which is an audit
+# requirement, not an incidental detail.
+/target
