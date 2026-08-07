@@ -40,15 +40,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 
-# Chain connection: JSON-RPC to zebrad/zcashd for tip and broadcast. hyper
-# rather than a JSON-RPC framework because the surface is two methods and the
-# shim already proves this stack builds under StageX musl.
-hyper = { version = "1", features = ["client", "http1"] }
+# Chain connection out (JSON-RPC to zebrad/zcashd) and the inbound serving path
+# in. hyper rather than a JSON-RPC or web framework because the surface is tiny
+# (two RPC methods out, one POST in) and the shim already proves this stack
+# builds under StageX musl.
+hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The hub holds decrypted transaction bytes in plaintext; wipe them on drop so a
+# copy does not linger in freed enclave memory (REVIEW.md).
+zeroize = "1"
 
 # Ordering within a flush must be unpredictable, so this is a security
 # dependency rather than a convenience one. See flush ordering in src/.
