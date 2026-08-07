@@ -42,6 +42,21 @@ pub struct Config {
     #[arg(long, env = "ZIS_BACKEND_TLS")]
     pub backend_tls: Option<String>,
 
+    /// Divert Orchard-touching SendTransactions to this hub instead of
+    /// forwarding them to the backing indexer. A literal SocketAddr, same
+    /// discipline as `--backend`. UNSET means forward-only: the shim classifies
+    /// and logs but diverts nothing, which is the merged proof-of-concept
+    /// behaviour.
+    #[arg(long, env = "ZIS_HUB")]
+    pub hub: Option<SocketAddr>,
+
+    /// Verify the hub's certificate as this DNS name, and speak TLS to it. Unset
+    /// with `--hub` set means plaintext to the hub. Same split as
+    /// `--backend`/`--backend-tls`: the enclave dials an IP, authenticates a
+    /// name.
+    #[arg(long, env = "ZIS_HUB_TLS")]
+    pub hub_tls: Option<String>,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///

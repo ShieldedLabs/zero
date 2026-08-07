@@ -26,9 +26,11 @@
 //!   configured the shim serves plaintext h2c, which is what the tests and a
 //!   local demo use.
 //!
-//! Out of scope for the proof of concept: diversion, the hub, Nym and STEVE.
-//! The enclave and attestation are no longer out of scope; see
-//! `deploy/caution/`.
+//! Diversion is being built on top of this PoC. The hub client ([`hub`]) and the
+//! divert-recognition state ([`state`]) have landed; the proxy wiring that makes
+//! the shim actually divert, and interception of a diverted migration's
+//! follow-up queries, are in progress. Nym and STEVE remain out of scope. The
+//! enclave and attestation are no longer out of scope; see `deploy/caution/`.
 //!
 //! The crate is a library with a thin binary wrapper so tests can bind
 //! ephemeral ports and drive the proxy in-process.
@@ -37,8 +39,10 @@
 
 pub mod classify;
 pub mod config;
+pub mod hub;
 pub mod intercept;
 pub mod proxy;
+pub mod state;
 pub mod tls;
 
 /// Boxed error type shared by the proxy paths.
