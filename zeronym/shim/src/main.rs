@@ -10,7 +10,10 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 use zero_indexer_shim::config::Config;
+use zero_indexer_shim::hub::HubClient;
+use zero_indexer_shim::intercept::Diversion;
 use zero_indexer_shim::proxy::Backend;
+use zero_indexer_shim::state::DivertState;
 use zero_indexer_shim::tls::{BackendTls, ServerTls};
 use zero_indexer_shim::BoxError;
 
@@ -63,14 +66,12 @@ async fn main() -> Result<(), BoxError> {
             } else {
                 "letsencrypt-staging"
             },
-            "zero-indexer-shim starting (TLS terminated here; non-destructive: \
-             migrations are logged, not diverted)"
+            "zero-indexer-shim starting (TLS terminated here)"
         ),
         None => tracing::info!(
             listen = %local,
             backend = %backend,
-            "zero-indexer-shim starting (plaintext h2c; non-destructive: \
-             migrations are logged, not diverted)"
+            "zero-indexer-shim starting (plaintext h2c)"
         ),
     }
 
@@ -88,7 +89,39 @@ async fn main() -> Result<(), BoxError> {
         tracing::warn!("no --backend-tls: the hop to the backing indexer is PLAINTEXT.");
     }
 
-    zero_indexer_shim::serve_with_shutdown(listener, backend, server_tls, shutdown()).await
+    // Diversion is on iff a hub is configured. Built here so a malformed hub TLS
+    // name is a startup failure the operator sees, warned about loudly when the
+    // hop is plaintext, and stated plainly when absent so nobody mistakes
+    // forward-only for private.
+    let diversion = match config.hub {
+        Some(hub_addr) => {
+            let hub_tls = match config.hub_tls.as_deref() {
+                Some(name) => Some(BackendTls::new(name)?),
+                None => None,
+            };
+            if hub_tls.is_none() {
+                tracing::warn!("no --hub-tls: the hop to the hub is PLAINTEXT.");
+            }
+            tracing::info!(
+                hub = %hub_addr,
+                "diversion ENABLED: Orchard-touching transactions go to the hub, not the operator"
+            );
+            Some(Arc::new(Diversion {
+                hub: HubClient::new(hub_addr, hub_tls),
+                state: Arc::new(DivertState::new()),
+            }))
+        }
+        None => {
+            tracing::warn!(
+                "no --hub: FORWARD-ONLY. Migrations are classified and logged but forwarded to \
+                 the operator's indexer. No privacy until a hub is set."
+            );
+            None
+        }
+    };
+
+    zero_indexer_shim::serve_with_shutdown(listener, backend, server_tls, diversion, shutdown())
+        .await
 }
 
 /// Resolves on the first ctrl-c, which stops the accept loop and drains.
