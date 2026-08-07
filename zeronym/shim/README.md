@@ -23,12 +23,19 @@ The design lives in The Zeronym Book, which is reviewed separately on the
   byte-for-byte, and forwarding a body that could be neither read nor reproduced
   is the leak this component exists to prevent
   (`an_oversized_send_transaction_is_refused_and_never_forwarded`).
-* No hub, no Nym, no STEVE.
-* No TLS and no ACME. Transport is plaintext h2c with prior knowledge on both
-  legs. `curl http://...` will look broken even when the shim is healthy;
-  `grpcurl -plaintext` and tonic channels over `http://` both work, because both
-  use prior knowledge.
-* No enclave and no attestation.
+* No hub, no Nym, no STEVE. Diversion, the batching hub, the Nym transport and
+  the sealed-transport layer are still out of scope for this PoC.
+* TLS and ACME are wired (`src/tls.rs`): the shim can terminate wallet-facing TLS
+  and obtain its own certificate by ACME, which is the vendor-independent path. On
+  Caution the in-enclave Caddy terminates instead, so the shim serves plaintext
+  h2c there and its own TLS stays dormant. To the backing indexer it speaks TLS
+  when `ZIS_BACKEND_TLS` is set, plaintext h2c otherwise. Either way `curl
+  http://...` looks broken even when the shim is healthy; `grpcurl` and tonic
+  channels work, because gRPC uses HTTP/2 prior knowledge.
+* The enclave and its attestation are demonstrated. The shim runs as an attested
+  AWS Nitro enclave on Caution (`deploy/caution/`); `POST /attestation` returns a
+  document binding the loaded image, and the reproducible build (`deploy/`) lets
+  an auditor match that image to source.
 * No upstream connection pooling across clients. One HTTP/2 connection to the
   backing indexer is opened per inbound client connection, lazily, on the first
   request that needs it. It IS redialled when the indexer restarts
