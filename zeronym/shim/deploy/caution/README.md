@@ -10,7 +10,7 @@ indexer.
 ## Why this deploy exists
 
 `deploy/README.md` proves one half of the shim's trust argument: the published
-binary hash `cd72daf3…` is reproducible from source. That half, on its own,
+binary hash `dde2cccc…` is reproducible from source. That half, on its own,
 proves nothing about what is *running*. An operator can publish an auditable
 recipe and run something else.
 
