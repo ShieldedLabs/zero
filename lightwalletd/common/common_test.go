@@ -99,9 +99,32 @@ func afterStub(d time.Duration) <-chan time.Time {
 	return ch
 }
 
+// resetGlobals restores the package globals that tests replace -- the RPC and
+// time stubs, the state those stubs accumulate, and the mempool cache that
+// GetMempool maintains -- to the values they have at package initialization.
+// Any test that installs a stub or otherwise dirties this state should
+// "defer resetGlobals()" so it doesn't leak into later tests, even if the test
+// exits early via t.Fatal. Restoring the function pointers to nil (rather than
+// to a working implementation) means that a test that forgets to install a
+// stub panics rather than silently running against a leftover one.
+func resetGlobals() {
+	RawRequest = nil
+	Time.Sleep = nil
+	Time.Now = nil
+	Time.After = nil
+	step = 0
+	sleepCount = 0
+	sleepDuration = 0
+	DonationAddress = ""
+	g_lastBlockChainInfo = &ZcashdRpcReplyGetblockchaininfo{}
+	g_lastTime = time.Time{}
+	g_txidSeen = map[txid]struct{}{}
+	g_txList = nil
+}
+
 // ------------------------------------------ GetLightdInfo()
 
-func getLightdInfoStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getLightdInfoStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	step++
 	switch method {
 	case "getinfo":
@@ -148,6 +171,7 @@ func getLightdInfoStub(method string, params []json.RawMessage) (json.RawMessage
 func TestGetLightdInfo(t *testing.T) {
 	testT = t
 	RawRequest = getLightdInfoStub
+	defer resetGlobals()
 	Time.Sleep = sleepStub
 	// This calls the getblockchaininfo rpc just to establish connectivity with zcashd
 	FirstRPC()
@@ -199,11 +223,6 @@ func TestGetLightdInfo(t *testing.T) {
 	if sleepCount != 1 || sleepDuration != 15*time.Second {
 		t.Error("unexpected sleeps", sleepCount, sleepDuration)
 	}
-
-	DonationAddress = ""
-	step = 0
-	sleepCount = 0
-	sleepDuration = 0
 }
 
 // ------------------------------------------ BlockIngestor()
@@ -225,7 +244,7 @@ func checkSleepMethod(count int, duration time.Duration, expected string, method
 // by just prepending "0000" to X in string form. For example, the "hash" of block 380640
 // is "0000380640". It may be better to make the (fake) hashes 32 bytes (64 characters),
 // and that may be required in the future, but for now this works okay.
-func blockIngestorStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func blockIngestorStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	var arg string
 	if len(params) > 1 {
 		err := json.Unmarshal(params[0], &arg)
@@ -398,6 +417,7 @@ func blockIngestorStub(method string, params []json.RawMessage) (json.RawMessage
 func TestBlockIngestor(t *testing.T) {
 	testT = t
 	RawRequest = blockIngestorStub
+	defer resetGlobals()
 	Time.Sleep = sleepStub
 	Time.Now = nowStub
 	os.RemoveAll(unitTestPath)
@@ -406,9 +426,6 @@ func TestBlockIngestor(t *testing.T) {
 	if step != 24 {
 		t.Error("unexpected final step", step)
 	}
-	step = 0
-	sleepCount = 0
-	sleepDuration = 0
 	os.RemoveAll(unitTestPath)
 }
 
@@ -416,7 +433,7 @@ func TestBlockIngestor(t *testing.T) {
 
 // There are four test blocks, 0..3
 // (probably don't need all these cases)
-func getblockStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getblockStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	if method != "getblock" {
 		testT.Error("unexpected method")
 	}
@@ -458,6 +475,7 @@ func getblockStub(method string, params []json.RawMessage) (json.RawMessage, err
 func TestGetBlockRange(t *testing.T) {
 	testT = t
 	RawRequest = getblockStub
+	defer resetGlobals()
 	os.RemoveAll(unitTestPath)
 	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, 0)
 	blockChan := make(chan *walletrpc.CompactBlock)
@@ -504,12 +522,40 @@ func TestGetBlockRange(t *testing.T) {
 	if step != 5 {
 		t.Fatal("unexpected step:", step)
 	}
-	step = 0
+	os.RemoveAll(unitTestPath)
+}
+
+func TestGetBlockRangeCancelsInFlightRPC(t *testing.T) {
+	RawRequest = func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	defer resetGlobals()
+	os.RemoveAll(unitTestPath)
+	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error, 1)
+	blockRange := &walletrpc.BlockRange{
+		Start: &walletrpc.BlockID{Height: 380640},
+		End:   &walletrpc.BlockID{Height: 380640},
+	}
+	done := make(chan struct{})
+	go func() {
+		GetBlockRange(ctx, testcache, blockChan, errChan, blockRange)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetBlockRange did not exit after context cancellation")
+	case <-done:
+	}
 	os.RemoveAll(unitTestPath)
 }
 
 // There are four test blocks, 0..3
-func getblockStubReverse(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getblockStubReverse(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	var arg string
 	err := json.Unmarshal(params[0], &arg)
 	if err != nil {
@@ -559,6 +605,7 @@ func getblockStubReverse(method string, params []json.RawMessage) (json.RawMessa
 func TestGetBlockRangeReverse(t *testing.T) {
 	testT = t
 	RawRequest = getblockStubReverse
+	defer resetGlobals()
 	os.RemoveAll(unitTestPath)
 	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, 0)
 	blockChan := make(chan *walletrpc.CompactBlock)
@@ -606,7 +653,6 @@ func TestGetBlockRangeReverse(t *testing.T) {
 	if step != 6 {
 		t.Fatal("unexpected step:", step)
 	}
-	step = 0
 	os.RemoveAll(unitTestPath)
 }
 
@@ -621,7 +667,7 @@ func TestGenerateCerts(t *testing.T) {
 // Note that in mocking zcashd's RPC replies here, we don't really need
 // actual txids or transactions, or even strings with the correct format
 // for those, except that a transaction must be a hex string.
-func mempoolStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func mempoolStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	step++
 	switch step {
 	case 1:
@@ -716,6 +762,7 @@ func mempoolStub(method string, params []json.RawMessage) (json.RawMessage, erro
 func TestMempoolStream(t *testing.T) {
 	testT = t
 	RawRequest = mempoolStub
+	defer resetGlobals()
 	Time.Sleep = sleepStub
 	Time.Now = nowStub
 	Time.After = afterStub
@@ -766,10 +813,6 @@ func TestMempoolStream(t *testing.T) {
 	if step != 8 {
 		t.Fatal("unexpected number of zebrad RPCs")
 	}
-
-	step = 0
-	sleepCount = 0
-	sleepDuration = 0
 }
 
 func TestZcashdRpcReplyUnmarshalling(t *testing.T) {
@@ -839,7 +882,7 @@ func TestMempoolStreamCancelOnEmptyMempool(t *testing.T) {
 	// Stub RawRequest to return a stable empty-mempool / stable-tip world,
 	// so the loop parks at the cancel-aware sleep with no work and no tip
 	// change to break out.
-	RawRequest = func(method string, params []json.RawMessage) (json.RawMessage, error) {
+	RawRequest = func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 		switch method {
 		case "getblockchaininfo":
 			r, _ := json.Marshal(&ZcashdRpcReplyGetblockchaininfo{
@@ -852,6 +895,7 @@ func TestMempoolStreamCancelOnEmptyMempool(t *testing.T) {
 		}
 		return nil, errors.New("unexpected RPC: " + method)
 	}
+	defer resetGlobals()
 	// Real time for the cancel-aware sleep so ctx.Done has a real race with
 	// the 200ms timer. afterStub would fire instantly and the test would not
 	// exercise the cancel path deterministically.
@@ -889,12 +933,32 @@ func TestMempoolStreamCancelOnEmptyMempool(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetMempool did not return within 2s of cancel; the cancel-aware select is not effective")
 	}
+}
 
-	// Reset shared state for any subsequent tests.
-	g_lastBlockChainInfo = &ZcashdRpcReplyGetblockchaininfo{}
-	g_lastTime = time.Time{}
-	g_txidSeen = map[txid]struct{}{}
-	g_txList = []*walletrpc.RawTransaction{}
-	sleepCount = 0
-	sleepDuration = 0
+func TestFilterTxPoolIronwood(t *testing.T) {
+	tx := &walletrpc.CompactTx{
+		Index: 7,
+		Txid:  []byte{1, 2, 3},
+		Actions: []*walletrpc.CompactOrchardAction{
+			{Nullifier: []byte{4}},
+		},
+		IronwoodActions: []*walletrpc.CompactOrchardAction{
+			{Nullifier: []byte{5}},
+		},
+	}
+
+	orchardOnly := FilterTxPool(tx, []walletrpc.PoolType{walletrpc.PoolType_ORCHARD})
+	if orchardOnly == nil || len(orchardOnly.Actions) != 1 || len(orchardOnly.IronwoodActions) != 0 {
+		t.Fatal("orchard-only filter returned unexpected actions")
+	}
+
+	ironwoodOnly := FilterTxPool(tx, []walletrpc.PoolType{walletrpc.PoolType_IRONWOOD})
+	if ironwoodOnly == nil || len(ironwoodOnly.Actions) != 0 || len(ironwoodOnly.IronwoodActions) != 1 {
+		t.Fatal("ironwood-only filter returned unexpected actions")
+	}
+
+	defaultFiltered := filterBlockPool([]*walletrpc.CompactTx{tx}, nil)
+	if len(defaultFiltered) != 1 || len(defaultFiltered[0].IronwoodActions) != 1 {
+		t.Fatal("default shielded filter should keep ironwood actions")
+	}
 }

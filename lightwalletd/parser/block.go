@@ -109,7 +109,6 @@ func (b *Block) GetPrevHash() hash32.T {
 // ToCompact returns the compact representation of the full block.
 func (b *Block) ToCompact() *walletrpc.CompactBlock {
 	compactBlock := &walletrpc.CompactBlock{
-		//TODO ProtoVersion: 1,
 		Height:        uint64(b.GetHeight()),
 		PrevHash:      hash32.ToSlice(b.hdr.HashPrevBlock),
 		Hash:          hash32.ToSlice(b.GetEncodableHash()),
@@ -139,6 +138,9 @@ func (b *Block) ParseFromSlice(data []byte) (rest []byte, err error) {
 	var txCount int
 	if !s.ReadCompactSize(&txCount) {
 		return nil, errors.New("could not read tx_count")
+	}
+	if err := rejectCountExceedingRemaining("tx_count", txCount, len(s), minTransactionWireBytes); err != nil {
+		return nil, err
 	}
 	data = []byte(s)
 

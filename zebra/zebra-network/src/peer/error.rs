@@ -259,12 +259,11 @@ pub enum HandshakeError {
     /// The remote peer offered a version older than our minimum version.
     #[error("Peer offered obsolete version: {0:?}")]
     ObsoleteVersion(crate::protocol::external::types::Version),
-    /// The remote peer's version message did not advertise the services Zebra
-    /// requires from outbound peers.
-    #[error("Peer advertised services without NODE_NETWORK: {advertised:?}")]
+    /// The remote peer is missing services that are required for outbound peers.
+    #[error("Peer is missing required services, advertised: {services:?}")]
     MissingRequiredServices {
-        /// The services advertised by the remote peer in its version message.
-        advertised: crate::protocol::external::types::PeerServices,
+        /// The services advertised by the remote peer in its `version` message.
+        services: crate::protocol::external::types::PeerServices,
     },
     /// Sending or receiving a message timed out.
     #[error("Timeout when sending or receiving a message to peer")]
