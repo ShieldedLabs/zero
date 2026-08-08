@@ -25,10 +25,16 @@ enclave "__ENCLAVE_NAME__" {
   }
 
   resources {
-    # The hub holds one transaction at a time, transiently, and broadcasts it. It
-    # keeps no chain state, no database, no cache: it re-parses each submission
-    # for telemetry and drops it. 2 GB is almost entirely EnclaveOS; the process
-    # itself sits in single-digit MB.
+    # The hub holds a batching queue in RAM between flushes, and nothing else:
+    # no chain state, no database, no disk. The queue is bounded by an explicit
+    # byte budget (64 MiB, roughly a thousand 64 KiB frames), which is what
+    # bounds this enclave's memory against a submitter who simply keeps
+    # submitting. 2 GB leaves that budget an ample margin over EnclaveOS.
+    #
+    # The queue is deliberately NOT persisted. An enclave is diskless, so a
+    # restart drops whatever was held and the shims re-submit; persisting it
+    # would mean writing plaintext migrations somewhere the operator could read,
+    # which is the one thing this component exists to prevent.
     cpu       = 2
     memory_mb = 2048
   }

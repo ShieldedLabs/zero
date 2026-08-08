@@ -51,6 +51,17 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# A flush publishes the whole (transaction x node) product at once. Sequential
+# calls with a 10 s per-call ceiling would exceed a block interval on one hung
+# node, which would reintroduce the ordering the shuffle removes.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# The queue's dedup key is sha256(tx_bytes), NOT the txid: under ZIP 244 a v5/v6
+# txid excludes authorizing data, so it is the wrong identity for a byte-level
+# dedup, and a submitter-chosen key would let an attacker suppress someone
+# else's entry by colliding with it.
+sha2 = "0.10"
+
 # The hub holds decrypted transaction bytes in plaintext; wipe them on drop so a
 # copy does not linger in freed enclave memory (REVIEW.md).
 zeroize = "1"

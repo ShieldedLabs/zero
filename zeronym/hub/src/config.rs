@@ -29,7 +29,12 @@ pub struct Config {
     /// least one is required. Every submission is broadcast to EVERY node: a
     /// migration that only ever entered one node's mempool is one outage away
     /// from never being mined.
-    #[arg(long = "node", env = "ZIH_NODES", value_delimiter = ',', required = true)]
+    #[arg(
+        long = "node",
+        env = "ZIH_NODES",
+        value_delimiter = ',',
+        required = true
+    )]
     pub nodes: Vec<String>,
 
     /// HTTP basic-auth user applied to every node. zebrad with

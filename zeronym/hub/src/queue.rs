@@ -1,0 +1,562 @@
+//! The batching queue: what is held between flushes, and what is refused entry.
+//!
+//! This module and [`crate::batcher`] are where the anonymity property lives. A
+//! migration is not broadcast when it arrives; it waits for the next scheduled
+//! flush and is published simultaneously with everything else admitted in that
+//! window, in an order nobody can predict. The batch IS the anonymity set.
+//!
+//! Every rule here comes from the adversarial review in `REVIEW.md`, and each
+//! one closes an attack rather than expressing a preference:
+//!
+//! * **Admission control instead of an early-expiry flush (#2).** There is no
+//!   "flush early because something is about to expire" trigger, because that is
+//!   an attacker-operated flush clock: one cheap junk transaction per block with
+//!   a tight expiry would collapse every window network-wide, permanently.
+//!   Instead an entry is admitted only if it provably survives the next
+//!   scheduled flush, which makes urgency unreachable rather than rate-limited.
+//! * **Keyed on the payload hash, not the txid (#4).** Under ZIP 244 a v5/v6
+//!   txid is a digest over transaction effects and excludes authorizing data, so
+//!   two different byte strings can legitimately share a txid. A txid is
+//!   therefore the wrong identity for a byte-level dedup, and a submitter-chosen
+//!   key would let an attacker suppress someone else's entry by colliding with
+//!   it. A payload hash is unforgeable by the submitter.
+//! * **Re-parse is telemetry, never a refusal (#5).** A transaction the hub
+//!   cannot parse is precisely one the shim deliberately diverted because it
+//!   could not read it either, so refusing it would inverd the shim's fail-safe
+//!   into a leak. Unparseable payloads are queued with `expiry = None` and
+//!   published; the node is the only authority on validity.
+//! * **Bytes are the budget, not entries.** Real Orchard migrations are 2 to
+//!   16 KB, so fixed-size slots would waste most of the budget and hand an
+//!   attacker a cheaper occupancy attack than the memory attack.
+//! * **Never evict an admitted entry.** An admission is a promise. Refuse at the
+//!   door instead; oldest-first eviction would evict exactly the entries closest
+//!   to expiry, which is the attacker's selection lever.
+//!
+//! **There is deliberately no contributor, channel or session identifier on an
+//! entry, and there must never be one.** An operator-to-migration mapping inside
+//! the enclave is precisely the linkage this system exists to destroy, and it
+//! would become exposure to enclave compromise, side channels and legal
+//! compulsion.
+
+// A panic in a diskless enclave destroys the queue, and every shim then walks
+// its retry ladder simultaneously: an enclave panic is a fleet-wide privacy
+// event, not a crash.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::sync::Mutex;
+
+use rand::seq::SliceRandom;
+use sha2::{Digest, Sha256};
+use zebra_chain::{serialization::ZcashDeserialize, transaction::Transaction};
+use zeroize::Zeroizing;
+
+/// Per-entry ceiling, matching the fixed frame the batching design pads to.
+///
+/// A deliberate, tight bound, and NOT the shim's 4 MiB HTTP-body limit, which
+/// bounds a wallet's request into a shim and is unrelated. 64 KiB accommodates
+/// roughly 75 Orchard actions; a transaction larger than the frame cannot be
+/// privately batched at all, which is the price of leaking zero bits of length.
+pub const MAX_TX_BYTES: usize = 64 * 1024;
+
+/// Total resident bytes the queue will hold. Bounds enclave memory against a
+/// submitter who simply keeps submitting.
+pub const MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why a submission was not admitted.
+///
+/// Typed rather than a string because the shim reacts differently to each: a
+/// tight expiry means hold and retry, an unavailable hub means try another hub.
+/// Neither may ever be answered by broadcasting through the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The transaction would expire on or before the flush that would publish
+    /// it. Publishing it late is worse than not accepting it, because the wallet
+    /// can still hold and retry into a later window.
+    ExpiryTooTight,
+    /// Larger than the fixed frame. Cannot be batched without leaking its size.
+    TooLarge,
+    /// The queue is at its byte budget.
+    Full,
+    /// The chain tip is stale, so neither the flush schedule nor the expiry
+    /// check can be trusted. Refusing is the fail-closed answer.
+    TipStale,
+}
+
+impl Refusal {
+    /// A stable machine-readable reason, safe to log and to return. Carries no
+    /// per-entry information.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refusal::ExpiryTooTight => "expiry_too_tight",
+            Refusal::TooLarge => "too_large",
+            Refusal::Full => "queue_full",
+            Refusal::TipStale => "tip_stale",
+        }
+    }
+}
+
+/// The outcome of offering a transaction to the queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// Held for the next flush. The txid is computed from the bytes, not
+    /// supplied by the submitter, and is `None` when the payload did not parse.
+    Admitted {
+        txid: Option<String>,
+    },
+    /// These exact bytes are already queued. Idempotent by construction: honest
+    /// resends and cross-hub duplicates collapse, because identical bytes hash
+    /// identically.
+    Duplicate {
+        txid: Option<String>,
+    },
+    Refused(Refusal),
+}
+
+/// One queued migration.
+///
+/// Note what is absent: any identifier of who submitted it. See the module docs.
+pub struct Entry {
+    /// `sha256(tx_bytes)`. The dedup identity, unforgeable by the submitter.
+    pub key: [u8; 32],
+    /// Computed by the hub from the bytes. `None` when the payload did not
+    /// parse, which is queued and published like any other.
+    pub txid: Option<String>,
+    /// `None` means NO expiry, i.e. infinitely far away. Never fold this to 0:
+    /// under an `expiry >= bound` test that would reject every legal no-expiry
+    /// transaction, and under an `expiry <= bound` test it would pin the hub
+    /// into permanent early flush.
+    pub expiry: Option<u32>,
+    /// Wiped on drop: the hub holds migrations in plaintext and a freed copy
+    /// lingering in enclave memory is exactly what attestation cannot excuse.
+    pub tx_bytes: Zeroizing<Vec<u8>>,
+    /// The tip when this was admitted. Drives the confirmation deadline.
+    pub received_height: u32,
+}
+
+struct Inner {
+    entries: HashMap<[u8; 32], Entry>,
+    bytes: usize,
+}
+
+/// The in-memory batching queue.
+pub struct Queue {
+    inner: Mutex<Inner>,
+    max_bytes: usize,
+}
+
+impl Queue {
+    pub fn new() -> Self {
+        Self::with_capacity(MAX_QUEUE_BYTES)
+    }
+
+    pub fn with_capacity(max_bytes: usize) -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                entries: HashMap::new(),
+                bytes: 0,
+            }),
+            max_bytes,
+        }
+    }
+
+    /// Offer a transaction to the queue.
+    ///
+    /// `tip` is the current height and `flush_interval` the cadence, together
+    /// deciding whether this entry provably survives the flush that would
+    /// publish it. The parse here is telemetry only: a payload that does not
+    /// deserialize is admitted with no txid and no expiry.
+    pub fn admit(
+        &self,
+        tx_bytes: &[u8],
+        tip: u32,
+        flush_interval: u32,
+        mining_margin: u32,
+    ) -> Admission {
+        if tx_bytes.len() > self.max_bytes.min(MAX_TX_BYTES) {
+            return Admission::Refused(Refusal::TooLarge);
+        }
+
+        // Telemetry parse. A failure is never a refusal (REVIEW #5).
+        //
+        // `nExpiryHeight == 0` means the transaction does NOT expire (ZIP 203),
+        // so it is folded to `None` here rather than being read as "expires at
+        // height zero". Getting this wrong is not cosmetic: every no-expiry
+        // transaction would fail the admission test below and be refused
+        // forever, which is the mirror image of the `unwrap_or(0)` mistake the
+        // review warns about.
+        let (txid, expiry) = match Transaction::zcash_deserialize(&mut Cursor::new(tx_bytes)) {
+            Ok(tx) => (
+                Some(tx.hash().to_string()),
+                tx.expiry_height()
+                    .map(|h| h.0)
+                    .filter(|height| *height != 0),
+            ),
+            Err(_) => (None, None),
+        };
+
+        // Admission control: admit only if this entry provably survives the next
+        // scheduled flush, which is what makes the early-flush trigger
+        // unreachable rather than merely rate-limited (REVIEW #2).
+        if !survives_next_flush(expiry, tip, flush_interval, mining_margin) {
+            return Admission::Refused(Refusal::ExpiryTooTight);
+        }
+
+        let key: [u8; 32] = Sha256::digest(tx_bytes).into();
+
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            // A poisoned lock means a thread panicked while holding it. Recover
+            // the data rather than propagating the panic: dropping the queue
+            // would push every pending migration onto its shim's retry ladder.
+            Err(poison) => poison.into_inner(),
+        };
+
+        if inner.entries.contains_key(&key) {
+            return Admission::Duplicate { txid };
+        }
+
+        // Reserve the budget and insert BEFORE the caller acknowledges. An
+        // acknowledgement is a promise; never emit one for an entry that is not
+        // resident.
+        if inner.bytes.saturating_add(tx_bytes.len()) > self.max_bytes {
+            return Admission::Refused(Refusal::Full);
+        }
+
+        inner.bytes += tx_bytes.len();
+        inner.entries.insert(
+            key,
+            Entry {
+                key,
+                txid: txid.clone(),
+                expiry,
+                tx_bytes: Zeroizing::new(tx_bytes.to_vec()),
+                received_height: tip,
+            },
+        );
+
+        Admission::Admitted { txid }
+    }
+
+    /// Take everything pending, in an order nobody can predict.
+    ///
+    /// Shuffled with `rand::rng()`, which is a ChaCha-based CSPRNG seeded from
+    /// the operating system and periodically reseeded. The requirement is that
+    /// the permutation be cryptographically unpredictable and NOT reproducible:
+    /// an observer who could predict intra-batch ordering could re-derive
+    /// arrival order, which is the very thing simultaneous publication hides.
+    /// Never seed this from a height, a counter, a timestamp or anything else an
+    /// observer can also see. Iterating a `HashMap` is NOT a shuffle, and
+    /// neither is sorting by any key.
+    pub fn drain_shuffled(&self) -> Vec<Entry> {
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poison) => poison.into_inner(),
+        };
+
+        let mut batch: Vec<Entry> = inner.entries.drain().map(|(_, entry)| entry).collect();
+        inner.bytes = 0;
+        drop(inner);
+
+        batch.shuffle(&mut rand::rng());
+        batch
+    }
+
+    /// Number of entries currently held. For the hub operator's own metrics
+    /// only: this is an anonymity-set-size oracle and must never be returned
+    /// down a shim channel.
+    pub fn len(&self) -> usize {
+        match self.inner.lock() {
+            Ok(inner) => inner.entries.len(),
+            Err(poison) => poison.into_inner().entries.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The next height at which a flush is scheduled, strictly after `h`.
+///
+/// Bounding admission against this rather than against `h + N` is strictly more
+/// permissive and equally safe: the wait until publication is uniform over
+/// `0..N` rather than always `N`, which matters because the tightest wallet
+/// expiry is the binding constraint on the whole design.
+pub fn next_flush_height(h: u32, n: u32) -> u32 {
+    if n == 0 {
+        return h;
+    }
+    ((h / n).saturating_add(1)).saturating_mul(n)
+}
+
+/// Whether an entry admitted at `tip` provably survives the flush that would
+/// publish it.
+///
+/// This is the whole of admission control, kept as a pure function because it is
+/// the rule that makes every early-flush trigger unreachable: if every admitted
+/// entry survives its scheduled flush, no entry can ever become urgent, so there
+/// is nothing for an attacker to make urgent.
+///
+/// `expiry == None` means the transaction does not expire, so it always
+/// survives. Never fold that to zero.
+pub fn survives_next_flush(
+    expiry: Option<u32>,
+    tip: u32,
+    flush_interval: u32,
+    mining_margin: u32,
+) -> bool {
+    match expiry {
+        None => true,
+        Some(expiry) => {
+            let deadline = next_flush_height(tip, flush_interval).saturating_add(mining_margin);
+            expiry >= deadline
+        }
+    }
+}
+
+#[cfg(test)]
+// The module-level deny above is about PRODUCTION paths: a panic in a diskless
+// enclave is a fleet-wide privacy event. In tests, panicking IS the failure
+// report, so the assertion macros are allowed here and nowhere else.
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    const N: u32 = 20;
+    const MARGIN: u32 = 4;
+
+    #[test]
+    fn next_flush_height_lands_on_the_following_multiple() {
+        // The two boundaries the review calls out by name.
+        assert_eq!(
+            next_flush_height(100, 20),
+            120,
+            "h % N == 0 must not return h"
+        );
+        assert_eq!(next_flush_height(119, 20), 120, "h % N == N-1");
+        assert_eq!(next_flush_height(101, 20), 120);
+        assert_eq!(next_flush_height(0, 20), 20);
+    }
+
+    #[test]
+    fn next_flush_height_is_saturating_not_panicking() {
+        // A hostile or corrupt tip must not take the enclave down.
+        let _ = next_flush_height(u32::MAX, 20);
+        assert_eq!(next_flush_height(5, 0), 5);
+    }
+
+    #[test]
+    fn a_transaction_with_no_expiry_is_always_admissible() {
+        // None means infinitely far away, NOT height zero. Folding it to 0 would
+        // reject every legal no-expiry transaction forever, which is the mirror
+        // of the `unwrap_or(0)` mistake the review warns about. Note that
+        // `nExpiryHeight == 0` on the wire means exactly this (ZIP 203) and is
+        // folded to None at parse time.
+        assert!(survives_next_flush(None, 0, N, MARGIN));
+        assert!(survives_next_flush(None, u32::MAX - 1, N, MARGIN));
+    }
+
+    #[test]
+    fn admission_requires_surviving_the_flush_that_would_publish_it() {
+        // Tip 100 with N=20: the next flush is at 120, plus 4 blocks to get
+        // mined, so 124 is the first expiry that survives.
+        assert_eq!(next_flush_height(100, N) + MARGIN, 124);
+        assert!(!survives_next_flush(Some(123), 100, N, MARGIN), "one short");
+        assert!(
+            survives_next_flush(Some(124), 100, N, MARGIN),
+            "exactly enough"
+        );
+        assert!(survives_next_flush(Some(200), 100, N, MARGIN));
+    }
+
+    #[test]
+    fn the_admission_bound_is_uniform_over_the_window_not_always_a_full_interval() {
+        // Bounding against next_flush_height rather than tip + N is strictly
+        // more permissive and equally safe: late in a window the wait until
+        // publication is short, so a tighter expiry is still admissible. That
+        // matters because the wallet expiry ceiling is the binding constraint on
+        // the whole design.
+        //
+        // At tip 119 the next flush is one block away, so expiry 124 works; at
+        // tip 100 it is twenty blocks away and 124 is the minimum. A naive
+        // tip + N bound would demand 143 at tip 119 and needlessly refuse.
+        assert!(survives_next_flush(Some(124), 119, N, MARGIN));
+        assert!(!survives_next_flush(Some(124 - 1), 119, N, MARGIN));
+        assert!(
+            survives_next_flush(Some(124), 119, N, MARGIN)
+                && !survives_next_flush(Some(142), 119 + 1, N, MARGIN),
+            "the bound moves with the window boundary, not with the tip"
+        );
+    }
+
+    #[test]
+    fn admission_boundaries_at_both_ends_of_a_window() {
+        // The two cases the review names explicitly.
+        // h % N == 0: the next flush is a full interval away, never `h` itself.
+        assert!(!survives_next_flush(Some(100 + MARGIN), 100, N, MARGIN));
+        assert!(survives_next_flush(Some(120 + MARGIN), 100, N, MARGIN));
+        // h % N == N - 1: the next flush is one block away.
+        assert!(survives_next_flush(Some(120 + MARGIN), 119, N, MARGIN));
+    }
+
+    #[test]
+    fn admission_arithmetic_saturates_rather_than_overflowing() {
+        // A hostile or corrupt tip must not take the enclave down, and must not
+        // wrap into accidentally admitting everything.
+        let _ = survives_next_flush(Some(u32::MAX), u32::MAX, N, MARGIN);
+        let _ = survives_next_flush(Some(0), u32::MAX, N, MARGIN);
+    }
+
+    /// A minimal payload that will not deserialize as a transaction.
+    fn junk(seed: u8) -> Vec<u8> {
+        vec![seed; 64]
+    }
+
+    #[test]
+    fn an_unparseable_payload_is_queued_not_refused() {
+        // The shim diverts what it cannot read; refusing it here would invert
+        // that fail-safe into a leak (REVIEW #5).
+        let q = Queue::new();
+        match q.admit(&junk(1), 100, N, MARGIN) {
+            Admission::Admitted { txid } => {
+                assert!(txid.is_none(), "no txid for an unparseable body")
+            }
+            other => panic!("an unparseable payload must be admitted, got {other:?}"),
+        }
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn identical_bytes_collapse_to_one_entry() {
+        // Honest resends and cross-hub duplicates must not inflate a batch.
+        let q = Queue::new();
+        assert!(matches!(
+            q.admit(&junk(7), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(7), 100, N, MARGIN),
+            Admission::Duplicate { .. }
+        ));
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn distinct_bytes_are_distinct_entries() {
+        let q = Queue::new();
+        assert!(matches!(
+            q.admit(&junk(1), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(2), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn an_oversized_payload_is_refused_rather_than_batched() {
+        // Batching it would leak its length; the shim must surface this to the
+        // wallet rather than fall back to a direct broadcast.
+        let q = Queue::new();
+        let huge = vec![0u8; MAX_TX_BYTES + 1];
+        assert_eq!(
+            q.admit(&huge, 100, N, MARGIN),
+            Admission::Refused(Refusal::TooLarge)
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_refuses_at_the_door_and_keeps_what_it_admitted() {
+        // Never evict an admitted entry: an admission is a promise, and
+        // oldest-first eviction would drop exactly the entries nearest expiry.
+        let q = Queue::with_capacity(200);
+        assert!(matches!(
+            q.admit(&junk(1), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(2), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(3), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        // Fourth would exceed 200 bytes.
+        assert_eq!(
+            q.admit(&junk(4), 100, N, MARGIN),
+            Admission::Refused(Refusal::Full)
+        );
+        assert_eq!(
+            q.len(),
+            3,
+            "admitted entries are never evicted to make room"
+        );
+    }
+
+    #[test]
+    fn draining_empties_the_queue_and_releases_the_budget() {
+        let q = Queue::with_capacity(200);
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let _ = q.admit(&junk(2), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+        assert_eq!(batch.len(), 2);
+        assert!(q.is_empty());
+        // The budget came back with them.
+        assert!(matches!(
+            q.admit(&junk(3), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(4), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(5), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn draining_an_empty_queue_is_an_empty_batch_not_a_panic() {
+        let q = Queue::new();
+        assert!(q.drain_shuffled().is_empty());
+    }
+
+    #[test]
+    fn the_order_a_batch_comes_out_in_is_not_the_order_it_went_in() {
+        // Statistical, and deliberately generous: the point is that SOME
+        // shuffling happens, not that a particular permutation appears. With 32
+        // entries the chance of the identity permutation is 1/32!, so a run that
+        // never permutes across 8 drains means the shuffle is not wired up.
+        let mut ever_differed = false;
+        for _ in 0..8 {
+            let q = Queue::new();
+            let inputs: Vec<Vec<u8>> = (0..32).map(junk).collect();
+            for input in &inputs {
+                let _ = q.admit(input, 100, N, MARGIN);
+            }
+            let batch = q.drain_shuffled();
+            assert_eq!(batch.len(), 32);
+            let out: Vec<Vec<u8>> = batch.iter().map(|e| e.tx_bytes.to_vec()).collect();
+            if out != inputs {
+                ever_differed = true;
+                break;
+            }
+        }
+        assert!(
+            ever_differed,
+            "drain_shuffled must not preserve insertion order"
+        );
+    }
+}

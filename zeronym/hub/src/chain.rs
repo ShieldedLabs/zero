@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -94,22 +95,35 @@ impl ChainClient {
         self.nodes.len()
     }
 
-    /// Current best-chain height, from the first node that answers.
+    /// Current best-chain height: the MAX over every node that answers.
+    ///
+    /// Not "the first node that answers", which is a second, independent lever
+    /// on the flush clock: a single lagging or hostile node would stall the
+    /// cadence (freezing flushes, so everything falls out to the shim's retry
+    /// ladder) or advance it (draining the queue into a near-empty batch).
+    /// Taking the max means an adversary must slow down EVERY node to slow the
+    /// clock, and cannot speed it up at all without a node that lies upward.
+    ///
+    /// Requiring agreement between nodes would be the wrong fix: tips
+    /// legitimately differ by a block during propagation, so a lagging node
+    /// would then stall scheduling.
     pub async fn tip_height(&self) -> Result<u32, BoxError> {
-        let mut last: Option<BoxError> = None;
-        for node in &self.nodes {
-            match self
-                .call::<BlockchainInfo>(node, "getblockchaininfo", serde_json::json!([]))
+        let queries = self.nodes.iter().map(|node| async move {
+            self.call::<BlockchainInfo>(node, "getblockchaininfo", serde_json::json!([]))
                 .await
-            {
-                Ok(info) => return Ok(info.blocks),
-                Err(err) => {
-                    tracing::debug!(node = %node.addr, %err, "tip query failed, trying the next node");
-                    last = Some(err);
-                }
-            }
-        }
-        Err(last.unwrap_or_else(|| "no nodes configured".into()))
+                .map(|info| info.blocks)
+                .map_err(|err| {
+                    tracing::debug!(node = %node.addr, %err, "tip query failed");
+                    err
+                })
+        });
+
+        let results = join_all(queries).await;
+        results
+            .into_iter()
+            .filter_map(Result::ok)
+            .max()
+            .ok_or_else(|| "no node answered a tip query".into())
     }
 
     /// Publish one raw transaction.
@@ -121,31 +135,56 @@ impl ChainClient {
     /// on its members actually landing together.
     pub async fn broadcast(&self, tx_bytes: &[u8]) -> Publish {
         let hex_tx = hex::encode(tx_bytes);
-        let mut best: Option<Publish> = None;
 
-        for node in &self.nodes {
-            let outcome = match self
-                .call::<String>(node, "sendrawtransaction", serde_json::json!([hex_tx]))
-                .await
-            {
-                Ok(txid) => Publish::Accepted { txid },
-                Err(err) => classify_publish_error(&err.to_string()),
-            };
+        // Concurrent, not sequential. A flush publishes k transactions across n
+        // nodes with a 10 s per-call ceiling; done in sequence, one hung node
+        // pushes the total past a 75 s block interval, which would reintroduce
+        // the very ordering the shuffle exists to remove.
+        let calls = self.nodes.iter().map(|node| {
+            let hex_tx = hex_tx.clone();
+            async move {
+                match self
+                    .call::<String>(node, "sendrawtransaction", serde_json::json!([hex_tx]))
+                    .await
+                {
+                    Ok(txid) => Publish::Accepted { txid },
+                    Err(err) => classify_publish_error(&err.to_string()),
+                }
+            }
+        });
 
-            best = Some(match (best.take(), outcome) {
-                // Any acceptance wins: one node taking it is enough for the
-                // transaction to reach the network.
-                (Some(Publish::Accepted { txid }), _) => Publish::Accepted { txid },
-                (_, Publish::Accepted { txid }) => Publish::Accepted { txid },
-                // Already-known beats a rejection: it means the network has it.
-                (Some(Publish::AlreadyKnown), _) | (_, Publish::AlreadyKnown) => Publish::AlreadyKnown,
-                (_, other) => other,
-            });
-        }
+        let outcomes = join_all(calls).await;
 
-        best.unwrap_or(Publish::Rejected {
-            reason: "no nodes configured".into(),
-        })
+        outcomes
+            .into_iter()
+            .fold(None, |best: Option<Publish>, outcome| {
+                Some(match (best, outcome) {
+                    // Any acceptance wins: one node taking it is enough for the
+                    // transaction to reach the network.
+                    (Some(Publish::Accepted { txid }), _) => Publish::Accepted { txid },
+                    (_, Publish::Accepted { txid }) => Publish::Accepted { txid },
+                    // Already-known beats a rejection: it means the network has it.
+                    (Some(Publish::AlreadyKnown), _) | (_, Publish::AlreadyKnown) => {
+                        Publish::AlreadyKnown
+                    }
+                    (_, other) => other,
+                })
+            })
+            .unwrap_or(Publish::Rejected {
+                reason: "no nodes configured".into(),
+            })
+    }
+
+    /// Publish a whole flushed batch, every transaction to every node, all at
+    /// once.
+    ///
+    /// Simultaneity is the property: the batch is the anonymity set only if its
+    /// members hit the network together. Publishing them one after another would
+    /// re-expose exactly the arrival ordering the shuffle just destroyed, so the
+    /// full (transaction x node) product is issued concurrently and the returned
+    /// verdicts are positional, one per input transaction.
+    pub async fn broadcast_batch(&self, txs: &[Vec<u8>]) -> Vec<Publish> {
+        join_all(txs.iter().map(|tx| self.broadcast(tx))).await
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(
@@ -168,14 +207,19 @@ impl ChainClient {
 
         if let Some(user) = &node.user {
             let raw = format!("{}:{}", user, node.password.clone().unwrap_or_default());
-            req = req.header("Authorization", format!("Basic {}", base64_encode(raw.as_bytes())));
+            req = req.header(
+                "Authorization",
+                format!("Basic {}", base64_encode(raw.as_bytes())),
+            );
         }
 
         let req = req.body(Full::new(bytes::Bytes::from(body)))?;
 
         let resp = tokio::time::timeout(RPC_TIMEOUT, self.http.request(req))
             .await
-            .map_err(|_| -> BoxError { format!("{method} timed out after {RPC_TIMEOUT:?}").into() })??;
+            .map_err(|_| -> BoxError {
+                format!("{method} timed out after {RPC_TIMEOUT:?}").into()
+            })??;
 
         let bytes = resp.into_body().collect().await?.to_bytes();
         let env: RpcEnvelope<T> = serde_json::from_slice(&bytes)?;
@@ -183,7 +227,8 @@ impl ChainClient {
         if let Some(err) = env.error {
             return Err(format!("rpc error {}: {}", err.code, err.message).into());
         }
-        env.result.ok_or_else(|| "rpc returned neither result nor error".into())
+        env.result
+            .ok_or_else(|| "rpc returned neither result nor error".into())
     }
 }
 
@@ -221,12 +266,24 @@ fn base64_encode(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18 & 63) as usize] as char);
         out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -250,9 +307,18 @@ mod tests {
             Publish::AlreadyKnown
         );
         // The hyphenated forms real nodes actually emit.
-        assert_eq!(classify_publish_error("txn-already-known"), Publish::AlreadyKnown);
-        assert_eq!(classify_publish_error("txn-already-in-mempool"), Publish::AlreadyKnown);
-        assert_eq!(classify_publish_error("18: txn-already-known"), Publish::AlreadyKnown);
+        assert_eq!(
+            classify_publish_error("txn-already-known"),
+            Publish::AlreadyKnown
+        );
+        assert_eq!(
+            classify_publish_error("txn-already-in-mempool"),
+            Publish::AlreadyKnown
+        );
+        assert_eq!(
+            classify_publish_error("18: txn-already-known"),
+            Publish::AlreadyKnown
+        );
     }
 
     #[test]
