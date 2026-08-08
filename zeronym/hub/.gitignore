@@ -1,0 +1,5 @@
+# Build artifacts for this standalone crate. Cargo.lock IS committed on
+# purpose: it pins the exact parser the hub re-validates with, which has to
+# match the shim's for the two to agree, and that is an audit requirement
+# rather than an incidental detail.
+/target

@@ -1,0 +1,63 @@
+[package]
+name = "zero-indexer-hub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Zeronym zero-indexer-hub: batches migration transactions from many shims and publishes them together"
+
+# Standalone workspace, for the same reason as the shim: there is no Cargo.toml
+# at the repo root, and this stanza stops the crate being absorbed into the
+# vendored zebra/ or zaino/ workspaces if one ever appears above it. It also
+# keeps this crate's lockfile authoritative, which is what makes the
+# reproducible build pin what it claims to pin.
+[workspace]
+
+[lib]
+name = "zero_indexer_hub"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zero-indexer-hub"
+path = "src/main.rs"
+
+[dependencies]
+# The real Zcash parser, vendored, same as the shim. The hub re-parses and
+# re-classifies every migration it receives rather than trusting the shim, so it
+# needs exactly the parser the shim used.
+zebra-chain = { path = "../../zebra/zebra-chain" }
+
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "sync",
+    "time",
+    "io-util",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+
+# Chain connection out (JSON-RPC to zebrad/zcashd) and the inbound serving path
+# in. hyper rather than a JSON-RPC or web framework because the surface is tiny
+# (two RPC methods out, one POST in) and the shim already proves this stack
+# builds under StageX musl.
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The hub holds decrypted transaction bytes in plaintext; wipe them on drop so a
+# copy does not linger in freed enclave memory (REVIEW.md).
+zeroize = "1"
+
+# Ordering within a flush must be unpredictable, so this is a security
+# dependency rather than a convenience one. See flush ordering in src/.
+rand = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
