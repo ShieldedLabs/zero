@@ -50,12 +50,17 @@ rustls-acme = { version = "0.14", default-features = false, features = ["ring", 
 futures-util = "0.3"
 
 # HTTP/2 (h2c) proxy stack. Versions match what zebra and zaino already resolve.
-hyper = { version = "1", features = ["server", "client", "http2"] }
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
+
+# Only for parsing the hub's small JSON verdict (hub.rs). Already in the tree via
+# zebra-chain, so this is a direct-dependency declaration, not new compiled code.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

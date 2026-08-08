@@ -28,21 +28,34 @@
 //! read nor reproduce is the exact leak this component exists to prevent.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http::{HeaderMap, Request, Response};
+use http::{HeaderMap, HeaderValue, Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use prost::Message;
-use zaino_proto::proto::service::RawTransaction;
+use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use crate::classify::{classify_with_evidence, Class, Evidence};
+use crate::hub::{HubClient, Submit};
 use crate::proxy::{
-    forward, grpc_error, ProxyBody, Upstream, GRPC_CANCELLED, GRPC_RESOURCE_EXHAUSTED,
+    forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
+    GRPC_RESOURCE_EXHAUSTED, GRPC_UNAVAILABLE,
 };
+use crate::state::DivertState;
 use crate::BoxError;
+
+/// The context that turns the classifying proof of concept into a diverting
+/// shim: where to send migrations, and the state to recognise their follow-up
+/// queries. Present only when `--hub` is configured; absent means forward-only,
+/// which is the merged proof-of-concept behaviour.
+pub struct Diversion {
+    pub hub: HubClient,
+    pub state: Arc<DivertState>,
+}
 
 /// gRPC length-prefixed message header: 1 flag byte + 4 big-endian length bytes.
 const GRPC_PREFIX_LEN: usize = 5;
@@ -63,9 +76,10 @@ const PREFIX_LOG_BYTES: usize = 8;
 /// The HTTP method is not checked here or by the caller, on purpose: see rule 3
 /// in [`crate::proxy`]. A backend that acts on a `GET` must not be handed one
 /// the classifier never saw.
-pub async fn send_transaction(
+pub(crate) async fn send_transaction(
     req: Request<Incoming>,
-    upstream: Upstream,
+    pool: Arc<UpstreamPool>,
+    diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
     let (parts, body) = req.into_parts();
 
@@ -78,14 +92,219 @@ pub async fn send_transaction(
     let trailers = collected.trailers().cloned();
     let frame = collected.to_bytes();
 
-    let inspection = inspect(&parts.headers, &frame);
+    let (inspection, tx_data) = inspect(&parts.headers, &frame);
     log_verdict(&inspection, &frame);
 
-    // Non-destructive: replay the ORIGINAL bytes, so the backing indexer sees
-    // exactly what the wallet sent, down to the request trailers.
+    // A migration bound for the hub is diverted here, and ONLY here does the
+    // operator's indexer stay undialled: this function holds the pool and dials
+    // it (below) solely on a pass-through verdict, or on a migration when no hub
+    // is configured. Moving the dial out of `handle` is what makes that true.
+    if inspection.treat_as_migration() {
+        if let Some(diversion) = diversion {
+            return divert(&diversion, tx_data).await;
+        }
+        // Forward-only: no hub configured, so behave exactly like the merged
+        // proof of concept and forward the migration to the operator. No
+        // privacy, but no behaviour change until an operator sets `--hub`.
+    }
+
+    // Pass-through, or a migration with no hub: replay the ORIGINAL bytes to the
+    // backing indexer, which sees exactly what the wallet sent, trailers and all.
+    let upstream = pool.get().await?;
     let replay = ReplayBody::new(frame, trailers).boxed();
     let resp = forward(upstream, Request::from_parts(parts, replay)).await?;
     Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+}
+
+/// Send a migration to the hub instead of the operator's indexer, then answer
+/// the wallet with a synthesized `SendResponse`. The operator's indexer is never
+/// contacted on this path.
+async fn divert(
+    diversion: &Diversion,
+    tx_data: Option<Bytes>,
+) -> Result<Response<ProxyBody>, BoxError> {
+    // A fail-safe verdict with no clean transaction bytes (compression flag,
+    // truncated frame, undecodable RawTransaction): the shim cannot broadcast
+    // what it could not read, and must not forward it to the operator. Fail
+    // closed, per REVIEW #11: the wallet retries, and a migration is never leaked
+    // to recover an availability failure.
+    let Some(tx_data) = tx_data else {
+        tracing::warn!(
+            target: "zis::classify",
+            "MIGRATION: body could not be read cleanly; failing closed rather than diverting or forwarding"
+        );
+        return Ok(grpc_error(
+            GRPC_UNAVAILABLE,
+            "zero-indexer-shim: could not divert transaction",
+        ));
+    };
+
+    match diversion.hub.submit(&tx_data).await {
+        Ok(submit) => {
+            // The SendTransaction reply is a `SendResponse { error_code,
+            // error_message }`: on success `error_code` is 0 and `error_message`
+            // carries the txid, exactly as lightwalletd answers, so an unmodified
+            // wallet reads the txid it expects.
+            let (error_code, message, txid) = match submit {
+                Submit::Accepted { txid } => (0, txid.clone(), Some(txid)),
+                Submit::AlreadyKnown { txid } => (0, txid.clone().unwrap_or_default(), txid),
+                Submit::Rejected { reason } => (-1, reason, None),
+            };
+
+            // Seed the recognition state so this migration's follow-up queries
+            // can be intercepted. Address extraction (TaintedAddrs) is a later
+            // layer; the txid mapping lands now.
+            if let Some(txid) = txid.filter(|t| !t.is_empty()) {
+                diversion.state.record(txid, tx_data, Vec::new());
+            }
+
+            tracing::info!(
+                target: "zis::classify",
+                accepted = error_code == 0,
+                "migration diverted to the hub"
+            );
+            Ok(grpc_send_response(error_code, &message))
+        }
+        Err(err) => {
+            // Hub unreachable after the client's own attempt. Fail closed; do NOT
+            // fall back to the operator's indexer (that is the leak) or to direct
+            // broadcast (off by default, REVIEW #11).
+            tracing::warn!(target: "zis::classify", %err, "hub unreachable; failing closed");
+            Ok(grpc_error(
+                GRPC_UNAVAILABLE,
+                "zero-indexer-shim: hub unreachable",
+            ))
+        }
+    }
+}
+
+/// A synthesized unary `SendTransaction` response: the framed `SendResponse`
+/// message with a `grpc-status: 0` trailer, the exact shape a real indexer's
+/// reply has, so the wallet cannot tell the transaction was diverted.
+fn grpc_send_response(error_code: i32, error_message: &str) -> Response<ProxyBody> {
+    let message = SendResponse {
+        error_code,
+        error_message: error_message.to_owned(),
+    }
+    .encode_to_vec();
+    grpc_unary(&message)
+}
+
+/// Handle `GetTransaction`. If the `TxFilter` names a migration this shim
+/// diverted, answer it from the held bytes so the operator's indexer never sees
+/// the wallet ask about its own migration; otherwise forward it, dialling the
+/// operator only then.
+pub(crate) async fn get_transaction(
+    req: Request<Incoming>,
+    pool: Arc<UpstreamPool>,
+    diversion: Option<Arc<Diversion>>,
+) -> Result<Response<ProxyBody>, BoxError> {
+    // With no hub, nothing was ever diverted, so there is nothing to recognise:
+    // relay untouched, without buffering.
+    let Some(diversion) = diversion else {
+        return pass_through(req, pool).await;
+    };
+
+    let (parts, body) = req.into_parts();
+    let collected = match Limited::new(body, MAX_SEND_TX_BYTES).collect().await {
+        Ok(collected) => collected,
+        Err(_) => {
+            return Ok(grpc_error(
+                GRPC_CANCELLED,
+                "zero-indexer-shim: GetTransaction body could not be read",
+            ))
+        }
+    };
+    let trailers = collected.trailers().cloned();
+    let frame = collected.to_bytes();
+
+    if let Some(txid) = diverted_txid(&parts.headers, &frame, &diversion.state) {
+        if let Some(bytes) = diversion.state.migration_bytes(&txid) {
+            // Answered from held bytes; the operator's indexer is never dialled.
+            tracing::info!(
+                target: "zis::classify",
+                "intercepted GetTransaction for a diverted migration"
+            );
+            return Ok(get_transaction_response(&bytes));
+        }
+    }
+
+    // An ordinary GetTransaction: forward the buffered request, dialling now.
+    let upstream = pool.get().await?;
+    let replay = ReplayBody::new(frame, trailers).boxed();
+    let resp = forward(upstream, Request::from_parts(parts, replay)).await?;
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+}
+
+/// If the buffered `GetTransaction` request's `TxFilter.hash` names a migration
+/// this shim holds, return the matching held-migration key. BOTH byte orders are
+/// checked: the wire order of `TxFilter.hash` (internal, little-endian) is the
+/// reverse of the display txid the hub returns, so depending on only one would
+/// silently stop intercepting.
+fn diverted_txid(headers: &HeaderMap, frame: &[u8], state: &DivertState) -> Option<String> {
+    // The same gRPC-frame unwrap inspect() does, for a different message. A body
+    // that will not unwrap names no txid, so let it forward: a GetTransaction
+    // leaks nothing until it references a diverted migration.
+    if let Some(encoding) = headers.get("grpc-encoding") {
+        if encoding.as_bytes() != b"identity" {
+            return None;
+        }
+    }
+    if frame.len() < GRPC_PREFIX_LEN || frame[0] != 0 {
+        return None;
+    }
+    let declared = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+    let message = GRPC_PREFIX_LEN
+        .checked_add(declared)
+        .and_then(|end| frame.get(GRPC_PREFIX_LEN..end))?;
+    let filter = TxFilter::decode(message).ok()?;
+    if filter.hash.is_empty() {
+        return None;
+    }
+
+    let forward_hex = hex_prefix(&filter.hash, filter.hash.len());
+    if state.migration_bytes(&forward_hex).is_some() {
+        return Some(forward_hex);
+    }
+    let mut reversed = filter.hash;
+    reversed.reverse();
+    let reversed_hex = hex_prefix(&reversed, reversed.len());
+    if state.migration_bytes(&reversed_hex).is_some() {
+        return Some(reversed_hex);
+    }
+    None
+}
+
+/// A synthesized `GetTransaction` reply carrying the held bytes. Height 0: the
+/// transaction is in flight, not yet mined; once mined the wallet receives it
+/// through ordinary block sync, which forwards.
+fn get_transaction_response(tx_bytes: &[u8]) -> Response<ProxyBody> {
+    let message = RawTransaction {
+        data: tx_bytes.to_vec(),
+        height: 0,
+    }
+    .encode_to_vec();
+    grpc_unary(&message)
+}
+
+/// Frame one unary protobuf message into a gRPC response with a `grpc-status: 0`
+/// trailer, the shape a real indexer's unary reply has.
+fn grpc_unary(message: &[u8]) -> Response<ProxyBody> {
+    let mut framed = Vec::with_capacity(GRPC_PREFIX_LEN + message.len());
+    framed.push(0);
+    framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    framed.extend_from_slice(message);
+
+    let mut trailers = HeaderMap::new();
+    trailers.insert("grpc-status", HeaderValue::from_static("0"));
+
+    let body = ReplayBody::new(Bytes::from(framed), Some(trailers)).boxed();
+    let mut resp = Response::new(body);
+    resp.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc"),
+    );
+    resp
 }
 
 /// The one case the proof of concept refuses to forward, split by cause.
@@ -168,7 +387,7 @@ impl Inspection {
 
 /// Unwrap one buffered unary request body down to the transaction bytes and
 /// classify them. Pure: no I/O, no state.
-fn inspect(headers: &HeaderMap, frame: &[u8]) -> Inspection {
+fn inspect(headers: &HeaderMap, frame: &[u8]) -> (Inspection, Option<Bytes>) {
     // Message-level compression is negotiated by header and flagged per
     // message. A compressed body is not the protobuf we would decode, so it
     // fails safe here. Note that this is the SECOND line of defence, not the
@@ -179,18 +398,24 @@ fn inspect(headers: &HeaderMap, frame: &[u8]) -> Inspection {
     // compression on in their own indexer.
     if let Some(encoding) = headers.get("grpc-encoding") {
         if encoding.as_bytes() != b"identity" {
-            return Inspection::failsafe_with(
-                "grpc-encoding is not identity",
-                String::from_utf8_lossy(encoding.as_bytes()).into_owned(),
+            return (
+                Inspection::failsafe_with(
+                    "grpc-encoding is not identity",
+                    String::from_utf8_lossy(encoding.as_bytes()).into_owned(),
+                ),
+                None,
             );
         }
     }
 
     if frame.len() < GRPC_PREFIX_LEN {
-        return Inspection::failsafe("gRPC frame shorter than its 5-byte prefix");
+        return (
+            Inspection::failsafe("gRPC frame shorter than its 5-byte prefix"),
+            None,
+        );
     }
     if frame[0] != 0 {
-        return Inspection::failsafe("gRPC compression flag set");
+        return (Inspection::failsafe("gRPC compression flag set"), None);
     }
 
     let declared = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
@@ -201,30 +426,45 @@ fn inspect(headers: &HeaderMap, frame: &[u8]) -> Inspection {
         .checked_add(declared)
         .and_then(|end| frame.get(GRPC_PREFIX_LEN..end))
     else {
-        return Inspection::failsafe_with(
-            "gRPC message truncated",
-            format!(
-                "declared {declared} bytes, body carries {}",
-                frame.len() - GRPC_PREFIX_LEN
+        return (
+            Inspection::failsafe_with(
+                "gRPC message truncated",
+                format!(
+                    "declared {declared} bytes, body carries {}",
+                    frame.len() - GRPC_PREFIX_LEN
+                ),
             ),
+            None,
         );
     };
     // A unary request carries exactly one message and nothing after it.
     if message.len() != frame.len() - GRPC_PREFIX_LEN {
-        return Inspection::failsafe_with(
-            "trailing bytes after the unary gRPC message",
-            format!(
-                "declared {declared} bytes, body carries {}",
-                frame.len() - GRPC_PREFIX_LEN
+        return (
+            Inspection::failsafe_with(
+                "trailing bytes after the unary gRPC message",
+                format!(
+                    "declared {declared} bytes, body carries {}",
+                    frame.len() - GRPC_PREFIX_LEN
+                ),
             ),
+            None,
         );
     }
 
     match RawTransaction::decode(message) {
-        // `data` is the serialized Zcash transaction. This is the only value
-        // the classifier ever sees.
-        Ok(raw) => Inspection::Classified(classify_with_evidence(&raw.data)),
-        Err(err) => Inspection::failsafe_with("RawTransaction decode failed", err.to_string()),
+        // `data` is the serialized Zcash transaction: the only value the
+        // classifier ever sees, and the exact bytes the hub broadcasts.
+        Ok(raw) => {
+            let evidence = classify_with_evidence(&raw.data);
+            (
+                Inspection::Classified(evidence),
+                Some(Bytes::from(raw.data)),
+            )
+        }
+        Err(err) => (
+            Inspection::failsafe_with("RawTransaction decode failed", err.to_string()),
+            None,
+        ),
     }
 }
 
@@ -382,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_framed_migration_reaches_the_classifier() {
-        let inspection = inspect(&HeaderMap::new(), &framed(V6_MIGRATION));
+        let (inspection, _) = inspect(&HeaderMap::new(), &framed(V6_MIGRATION));
         assert_eq!(classified(&inspection), Class::Migration);
         assert!(inspection.treat_as_migration());
     }
@@ -392,7 +632,7 @@ mod tests {
         // No Orchard bundle, so nothing about legacy Orchard holdings is on the
         // wire and the transaction is forwarded. This is ordinary commerce in
         // the new pool, which the widened rule must not swallow.
-        let inspection = inspect(&HeaderMap::new(), &framed(V6_IRONWOOD_ONLY));
+        let (inspection, _) = inspect(&HeaderMap::new(), &framed(V6_IRONWOOD_ONLY));
         assert_eq!(classified(&inspection), Class::PassThrough);
         assert!(!inspection.treat_as_migration());
     }
@@ -401,7 +641,7 @@ mod tests {
     fn a_framed_orchard_bundle_is_a_migration_whichever_way_its_balance_points() {
         // Same fixture pair, opposite Orchard value balances, one verdict. The
         // sign stopped mattering when the predicate became presence of actions.
-        let inspection = inspect(&HeaderMap::new(), &framed(V6_REVERSE));
+        let (inspection, _) = inspect(&HeaderMap::new(), &framed(V6_REVERSE));
         assert_eq!(classified(&inspection), Class::Migration);
         assert!(inspection.treat_as_migration());
     }
@@ -410,7 +650,7 @@ mod tests {
     fn compression_flag_fails_safe() {
         let mut frame = framed(V6_MIGRATION);
         frame[0] = 1;
-        let inspection = inspect(&HeaderMap::new(), &frame);
+        let (inspection, _) = inspect(&HeaderMap::new(), &frame);
         assert!(matches!(inspection, Inspection::Failsafe { .. }));
         assert!(inspection.treat_as_migration());
     }
@@ -419,7 +659,7 @@ mod tests {
     fn grpc_encoding_header_fails_safe() {
         let mut headers = HeaderMap::new();
         headers.insert("grpc-encoding", "gzip".parse().unwrap());
-        let inspection = inspect(&headers, &framed(V6_MIGRATION));
+        let (inspection, _) = inspect(&headers, &framed(V6_MIGRATION));
         assert!(matches!(inspection, Inspection::Failsafe { .. }));
         assert!(inspection.treat_as_migration());
     }
@@ -429,7 +669,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("grpc-encoding", "identity".parse().unwrap());
         assert_eq!(
-            classified(&inspect(&headers, &framed(V6_MIGRATION))),
+            classified(&inspect(&headers, &framed(V6_MIGRATION)).0),
             Class::Migration
         );
     }
@@ -445,7 +685,7 @@ mod tests {
             // Declared length overruns the body.
             &frame[..frame.len() - 1],
         ] {
-            let inspection = inspect(&HeaderMap::new(), body);
+            let (inspection, _) = inspect(&HeaderMap::new(), body);
             assert!(
                 matches!(inspection, Inspection::Failsafe { .. }),
                 "expected a fail-safe for a {}-byte body",
@@ -457,7 +697,7 @@ mod tests {
         // A second message appended after the unary one.
         let mut trailing = frame.clone();
         trailing.extend_from_slice(&[0, 0, 0, 0, 0]);
-        let inspection = inspect(&HeaderMap::new(), &trailing);
+        let (inspection, _) = inspect(&HeaderMap::new(), &trailing);
         assert!(matches!(inspection, Inspection::Failsafe { .. }));
         assert!(inspection.treat_as_migration());
     }
@@ -468,7 +708,7 @@ mod tests {
         // wraps on a 32-bit target, which panicked in a debug build (a denial
         // of service in the proxy) instead of landing here.
         let frame = [0u8, 0xff, 0xff, 0xff, 0xff];
-        let inspection = inspect(&HeaderMap::new(), &frame);
+        let (inspection, _) = inspect(&HeaderMap::new(), &frame);
         assert!(matches!(inspection, Inspection::Failsafe { .. }));
         assert!(inspection.treat_as_migration());
     }
@@ -517,14 +757,14 @@ mod tests {
         let mut frame = vec![0, 0, 0, 0, message.len() as u8];
         frame.extend_from_slice(&message);
 
-        let inspection = inspect(&HeaderMap::new(), &frame);
+        let (inspection, _) = inspect(&HeaderMap::new(), &frame);
         assert!(matches!(inspection, Inspection::Failsafe { .. }));
         assert!(inspection.treat_as_migration());
     }
 
     #[test]
     fn an_empty_transaction_is_unparseable_not_a_pass_through() {
-        let inspection = inspect(&HeaderMap::new(), &framed(&[]));
+        let (inspection, _) = inspect(&HeaderMap::new(), &framed(&[]));
         assert_eq!(classified(&inspection), Class::Unparseable);
         assert!(inspection.treat_as_migration());
     }
