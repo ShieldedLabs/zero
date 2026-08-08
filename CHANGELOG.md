@@ -6,6 +6,22 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
+## Unreleased
+
+### CI
+
+- `z3-smoke` and `z3-regtest` no longer use GitHub's `paths:` trigger filter.
+  Both now register on every pull request and decide in a 20-second `Path gate`
+  job whether the expensive jobs run, computed from `git diff` against the
+  merge commit's base. PR #20 (the v25 zebra security update) matched the old
+  filters on 107 of its 144 changed files and GitHub still created no Actions
+  check suite for it, so a 144-file consensus change merged with no stack CI
+  and nothing on the PR page showing anything was missing. Each workflow also
+  gained a `required` job that reports on every PR, pass or skip, so "the
+  workflow never ran" can no longer look identical to "the workflow passed".
+  The release `workflow_call` gate is unchanged and still runs the full stack
+  unconditionally.
+
 ## v25 - 2026-08-06
 
 ### Security
