@@ -35,7 +35,10 @@ impl DivertState {
     /// Record a diverted migration: its bytes under its txid, and every
     /// transparent address it touched as tainted by that txid.
     pub fn record(&self, txid: String, tx_bytes: Bytes, addresses: Vec<String>) {
-        let mut inner = self.inner.write().unwrap_or_else(|poison| poison.into_inner());
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
         for addr in addresses {
             inner.tainted.insert(addr, txid.clone());
         }
@@ -44,13 +47,19 @@ impl DivertState {
 
     /// The bytes held for a diverted txid, if this shim diverted it.
     pub fn migration_bytes(&self, txid: &str) -> Option<Bytes> {
-        let inner = self.inner.read().unwrap_or_else(|poison| poison.into_inner());
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
         inner.migrations.get(txid).cloned()
     }
 
     /// The diverted migration txid that tainted an address, if any.
     pub fn taint(&self, address: &str) -> Option<String> {
-        let inner = self.inner.read().unwrap_or_else(|poison| poison.into_inner());
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
         inner.tainted.get(address).cloned()
     }
 
@@ -82,7 +91,10 @@ mod tests {
             vec!["t1abc".into(), "t1def".into()],
         );
 
-        assert_eq!(state.migration_bytes("aa").as_deref(), Some(&b"txbytes"[..]));
+        assert_eq!(
+            state.migration_bytes("aa").as_deref(),
+            Some(&b"txbytes"[..])
+        );
         assert_eq!(state.taint("t1abc").as_deref(), Some("aa"));
         assert_eq!(state.taint("t1def").as_deref(), Some("aa"));
         assert!(state.taint("t1zzz").is_none());

@@ -68,6 +68,12 @@ pub type ProxyBody = BoxBody<Bytes, BoxError>;
 /// The one method the shim decodes. Everything else is opaque.
 pub const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
 
+/// The method a wallet calls to fetch one transaction by txid. When it names a
+/// diverted migration, forwarding it hands the operator the exact txid the hub
+/// and the diversion removed from the link, so it is intercepted and answered
+/// from the bytes the shim holds. See `crate::intercept::get_transaction`.
+pub const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
 /// gRPC status code 14, UNAVAILABLE.
 pub const GRPC_UNAVAILABLE: u16 = 14;
 
@@ -474,16 +480,10 @@ async fn handle(
     // connection to the operator: the reason the pool is lazy and the dial lives
     // here rather than at accept time.
     let result = match route_for(&path) {
-        Route::PassThrough => match pool.get().await {
-            Ok(upstream) => pass_through(req, upstream).await,
-            Err(err) => {
-                tracing::warn!(%method, %path, %err, "cannot reach backing indexer");
-                return Ok(grpc_error(
-                    GRPC_UNAVAILABLE,
-                    "zero-indexer-shim: backing indexer unreachable",
-                ));
-            }
-        },
+        Route::PassThrough => pass_through(req, pool).await,
+        // GetTransaction may name a diverted migration; the interceptor decides,
+        // and forwards (dialling the operator) only when it does not.
+        Route::GetTransaction => intercept::get_transaction(req, pool, diversion).await,
         route @ (Route::Intercept | Route::InterceptNearMiss) => {
             if route == Route::InterceptNearMiss {
                 tracing::warn!(
@@ -527,6 +527,9 @@ pub enum Route {
     /// rejected costs one log line, while NOT classifying one the backend
     /// accepts is the privacy leak this component exists to prevent.
     InterceptNearMiss,
+    /// Exactly [`GET_TRANSACTION`]: buffer the `TxFilter`, and if it names a
+    /// diverted migration serve it from held bytes; otherwise forward.
+    GetTransaction,
     /// Opaque. Relayed without being read.
     PassThrough,
 }
@@ -542,6 +545,9 @@ pub enum Route {
 pub fn route_for(path: &str) -> Route {
     if path == SEND_TRANSACTION {
         return Route::Intercept;
+    }
+    if path == GET_TRANSACTION {
+        return Route::GetTransaction;
     }
 
     // Trailing slashes are tolerated here, not because tonic accepts them (it
@@ -559,12 +565,17 @@ pub fn route_for(path: &str) -> Route {
 
 /// Forward a request the shim does not decode: every method except
 /// `SendTransaction`, including streams, unknown methods and other services.
-async fn pass_through(
+pub(crate) async fn pass_through(
     req: Request<Incoming>,
-    upstream: Upstream,
+    pool: Arc<UpstreamPool>,
 ) -> Result<Response<ProxyBody>, BoxError> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
+
+    // Dial the operator HERE, not in `handle`: this path is the one meant to
+    // reach the operator, so connecting on it is correct. The classify-before-
+    // connect property lives in the intercept paths, which never call this.
+    let upstream = pool.get().await?;
 
     // `map` rewraps the body value without polling it, so a client-streaming
     // request body is relayed frame by frame and is never buffered here.

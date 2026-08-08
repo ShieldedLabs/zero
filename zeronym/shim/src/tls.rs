@@ -41,8 +41,8 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_acme::caches::NoCache;
 use rustls_acme::{is_tls_alpn_challenge, AcmeConfig};
 use rustls_pki_types::ServerName;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 
@@ -157,7 +157,10 @@ impl ServerTls {
     /// Returns `Ok(None)` when the connection was a TLS-ALPN-01 challenge from
     /// the ACME server rather than a client. Those are not wallet traffic and
     /// must not be handed to the proxy; the acceptor has already answered them.
-    pub async fn accept<IO>(&self, io: IO) -> Result<Option<tokio_rustls::server::TlsStream<IO>>, BoxError>
+    pub async fn accept<IO>(
+        &self,
+        io: IO,
+    ) -> Result<Option<tokio_rustls::server::TlsStream<IO>>, BoxError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -246,7 +249,10 @@ impl BackendTls {
         stream: TcpStream,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, BoxError> {
         let _ = addr;
-        Ok(self.connector.connect(self.server_name.clone(), stream).await?)
+        Ok(self
+            .connector
+            .connect(self.server_name.clone(), stream)
+            .await?)
     }
 }
 
