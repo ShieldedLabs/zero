@@ -29,16 +29,20 @@ other.
 | `assemble.sh` | Builds the throwaway build context out of `git archive HEAD`. Never touches the working tree. |
 | `Containerfile` | The build itself. StageX bases pinned by digest, static musl, export stage, busybox runtime. |
 | `build.sh` | One deterministic build: extracts the binary and packages the OCI image, printing both hashes. |
-| `reproduce.sh` | The proof: two cold builds, compared against each other **and** against `EXPECTED_SHA256`, then assert `zebra/` is still clean. |
+| `reproduce.sh` | The proof: two cold builds, compared against each other **and** against `EXPECTED_SHA256`, then assert `zebra/` and `zaino/` are still clean. |
 | `EXPECTED_SHA256` | The published binary hash. Re-baseline it (and this list) whenever a determinism ingredient changes. |
 | `caution/` | The attested Nitro-enclave deploy (see `caution/README.md`). |
 
 ## What differs from the shim recipe
 
-- **No `zaino/` in the context.** The hub speaks JSON-RPC to full nodes, not the
-  CompactTxStreamer gRPC, so it has no `zaino-proto` dependency. `assemble.sh`
-  archives only `zeronym/hub` and the `zebra/` pieces `zebra-chain` needs.
-- **Binary `zero-indexer-hub`**, entrypoint `/zero-indexer-hub`.
+- **Binary name and entrypoint** (`zero-indexer-hub`, `/zero-indexer-hub`).
+- The context is the same shape as the shim's: `zeronym/hub` plus the `zebra/`
+  pieces `zebra-chain` needs and the `zaino/` pieces `zaino-proto` needs. The hub
+  broadcasts through an indexer's `CompactTxStreamer`, so it carries
+  `zaino-proto` exactly as the shim does, with the same
+  `default-features = false` requirement and the same no-protoc-in-the-image
+  lock. (An earlier revision broadcast over a node's JSON-RPC and needed no
+  `zaino/`; that is why some sibling notes still say so.)
 - Everything else (StageX bases, `SOURCE_DATE_EPOCH=1`, `codegen-units=1`,
   `crt-static`, `--build-id=none`, committed lockfile, no BuildKit cache mounts,
   no TLS stack, no rocksdb, no `libzcash_script`) is identical to the shim.
@@ -48,9 +52,9 @@ other.
 1. The `docker/dockerfile` frontend digest pinned on line 1 of `Containerfile`.
 2. The StageX base digests (`pallet-rust`, `core-busybox`).
 3. `RUSTFLAGS`, `SOURCE_DATE_EPOCH`, `CARGO_HOME`, `WORKDIR`.
-4. The committed `Cargo.lock`, and the `zebra-chain` sources archived into the
-   context (a `zebra/` subtree pull can move the hash; the reproduce workflow
-   fires on those paths for that reason).
+4. The committed `Cargo.lock`, and the `zebra-chain` and `zaino-proto` sources
+   archived into the context (a subtree pull in either can move the hash; the
+   reproduce workflow fires on those paths for that reason).
 
 ## Reproduce it
 

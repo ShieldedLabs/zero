@@ -21,10 +21,17 @@ name = "zero-indexer-hub"
 path = "src/main.rs"
 
 [dependencies]
-# The real Zcash parser, vendored, same as the shim. The hub re-parses and
-# re-classifies every migration it receives rather than trusting the shim, so it
-# needs exactly the parser the shim used.
+# The real Zcash parser, vendored, same as the shim. The hub re-parses every
+# migration it receives rather than trusting the shim, so it needs exactly the
+# parser the shim used.
 zebra-chain = { path = "../../zebra/zebra-chain" }
+
+# CompactTxStreamer types for the indexer hop (SendTransaction, GetLightdInfo).
+# default-features = false is REQUIRED, not tidiness: the default "heavy" feature
+# pulls a SECOND zebra-chain from crates.io alongside our vendored path dep, and
+# its build.rs regenerates the committed protos whenever protoc is reachable.
+zaino-proto = { path = "../../zaino/packages/zaino-proto", default-features = false }
+prost = "0.14"
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = [
@@ -44,8 +51,8 @@ hex = "0.4"
 # in. hyper rather than a JSON-RPC or web framework because the surface is tiny
 # (two RPC methods out, one POST in) and the shim already proves this stack
 # builds under StageX musl.
-hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1", "http2"] }
 http-body-util = "0.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -65,6 +72,15 @@ sha2 = "0.10"
 # The hub holds decrypted transaction bytes in plaintext; wipe them on drop so a
 # copy does not linger in freed enclave memory (REVIEW.md).
 zeroize = "1"
+
+# TLS to the indexer. Without it the enclave's parent host reads every batch in
+# the clear moments before it is public. Roots are compiled in because an enclave
+# has no system trust store, and one the operator could edit would let them
+# substitute their own CA.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
 
 # Ordering within a flush must be unpredictable, so this is a security
 # dependency rather than a convenience one. See flush ordering in src/.

@@ -21,13 +21,15 @@ on:
     paths:
       - ".github/workflows/zeronym-hub-reproduce.yml"
       - "zeronym/hub/**"
-      # The vendored path dependency. These are what assemble.sh archives into
+      # The vendored path dependencies. These are what assemble.sh archives into
       # the build context, so a subtree pull touching any of them changes the
       # compiled binary and stales the published hash. Keep in sync with the
       # archive list in zeronym/hub/deploy/assemble.sh.
       - "zebra/Cargo.toml"
       - "zebra/zebra-chain/**"
       - "zebra/zebra-test/**"
+      - "zaino/Cargo.toml"
+      - "zaino/packages/zaino-proto/**"
 
 concurrency:
   group: zeronym-hub-reproduce-${{ github.ref }}
