@@ -68,6 +68,12 @@ pub type ProxyBody = BoxBody<Bytes, BoxError>;
 /// The one method the shim decodes. Everything else is opaque.
 pub const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
 
+/// The method a wallet calls to fetch one transaction by txid. When it names a
+/// diverted migration, forwarding it hands the operator the exact txid the hub
+/// and the diversion removed from the link, so it is intercepted and answered
+/// from the bytes the shim holds. See `crate::intercept::get_transaction`.
+pub const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
 /// gRPC status code 14, UNAVAILABLE.
 pub const GRPC_UNAVAILABLE: u16 = 14;
 
@@ -236,7 +242,7 @@ impl Upstream {
 ///   healthy HTTP/2 connection to the wallet, and because that is a clean
 ///   application-level status rather than a transport error, the wallet's own
 ///   reconnect logic never fires and it stays stuck.
-struct UpstreamPool {
+pub(crate) struct UpstreamPool {
     backend: Backend,
     state: tokio::sync::Mutex<PoolState>,
 }
@@ -262,7 +268,12 @@ impl UpstreamPool {
     /// The lock is held across the dial on purpose: it is what stops the
     /// requests multiplexed on one client connection from opening a fistful of
     /// upstream connections the moment the indexer comes back.
-    async fn get(&self) -> Result<Upstream, BoxError> {
+    ///
+    /// Reachable from [`crate::intercept`] because the dial happens there now,
+    /// not in [`handle`]: a `SendTransaction` bound for the hub must reach a
+    /// verdict before any connection to the operator's indexer exists, so the
+    /// intercept path holds the pool and dials only on a pass-through verdict.
+    pub(crate) async fn get(&self) -> Result<Upstream, BoxError> {
         let mut state = self.state.lock().await;
 
         if let Some(upstream) = state.live.take() {
@@ -308,7 +319,7 @@ impl UpstreamPool {
 /// Serve until the listener errors. Equivalent to [`serve_with_shutdown`] with
 /// a shutdown signal that never fires.
 pub async fn serve(listener: TcpListener, backend: impl Into<Backend>) -> Result<(), BoxError> {
-    serve_with_shutdown(listener, backend, None, std::future::pending::<()>()).await
+    serve_with_shutdown(listener, backend, None, None, std::future::pending::<()>()).await
 }
 
 /// Serve until `shutdown` resolves, then stop accepting and drain.
@@ -324,6 +335,7 @@ pub async fn serve_with_shutdown<S>(
     listener: TcpListener,
     backend: impl Into<Backend>,
     tls: Option<Arc<ServerTls>>,
+    diversion: Option<Arc<crate::intercept::Diversion>>,
     shutdown: S,
 ) -> Result<(), BoxError>
 where
@@ -362,15 +374,18 @@ where
                 let live = live_tx.clone();
                 let backend = backend.clone();
                 let tls = tls.clone();
+                let diversion = diversion.clone();
                 tokio::spawn(async move {
                     let _live = live;
                     match tls {
-                        None => serve_connection(stream, peer, backend).await,
+                        None => serve_connection(stream, peer, backend, diversion).await,
                         Some(tls) => match tls.accept(stream).await {
                             // A TLS-ALPN-01 validation, already answered and
                             // closed by the acceptor. Not wallet traffic.
                             Ok(None) => {}
-                            Ok(Some(stream)) => serve_connection(stream, peer, backend).await,
+                            Ok(Some(stream)) => {
+                                serve_connection(stream, peer, backend, diversion).await
+                            }
                             // Handshake failures are ordinary on a public
                             // listener (scanners, a wallet that gave up, or a
                             // certificate that has not been issued yet) and
@@ -415,8 +430,12 @@ fn is_fd_exhaustion(err: &std::io::Error) -> bool {
 }
 
 /// Serve one inbound client connection.
-async fn serve_connection<IO>(stream: IO, peer: SocketAddr, backend: Backend)
-where
+async fn serve_connection<IO>(
+    stream: IO,
+    peer: SocketAddr,
+    backend: Backend,
+    diversion: Option<Arc<intercept::Diversion>>,
+) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // set_nodelay moved to the accept site: once the stream may be a TLS
@@ -430,7 +449,8 @@ where
 
     let service = service_fn(move |req: Request<Incoming>| {
         let pool = pool.clone();
-        async move { handle(req, pool).await }
+        let diversion = diversion.clone();
+        async move { handle(req, pool, diversion).await }
     });
 
     if let Err(err) = server_h2::Builder::new(TokioExecutor::new())
@@ -448,22 +468,36 @@ where
 async fn handle(
     req: Request<Incoming>,
     pool: Arc<UpstreamPool>,
+    diversion: Option<Arc<intercept::Diversion>>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
 
-    let upstream = match pool.get().await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            tracing::warn!(%method, %path, %err, "cannot reach backing indexer");
-            return Ok(grpc_error(
-                GRPC_UNAVAILABLE,
-                "zero-indexer-shim: backing indexer unreachable",
-            ));
+    // Classify BEFORE connecting. `route_for` is a pure function of the path, so
+    // a request bound for the intercept path reaches `send_transaction` with no
+    // upstream connection in existence, and only a pass-through verdict dials the
+    // operator's indexer. A diverted migration therefore never opens even a TCP
+    // connection to the operator: the reason the pool is lazy and the dial lives
+    // here rather than at accept time.
+    let result = match route_for(&path) {
+        Route::PassThrough => pass_through(req, pool).await,
+        // GetTransaction may name a diverted migration; the interceptor decides,
+        // and forwards (dialling the operator) only when it does not.
+        Route::GetTransaction => intercept::get_transaction(req, pool, diversion).await,
+        route @ (Route::Intercept | Route::InterceptNearMiss) => {
+            if route == Route::InterceptNearMiss {
+                tracing::warn!(
+                    target: "zis::classify",
+                    %method,
+                    path = %path,
+                    "path is not the SendTransaction method but spells it: classifying anyway"
+                );
+            }
+            intercept::send_transaction(req, pool, diversion).await
         }
     };
 
-    match route(req, upstream).await {
+    match result {
         Ok(resp) => Ok(resp),
         Err(err) => {
             tracing::warn!(%method, %path, %err, "proxying failed");
@@ -493,6 +527,9 @@ pub enum Route {
     /// rejected costs one log line, while NOT classifying one the backend
     /// accepts is the privacy leak this component exists to prevent.
     InterceptNearMiss,
+    /// Exactly [`GET_TRANSACTION`]: buffer the `TxFilter`, and if it names a
+    /// diverted migration serve it from held bytes; otherwise forward.
+    GetTransaction,
     /// Opaque. Relayed without being read.
     PassThrough,
 }
@@ -509,6 +546,9 @@ pub fn route_for(path: &str) -> Route {
     if path == SEND_TRANSACTION {
         return Route::Intercept;
     }
+    if path == GET_TRANSACTION {
+        return Route::GetTransaction;
+    }
 
     // Trailing slashes are tolerated here, not because tonic accepts them (it
     // answers UNIMPLEMENTED), but because normalizing them is one line and
@@ -523,33 +563,19 @@ pub fn route_for(path: &str) -> Route {
     }
 }
 
-async fn route(
-    req: Request<Incoming>,
-    upstream: Upstream,
-) -> Result<Response<ProxyBody>, BoxError> {
-    match route_for(req.uri().path()) {
-        Route::Intercept => intercept::send_transaction(req, upstream).await,
-        Route::InterceptNearMiss => {
-            tracing::warn!(
-                target: "zis::classify",
-                method = %req.method(),
-                path = %req.uri().path(),
-                "path is not the SendTransaction method but spells it: classifying anyway"
-            );
-            intercept::send_transaction(req, upstream).await
-        }
-        Route::PassThrough => pass_through(req, upstream).await,
-    }
-}
-
 /// Forward a request the shim does not decode: every method except
 /// `SendTransaction`, including streams, unknown methods and other services.
-async fn pass_through(
+pub(crate) async fn pass_through(
     req: Request<Incoming>,
-    upstream: Upstream,
+    pool: Arc<UpstreamPool>,
 ) -> Result<Response<ProxyBody>, BoxError> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
+
+    // Dial the operator HERE, not in `handle`: this path is the one meant to
+    // reach the operator, so connecting on it is correct. The classify-before-
+    // connect property lives in the intercept paths, which never call this.
+    let upstream = pool.get().await?;
 
     // `map` rewraps the body value without polling it, so a client-streaming
     // request body is relayed frame by frame and is never buffered here.
