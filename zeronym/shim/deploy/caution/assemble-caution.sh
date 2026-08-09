@@ -15,7 +15,12 @@
 # it hides the exit status of everything but the last command.
 #
 # Usage:
-#   sh .../assemble-caution.sh --name <enclave> --backend <ip:port> [dest-dir]
+#   sh .../assemble-caution.sh --name <enclave> --backend <ip:port> \
+#       --backend-tls <cert-name> --tls-domain <wallet-facing-domain> \
+#       [--hub <ip:port> --hub-tls <hub-cert-name>] [dest-dir]
+#
+# --hub turns diversion ON. Without it the shim is forward-only: it classifies
+# and logs, and still hands every migration to the operator's indexer.
 #
 # One enclave fronts exactly one indexer, so each backend gets its own app and
 # its own assembled repo. Both arguments are required rather than defaulted: a
@@ -29,6 +34,8 @@ umask 022
 NAME=""
 BACKEND=""
 BACKEND_TLS=""
+HUB=""
+HUB_TLS=""
 TLS_DOMAIN=""
 TLS_EMAIL="security@shieldedlabs.com"
 TLS_PRODUCTION="false"
@@ -39,6 +46,8 @@ while [ $# -gt 0 ]; do
 		--name)        NAME=$2; shift 2 ;;
 		--backend)     BACKEND=$2; shift 2 ;;
 		--backend-tls) BACKEND_TLS=$2; shift 2 ;;
+		--hub)         HUB=$2; shift 2 ;;
+		--hub-tls)     HUB_TLS=$2; shift 2 ;;
 		--tls-domain)  TLS_DOMAIN=$2; shift 2 ;;
 		--tls-email)   TLS_EMAIL=$2; shift 2 ;;
 		--production)  TLS_PRODUCTION="true"; shift ;;
@@ -76,6 +85,82 @@ echo "$BACKEND_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
 }
 echo "$BACKEND_PORT" | grep -qE '^[0-9]+$' || {
 	echo "error: --backend port '$BACKEND_PORT' is not numeric" >&2; exit 2; }
+
+# --hub turns DIVERSION ON. Without it the shim is forward-only: it classifies
+# and logs but hands every migration to the operator's indexer exactly as the
+# proof of concept did, which is no privacy at all. That is the default on
+# purpose, so an operator who deploys this without having been given a hub
+# address gets working, honest, unchanged behaviour rather than a shim that
+# fails every migration.
+STAGE=$(mktemp -d)
+# shellcheck disable=SC2064
+trap "rm -rf '$STAGE'" EXIT INT TERM
+HUB_EGRESS="$STAGE/hub_egress.txt"
+HUB_ENV="$STAGE/hub_env.txt"
+: > "$HUB_EGRESS"
+: > "$HUB_ENV"
+
+if [ -n "$HUB" ]; then
+	# ZIS_HUB parses as a Rust SocketAddr and the enclave resolves no DNS (there
+	# is no port 53 egress), so a hostname does not degrade, it fails to parse
+	# and the enclave never starts. Catch it here where the error is readable.
+	HUB_IP=${HUB%:*}
+	HUB_PORT=${HUB##*:}
+	echo "$HUB_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
+		echo "error: --hub must be a literal IPv4 address and port, got '$HUB'." >&2
+		echo "       ZIS_HUB is a SocketAddr; a hostname will not parse." >&2
+		exit 2
+	}
+	echo "$HUB_PORT" | grep -qE '^[0-9]+$' || {
+		echo "error: --hub port '$HUB_PORT' is not numeric" >&2; exit 2; }
+
+	# A SECOND /32, and no wider. The shim now holds migrations in the clear on
+	# their way out, so the set of places this enclave can reach is the set of
+	# places a migration could go. Two destinations, two ports, nothing else.
+	cat > "$HUB_EGRESS" <<EOF
+
+    # The hub. Migrations go here instead of to the operator's indexer, so this
+    # is the one additional destination the enclave may reach. Same reasoning as
+    # the backend rule above: a literal /32 and a single port, no DNS.
+    egress {
+      cidr_ipv4   = "$HUB_IP/32"
+      port        = $HUB_PORT
+      ip_protocol = "tcp"
+    }
+EOF
+
+	if [ -n "$HUB_TLS" ]; then
+		cat > "$HUB_ENV" <<EOF
+
+      # Divert Orchard-touching transactions to the hub at this literal address,
+      # authenticated as the name below. With ZIS_HUB set the shim stops handing
+      # migrations to the operator's indexer at all.
+      ZIS_HUB     = "$HUB"
+      ZIS_HUB_TLS = "$HUB_TLS"
+EOF
+	else
+		# Allowed, and warned about loudly. The hop carries a migration in the
+		# clear, and the whole point of the hub being attested is undone if
+		# anything between the two enclaves can read or alter what crosses.
+		cat > "$HUB_ENV" <<EOF
+
+      # Divert Orchard-touching transactions to the hub at this literal address.
+      # NO ZIS_HUB_TLS: this hop is PLAINTEXT. Only correct on a trusted network
+      # path; set --hub-tls for any real deployment.
+      ZIS_HUB = "$HUB"
+EOF
+		echo "==> WARNING: --hub without --hub-tls. The shim-to-hub hop will be PLAINTEXT."
+		echo "    A migration crosses it in the clear. Use --hub-tls for a real deployment."
+	fi
+	echo "==> DIVERSION ON: Orchard-touching transactions go to $HUB, not to the operator's indexer."
+else
+	echo "==> forward-only: no --hub, so migrations are forwarded to the operator's indexer (no privacy)."
+fi
+
+if [ -n "$HUB_TLS" ] && [ -z "$HUB" ]; then
+	echo "error: --hub-tls without --hub. Nothing would be diverted." >&2
+	exit 2
+fi
 
 ZERO_ROOT=$(git rev-parse --show-toplevel)
 HERE="$ZERO_ROOT/zeronym/shim/deploy/caution"
@@ -125,6 +210,16 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 # name and the backend, and hand-editing two near-identical copies is how the
 # egress CIDR ends up disagreeing with ZIS_BACKEND: the enclave would then boot,
 # fail every dial, and look like a shim bug rather than a firewall one.
+# The two hub markers carry multi-line content and are injected with awk from
+# the files built above, so nothing has to survive sed quoting. Both are empty
+# in the forward-only case, and an empty file removes the marker line entirely.
+RENDERED="$STAGE/caution.hcl"
+awk -v egress="$HUB_EGRESS" -v env="$HUB_ENV" '
+	/__HUB_EGRESS__/ { while ((getline l < egress) > 0) print l; next }
+	/__HUB_ENV__/    { while ((getline l < env) > 0) print l; next }
+	{ print }
+' "$HERE/caution.hcl.tmpl" > "$RENDERED"
+
 sed \
 	-e "s|__ENCLAVE_NAME__|$NAME|g" \
 	-e "s|__BACKEND_ADDR__|$BACKEND|g" \
@@ -134,7 +229,7 @@ sed \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
 	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
 	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
-	"$HERE/caution.hcl.tmpl" > "$DEST/caution.hcl"
+	"$RENDERED" > "$DEST/caution.hcl"
 
 # --debug: flip the enclave into debug mode and turn on per-request shim logging.
 # This is a DIAGNOSTIC build, not a shippable one, for two reasons stated in the
@@ -172,6 +267,7 @@ zero-indexer-shim Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
 serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME)
 backend:         $BACKEND verified as $BACKEND_TLS
+diversion:       $([ -n "$HUB" ] && echo "ON -> hub $HUB${HUB_TLS:+ verified as $HUB_TLS}" || echo "OFF (forward-only, no privacy)")
 acme directory:  $([ "$TLS_PRODUCTION" = "true" ] && echo "letsencrypt PRODUCTION" || echo "letsencrypt staging")
 source commit:   $SHA
 expected binary: $EXPECTED

@@ -74,7 +74,7 @@ enclave "__ENCLAVE_NAME__" {
       port        = __BACKEND_PORT__
       ip_protocol = "tcp"
     }
-
+__HUB_EGRESS__
     # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
     #
     # `e2e_encryption { enabled = true }` is Caution's in-enclave TLS
@@ -157,6 +157,7 @@ enclave "__ENCLAVE_NAME__" {
       # ingress in front of the indexer routes on; with the address there it
       # matches no host rule and answers 404 over a healthy TLS connection.
       ZIS_BACKEND_TLS = "__BACKEND_TLS_NAME__"
+__HUB_ENV__
 
       # ZIS_TLS_DOMAIN is deliberately UNSET, so the shim serves plaintext h2c
       # and its own TLS stack stays dormant. The in-enclave Caddy declared in
