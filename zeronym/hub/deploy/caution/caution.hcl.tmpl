@@ -53,21 +53,23 @@ enclave "__ENCLAVE_NAME__" {
       ip_protocol = "tcp"
     }
 
-    # Egress to exactly the full nodes the hub broadcasts through, each a /32 on
-    # its JSON-RPC port, and NOTHING else.
+    # Egress to exactly the indexers the hub broadcasts through, each a /32 on
+    # its gRPC port, and NOTHING else.
     #
     # This narrowness is a security property, not tidiness. The hub sees every
     # migration in the clear, which is the exposure the whole system exists to
     # contain, so the enclave should be structurally incapable of shipping that
-    # anywhere except the nodes it broadcasts to. A set of /32s and a single port
-    # each make exfiltration to a third party a network-level impossibility
-    # instead of a promise about the code.
+    # anywhere except the indexers it broadcasts through. A set of /32s and a
+    # single port each make exfiltration to a third party a network-level
+    # impossibility instead of a promise about the code.
     #
-    # Note what is absent: no port 53. ZIH_NODES stays a list of literal
-    # addresses, so the enclave dials IPs and never resolves DNS; a poisoned DNS
-    # answer has nothing to poison. assemble-caution.sh generates one block per
-    # node from the --nodes list and enforces literal IPv4. Update the CIDRs
-    # whenever a node IP moves.
+    # Note what is absent: no port 53, even though the indexer is authenticated
+    # by NAME. That combination is the point. ZIH_INDEXERS stays a list of
+    # literal addresses, so the enclave dials IPs and never resolves DNS, while
+    # ZIH_INDEXER_TLS names what the certificate must say. A poisoned DNS answer
+    # has nothing to poison, and a hijacked address cannot present a valid
+    # certificate for the name. assemble-caution.sh generates one block per
+    # endpoint from --indexers and enforces literal IPv4.
     __EGRESS_BLOCKS__
 
     # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
@@ -108,16 +110,17 @@ enclave "__ENCLAVE_NAME__" {
       # platform forwards to.
       ZIH_LISTEN = "0.0.0.0:8083"
 
-      # The full nodes to broadcast through, as a comma-separated list of literal
-      # IPv4 host:port. Every submission goes to EVERY node: a migration that
-      # only ever entered one node's mempool is one outage away from never being
+      # The indexers to broadcast through, as a comma-separated list of literal
+      # IPv4 host:port. Every batch member goes to EVERY endpoint: a migration
+      # that only ever entered one mempool is one outage away from never being
       # mined. The egress blocks above must name exactly these IPs and ports.
-      ZIH_NODES = "__NODES__"
+      ZIH_INDEXERS = "__INDEXERS__"
 
-      # Optional HTTP basic-auth applied to every node. Present only when
-      # --node-user / --node-password were passed to assemble-caution.sh; a
-      # zebrad with enable_cookie_auth = false ignores them.
-      __NODE_AUTH_ENV__
+      # The name each indexer's certificate must carry. WITHOUT THIS THE HOP IS
+      # PLAINTEXT and the enclave's parent host reads every batch in the clear
+      # moments before it is public, which would undo most of the reason this
+      # runs in an enclave at all.
+      ZIH_INDEXER_TLS = "__INDEXER_TLS__"
 
       # Default is `info`. The hub deliberately logs only counts and dispositions,
       # never a txid or a transaction body (REVIEW.md #157), because in an enclave

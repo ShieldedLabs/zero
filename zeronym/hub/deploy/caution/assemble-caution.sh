@@ -15,23 +15,24 @@
 # hides the exit status of everything but the last command.
 #
 # Usage:
-#   sh .../assemble-caution.sh --name <enclave> --nodes <ip:port[,ip:port...]> \
-#       --tls-domain <hub-domain> [--node-user U --node-password P] [dest-dir]
+#   sh .../assemble-caution.sh --name <enclave> \
+#       --indexers <ip:port[,ip:port...]> --indexer-tls <indexer-cert-name> \
+#       --tls-domain <hub-domain> [dest-dir]
 #
-# Unlike the shim (one enclave fronts one indexer), the hub broadcasts to a SET
-# of nodes, so --nodes takes a comma-separated list and one egress /32 is emitted
-# per node. --name, --nodes and --tls-domain are required: a hub with the wrong
-# nodes broadcasts nowhere useful, and a hub with no domain has no cert for the
-# shim to verify.
+# Unlike the shim (one enclave fronts one indexer), the hub broadcasts through a
+# SET of endpoints, so --indexers takes a comma-separated list and one egress /32
+# is emitted per endpoint. All four arguments are required: a hub with the wrong
+# indexers broadcasts nowhere useful, a hub with no domain has no certificate for
+# the shim to verify, and a hub without --indexer-tls sends every batch in the
+# clear past its own enclave boundary.
 
 set -eu
 
 umask 022
 
 NAME=""
-NODES=""
-NODE_USER=""
-NODE_PASSWORD=""
+INDEXERS=""
+INDEXER_TLS=""
 TLS_DOMAIN=""
 TLS_EMAIL="security@shieldedlabs.com"
 TLS_PRODUCTION="false"
@@ -40,9 +41,8 @@ DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--name)          NAME=$2; shift 2 ;;
-		--nodes)         NODES=$2; shift 2 ;;
-		--node-user)     NODE_USER=$2; shift 2 ;;
-		--node-password) NODE_PASSWORD=$2; shift 2 ;;
+		--indexers)         INDEXERS=$2; shift 2 ;;
+		--indexer-tls)   INDEXER_TLS=$2; shift 2 ;;
 		--tls-domain)    TLS_DOMAIN=$2; shift 2 ;;
 		--tls-email)     TLS_EMAIL=$2; shift 2 ;;
 		--production)    TLS_PRODUCTION="true"; shift ;;
@@ -53,16 +53,17 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$NAME" ] || { echo "error: --name is required (e.g. zeronym-hub-1)" >&2; exit 2; }
-[ -n "$NODES" ] || { echo "error: --nodes is required (e.g. 1.2.3.4:8232,5.6.7.8:8232)" >&2; exit 2; }
+[ -n "$INDEXERS" ] || { echo "error: --indexers is required (e.g. 1.2.3.4:8232,5.6.7.8:8232)" >&2; exit 2; }
 [ -n "$TLS_DOMAIN" ] || { echo "error: --tls-domain is required (the name shims connect to)" >&2; exit 2; }
 
-# One of --node-user / --node-password without the other is almost always a
-# mistake, and basic-auth with an empty half fails at the node rather than here.
-if { [ -n "$NODE_USER" ] && [ -z "$NODE_PASSWORD" ]; } || \
-   { [ -z "$NODE_USER" ] && [ -n "$NODE_PASSWORD" ]; }; then
-	echo "error: pass --node-user and --node-password together, or neither." >&2
+# Without TLS the enclave's parent host reads every batch in the clear moments
+# before it is public, which removes most of the reason to run the hub in an
+# enclave at all. Required rather than warned about.
+[ -n "$INDEXER_TLS" ] || {
+	echo "error: --indexer-tls is required (the DNS name the indexer's cert carries)." >&2
+	echo "       Without it the hop is plaintext and the parent host reads every batch." >&2
 	exit 2
-fi
+}
 
 # Production is opt-in and announced, because it spends one of five weekly
 # duplicate-certificate issuances for this name and there is no way to get it
@@ -85,7 +86,7 @@ STAGE=$(mktemp -d)
 # shellcheck disable=SC2064
 trap "rm -rf '$STAGE'" EXIT INT TERM
 
-# Validate every node and build its egress block. ZIH_NODES entries must be
+# Validate every endpoint and build its egress block. ZIH_INDEXERS entries must be
 # literal IPv4:port: the enclave has no DNS egress (no port 53), so a hostname
 # would dial nothing, and the /32 egress rule needs a literal address anyway.
 # Each block is emitted with the four-space indent of the network stanza so the
@@ -95,17 +96,17 @@ EGRESS="$STAGE/egress.txt"
 OLDIFS=$IFS
 IFS=,
 first=1
-for node in $NODES; do
+for endpoint in $INDEXERS; do
 	IFS=$OLDIFS
-	NODE_IP=${node%:*}
-	NODE_PORT=${node##*:}
+	NODE_IP=${endpoint%:*}
+	NODE_PORT=${endpoint##*:}
 	echo "$NODE_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || {
-		echo "error: --nodes entry '$node' is not a literal IPv4 address and port." >&2
+		echo "error: --indexers entry '$endpoint' is not a literal IPv4 address and port." >&2
 		echo "       The enclave dials IPs with no DNS; a hostname will not resolve." >&2
 		exit 2
 	}
 	echo "$NODE_PORT" | grep -qE '^[0-9]+$' || {
-		echo "error: --nodes entry '$node' has a non-numeric port" >&2; exit 2; }
+		echo "error: --indexers entry '$endpoint' has a non-numeric port" >&2; exit 2; }
 	[ "$first" = 1 ] || echo "" >> "$EGRESS"
 	first=0
 	cat >> "$EGRESS" <<EOF
@@ -119,20 +120,8 @@ EOF
 done
 IFS=$OLDIFS
 
-# The node list, normalised (no trailing/leading spaces), for the ZIH_NODES env.
-NODES_ENV=$NODES
-
-# Optional node basic-auth env lines, written to a file so the password never
-# passes through sed (where a metacharacter in it would corrupt the render or
-# leak into an error). Absent auth removes the marker line entirely.
-AUTH="$STAGE/auth.txt"
-: > "$AUTH"
-if [ -n "$NODE_USER" ]; then
-	cat >> "$AUTH" <<EOF
-      ZIH_NODE_USER     = "$NODE_USER"
-      ZIH_NODE_PASSWORD = "$NODE_PASSWORD"
-EOF
-fi
+# The endpoint list, normalised (no trailing/leading spaces), for the ZIH_INDEXERS env.
+INDEXERS_ENV=$INDEXERS
 
 # Refuse to assemble from a dirty tree. The context comes from HEAD regardless,
 # so a dirty tree does not corrupt the build; it corrupts the OPERATOR'S
@@ -169,19 +158,15 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 # the files built above so no metacharacter has to survive sed. The scalar
 # fields go through sed afterwards.
 RENDERED="$STAGE/caution.hcl"
-awk -v egress="$EGRESS" -v auth="$AUTH" '
+awk -v egress="$EGRESS" '
 	/__EGRESS_BLOCKS__/ { while ((getline l < egress) > 0) print l; next }
-	/__NODE_AUTH_ENV__/ {
-		printed = 0
-		while ((getline l < auth) > 0) { print l; printed = 1 }
-		next
-	}
 	{ print }
 ' "$HERE/caution.hcl.tmpl" > "$RENDERED"
 
 sed \
 	-e "s|__ENCLAVE_NAME__|$NAME|g" \
-	-e "s|__NODES__|$NODES_ENV|g" \
+	-e "s|__INDEXERS__|$INDEXERS_ENV|g" \
+	-e "s|__INDEXER_TLS__|$INDEXER_TLS|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
 	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
 	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
@@ -214,7 +199,7 @@ cat > "$DEST/PROVENANCE" <<EOF
 zero-indexer-hub Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
 serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME)
-broadcasts to:   $NODES_ENV
+broadcasts via:  $INDEXERS_ENV verified as $INDEXER_TLS
 acme directory:  $([ "$TLS_PRODUCTION" = "true" ] && echo "letsencrypt PRODUCTION" || echo "letsencrypt staging")
 source commit:   $SHA
 expected binary: $EXPECTED

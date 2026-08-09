@@ -24,7 +24,9 @@
 //!
 //! Layering:
 //!
-//! * [`chain`] is the connection to the Zcash network: tip in, transactions out.
+//! * [`chain`] is the connection to the network, through an indexer: tip in,
+//!   transactions out.
+//! * [`tls`] verifies that connection, which an enclave deployment requires.
 //! * [`config`] is the command-line and environment surface.
 //! * [`queue`] holds admitted migrations, and decides what is admitted at all.
 //! * [`batcher`] drives the flush cadence and owns the hub's view of the tip.
@@ -37,6 +39,7 @@ pub mod chain;
 pub mod config;
 pub mod queue;
 pub mod server;
+pub mod tls;
 
 /// Boxed error type shared across the hub.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

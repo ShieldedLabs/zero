@@ -12,26 +12,31 @@ for the hub.
 
 ## What differs from the shim deploy
 
-- **Egress is to a set of full nodes, not one indexer.** `--nodes` takes a
+- **Egress is to a set of indexer endpoints.** `--indexers` takes a
   comma-separated list of literal `IPv4:port`, and one `/32` egress block is
-  emitted per node. Every submission is broadcast to every node.
-- **Inbound is HTTP/1.1, not gRPC.** The hub's endpoint is a plain `POST` of raw
-  transaction bytes, so the enclave config sets **no** `upstream_protocol`
-  (Caddy's default HTTP/1.1 is correct; the shim needed `h2c` only because it is
-  an HTTP/2-only gRPC server).
-- **No DNS egress** (no port 53), same as the shim: nodes are dialled by literal
-  IP, so a poisoned DNS answer has nothing to poison.
-- **Optional node basic-auth** via `--node-user` / `--node-password`, applied to
-  every node. A zebrad with `enable_cookie_auth = false` ignores it.
+  emitted per endpoint. Every batch member is broadcast to every endpoint.
+- **`--indexer-tls` is required**, naming the certificate each endpoint must
+  present. Without TLS the enclave's parent host reads every batch in the clear
+  moments before it is public, which removes most of the reason to run the hub in
+  an enclave.
+- **Inbound is HTTP/1.1, not gRPC**, even though the hub's OUTBOUND hop is gRPC.
+  The shim submits a plain `POST` of raw transaction bytes, so the enclave config
+  sets **no** `upstream_protocol` (Caddy's default HTTP/1.1 is correct; the shim
+  needed `h2c` only because it is an HTTP/2-only gRPC server).
+- **No DNS egress** (no port 53), same as the shim: endpoints are dialled by
+  literal IP while the certificate is verified against `--indexer-tls`, so a
+  poisoned DNS answer has nothing to poison and a hijacked address cannot
+  present a valid certificate for the name.
+
 
 ## Assemble and deploy
 
 ```sh
 sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name zeronym-hub-1 \
-  --nodes 203.0.113.10:8232,203.0.113.11:8232 \
+  --indexers 66.42.124.202:443 \
+  --indexer-tls lwd.shieldedinfra.net \
   --tls-domain hub.example.org \
-  [--node-user zcashrpc --node-password <secret>] \
   [--production] [--debug]
 ```
 

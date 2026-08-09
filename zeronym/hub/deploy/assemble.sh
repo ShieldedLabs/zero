@@ -1,8 +1,9 @@
 #!/bin/sh
 # Assemble the zero-indexer-hub build context: a partial mirror of the zero repo
-# containing the hub plus exactly the parts of zebra/ its one path dependency
-# (zebra-chain) needs. Sibling of zeronym/shim/deploy/assemble.sh; simpler,
-# because the hub has no zaino-proto dependency and so needs no zaino/.
+# containing the hub plus exactly the parts of zebra/ and zaino/ its path
+# dependencies need. Sibling of zeronym/shim/deploy/assemble.sh, and now the same
+# shape: the hub broadcasts through an indexer's CompactTxStreamer, so it carries
+# zaino-proto just as the shim does.
 #
 # Everything comes out of `git archive HEAD`, never the working tree. Three
 # reasons, all of them load-bearing:
@@ -46,8 +47,8 @@ STAGE=$(mktemp -d)
 # shellcheck disable=SC2064
 trap "rm -rf '$STAGE'" EXIT INT TERM
 
-# The crate. Its manifest path-depends on ../../zebra/zebra-chain, so the context
-# keeps the repo's own layout and the Containerfile reconstructs it under
+# The crate. Its manifest path-depends on ../../zebra/zebra-chain and
+# ../../zaino/packages/zaino-proto, so the context keeps the repo's own layout and the Containerfile reconstructs it under
 # /usr/src/app. No manifest is edited, here or in the image.
 #
 # This also carries deploy/ itself, which is how the build gets a commit-pinned
@@ -72,7 +73,7 @@ tar -xpf "$STAGE/hub.tar" -C "$DEST"
 # the workspace root for inheritance here, and does not require absent members
 # to exist.
 #
-# Keep this list in sync with the `paths:` filter of
+# Keep this list, and the zaino one below, in sync with the `paths:` filter of
 # .github/workflows/zeronym-hub-reproduce.yml. A subtree pull that touches one
 # of these directories changes the binary and therefore the recorded hash, so
 # the reproduce job has to fire on it.
@@ -82,12 +83,23 @@ git -C "$ZERO_ROOT" archive HEAD -o "$STAGE/zebra.tar" \
 	zebra/zebra-test
 tar -xpf "$STAGE/zebra.tar" -C "$DEST"
 
-# Deliberately NOT in the context: orchard/ and zaino/. zebra/Cargo.toml carries
-# a [zero] patch `orchard = { path = "../orchard" }`, but that patch belongs to
-# zebra's workspace and does not apply to the hub's own; the hub resolves orchard
-# from crates.io per its committed Cargo.lock, and cargo does not complain about
-# the dangling patch path when it merely loads zebra's manifest for inheritance.
-# zaino/ is absent because the hub has no zaino-proto dependency at all.
+# zaino: same shape. zaino-proto inherits authors/repository/homepage/edition/
+# license and its tonic and prost versions from [workspace.*], so the root
+# manifest is required; the other members are not.
+#
+# zaino-proto/proto/{compact_formats,service}.proto are git-tracked SYMLINKS into
+# ../lightwallet-protocol/walletrpc/. git archive reproduces both the links and
+# their targets, so copying the crate directory is sufficient.
+git -C "$ZERO_ROOT" archive HEAD -o "$STAGE/zaino.tar" \
+	zaino/Cargo.toml \
+	zaino/packages/zaino-proto
+tar -xpf "$STAGE/zaino.tar" -C "$DEST"
+
+# Deliberately NOT in the context: orchard/. zebra/Cargo.toml carries a [zero]
+# patch `orchard = { path = "../orchard" }`, but that patch belongs to zebra's
+# workspace and does not apply to the hub's own; the hub resolves orchard from
+# crates.io per its committed Cargo.lock, and cargo does not complain about the
+# dangling patch path when it merely loads zebra's manifest for inheritance.
 #
 # Also not needed: zebra/Cargo.lock or either tree's rust-toolchain.toml. The
 # hub's own lockfile is authoritative, and the pinned pallet-rust digest is the

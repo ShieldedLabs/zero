@@ -26,7 +26,17 @@ async fn main() -> Result<(), BoxError> {
         .init();
 
     let config = Config::parse();
-    let chain = Arc::new(ChainClient::new(config.node_endpoints())?);
+
+    // Refuse to run blind. A hub without indexer TLS lets the enclave's parent
+    // host read every batch in the clear moments before it is public, so this is
+    // announced loudly rather than left to a config review.
+    let tls = config.indexer_tls()?;
+    if tls.is_none() {
+        tracing::warn!(
+            "no --indexer-tls: the hop to the indexer is PLAINTEXT and the host can read every batch"
+        );
+    }
+    let chain = Arc::new(ChainClient::new(config.indexers.clone(), tls)?);
 
     // The expiry budget is asserted at startup, not trusted. A parameter change
     // that overspends it must fail here rather than be discovered in production
