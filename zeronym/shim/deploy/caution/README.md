@@ -86,8 +86,11 @@ authenticator and gives no hint that a phone-based FIDO2 flow exists. `caution
 apps create` takes no `--name`; it reads the repo, assigns a generated name, and
 adds the `caution` git remote for you, so there is no separate `init` or `git
 remote add` step. Create a **new** app per shim; pushing into another app's repo
-replaces that enclave. Redeploying later is just `git push caution main` against
-the same app.
+replaces that enclave. To redeploy: a push to an app in state `running` is
+REFUSED ("already exists in state 'running'"), so destroy the app, `apps create`
+a fresh one (new id, so `git remote remove caution` first), and push again. The
+replacement enclave gets a new IP, so repoint DNS in the same pass. `apps
+destroy` prompts; pipe `echo y` when scripting.
 
 Enclave IPs change on most redeploys. On Shielded Labs' infra the enclave's egress
 IP must be allowed on the backend's ingress `ipAllowList` (in shielded-infra) and

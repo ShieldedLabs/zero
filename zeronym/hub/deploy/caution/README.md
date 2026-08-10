@@ -44,10 +44,8 @@ Then, from the assembled directory:
 
 ```sh
 caution login --username <name> --qr
-caution apps create --name zeronym-hub-1
-caution init <app-id>
-git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git
-git push caution main
+caution apps create      # no --name: auto-names the app, adds the 'caution' remote
+git push caution main    # builds and boots the enclave; prints its IP
 ```
 
 Point the hub's DNS name at the enclave IP the deploy prints, and set the shim's

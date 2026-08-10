@@ -52,8 +52,9 @@ git push caution main                  # builds and boots the enclave; prints it
 ```
 
 Point your `--tls-domain` at that IP right after the push (so the cert can issue),
-then point wallets at `<tls-domain>:443`. One app per enclave; redeploy later is
-just `git push caution main`.
+then point wallets at `<tls-domain>:443`. One app per enclave. To redeploy a
+changed repo: a running app refuses pushes, so `caution apps destroy <app-id>`,
+`caution apps create`, push again, and repoint DNS (new app id AND new IP).
 
 ## Verify
 
