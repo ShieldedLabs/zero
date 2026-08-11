@@ -26,10 +26,12 @@
 //!   configured the shim serves plaintext h2c, which is what the tests and a
 //!   local demo use.
 //!
-//! Diversion is being built on top of this PoC. The hub client ([`hub`]) and the
-//! divert-recognition state ([`state`]) have landed; the proxy wiring that makes
-//! the shim actually divert, and interception of a diverted migration's
-//! follow-up queries, are in progress. Nym and STEVE remain out of scope. The
+//! Diversion is built on top of this PoC via the hub client ([`hub`]): an
+//! Orchard-touching `SendTransaction` is submitted to the hub, and a wallet's
+//! follow-up `GetTransaction` is looked up on the hub too, so the operator's
+//! indexer sees neither. The shim keeps NO per-migration state of its own: it
+//! recognises nothing about what it diverted, which is what makes it safe to
+//! restart or run more than one instance. Nym and STEVE remain out of scope. The
 //! enclave and attestation are no longer out of scope; see `deploy/caution/`.
 //!
 //! The crate is a library with a thin binary wrapper so tests can bind
@@ -42,7 +44,6 @@ pub mod config;
 pub mod hub;
 pub mod intercept;
 pub mod proxy;
-pub mod state;
 pub mod tls;
 
 /// Boxed error type shared by the proxy paths.

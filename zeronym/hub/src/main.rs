@@ -77,7 +77,15 @@ async fn main() -> Result<(), BoxError> {
         shutdown_signal(),
     ));
 
-    let serving = server::serve(listener, Hub { queue, tip, params });
+    let serving = server::serve(
+        listener,
+        Hub {
+            queue,
+            tip,
+            params,
+            chain,
+        },
+    );
 
     // Either half stopping is fatal: a hub that admits without publishing holds
     // migrations until they expire, and a hub that publishes without admitting

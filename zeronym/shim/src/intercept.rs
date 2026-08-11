@@ -1,20 +1,23 @@
-//! The one intercepted method: `SendTransaction`.
+//! The two intercepted methods: `SendTransaction` and `GetTransaction`.
 //!
-//! The request is unary and small, so the body is buffered, the 5-byte gRPC
-//! length prefix is stripped, the `RawTransaction` message is decoded, and its
-//! `data` field (the serialized Zcash transaction) is handed to
-//! [`crate::classify`]. The verdict is logged with the evidence it rests on.
+//! **`SendTransaction`** is buffered, the 5-byte gRPC length prefix stripped, the
+//! `RawTransaction` decoded, and its `data` field handed to [`crate::classify`].
+//! An Orchard-touching transaction is DIVERTED to the hub (never dialling the
+//! operator), and the wallet gets a synthesized `SendResponse` carrying the hub's
+//! txid, indistinguishable from a real indexer's reply. A pass-through, or a
+//! migration when no hub is configured, is replayed to the operator's indexer
+//! unchanged.
 //!
-//! **This proof of concept is non-destructive.** After logging, the ORIGINAL
-//! bytes are forwarded to the backing indexer through the same
-//! [`crate::proxy::forward`] the pass-through path uses, and the backing
-//! indexer's real response is relayed back. Nothing is diverted. Diversion,
-//! the hub, and Nym are out of scope here.
+//! **`GetTransaction`**, when a hub is configured, is answered by the hub (from
+//! its queue, or its own indexer), never by the operator's. The shim keeps NO
+//! record of what it diverted, so it cannot tell a migration's txid from any
+//! other; routing every `GetTransaction` to the hub is what keeps a migration's
+//! follow-up query off the operator's indexer. With no hub it passes through.
 //!
-//! Fail-safe for privacy applies at every layer above the classifier too. The
-//! classifier never sees a malformed gRPC frame, so these cases are decided
-//! here, and all of them mean "in production this would be diverted, not handed
-//! to the operator's indexer":
+//! Fail-safe for privacy binds at every layer above the classifier. A
+//! `SendTransaction` the shim cannot read cleanly is treated as a migration and
+//! diverted, never handed to the operator; these cases are decided here rather
+//! than in the classifier:
 //!
 //! * a body shorter than the 5-byte prefix,
 //! * the gRPC compression flag set, or a `grpc-encoding` other than `identity`,
@@ -22,10 +25,9 @@
 //! * a `RawTransaction` that does not decode,
 //! * a body over [`MAX_SEND_TX_BYTES`], or a client body stream that errored.
 //!
-//! The last one is the only case the proof of concept refuses to forward: once
-//! [`Limited`] has errored mid-collect the original bytes are gone, so they
-//! cannot be replayed byte-for-byte, and forwarding a body we could neither
-//! read nor reproduce is the exact leak this component exists to prevent.
+//! And every failure on the divert or lookup path fails CLOSED: an unreachable
+//! hub is a gRPC error to the wallet, never a fall-back to the operator, because
+//! answering there is the exact leak this component exists to prevent.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,21 +42,24 @@ use prost::Message;
 use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use crate::classify::{classify_with_evidence, Class, Evidence};
-use crate::hub::{HubClient, Submit};
+use crate::hub::{HubClient, Lookup, Submit};
 use crate::proxy::{
     forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
-    GRPC_RESOURCE_EXHAUSTED, GRPC_UNAVAILABLE,
+    GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED, GRPC_UNAVAILABLE,
 };
-use crate::state::DivertState;
 use crate::BoxError;
 
 /// The context that turns the classifying proof of concept into a diverting
-/// shim: where to send migrations, and the state to recognise their follow-up
-/// queries. Present only when `--hub` is configured; absent means forward-only,
-/// which is the merged proof-of-concept behaviour.
+/// shim: just where to send migrations and look them back up. Present only when
+/// `--hub` is configured; absent means forward-only, the merged proof-of-concept
+/// behaviour.
+///
+/// Deliberately holds NO state about what it diverted. A stateless shim survives
+/// a restart and can run as more than one instance without a follow-up query
+/// leaking to the operator, because it recognises nothing: every
+/// `GetTransaction` goes to the hub regardless.
 pub struct Diversion {
     pub hub: HubClient,
-    pub state: Arc<DivertState>,
 }
 
 /// gRPC length-prefixed message header: 1 flag byte + 4 big-endian length bytes.
@@ -145,18 +150,15 @@ async fn divert(
             // error_message }`: on success `error_code` is 0 and `error_message`
             // carries the txid, exactly as lightwalletd answers, so an unmodified
             // wallet reads the txid it expects.
-            let (error_code, message, txid) = match submit {
-                Submit::Accepted { txid } => (0, txid.clone(), Some(txid)),
-                Submit::AlreadyKnown { txid } => (0, txid.clone().unwrap_or_default(), txid),
-                Submit::Rejected { reason } => (-1, reason, None),
+            let (error_code, message) = match submit {
+                Submit::Accepted { txid } => (0, txid),
+                Submit::AlreadyKnown { txid } => (0, txid.unwrap_or_default()),
+                Submit::Rejected { reason } => (-1, reason),
             };
 
-            // Seed the recognition state so this migration's follow-up queries
-            // can be intercepted. Address extraction (TaintedAddrs) is a later
-            // layer; the txid mapping lands now.
-            if let Some(txid) = txid.filter(|t| !t.is_empty()) {
-                diversion.state.record(txid, tx_data, Vec::new());
-            }
+            // Nothing is recorded: the shim keeps no map of what it diverted. A
+            // follow-up GetTransaction is answered by the hub, not from local
+            // state, which is what makes this shim safe to restart or replicate.
 
             tracing::info!(
                 target: "zis::classify",
@@ -190,17 +192,21 @@ fn grpc_send_response(error_code: i32, error_message: &str) -> Response<ProxyBod
     grpc_unary(&message)
 }
 
-/// Handle `GetTransaction`. If the `TxFilter` names a migration this shim
-/// diverted, answer it from the held bytes so the operator's indexer never sees
-/// the wallet ask about its own migration; otherwise forward it, dialling the
-/// operator only then.
+/// Handle `GetTransaction`.
+///
+/// With a hub configured, EVERY `GetTransaction` is answered via the hub and NONE
+/// reaches the operator's indexer. A stateless shim cannot tell a migration's
+/// txid from any other, so the only way to keep a migration's follow-up query
+/// off the operator is to route them all to the hub, which answers from its
+/// queue (a diverted, unflushed migration) or from its own indexer. Forward-only
+/// mode (no hub) passes through to the operator unchanged.
 pub(crate) async fn get_transaction(
     req: Request<Incoming>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
-    // With no hub, nothing was ever diverted, so there is nothing to recognise:
-    // relay untouched, without buffering.
+    // No hub: nothing is diverted and there is nothing to hide, so relay
+    // untouched, without buffering.
     let Some(diversion) = diversion else {
         return pass_through(req, pool).await;
     };
@@ -215,73 +221,100 @@ pub(crate) async fn get_transaction(
             ))
         }
     };
-    let trailers = collected.trailers().cloned();
     let frame = collected.to_bytes();
 
-    if let Some(txid) = diverted_txid(&parts.headers, &frame, &diversion.state) {
-        if let Some(bytes) = diversion.state.migration_bytes(&txid) {
-            // Answered from held bytes; the operator's indexer is never dialled.
-            tracing::info!(
-                target: "zis::classify",
-                "intercepted GetTransaction for a diverted migration"
-            );
-            return Ok(get_transaction_response(&bytes));
+    let filter = match decode_tx_filter(&parts.headers, &frame) {
+        Ok(filter) => filter,
+        // With a hub configured this path may never dial the operator, so an
+        // undecodable request is a terminal INVALID_ARGUMENT, not a forward.
+        Err(reason) => {
+            return Ok(grpc_error(
+                GRPC_INVALID_ARGUMENT,
+                &format!("zero-indexer-shim: {reason}"),
+            ))
         }
+    };
+
+    // Validate the filter locally, matching lightwalletd and Zaino, so a bad
+    // filter never becomes a hub round trip.
+    if filter.hash.is_empty() {
+        let message = if filter.block.is_some() {
+            "GetTransaction: specify a txid, not a blockhash+num"
+        } else {
+            "GetTransaction: specify a txid"
+        };
+        return Ok(grpc_error(
+            GRPC_INVALID_ARGUMENT,
+            &format!("zero-indexer-shim: {message}"),
+        ));
+    }
+    if filter.hash.len() != 32 {
+        return Ok(grpc_error(
+            GRPC_INVALID_ARGUMENT,
+            &format!(
+                "zero-indexer-shim: GetTransaction: transaction ID has invalid length: {}",
+                filter.hash.len()
+            ),
+        ));
     }
 
-    // An ordinary GetTransaction: forward the buffered request, dialling now.
-    let upstream = pool.get().await?;
-    let replay = ReplayBody::new(frame, trailers).boxed();
-    let resp = forward(upstream, Request::from_parts(parts, replay)).await?;
-    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+    match diversion.hub.get_transaction(&filter.hash).await {
+        Ok(Lookup::Found { data, height }) => Ok(get_transaction_response(&data, height)),
+        Ok(Lookup::NotFound) => Ok(grpc_error(GRPC_NOT_FOUND, &not_found_message(&filter.hash))),
+        Err(err) => {
+            // Fail closed. Never fall back to the operator's indexer: answering a
+            // migration's follow-up query there is the exact leak this prevents.
+            tracing::warn!(target: "zis::classify", %err, "hub lookup failed; failing closed");
+            Ok(grpc_error(
+                GRPC_UNAVAILABLE,
+                "zero-indexer-shim: hub unreachable",
+            ))
+        }
+    }
 }
 
-/// If the buffered `GetTransaction` request's `TxFilter.hash` names a migration
-/// this shim holds, return the matching held-migration key. BOTH byte orders are
-/// checked: the wire order of `TxFilter.hash` (internal, little-endian) is the
-/// reverse of the display txid the hub returns, so depending on only one would
-/// silently stop intercepting.
-fn diverted_txid(headers: &HeaderMap, frame: &[u8], state: &DivertState) -> Option<String> {
-    // The same gRPC-frame unwrap inspect() does, for a different message. A body
-    // that will not unwrap names no txid, so let it forward: a GetTransaction
-    // leaks nothing until it references a diverted migration.
+/// Unwrap a single gRPC-framed `TxFilter` out of a `GetTransaction` request.
+///
+/// Strict, like `inspect`: identity encoding only, the 5-byte length prefix must
+/// exactly account for the rest of the body, and the message must decode. A
+/// request that fails any of these is INVALID_ARGUMENT, never forwarded.
+fn decode_tx_filter(headers: &HeaderMap, frame: &[u8]) -> Result<TxFilter, &'static str> {
     if let Some(encoding) = headers.get("grpc-encoding") {
         if encoding.as_bytes() != b"identity" {
-            return None;
+            return Err("GetTransaction: a compressed request is not supported");
         }
     }
     if frame.len() < GRPC_PREFIX_LEN || frame[0] != 0 {
-        return None;
+        return Err("GetTransaction: request is not a single identity-coded frame");
     }
     let declared = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
-    let message = GRPC_PREFIX_LEN
-        .checked_add(declared)
-        .and_then(|end| frame.get(GRPC_PREFIX_LEN..end))?;
-    let filter = TxFilter::decode(message).ok()?;
-    if filter.hash.is_empty() {
-        return None;
+    if GRPC_PREFIX_LEN.checked_add(declared) != Some(frame.len()) {
+        return Err("GetTransaction: request frame length does not match its body");
     }
-
-    let forward_hex = hex_prefix(&filter.hash, filter.hash.len());
-    if state.migration_bytes(&forward_hex).is_some() {
-        return Some(forward_hex);
-    }
-    let mut reversed = filter.hash;
-    reversed.reverse();
-    let reversed_hex = hex_prefix(&reversed, reversed.len());
-    if state.migration_bytes(&reversed_hex).is_some() {
-        return Some(reversed_hex);
-    }
-    None
+    TxFilter::decode(&frame[GRPC_PREFIX_LEN..])
+        .map_err(|_| "GetTransaction: could not decode TxFilter")
 }
 
-/// A synthesized `GetTransaction` reply carrying the held bytes. Height 0: the
-/// transaction is in flight, not yet mined; once mined the wallet receives it
-/// through ordinary block sync, which forwards.
-fn get_transaction_response(tx_bytes: &[u8]) -> Response<ProxyBody> {
+/// The message lightwalletd returns for an unknown txid, naming the DISPLAY txid
+/// (the byte-reverse of the wire hash). The wallet already knows its own txid, so
+/// echoing it here reveals nothing, and it goes only to the wallet over its TLS
+/// link, never to a log.
+fn not_found_message(wire_hash: &[u8]) -> String {
+    let mut display = wire_hash.to_vec();
+    display.reverse();
+    format!(
+        "zero-indexer-shim: GetTransaction: getrawtransaction {} failed: -5: No such mempool or main chain transaction",
+        hex_prefix(&display, display.len())
+    )
+}
+
+/// A synthesized `GetTransaction` reply carrying the transaction the hub
+/// returned. Height 0 (from a queue hit) is the mempool sentinel; a mined
+/// transaction relays the indexer's height.
+fn get_transaction_response(tx_bytes: &[u8], height: u64) -> Response<ProxyBody> {
     let message = RawTransaction {
         data: tx_bytes.to_vec(),
-        height: 0,
+        height,
     }
     .encode_to_vec();
     grpc_unary(&message)

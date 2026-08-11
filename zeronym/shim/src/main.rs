@@ -13,7 +13,6 @@ use zero_indexer_shim::config::Config;
 use zero_indexer_shim::hub::HubClient;
 use zero_indexer_shim::intercept::Diversion;
 use zero_indexer_shim::proxy::Backend;
-use zero_indexer_shim::state::DivertState;
 use zero_indexer_shim::tls::{BackendTls, ServerTls};
 use zero_indexer_shim::BoxError;
 
@@ -108,11 +107,11 @@ async fn main() -> Result<(), BoxError> {
             }
             tracing::info!(
                 hub = %hub_addr,
-                "diversion ENABLED: Orchard-touching transactions go to the hub, not the operator"
+                "diversion ENABLED: Orchard-touching sends and all GetTransaction go to the hub, \
+                 not the operator"
             );
             Some(Arc::new(Diversion {
                 hub: HubClient::new(hub_addr, hub_tls),
-                state: Arc::new(DivertState::new()),
             }))
         }
         None => {
