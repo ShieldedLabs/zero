@@ -1,28 +1,31 @@
 //! The hub's inbound path over the Nym mixnet: receive a `SubmitV1`, admit it,
-//! reply with an `AckV1`.
+//! reply with an `AckV1`; receive a `LookupV1`, answer it with a
+//! `LookupReplyV1`.
 //!
 //! The design keeps the Nym SDK out of everything here. A driver task (which
 //! lands with the SDK) owns the mixnet client and does nothing but move bytes:
 //! it hands each inbound message to this module as a [`Received`] and sends each
 //! [`Reply`] this module produces back out. So the listen loop is a plain async
-//! function over two channels plus the admission core, and its whole behaviour is
+//! function over two channels plus the shared cores, and its whole behaviour is
 //! exercised by feeding the channels directly, with no SDK and no fake client.
 //!
 //! What crosses the channels is BYTES and an opaque [`SenderTag`], never a domain
-//! object: the tag is carried from a submission to its reply and never
+//! object: the tag is carried from a request to its reply and never
 //! interpreted, logged, or stored, because it is a per-session pseudonym for the
-//! submitting shim and the whole point of the hop is to hold none of those.
+//! requesting shim and the whole point of the hop is to hold none of those.
 //!
-//! Admission is [`crate::server::Hub::admit`], the exact call the HTTP serving
-//! path uses, so the two ingress paths cannot drift. Everything REVIEW.md binds
-//! on that call binds here too: an unparseable transaction is queued and
-//! published, never refused (#5); only counts and reasons are logged, never a
-//! txid or a body (#157).
+//! Admission is [`crate::server::Hub::admit`] and lookup is
+//! [`crate::server::Hub::lookup`], the exact calls the HTTP serving path uses,
+//! so the two ingress paths cannot drift. Everything REVIEW.md binds on those
+//! calls binds here too: an unparseable transaction is queued and published,
+//! never refused (#5); only counts, reasons, and dispositions are logged, never
+//! a txid, a queried hash, or a body (#157).
 
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
-use crate::server::Hub;
-use crate::wire::{self, AckKind, AckRefusal};
+use crate::server::{Hub, LookupOutcome};
+use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
 /// The mixnet's anonymous sender tag, carried but never interpreted. Sized to the
 /// SDK's tag (16 bytes); the driver converts the SDK value to and from this so
@@ -30,23 +33,26 @@ use crate::wire::{self, AckKind, AckRefusal};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SenderTag(pub [u8; 16]);
 
-/// One inbound submission: the frame bytes and the tag to reply to.
+/// One inbound request: the frame bytes and the tag to reply to.
 pub struct Received {
     pub frame: Vec<u8>,
     pub sender_tag: SenderTag,
 }
 
-/// One outbound reply: the ack frame and the tag it goes back to.
+/// One outbound reply: the reply frame (an `AckV1` or a `LookupReplyV1`) and
+/// the tag it goes back to. [`Zeroizing`] because a found lookup reply carries
+/// transaction bytes, possibly of a diverted, not-yet-published migration.
 pub struct Reply {
     pub sender_tag: SenderTag,
-    pub ack: Vec<u8>,
+    pub frame: Zeroizing<Vec<u8>>,
 }
 
-/// Serve submissions until the inbound channel closes.
+/// Serve requests until the inbound channel closes.
 ///
-/// Each message is handled on its own task so a slow reply cannot head-of-line
-/// block the next admission; the queue is internally locked, and [`Hub`] is cheap
-/// to clone (it is `Arc`s and `Copy` params).
+/// Each message is handled on its own task so a slow reply (a lookup awaiting
+/// the indexer, most of all) cannot head-of-line block the next admission; the
+/// queue is internally locked, and [`Hub`] is cheap to clone (it is `Arc`s and
+/// `Copy` params).
 pub async fn run_listener(
     mut incoming: mpsc::Receiver<Received>,
     outgoing: mpsc::Sender<Reply>,
@@ -54,23 +60,78 @@ pub async fn run_listener(
 ) {
     while let Some(received) = incoming.recv().await {
         // Empty inbound messages are the SDK's SURB-replenishment artifacts, not
-        // submissions. Drop them before they reach the codec (they would decode
-        // as bad_frame and add noise for nothing).
+        // requests. Drop them before they reach the codec (they would decode as
+        // bad_frame and add noise for nothing).
         if received.frame.is_empty() {
             continue;
         }
         let hub = hub.clone();
         let outgoing = outgoing.clone();
         tokio::spawn(async move {
-            if let Some(ack) = build_ack(&hub, &received.frame) {
+            if let Some(frame) = build_reply(&hub, &received.frame).await {
                 let _ = outgoing
                     .send(Reply {
                         sender_tag: received.sender_tag,
-                        ack,
+                        frame,
                     })
                     .await;
             }
         });
+    }
+}
+
+/// Dispatch one inbound frame to the submit or the lookup arm by its magic.
+/// A lookup-shaped frame (the lookup magic with at least a full header) takes
+/// the lookup arm even when malformed, so its failure is answered in lookup
+/// vocabulary; everything else takes the submit arm, whose bad-frame handling
+/// covers unknown magics too.
+async fn build_reply(hub: &Hub, frame: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    if wire::peek_lookup_nonce(frame).is_some() {
+        Some(build_lookup_reply(hub, frame).await)
+    } else {
+        build_ack(hub, frame).map(Zeroizing::new)
+    }
+}
+
+/// Decode one lookup frame, answer it through the shared core, and build the
+/// reply. Always correlatable: this arm is only entered when the nonce is
+/// recoverable, and every failure inside it (a malformed frame, an empty key,
+/// an unanswerable indexer, a transaction too large for the reply frame) is an
+/// `error` disposition, which fails CLOSED at the shim.
+async fn build_lookup_reply(hub: &Hub, frame: &[u8]) -> Zeroizing<Vec<u8>> {
+    let error_reply = |nonce| {
+        wire::encode_lookup_reply(&nonce, &LookupReply::Error)
+            .expect("an error reply carries no transaction and always fits")
+    };
+    let (nonce, hash) = match wire::decode_lookup(frame) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            // Reason only: no nonce, no hash, no body (#157).
+            tracing::warn!(reason = %err, "lookup frame could not be decoded");
+            let nonce = wire::peek_lookup_nonce(frame).expect("dispatch checked the header");
+            return error_reply(nonce);
+        }
+    };
+    // An empty key is a malformed query, not a miss: answering not_found would
+    // dress a shim bug up as a real verdict.
+    if hash.is_empty() {
+        tracing::warn!(reason = "empty lookup key", "lookup refused");
+        return error_reply(nonce);
+    }
+    let reply = match hub.lookup(&hash).await {
+        LookupOutcome::Found { data, height } => LookupReply::Found { height, tx: data },
+        LookupOutcome::NotFound => LookupReply::NotFound,
+        LookupOutcome::Unavailable => LookupReply::Error,
+    };
+    match wire::encode_lookup_reply(&nonce, &reply) {
+        Ok(frame) => frame,
+        // The reply budget is nine bytes under the submit cap, so an indexer
+        // can return a transaction that fits nowhere in a reply frame. Fail
+        // closed rather than truncate.
+        Err(err) => {
+            tracing::warn!(reason = %err, "lookup reply could not be framed");
+            error_reply(nonce)
+        }
     }
 }
 

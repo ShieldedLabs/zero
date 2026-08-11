@@ -79,6 +79,22 @@ pub struct Hub {
     pub chain: Arc<ChainClient>,
 }
 
+/// The outcome of the transport-independent lookup core, rendered by each
+/// transport in its own wire shape (HTTP status plus header, or a
+/// `LookupReplyV1` disposition).
+pub enum LookupOutcome {
+    /// The transaction, at `height` (`0` = mempool, the sentinel a wallet sees
+    /// for an unmined transaction). [`Zeroizing`] because a queue hit is a
+    /// diverted, not-yet-published migration.
+    Found { data: Zeroizing<Vec<u8>>, height: u64 },
+    /// Neither the queue nor the indexer knows it.
+    NotFound,
+    /// The indexer could not answer. Every transport renders this closed
+    /// (HTTP 502, wire `error`); the caller must never fall back to the
+    /// operator's indexer.
+    Unavailable,
+}
+
 impl Hub {
     /// Admit one migration's bytes into the batch, or refuse it. This is the
     /// transport-independent core of the serving path: the stale-tip gate, the
@@ -118,6 +134,51 @@ impl Hub {
             Admission::Refused(refusal) => {
                 tracing::info!(reason = refusal.as_str(), "submission refused at admission");
                 Err(refusal)
+            }
+        }
+    }
+
+    /// Answer a transaction lookup: the queue first (a diverted, not-yet-flushed
+    /// migration exists nowhere else; height 0 is the mempool sentinel), then
+    /// the hub's indexer. This is the transport-independent core of the lookup
+    /// path, factored the way [`Hub::admit`] was, so the mixnet listener answers
+    /// through exactly this call and cannot drift from the HTTP path.
+    ///
+    /// Disposition only in every log arm: an indexer's error message can echo
+    /// the txid, so nothing but the outcome word reaches the log (#157).
+    ///
+    /// Note the flush-in-flight gap: `flush()` drains the queue before
+    /// `broadcast_batch` has reached the indexer, so a lookup in that window
+    /// gets a queue miss then an indexer NOT_FOUND for a transaction it was
+    /// told height-0 about seconds earlier. Wallets poll on multi-second
+    /// intervals and tolerate a transient NOT_FOUND; a resubmit is harmless
+    /// (deduped pre-flush, already-known post-flush). Holding entries until
+    /// broadcast returns would extend how long the hub remembers a txid, which
+    /// is the wrong trade.
+    pub async fn lookup(&self, wire_hash: &[u8]) -> LookupOutcome {
+        if let Some(bytes) = self.queue.find_by_txid(wire_hash) {
+            tracing::debug!(source = "queue", "transaction lookup answered");
+            return LookupOutcome::Found {
+                data: bytes,
+                height: 0,
+            };
+        }
+
+        match self.chain.get_transaction(wire_hash).await {
+            Ok(TxLookup::Found { data, height }) => {
+                tracing::debug!(source = "indexer", "transaction lookup answered");
+                LookupOutcome::Found {
+                    data: Zeroizing::new(data),
+                    height,
+                }
+            }
+            Ok(TxLookup::NotFound) => {
+                tracing::debug!(source = "miss", "transaction lookup: not found");
+                LookupOutcome::NotFound
+            }
+            Err(_) => {
+                tracing::debug!(source = "indexer_error", "transaction lookup failed");
+                LookupOutcome::Unavailable
             }
         }
     }
@@ -166,21 +227,12 @@ async fn handle(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>
     }
 }
 
-/// Answer a transaction lookup: the queue first (a diverted, not-yet-flushed
-/// migration exists nowhere else), then the hub's indexer.
+/// Answer a transaction lookup over HTTP. The queue-then-indexer core is
+/// [`Hub::lookup`], shared with the mixnet listener; this handler only buffers
+/// the key and shapes the outcome as a status code plus the height header.
 ///
 /// This is why the shim can be stateless: it holds nothing about the migrations
-/// it diverted, and routes every `GetTransaction` here instead. Height 0 on a
-/// queue hit is the mempool sentinel, exactly what a wallet sees for an unmined
-/// transaction.
-///
-/// Note the flush-in-flight gap: `flush()` drains the queue before
-/// `broadcast_batch` has reached the indexer, so a lookup in that window gets a
-/// queue miss then an indexer NOT_FOUND for a transaction it was told height-0
-/// about seconds earlier. Wallets poll on multi-second intervals and tolerate a
-/// transient NOT_FOUND; a resubmit is harmless (deduped pre-flush, already-known
-/// post-flush). Holding entries until broadcast returns would extend how long
-/// the hub remembers a txid, which is the wrong trade.
+/// it diverted, and routes every `GetTransaction` here instead.
 async fn lookup(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
     let collected = match Limited::new(req.into_body(), MAX_LOOKUP_BYTES)
         .collect()
@@ -194,26 +246,10 @@ async fn lookup(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>
         return Ok(text(StatusCode::BAD_REQUEST, "empty lookup key"));
     }
 
-    if let Some(bytes) = hub.queue.find_by_txid(&wire_hash) {
-        tracing::debug!(source = "queue", "transaction lookup answered");
-        return Ok(found(&bytes, 0));
-    }
-
-    // Disposition only in every arm: an indexer's error message can echo the
-    // txid, so nothing but the outcome word reaches the log (#157).
-    match hub.chain.get_transaction(&wire_hash).await {
-        Ok(TxLookup::Found { data, height }) => {
-            tracing::debug!(source = "indexer", "transaction lookup answered");
-            Ok(found(&data, height))
-        }
-        Ok(TxLookup::NotFound) => {
-            tracing::debug!(source = "miss", "transaction lookup: not found");
-            Ok(text(StatusCode::NOT_FOUND, "transaction not found"))
-        }
-        Err(_) => {
-            tracing::debug!(source = "indexer_error", "transaction lookup failed");
-            Ok(text(StatusCode::BAD_GATEWAY, "indexer unavailable"))
-        }
+    match hub.lookup(&wire_hash).await {
+        LookupOutcome::Found { data, height } => Ok(found(&data, height)),
+        LookupOutcome::NotFound => Ok(text(StatusCode::NOT_FOUND, "transaction not found")),
+        LookupOutcome::Unavailable => Ok(text(StatusCode::BAD_GATEWAY, "indexer unavailable")),
     }
 }
 
