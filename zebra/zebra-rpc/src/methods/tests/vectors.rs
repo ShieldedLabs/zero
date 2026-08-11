@@ -2383,6 +2383,7 @@ async fn gbt_with(net: Network, addr: ZcashAddress) {
         miner_address: Some(addr.clone()),
         extra_coinbase_data: None,
         miner_memo: None,
+        coinbase_tx_version: None,
         internal_miner: true,
     };
 
@@ -3078,6 +3079,7 @@ async fn rpc_getdifficulty() {
         miner_address: None,
         extra_coinbase_data: None,
         miner_memo: None,
+        coinbase_tx_version: None,
         internal_miner: true,
     };
 

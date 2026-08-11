@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- New `mining.coinbase_tx_version` config option pins the version of the coinbase transaction
+  built by `getblocktemplate`. From NU6.3 (Ironwood) onward templates default to the V6 format,
+  which some mining-pool coinbase parsers do not support yet; `coinbase_tx_version = 5` keeps
+  building V5 coinbase transactions, which remain consensus-valid. Unset follows the network
+  upgrade's preferred version. Invalid mining configs now log an error instead of silently
+  disabling the mining RPCs.
 - Added `seeder.zec.rocks` and `seeder.testnet.zec.rocks` as default DNS seeders
   ([#11096](https://github.com/ZcashFoundation/zebra/pull/11096)).
 - Prometheus metrics now separate peer connection attempts and terminal outcomes by network,

@@ -8,6 +8,18 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### Added
+
+- `coinbase_tx_version = 5` under `[mining]` in zebra pins `getblocktemplate` to V5
+  coinbase transactions. At Ironwood activation zebrad templates switched to the V6
+  format, and mining-pool software that splices extranonce data into the coinbase
+  broke parsing them; F2Pool works around it by running a hand-patched zebrad
+  (upstream's answer, ZcashFoundation/zebra#10909, is documentation only). The pin
+  gives the same result as a supported config option and stays consensus-valid.
+  Unset keeps the network-upgrade default. A V5 pin with a miner address whose only
+  receiver is Orchard is rejected at startup, since paying an Orchard receiver after
+  NU6.3 needs the V6-only Ironwood output.
+
 ### CI
 
 - `z3-smoke` and `z3-regtest` no longer use GitHub's `paths:` trigger filter.
