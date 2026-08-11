@@ -11,7 +11,7 @@ Today a Zcash light wallet leaks. Under the ZIP 307 light-client protocol it tal
 
 Two efforts share a name and a direction but not a scope.
 
-**The near-term system** is urgent and narrowly scoped: stop transactions that take value out of the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP. It targeted a soft ~Aug 10 deadline (a joint Nym and Shielded Labs blog post promised a mechanism by then). It is a small, attested system, deliberately an 80% first step, honest about the 20% it does not cover. The shim and the hub are built and run as attested enclaves; the Nym hop, STEVE, and the key consortium remain design (see [the shim and the hub](./components.md) and [roadmap](./roadmap.md) for status).
+**The near-term system** is urgent and narrowly scoped: stop transactions that touch the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP. It is a small, attested system, deliberately an 80% first step, honest about the 20% it does not cover. The shim and the hub are built and run as attested enclaves, and a real Orchard to Ironwood migration has gone through the whole stack on mainnet: held, batched, and published on the flush cadence, with the operator's indexer never seeing it. The Nym hop, STEVE, and the key consortium remain design (see [the shim and the hub](./components.md) and [roadmap](./roadmap.md) for status).
 
 **The long-term vision** is the fuller product the name promises: a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer. That arc is deferred until the migration fix ships. [Roadmap](./roadmap.md) traces the three versions (V1 Nym, V2 +TEE, V3 +PIR). Most of this book is the near-term system, because that is what is being built now.
 
@@ -23,7 +23,7 @@ Seen from outside, Zeronym is one thing: an attested front-end that a wallet tal
 flowchart TB
   USER["Wallet user (the IP at stake)"] -->|"runs"| WAL["Wallet software (zingo, Zashi, ywallet)"]
   WAL -->|"queries + broadcasts, same endpoint URL as today"| ZN["ZERONYM"]
-  OPR["Light-wallet operator"] -->|"deploys the front-end; untrusted for Orchard-exit contents"| ZN
+  OPR["Light-wallet operator"] -->|"deploys the front-end; untrusted for Orchard-touching contents"| ZN
   TO["Hub operator / Trusted Organization"] -->|"operates the batcher; announces a detected attack"| ZN
   AUD["Auditor (any independent party)"] -->|"verifies attestation + CT, without trusting an operator"| ZN
   KC["Key consortium (Caution / Nym / SL / ZF)"] -->|"governs the long-lived keys"| ZN
@@ -49,7 +49,7 @@ flowchart TB
 
 - **The wallet user.** The person whose IP address is what is at stake. They install nothing, change no setting, and point their wallet at the same endpoint URL as before.
 - **The wallet software** (zingo, Zashi, ywallet, and the rest). Needs no reconfiguration and no new endpoint, but must choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. That is the one thing asked of wallets, and it is a hard requirement, not a nicety ([the problem](./problem.md) explains why a latest-anchor wallet re-links itself).
-- **The light-wallet operator.** One of the roughly five to ten organizations running a public indexer today. Each deploys Zeronym's front-end behind its own existing URL, in front of its own unmodified indexer. An operator is **untrusted** for the contents of an Orchard exit, and still sees the contents of every ordinary query.
+- **The light-wallet operator.** One of the roughly five to ten organizations running a public indexer today. Each deploys Zeronym's front-end behind its own existing URL, in front of its own unmodified indexer. An operator is **untrusted** for the contents of an Orchard-touching transaction, and still sees the contents of ordinary queries (block sync and address lookups; a wallet's `GetTransaction` is now answered by the hub, not the operator).
 - **The hub operator, also the Trusted Organization.** Runs the central batching service (Caution at launch), and separately performs the **detection** role: verifying the front-end's attestation, monitoring Certificate Transparency, and **publicly announcing** that it has detected signs of an attack. Untrusted for contents; relied on for liveness and for detection.
 - **The auditor.** Any independent third party, in practice often a wallet developer auditing once on behalf of all its users. Verifies the attestation and the CT logs and reproduces the build, **without trusting the operator** ([trust](./trust.md) has the steps).
 - **The key consortium.** Caution, Nym, Shielded Labs, and the Zcash Foundation, holding the long-lived keys as an M-of-N quorum so that no single party, not even the hub operator, controls them.

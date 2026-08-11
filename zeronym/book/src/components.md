@@ -4,7 +4,7 @@ The concrete engineering designs for both TEE services. The shim and the hub are
 
 ## The zero-indexer-shim (ZIS)
 
-The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)), forwards all traffic to the operator's unmodified backing lwd, and isolates only **Orchard-exit** `SendTransaction`s (transactions moving value out of the Orchard pool, the class the code and the hub protocol still call a *migration*), which it routes over Nym to the hub.
+The ZIS is an attested-TEE proxy an operator deploys behind their **existing public URL** (e.g. `zec.rocks:443`). It is a drop-in LWD to every wallet (no reconfiguration or endpoint change; wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)). It forwards most traffic to the operator's unmodified backing indexer, but intercepts two methods and routes them to the hub: an **Orchard-touching** `SendTransaction` (a transaction that carries Orchard actions, the class the code and hub protocol still call a *migration*), and every `GetTransaction`, so a wallet's follow-up on a diverted migration also bypasses the operator. The shipped shim-to-hub hop is plain TLS; Nym is designed, not yet wired in.
 
 ### Why a shim, not the whole indexer in a TEE
 
@@ -16,51 +16,53 @@ The shim avoids it by being a thin router, not an indexer:
 - **Base-agnostic.** It sits in front of whatever the operator already runs, sidestepping the lightwalletd-versus-Zaino question entirely for the near term.
 - **Deployable by the people who already run the infrastructure.** The roughly five to ten existing operators add the shim; users and wallets do not change their endpoint URL.
 
-In effect the shim realizes a scoped "decouple broadcast from query": the crossing broadcast is split off from the operator entirely and sent to a different counterparty, the hub, while queries still go to the operator's own backend, now blinded to the wallet's IP. [Trust and honest limits](./trust.md) covers why the enclave makes operator-blindness real and checkable rather than merely promised.
+In effect the shim realizes a scoped "decouple broadcast from query": the crossing broadcast is split off from the operator entirely and sent to a different counterparty, the hub, while queries still go to the operator's own backend, now blinded to the wallet's IP. The one query exception is `GetTransaction`, which the hub also answers, so the operator cannot watch a migrating wallet fetch its own crossing transaction back. [Trust and honest limits](./trust.md) covers why the enclave makes operator-blindness real and checkable rather than merely promised.
 
 ### Status
 
-The shim began as a proof of concept (commit `56394a1a54`): a transparent h2c gRPC reverse proxy that fronts an operator's existing indexer, forwards every method, stream and trailer verbatim, and decodes exactly one path (`SendTransaction`) to classify it with the real vendored `zebra-chain` parser and **log** the verdict. It is now the shipped component: diversion is implemented (an Orchard exit stops at the shim and goes to the hub), the hub exists as its own crate (`zeronym/hub/`: queue, batcher, chain watcher, its own reproducible build), and both run as attested Nitro enclaves with in-enclave TLS, reproducible StageX builds checked in CI, and an operator runbook (`zeronym/shim/deploy/caution/OPERATORS.md`) a third party has already run end to end. Still design rather than code: the Nym tunnel on the shim-to-hub hop (the shipped hop is a direct TLS dial to a pinned address), STEVE, and the keymaker quorum. The **(built)** marks below date from the PoC and are kept where they carry the evidence story.
+The shim began as a proof of concept (commit `56394a1a54`): a transparent h2c gRPC reverse proxy that fronts an operator's existing indexer, forwards every method, stream and trailer verbatim, and decoded a single path (`SendTransaction`) to classify it with the real vendored `zebra-chain` parser and **log** the verdict. It is now the shipped component. Diversion is implemented: an Orchard-touching transaction stops at the shim and goes to the hub, and a second intercepted method, `GetTransaction`, is answered by the hub rather than the operator. The shim holds **no per-migration state** (it recognises nothing about what it diverted and asks the hub every time), so a restart or a second instance loses nothing. The hub exists as its own crate (`zeronym/hub/`: queue, batcher, chain connection, its own reproducible build), and both run as attested Nitro enclaves with in-enclave TLS, reproducible StageX builds checked in CI, and an operator runbook (`zeronym/shim/deploy/caution/OPERATORS.md`) a third party has already run end to end. A real mainnet Orchard-to-Ironwood migration has gone through the whole stack: held at the shim, batched at the hub, published on the cadence, with the operator's indexer never seeing the direct submit. Still design rather than code: the Nym tunnel on the shim-to-hub hop (the shipped hop is a direct TLS dial to a pinned address), STEVE, and the keymaker quorum. The **(built)** marks below date from the PoC and are kept where they carry the evidence story.
 
-**What it proves, tested rather than asserted** (59 passing tests, plus one ignored by design, the fixture regenerator; the indexer behind them is a hand-rolled h2c mock and a real tonic `CompactTxStreamer` server, never yet a live lightwalletd or Zaino, which for these properties is the stronger evidence: the mock records the exact bytes it received and can stall a stream on command): unknown method paths pass through carrying the *backend's* own status, so the proxy is path-agnostic and forward-compatible with methods it has never heard of; a `SendTransaction` reaches the indexer byte-for-byte with `te`, `grpc-timeout` and custom metadata intact and only the origin retargeted; gRPC trailers survive in both response shapes (a real trailers frame, and trailers-only responses where `grpc-status` rides in the headers); the streaming tests fail by *timeout* if a body is ever buffered, in both directions; an unreachable indexer answers `grpc-status 14 UNAVAILABLE` rather than dropping the connection; and the shim redials after the backing indexer restarts.
+**What it proves, tested rather than asserted** (the wire-transparency suite passes, plus one test ignored by design, the fixture regenerator; the indexer behind these tests is a hand-rolled h2c mock and a real tonic `CompactTxStreamer` server, not a live lightwalletd or Zaino, which for these properties is the stronger evidence: the mock records the exact bytes it received and can stall a stream on command): unknown method paths pass through carrying the *backend's* own status, so the proxy is path-agnostic and forward-compatible with methods it has never heard of; a `SendTransaction` reaches the indexer byte-for-byte with `te`, `grpc-timeout` and custom metadata intact and only the origin retargeted; gRPC trailers survive in both response shapes (a real trailers frame, and trailers-only responses where `grpc-status` rides in the headers); the streaming tests fail by *timeout* if a body is ever buffered, in both directions; an unreachable indexer answers `grpc-status 14 UNAVAILABLE` rather than dropping the connection; and the shim redials after the backing indexer restarts.
 
-The PoC was fully transparent only *because* it was non-destructive. The shipped shim is transparent to the wallet by design and deliberately **not** transparent to the operator: a diverted migration never reaches their indexer, and that asymmetry is the documented residual (the operator learns *that* a client migrated, see [honest limits](./trust.md)).
+The PoC was fully transparent only *because* it was non-destructive. The shipped shim is transparent to the wallet by design and deliberately **not** transparent to the operator: a diverted migration and its follow-up `GetTransaction` never reach their indexer, and that asymmetry is the documented residual (the operator still learns *that* a client migrated, see [honest limits](./trust.md)).
 
 ### Topology and process model
 
 ```
-                         AWS Nitro enclave (attested, diskless)
-  wallet --TLS/h2-->   +---------------------------------------------------+
-  https://<puburl>:443 |  zero-indexer-shim                                 |
-                       |   1. TLS terminate (enclave-born key + cert)       |
-                       |   2. route by HTTP/2 :path                         |
-                       |        SendTransaction -> classify                 |
-                       |          migration -> encrypt -> hub channel ------+--.
-                       |          non-migration --------------------.       |  |
-                       |        any other method / stream ----------|       |  |
-                       |                                            vv       |  | Nym
-                       |                              proxy to backing lwd   |  | tunnel
-                       +---------------------|-------------------------------+--|--------+
-                                             | internal cleartext gRPC          |
-                                             v                                  v
-                                   operator's existing lwd            local nym-proxy-client
-                                   (unmodified)                               -> hub (ZIH)
+                     AWS Nitro enclave (attested, diskless)
+                    +--------------------------------------------------+
+  wallet            |  zero-indexer-shim                               |
+  --TLS/h2-->       |   1. TLS terminate (enclave-born key + cert)     |
+  https://<puburl>  |   2. route by HTTP/2 :path                       |
+       :443         |                                                  |
+                    |     SendTransaction, Orchard-touching  --------->  hub (ZIH)
+                    |     GetTransaction  ---------------------------->  hub (ZIH)
+                    |     SendTransaction, non-Orchard  ---------.      |
+                    |     any other method / stream  ------------|      |
+                    |                                            v      |
+                    |                       proxy to backing indexer    |
+                    +-------------------------|------------------------+
+                                              v
+                                    operator's existing indexer (unmodified)
+
+  shim->hub hop: plain TLS to a pinned address today; Nym designed, not yet wired in.
 ```
 
 - **Enclave contents (the TCB):** the ZIS binary + rustls. The **Nym client is untrusted** (payload is already encrypted to the hub key), so `nym-proxy-client` runs as a sidecar (in-enclave on managed Caution since we do not control the parent; parent-side on BYOC).
-- **The backing lwd is untrusted for migrations** (it never sees them) and trusted for everything else (it already serves those today). From its perspective the ZIS is a single gRPC client.
+- **The backing lwd is untrusted for migrations** (it never sees them) and for `GetTransaction` (also hub-served), and trusted for the rest, which it already serves today. From its perspective the ZIS is a single gRPC client.
 - **Supervisor:** a small PID-1 script starts the Nym client then the ZIS, ties their lifecycles, mirrors `deploy/caution-zaino/combined/run-both.sh`.
 
 ### Request pipeline (the core)
 
 **Decision: an HTTP/2 reverse proxy, not a full `tonic` server.** After TLS termination the ZIS routes by the `:path` pseudo-header:
 
-- **Every path except `SendTransaction`** (all queries, all streams, unknown/new methods, other services): **proxy verbatim** to the backing lwd. Forward request headers + streaming body, stream the response body and **trailers** (`grpc-status`) back. No decode. This is a generic h2 reverse proxy and is base-agnostic (works for Zaino or lightwalletd; unknown methods pass through).
+- **Every path except `SendTransaction` and `GetTransaction`** (all other queries, all streams, unknown/new methods, other services): **proxy verbatim** to the backing lwd. Forward request headers + streaming body, stream the response body and **trailers** (`grpc-status`) back. No decode. This is a generic h2 reverse proxy and is base-agnostic (works for Zaino or lightwalletd; unknown methods pass through).
 - **`/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction`** (unary): buffer the one request message (small), strip the 5-byte gRPC length prefix, `prost`-decode `RawTransaction { data }`, and classify:
   - **pass-through** (no value left the Orchard pool) -> proxy to the backing lwd exactly like the fallback, return the backing lwd's real `SendResponse` (so the operator's node actually relays it and the client gets the true result).
-  - **Orchard exit** (or a fail-safe verdict) -> encrypt to the hub key, hand to the hub channel, and **synthesize** a gRPC response: `SendResponse { errorCode: 0 }`, framed with the 5-byte prefix + `grpc-status: 0` trailer, so the client sees "accepted."
+  - **Orchard-touching** (or a fail-safe verdict) -> hand to the hub, and **synthesize** a gRPC response: `SendResponse { errorCode: 0 }`, framed with the 5-byte prefix + `grpc-status: 0` trailer, so the client sees "accepted."
+- **`/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction`** (unary): decode the `TxFilter`, and when a hub is configured, answer from the **hub**, never the operator. The hub checks its batch queue first (a diverted-but-unflushed migration comes back with height 0, marking it still in the mempool) and otherwise asks the hub's own indexer. Routing every `GetTransaction` this way is what lets the shim keep no per-migration state: it recognises nothing and asks the hub every time. Address-level queries (`GetTaddressTxids`, `GetTaddressBalance`, `GetAddressUtxos`) are **not** intercepted and still reach the operator, an open gap (see [honest limits](./trust.md)).
 
-Rationale over a `tonic` server re-exporting all ~20 methods: this touches exactly one message type (smallest auditable TEE surface), and hyper handles h2 framing / flow control / trailers for the pass-through. "Proxy to backing lwd" is a shared helper used by both the fallback and the non-migration `SendTransaction` case.
+Rationale over a `tonic` server re-exporting all ~20 methods: this decodes only two message types (`RawTransaction` for `SendTransaction`, `TxFilter` for `GetTransaction`), still the smallest auditable TEE surface, and hyper handles h2 framing / flow control / trailers for the pass-through. "Proxy to backing lwd" is a shared helper used by both the fallback and the non-Orchard `SendTransaction` case.
 
 **Decision: route on PATH ALONE, and keep the interception set a SUPERSET of every routing predicate any supported backend uses (built).** The tonic server Zaino is built from dispatches on `req.uri().path()` with no HTTP-method guard, so a `GET` to the `SendTransaction` path reaches its `send_transaction` handler. A routing predicate *narrower* than the backend's fails **open**: the backend acts on a request the classifier never saw, which is the false-negative direction, a migration broadcast in the clear. The PoC had exactly that bug (interception gated on `method == POST`, caught by adversarial review). It now routes through a pure `route_for(path)` that structurally cannot see the HTTP method, plus a near-miss arm that hands any path whose final segment case-insensitively spells `sendtransaction` to the classifier with a distinct warning. The two mistakes are not symmetric: classifying a request the backend would have rejected costs a log line; failing to classify one it accepts is the leak. Being stricter than the thing behind you is not conservative.
 
@@ -95,25 +97,23 @@ Its reasoning still explains why Orchard is the pool in question: **any transact
 This replaces a three-conjunct predicate (`tx.version == V6 && orchard_value_balance > 0 && ironwood_value_balance < 0`). Both dropped conjuncts were real gaps, not redundancy:
 
 - **The Ironwood conjunct** handed an Orchard withdrawal to transparent or to Sapling straight to the operator's indexer in the clear, though it leaks exactly the same fact. Demonstrated, not theorized: the PoC demo used to print `passthrough ... orchard_vb=+250000 ironwood_vb=+0` for precisely that shape, and the same fixture now lands in the diverted class.
-- **The V6 conjunct** passed V5 Orchard spends, which are equally real Orchard exits. Nothing replaces it: `orchard_value_balance()` reads the Orchard bundle, is version-agnostic, and returns zero when there is no bundle (`transaction.rs:1503`), so a V1-V4 transparent transaction reads `0` and passes by the predicate itself.
+- **The V6 conjunct** passed V5 Orchard spends, which are equally real Orchard activity. Nothing replaces it: `orchard_shielded_data()` is version-agnostic and absent on a V1-V4 transparent transaction (`transaction.rs`), which therefore passes by the predicate itself.
 
-Three cases, exhaustively:
+All three value-balance sub-cases carry Orchard actions, so all three divert:
 
-| `orchard_value_balance` | Verdict | Why |
+| `orchard_value_balance` | Shape | Verdict |
 |---|---|---|
-| `> 0` | divert (batch) | Legacy value left a closed pool: the identifying event |
-| `== 0` | pass through | No Orchard value left the pool, which is the ruling's criterion (see the caveat below the table) |
-| `< 0` | pass through | Value entering Orchard, consensus-invalid post-NU6.3; kept only as a directionality probe in tests |
+| `> 0` | value leaving Orchard (an exit) | divert |
+| `== 0` | same-receiver shuffle, fee from another pool: nullifiers published, nets to zero | divert |
+| `< 0` | value entering Orchard, consensus-invalid post-NU6.3 | divert (but unmineable; kept only as a directionality probe in tests) |
 
-**One caveat on the `== 0` row, open rather than closed.** A transaction can spend legacy Orchard notes and still net to zero (fee from transparent or Sapling, change back to the same receiver), and spending them publishes those notes' nullifiers. The ruling's rationale is that *spending Orchard at all* is the identifying event, so that shape is an identifying event the ruling's criterion (`> 0`, value **leaving**) does not catch. The predicate follows the criterion as written; whether to widen it to "an Orchard bundle with at least one spend" is Zooko's call, tracked as open question 4 in `zeronym/shim/README.md` and in front of him and Taylor. Widening is not free: it would sweep in ordinary same-receiver-change activity, which is why the old *gross* alternative was rejected on its own terms.
+Only a transaction with **no Orchard bundle** passes through. This is what **dissolves** the old net-versus-gross boundary: the `== 0` shuffle, which the superseded `> 0` predicate handed to the operator in the clear, now diverts because it carries Orchard actions. [review](./review.md) keeps the retracted `> 0` analysis visible, because the history is what the rest of that checklist is read against. Each shape has its own test vector (including an Orchard withdrawal with no Ironwood bundle, and a V5 Orchard spend), so a regression toward the narrower predicate fails the suite rather than passing quietly.
 
-That **dissolves** the old net-versus-gross boundary question rather than answering it; [review](./review.md) keeps the retracted analysis visible, because the history is what the rest of that checklist is read against. Each case has its own vector (including an Orchard exit with no Ironwood bundle at all, and a V5 Orchard spend), so a regression back toward the narrower predicate fails the suite rather than passing quietly.
-
-**A naming note, rather than papering over it.** The diverted class is still `Class::Migration` in the code, the routing helper is still `treat_as_migration()`, and the wire message is still `SubmitMigration`, but an Orchard-to-transparent deshield is not literally a migration. Post-NU6.3 every Orchard exit is legacy-fund movement, so the behaviour is right and only the name is imprecise. This book says **Orchard exit** for the concept and treats *migration* as the legacy label for the same class.
+**A naming note.** The diverted class is `Class::Migration` in the code, the routing helper `treat_as_migration()`, the wire message `SubmitMigration`, but an Orchard deshield or a same-receiver shuffle is not literally a migration. The code's own accurate name is `is_orchard_touching`, so this book says **Orchard-touching transaction** for the class and keeps *migration* as the legacy label for the same thing.
 
 **Decision: parse with `zebra-chain`** (`orchard_value_balance()` `transaction.rs:1503`, `ironwood_value_balance()` `:1520`, `expiry_height()` `:510`), not a hand-rolled parser. A misclassification is a privacy failure, so correctness outweighs the extra dependency weight; a hand-rolled parser would have to walk most of the tx anyway to reach the bundle value balances. Fixture: `zaino/live-tests/e2e/tests/ironwood_activation.rs`.
 
-The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Migration | PassThrough | Unparseable) with unit tests over real vectors. No I/O, no state, no clock, no config, so it is the easy part to audit. Built as `classify.rs`, which returns the evidence a verdict rests on (version, the Orchard, Ironwood and Sapling value balances, expiry, lengths) alongside the verdict itself, so a log line can never disagree with the routing decision. The Ironwood balance is now **evidence only**: it gates nothing, and it is logged because it is what shows an operator where an Orchard exit went, which is how you see the classifier catching the destinations it used to miss.
+The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Migration | PassThrough | Unparseable) with unit tests over real vectors. No I/O, no state, no clock, no config, so it is the easy part to audit. Built as `classify.rs`, which returns the evidence a verdict rests on (version, the Orchard, Ironwood and Sapling value balances, expiry, lengths) alongside the verdict itself, so a log line can never disagree with the routing decision. The Ironwood balance is now **evidence only**: it gates nothing, and it is logged because it is what shows an operator where an Orchard-touching transaction sent its value, which is how you see the classifier catching the destinations it used to miss.
 
 **Full consumption is part of the parse (built).** `Transaction::zcash_deserialize` stops at the end of the transaction and ignores trailing bytes, so a valid tx followed by junk parses `Ok`. Without a cursor-position check the shim would classify a *prefix* of what the backing node acts on, meaning the shim and the node could disagree about what the transaction even is. Trailing bytes are therefore `Unparseable`, which fails safe toward migration.
 
@@ -125,11 +125,13 @@ The classifier is a pure function `fn classify(raw: &[u8]) -> Class` (Class = Mi
 
 ### The hub channel (ZIS -> ZIH)
 
-The encrypted migration travels ZIS -> local `nym-proxy-client` -> Nym mixnet -> `nym-proxy-server` -> ZIH. To the ZIS this is a local TCP endpoint the Nym client exposes.
+**Shipped today:** the shim reaches the hub over plain TLS, dialing a pinned address per call (an HTTP `POST /` to submit an Orchard-touching transaction, `POST /transaction` to look one up), and returns the hub's verdict synchronously. The Nym tunnel, the STEVE handshake, the `SubmitMigration`/`Ack` framing, and multi-hub failover below are the **designed** hardening, not yet wired in.
+
+In that design the migration travels ZIS -> local `nym-proxy-client` -> Nym mixnet -> `nym-proxy-server` -> ZIH. To the ZIS this is a local TCP endpoint the Nym client exposes.
 
 - **Attested, encrypted channel.** The ZIS verifies the hub's attestation and establishes a shared key (STEVE handshake), then sends each migration as an encrypted message. The payload is end-to-end encrypted to the hub enclave, so the Nym client, the mixnet, and the parent host see only ciphertext. **Decision: the migration is encrypted to the hub key regardless of channel**, so a compromised Nym path yields nothing.
 - **Message:** a small framed record `SubmitMigration { ciphertext, txid, expiry_height }` (txid + expiry in the clear to the hub for dedup and flush scheduling; the tx body encrypted). The hub replies `Ack { txid }`.
-- **Delivery guarantees:** the ZIS holds the migration until it has an Ack from some hub, retrying and failing over across the >=2 hubs using the migration's expiry slack; last-resort direct broadcast before expiry.
+- **Delivery guarantees (designed):** across the future multi-hub deployment the ZIS holds a migration until Ack'd, retrying and failing over across the >=2 hubs on expiry slack, with a last-resort direct broadcast before expiry. The shipped single-hub shim keeps no such state: it submits within the request and returns the hub's verdict, so recovery today rides on the wallet's own resend, not shim-side retention.
 
 ### TLS and certificate model
 
@@ -138,16 +140,15 @@ The encrypted migration travels ZIS -> local `nym-proxy-client` -> Nym mixnet ->
 ### What the operator does
 
 1. Deploy the ZIS enclave, point the public DNS/URL (`zec.rocks:443`) at it.
-2. Configure the ZIS with the **backing lwd's internal address** (e.g. `10.0.0.5:9067`) and the **hub's Nym address**. The backing lwd is unchanged and stays on its internal address.
+2. Configure the ZIS with the **backing lwd's internal address** (e.g. `10.0.0.5:9067`) and the **hub's address** (a pinned TLS endpoint today; a Nym address under the Nym design). The backing lwd is unchanged and stays on its internal address.
 
 ### Configuration
 
 ```
 public_domain      = "zec.rocks"            # for ACME + the served endpoint
 backing_lwd         = "10.0.0.5:9067"        # operator's existing lwd (internal)
-hubs               = ["<nym-addr-1>", "<nym-addr-2>"]   # >=2 for failover
+hubs               = ["<hub-addr-1>", "<hub-addr-2>"]   # TLS today; >=2 for failover (designed)
 network            = "testnet" | "mainnet"   # selects Ironwood branch id / activation
-flush_safety_blocks = 5                       # broadcast direct if expiry within N blocks
 acme               = { provider, contact, challenge = "tls-alpn-01" }
 ```
 
@@ -156,8 +157,8 @@ Config is loaded at boot; no secrets are on disk (keys are quorum- or enclave-he
 ### Failure modes and correctness
 
 - **Backing lwd down:** pass-through requests fail as they would today; the ZIS is transparent, so this is the operator's existing failure mode, not a new one.
-- **Hub unreachable:** hold + retry + fail over across hubs; last-resort direct broadcast before expiry. The ZIS keeps a migration until it sees an Ack, and ideally until it observes the tx on-chain, re-submitting if a hub crash lost it.
-- **Restart durability:** the enclave is diskless, so in-flight migrations in RAM are lost on a ZIS restart. Mitigation: keep the ACK-pending set small (short retry loop), and rely on the wallet's own resend if needed; the hub dedups by txid.
+- **Hub unreachable:** the shipped single-hub shim submits within the request; if the hub cannot be reached it fails that submit rather than leaking the migration to the operator. Retry, fail-over across >=2 hubs on expiry slack, and last-resort direct broadcast are the designed multi-hub behavior, not yet shipped.
+- **Restart / multiple instances:** the shim is **stateless**, holding no per-migration state, so a restart or a second instance loses nothing. Recognition lives at the hub (which dedups identical payloads by their `sha256` hash); the shim recognises nothing and asks the hub every time.
 - **Invalid migration -> false success:** the ZIS returns success before the hub broadcasts, so an invalid tx fails silently at flush. Do stateless sanity at the ZIS (parseable, not already expired); full validity is the hub's broadcast result (surfacing it to the client is out of near-term scope).
 - **The operator learns *that* a client migrated** (see [honest limits](./trust.md)): inherent; do not attempt shim-side mitigation.
 
@@ -172,73 +173,75 @@ zeronym/shim/
     tls.rs                  # in-enclave keygen, ACME, keymaker-quorum persistence
     attest.rs               # NSM attestation binding; /attestation endpoint
     proxy.rs                # h2 server, :path routing, reverse-proxy to backing lwd
-    intercept.rs            # SendTransaction decode + gRPC frame + response synth
+    intercept.rs            # SendTransaction + GetTransaction decode; gRPC frame + response synth
     classify.rs             # is_orchard_touching over zebra-chain (pure, unit-tested)
-    hub.rs                  # STEVE session, encrypt, SubmitMigration, retry/failover
+    hub.rs                  # hub client: submit + GetTransaction lookup (TLS today; STEVE/failover designed)
     config.rs
   tests/
     classify_vectors.rs     # Orchard-exit / into-Orchard / transparent fixtures
     proxy_passthrough.rs    # a mock backing lwd; assert non-migration passes through
 ```
 
-The shipped crate carries `lib.rs`, `main.rs`, `proxy.rs`, `intercept.rs`, `classify.rs`, `config.rs`, `hub.rs`, `state.rs` and `tls.rs` plus the test files. Diversion landed exactly where this design said it would: a branch in `intercept::send_transaction` on the fail-safe-folded verdict, with the upstream dial moved out of `handle()` so the connect happens only after a pass-through verdict.
+The shipped crate carries `lib.rs`, `main.rs`, `proxy.rs`, `intercept.rs`, `classify.rs`, `config.rs`, `hub.rs` and `tls.rs` plus the test files, and **no `state.rs`**: the shim holds no per-migration state. Diversion landed close to where this design said it would: a branch in `intercept::send_transaction` on the fail-safe-folded verdict, with the upstream dial moved out of `handle()` so the connect happens only after a pass-through verdict; `intercept::get_transaction` routes lookups to the hub.
 
 ## The zero-indexer-hub (ZIH)
 
-The ZIH (earlier called `zero-broadcaster`) is an attested-TEE service that receives encrypted **migration** transactions from many shims over Nym, batches them, and publishes them to the Zcash network together on a strict block cadence, so no party can link a migration to the source IP that submitted it. It is run as **>=2 instances with failover**.
+The ZIH (earlier called `zero-broadcaster`) is an attested-TEE service that receives **migration** transactions from many shims, holds them in an in-RAM batch queue, and publishes the batch together on a strict block cadence, so no party can link a migration to the source IP that submitted it. It broadcasts through an **indexer's `CompactTxStreamer`** (`SendTransaction`) over TLS, not a node's JSON-RPC `sendrawtransaction`. Shims reach it over TLS today (Nym designed); running **>=2 instances with failover** is designed, not yet shipped. At launch adoption the modal batch is 0 or 1, and a size-1 batch proves the mechanics and content privacy but not batching anonymity (see [honest limits](./trust.md)).
 
 ### Topology and process model
 
 ```
-   shim A ---.                          AWS Nitro enclave (attested, diskless)
-   shim B ----\  Nym mixnet   +-------------------------------------------------+
-   shim C -----+------------->| nym-proxy-server -> zero-indexer-hub            |
-              /   (encrypted  |    decrypt (in enclave) -> validate -> queue    |
-   shim N ---'    migrations) |    flush every <N blocks -> publish batch  -----+---.
-                              |    hub key from keymaker M-of-N quorum          |   |
-                              +---------------------|---------------------------+   | clearnet
-                                                    | clearnet (tip + broadcast)    |
-                                                    v                               v
-                                       full node(s) (zebrad/zcashd)         Zcash P2P network
-                                       getblockchaininfo + sendrawtransaction
+   shim A ---.                        AWS Nitro enclave (attested, diskless)
+   shim B ----\   TLS today  +--------------------------------------------------+
+   shim C -----+------------>|  zero-indexer-hub                                |
+              /  (Nym        |    decrypt -> re-parse (telemetry only) -> queue |
+   shim N ---'   designed)   |    flush every N blocks -> shuffle -> publish ----+--.
+                             |    (hub key + keymaker quorum: designed)         |  |
+                             +--------------------------------------------------+  | TLS gRPC (h2)
+                                                                                   v
+                                          the hub's indexer  (CompactTxStreamer, over TLS)
+                                            GetLightdInfo   -> tip / height
+                                            SendTransaction -> broadcast the batch
+                                            GetTransaction  -> detail lookups forwarded by shims
 ```
 
-- **Enclave contents (TCB):** the hub binary + rustls. It is **lightweight**, like the shim: it does NOT run a validator in-enclave (that is the 400-500 GB problem). It connects OUT to an existing full node for chain tip and for broadcasting.
-- **Sidecars / egress:** `nym-proxy-server` fronts the inbound side (from shims); clearnet egress to full node(s) for tip + broadcast; egress to the keymaker quorum and (if needed) Nyx-RPC for Nym ecash. The Nym server can be parent-side (untrusted; the payload is already encrypted to the hub key).
+- **Enclave contents (TCB):** the hub binary + rustls. It is **lightweight**, like the shim: it does NOT run a validator in-enclave (that is the 400-500 GB problem). It connects OUT to an existing **indexer** (`CompactTxStreamer` over TLS) for chain tip and for broadcasting, not a node's JSON-RPC.
+- **Sidecars / egress:** TLS gRPC out to the hub's indexer(s) for tip + broadcast. Designed additions: a `nym-proxy-server` sidecar fronting the inbound side, egress to the keymaker quorum, and Nyx-RPC for Nym ecash. A Nym server can be parent-side (untrusted; the payload is encrypted to the hub key).
 - **Supervisor:** small PID-1 script, mirrors the shim's.
 
 ### Language and crates
 
-**Decision: Rust**, static-musl, reproducible (StageX), same reasons as the shim. Key crates: `hyper`/`tower` or a minimal framed-TCP server for the inbound `SubmitMigration` channel; `rustls`; `prost` for the tx bytes; `zebra-chain` to re-parse and re-classify migrations (defense in depth); a JSON-RPC client (`jsonrpsee`) for the node's `sendrawtransaction` / `getblockchaininfo`; `aws-nitro-enclaves-nsm-api` for attestation; the keymaker/quorum client.
+**Decision: Rust**, static-musl, reproducible (StageX), same reasons as the shim. Key crates: `hyper` for the inbound submit channel; `rustls`; `prost` for the tx bytes; `zebra-chain` to re-parse and re-classify migrations (defense in depth); `hyper` speaking `CompactTxStreamer` gRPC directly (two unary calls, `SendTransaction` and `GetLightdInfo`) to the hub's indexer over TLS, not a node JSON-RPC client; `aws-nitro-enclaves-nsm-api` for attestation; the keymaker/quorum client (designed).
 
 ### Inbound: receiving migrations
 
-The hub is the server end of the shim's channel. Over the Nym tunnel it accepts `SubmitMigration { ciphertext, txid, expiry_height }` and replies `Ack { txid }`.
+The hub is the server end of the shim's channel. Today it accepts an HTTP `POST` over TLS carrying the migration (submit) and a second `POST` for a `GetTransaction` lookup. The Nym tunnel and the `SubmitMigration { ciphertext, txid, expiry_height }` / `Ack { txid }` framing below are the designed form.
 
 - **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision (see [review](./review.md)): one-way is enough for privacy, mutual would gate abuse.
 - **Decrypt in-enclave.** Only the attested hub software sees cleartext; the hub host operator (Caution) and the Nym path see ciphertext.
-- **Re-parse, but as telemetry only, never as a drop reason.** The hub parses with `zebra-chain` and re-runs `is_orchard_touching` so a disagreement with the shim is *visible*, and it stops there. An earlier version of this design said "reject anything that is not a valid-looking, unexpired Orchard exit, to keep garbage out of the batch." That is backwards, and the adversarial review of the batching design, recorded in `zeronym/hub/REVIEW.md`, is where it was caught. The shim fail-safes for privacy: a body it cannot read cleanly routes to the migration arm precisely *because* it could not read it. So the transactions most likely to fail the hub's parse are exactly the ones the shim deliberately diverted, and a hub that rejects them converts the shim's fail-safe into a leak, handing an adversary who can characterise the parser skew an on-demand way to force a transaction back onto the direct-broadcast path. An unparseable payload is therefore queued and published; `sendrawtransaction` at the node is the only authority on validity, and the cost of being wrong is one wasted batch slot. The permitted refusals are narrow and structural: authentication failure, a malformed frame, byte-budget exhaustion, and the expiry admission rule. **Rate-limit** per channel to bound resource use.
+- **Re-parse, but as telemetry only, never as a drop reason.** The hub parses with `zebra-chain` and re-runs `is_orchard_touching` so a disagreement with the shim is *visible*, and it stops there. An earlier version of this design said "reject anything that is not a valid-looking, unexpired Orchard-touching transaction, to keep garbage out of the batch." That is backwards, and the adversarial review of the batching design, recorded in `zeronym/hub/REVIEW.md`, is where it was caught. The shim fail-safes for privacy: a body it cannot read cleanly routes to the migration arm precisely *because* it could not read it. So the transactions most likely to fail the hub's parse are exactly the ones the shim deliberately diverted, and a hub that rejects them converts the shim's fail-safe into a leak, handing an adversary who can characterise the parser skew an on-demand way to force a transaction back onto the direct-broadcast path. An unparseable payload is therefore queued and published; the indexer's `SendTransaction` (which relays to its node) is the only authority on validity, and the cost of being wrong is one wasted batch slot. The permitted refusals are narrow and structural: authentication failure, a malformed frame, byte-budget exhaustion, and the expiry admission rule. **Rate-limit** per channel to bound resource use.
 
 ### The batch queue
 
-In-RAM (diskless enclave), keyed by **txid** for dedup. Each entry: `{ txid, expiry_height, tx_bytes, received_at }`. The hub tracks the current chain height `H` from its node connection to schedule flushes and check expiries. Duplicate submissions (same txid) collapse; this is also what makes cross-hub failover safe.
+In-RAM (diskless enclave), keyed by the **payload hash** `sha256(tx_bytes)` for dedup, not the txid: under ZIP 244 two different byte strings can share a txid, and a submitter-chosen key would let an attacker suppress another's entry, so the hash the submitter cannot forge is the right identity. Each entry carries that key plus the derived txid (telemetry only), `expiry_height`, `tx_bytes`, and `received_at`. The hub tracks the current chain height `H` from its indexer connection to schedule flushes and check expiries. Identical resubmissions collapse; this is also what makes cross-hub failover safe.
 
 ### Flush and publish (the core)
 
 - **Flush trigger:** at every height that is a multiple of **N (Decision: N = 20, about 25 minutes)**, and at no other time. The bound is a budget rather than a round number: `N + mining_margin + delivery_lag <= min_wallet_expiry`, or `20 + 4 + 6 = 30` against a 40-block expiry, asserted at startup so a later change to N fails loudly instead of quietly pushing traffic onto the direct-broadcast path. An earlier draft set N to about 10 against "Brave's 20-block expiry", but 20 is only Brave's default and the lowest in the ecosystem (librustzcash 40, Zingo 100), so building to it let the least generous wallet cap everyone. Brave is out of scope for v1 and the ask to them is 40. Doubling the window doubles the expected batch at no cost to any wallet, which is the cheapest improvement available to the batch-size problem in [honest limits](./trust.md).
 - **No early flush, and this replaces an earlier design.** The trigger used to fire early if any queued migration's `expiry_height` came within a safety margin. That is an attacker-operated flush clock: the hub's re-validation is stateless, so one well-formed but consensus-invalid Orchard-touching transaction per block, at no cost, collapses every batching window network-wide and permanently. The urgency is instead made unreachable by **admission control**: accept a migration only if it provably survives the next scheduled flush (`expiry >= next_flush_height(H) + mining_margin`), and refuse it otherwise so the shim holds and retries rather than broadcasting. If nothing urgent can be admitted, nothing can ever be urgent.
 - Batches are triggered by **time / block-height, never by transaction count**: a count-based flush (say every 100 txs) would let an attacker submit 99 of its own migrations the instant it sees a target submit, isolating the target's transaction in the revealed batch. Batch granularity must also line up with how wallets choose anchors and expiries (see [the problem](./problem.md)).
-- **Publish "simultaneously."** On flush: take all pending migrations, **shuffle the order** (never leak arrival order), and submit them to the node(s) as close to simultaneously as possible (parallel `sendrawtransaction`), so they enter the mempool together and land in the same block window. An on-chain / mempool observer then sees N migrations appear together, unordered, from many shims. **Decision: randomize order + parallel submit**; do not drip them out.
+- **Publish "simultaneously."** On flush: take all pending migrations, **shuffle the order** (never leak arrival order), and submit them through the indexer(s) as close to simultaneously as possible (parallel `SendTransaction`), so they enter the mempool together and land in the same block window. An on-chain / mempool observer then sees N migrations appear together, unordered, from many shims. **Decision: randomize order + parallel submit**; do not drip them out.
 - **Confirmation tracking.** Move flushed migrations to an "awaiting confirmation" set; watch the chain until each is mined; **re-submit** if a tx is not seen within a few blocks (node dropped it, or a hub crash lost it). Drop from the set once confirmed or expired.
-- **The anonymity set is the batch itself** (cross-operator), so batch size is the key metric; the hub logs achieved batch size honestly (see [honest limits](./trust.md)). Hub-generated decoys are a costly last resort, not the primary lever.
+- **The anonymity set is the batch itself** (cross-operator), so batch size is the key metric. At launch adoption (measured ~0.77 Orchard-touching tx/block, one to a few operators) the modal batch is 0 or 1, and a size-1 batch's anonymity set is the transaction itself: the shuffle, the simultaneous publish, and the enclave prove content privacy and mechanics, not batching anonymity. The property is real but conditional on adoption, with no fix at v1. The hub therefore measures and exports its achieved batch size rather than asserting the property (see [honest limits](./trust.md)); hub-generated decoys are a costly last resort, not the primary lever.
 
 ### Chain connection (tip + broadcast)
 
-**Decision: connect OUT to existing full node(s) (zebrad/zcashd) over clearnet**, do not run a validator in-enclave.
+**Decision: connect OUT to an existing indexer's `CompactTxStreamer` over TLS**, not a node's JSON-RPC and not a validator in-enclave. The indexer endpoint is already published over TLS, which the enclave requires: without TLS on this hop the parent host reads every batch in the clear moments before it is public. Speaking `CompactTxStreamer` also means the hub broadcasts through exactly the interface wallets use, so nothing about a batched migration looks different from an ordinary submission at the point it enters the network.
 
-- **Tip:** poll / subscribe `getblockchaininfo` (or `getbestblockhash` + height) to keep `H` current for flush cadence and expiry checks.
-- **Broadcast:** `sendrawtransaction` for each tx in the flush. Connect to **>=2 nodes** for robustness; optionally speak Zcash **P2P `tx`** to many peers directly (Nate's point: P2P relay reaches a far larger node set than one lwd endpoint, a bigger anonymity set for the broadcast source). The hub's node IP is not user-linked, so clearnet is acceptable near-term; broadcasting over Nym to hide the hub's own IP is an optional enhancement.
-- The node connection is a hard dependency (no tip -> cannot schedule; no node -> cannot broadcast), so >=2 nodes, and node-down is part of the hub's failure handling.
+- **Tip:** poll `GetLightdInfo` for the height, keeping `H` current for flush cadence and expiry admission.
+- **Broadcast:** `SendTransaction` for each tx in the flush. Configure **>=2 indexer endpoints** for robustness. Honest cost: an indexer is a single funnel in front of a single node, so the "publish to every node" property (`REVIEW.md` #6) is weaker here than direct multi-node broadcast, and a batch that entered only one mempool is one outage from never being mined. Broadcasting to many P2P peers directly (Nate's point: a bigger anonymity set for the broadcast source), and over Nym to hide the hub's own IP, are designed enhancements.
+- **Detail lookups:** the same indexer answers `GetTransaction`, which is how the shim's intercepted `GetTransaction` is served without touching the operator.
+- The indexer connection is a hard dependency (no tip -> cannot schedule; no indexer -> cannot broadcast), so >=2 endpoints, and indexer-down is part of the hub's failure handling.
 
 ### Key management (hub key, STEVE, keymaker quorum)
 
@@ -249,17 +252,17 @@ In-RAM (diskless enclave), keyed by **txid** for dedup. Each entry: `{ txid, exp
 ### Failover and multiple hubs
 
 - **Run >=2 hubs, shared key.** A shim prefers a **primary** hub (so batches converge there and stay dense) and **fails over** to a standby only when the primary is unreachable. Standbys are hot but mostly idle until failover, so **batch density is preserved** (one active hub) while liveness is covered.
-- **Dedup by txid** within each hub. If failover causes a migration to reach two hubs, both may publish; the second on-chain submission is a **harmless already-known duplicate**. No cross-hub state sync is needed near-term (Decision: accept harmless duplicates over the complexity of a shared published-set).
+- **Dedup by payload hash** within each hub. If failover causes a migration to reach two hubs, both may publish; the second on-chain submission is a **harmless already-known duplicate**. No cross-hub state sync is needed near-term (Decision: accept harmless duplicates over the complexity of a shared published-set).
 - The consortium's multiple orgs are the natural operators of the standby hubs, which also starts decentralization.
 
 ### Configuration
 
 ```
-listen_nym          = <hub Nym address / proxy-server config>
-nodes               = ["node-a:8232", "node-b:8232"]   # tip + broadcast, >=2
+listen               = <inbound TLS endpoint today; hub Nym address under the Nym design>
+indexers             = ["indexer-a:9067", "indexer-b:9067"]   # CompactTxStreamer over TLS; tip + broadcast
 network             = "testnet" | "mainnet"
 flush_interval_blocks = 20                # N + mining_margin + delivery_lag <= min wallet expiry (40)
-safety_margin_blocks  = 5                 # flush early if expiry within; covers mining time
+mining_margin_blocks  = 4                 # admission control: admit only if expiry survives the next flush
 role                = "primary" | "standby"
 keymaker_quorum     = <quorum endpoints / policy>
 peer_hubs           = [...]               # awareness only, no shared state near-term
@@ -267,9 +270,9 @@ peer_hubs           = [...]               # awareness only, no shared state near
 
 ### Failure modes and correctness
 
-- **Node(s) down:** cannot get tip or broadcast; with >=2 nodes this is rare, but if all are down the hub cannot flush. Since the shim retains + re-submits and fails over, and migrations carry expiry slack, brief node outages self-heal; a sustained one is what the shim's last-resort direct broadcast covers.
-- **Hub crash:** the in-RAM queue and awaiting-confirmation set are lost (diskless). The shim retains each migration until it observes on-chain confirmation and re-submits, and fails over to a standby, so a hub crash does not lose migrations. (This makes the shim-side retain-until-confirmed a hard requirement.)
-- **Expiry pressure:** flush early per `safety_margin`; never let a queued migration expire in the buffer.
+- **Indexer(s) down:** cannot get tip or broadcast; with >=2 endpoints this is rare, but if all are down the hub cannot flush. Brief outages self-heal on the migrations' expiry slack; a sustained one is what the designed last-resort direct broadcast covers.
+- **Hub crash:** the in-RAM queue and awaiting-confirmation set are lost (diskless). Recovery is designed, not shipped: standby hubs plus a shim that resubmits across failover on expiry slack. The shipped shim is stateless and does not itself retain migrations, so hub-crash durability rides on the wallet's own resend and the multi-hub design.
+- **Expiry pressure:** admission control refuses any migration that would not survive the next scheduled flush, so nothing urgent is ever queued. There is no early-flush escape hatch (that was retired as an attacker-operated flush clock).
 - **Garbage / abuse:** re-validate + rate-limit; optionally require shim attestation (see [review](./review.md)).
 - **Fee too low to mine before expiry:** the fee is in the wallet-signed tx and the hub cannot change it; `safety_margin` gives mining headroom, but a badly-underpaid migration can still fail. That is the wallet's responsibility, not the hub's.
 
@@ -282,17 +285,19 @@ zeronym/hub/
     main.rs          # config, boot sequence, run the flush loop
     inbound.rs       # STEVE server, SubmitMigration decode, decrypt
     validate.rs      # re-parse + re-classify (zebra-chain) + expiry/well-formed checks
-    queue.rs         # in-RAM dedup queue keyed by txid; expiry tracking
-    flush.rs         # cadence + expiry trigger, shuffle, parallel publish, confirm-track
-    chain.rs         # node connection: tip + sendrawtransaction (+ optional P2P)
+    queue.rs         # in-RAM dedup queue keyed by payload hash; expiry tracking
+    flush.rs         # cadence trigger, admission control, shuffle, parallel publish, confirm-track
+    chain.rs         # indexer connection: GetLightdInfo (tip) + SendTransaction (broadcast)
     keys.rs          # keymaker quorum reconstitution; STEVE handshake; decrypt
     attest.rs        # NSM attestation binding; /attestation
     config.rs
   tests/
     flush_batch.rs   # queue N migrations, assert a single simultaneous shuffled publish
-    expiry.rs        # assert early flush when expiry is within the safety margin
-    dedup.rs         # duplicate txids collapse; cross-hub duplicate is harmless
+    expiry.rs        # assert a migration that cannot survive the next flush is refused (admission control)
+    dedup.rs         # identical payloads collapse; cross-hub duplicate is harmless
 ```
+
+Shipped modules: `chain.rs`, `queue.rs`, `batcher.rs`, `server.rs`, `tls.rs`, `config.rs`. The STEVE and keymaker pieces sketched above are designed, not yet split out.
 
 ## Boot, build, and attestation
 
@@ -302,12 +307,12 @@ Both services share the same enclave idioms: a static-musl Rust binary, a reprod
 
 **Shim boot sequence.** (1) Key material: reconstitute the TLS keypair from the keymaker M-of-N quorum if one exists, else generate in-enclave and register with the quorum (persists across cold boots/upgrades; the private key never leaves the enclave). (2) Certificate: ensure a valid CA cert for the public domain via ACME, keyed to the enclave-born key. (3) Attestation: bind the TLS public key into the Nitro attestation; serve `/attestation` (or expose over Nym). (4) Hub session: STEVE-handshake each configured hub; cache the shared keys. (5) Backing lwd: open the upstream h2 connection(s); health-check. (6) Listen: bind `:443`, serve.
 
-**Hub boot sequence.** (1) Hub key from the keymaker quorum (reconstitute; private key stays in-enclave). (2) Attestation: bind the hub public key into the Nitro attestation; publish `/attestation` (or over Nym) for the shim's STEVE check + auditors. (3) Chain: connect to the full node(s); sync `H`; verify `sendrawtransaction` works. (4) Inbound: start `nym-proxy-server`; begin accepting `SubmitMigration` over STEVE. (5) Run the flush loop against `H`.
+**Hub boot sequence.** (1) Hub key from the keymaker quorum (reconstitute; private key stays in-enclave). (2) Attestation: bind the hub public key into the Nitro attestation; publish `/attestation` (or over Nym) for the shim's STEVE check + auditors. (3) Chain: connect to the hub's indexer(s) over TLS; sync `H` via `GetLightdInfo`; verify `SendTransaction` works. (4) Inbound: accept submit/lookup `POST`s over TLS today (designed form: a `nym-proxy-server` sidecar accepting `SubmitMigration` over STEVE). (5) Run the flush loop against `H`.
 
 The open forks (cert model, STEVE wire form over Nym, mutual vs one-way STEVE, `nym-proxy-server` placement, zero-ingress attestation delivery, JSON-RPC front-ends, keymaker walkthrough, publish path, batch-density vs failover, flush cadence) are collected in [review](./review.md).
 
 ### Build and test
 
-**Shim.** Unit: `classify.rs` against real vectors (the `ironwood_activation.rs` migrate tx, an Orchard exit with no Ironwood bundle, a V5 Orchard spend, value entering Orchard, and a mainnet transparent tx), the correctness-critical piece. Integration: a mock backing lwd; assert every non-`SendTransaction` method and a pass-through `SendTransaction` reach it unchanged, and an Orchard exit is diverted to a mock hub (never reaches the backing lwd). Built so far: the classifier vectors, the wire-level transparency suite, and the logging assertions. Still open, and the largest gap in the evidence: the fixtures are generated with zebra's own serializer, so no transaction a wallet actually produced has been classified; capturing the `orchard_note_spends_to_ironwood_across_boundary` tx from `ironwood_activation.rs` closes it and needs a running regtest node. Enclave: the reproducible StageX build (done, CI-checked), the Nitro boot (done, live deploys since 2026-08-01), and the nonce-bound `/attestation` document (served; the manifest binds the deploy config including `ZIS_BACKEND`, while binding the TLS pubkey specifically remains open) are real, and a third-party operator has run the Auditor Role steps against a live enclave (PCR0/1 caveat in [trust](./trust.md)). Still open, end to end: ZIS in front of a live indexer, a real wallet syncs (pass-through) and submits a testnet migration that lands in a hub batch.
+**Shim.** Unit: `classify.rs` against real vectors (the `ironwood_activation.rs` migrate tx, an Orchard-touching tx with no Ironwood bundle, a V5 Orchard spend, value entering Orchard, and a mainnet transparent tx), the correctness-critical piece. Integration: a mock backing lwd; assert every non-intercepted method and a pass-through `SendTransaction` reach it unchanged, and an Orchard-touching transaction (and every `GetTransaction`) is diverted to a mock hub, never reaching the backing lwd. Built so far: the classifier vectors, the wire-level transparency suite, and the logging assertions. The fixtures were long generated with zebra's own serializer, so no wallet-produced transaction had been classified; the mainnet migration run closed that gap by classifying and diverting a transaction a wallet actually produced. Enclave: the reproducible StageX build (done, CI-checked), the Nitro boot (done, live deploys since 2026-08-01), and the nonce-bound `/attestation` document (served; the manifest binds the deploy config including `ZIS_BACKEND`, while binding the TLS pubkey specifically remains open) are real, and a third-party operator has run the Auditor Role steps against a live enclave (PCR0/1 caveat in [trust](./trust.md)). **Done end to end:** a real mainnet Orchard-to-Ironwood migration has run ZIS -> hub -> batch -> published on the cadence, with the operator's indexer never seeing the direct submit. What it does not yet prove is batching anonymity: at launch adoption the batch is size 1 (see [honest limits](./trust.md)).
 
-**Hub.** Unit: `flush.rs` (N queued migrations -> one shuffled, parallel publish), `expiry.rs` (early flush within the safety margin), `dedup.rs` (txid collapse; harmless cross-hub duplicate), `validate.rs` (reject non-migrations / expired). Integration: a mock shim submitting over a local STEVE-ish channel and a mock node capturing `sendrawtransaction`; assert a batch of migrations is published together, shuffled, once per txid. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the hub key; a shim completes STEVE and submits a migration. End to end: >=1 shim in front of the live testnet Zaino, a testnet migration flows shim -> Nym -> hub -> batch -> testnet chain; confirm it lands and is unlinkable to the submitting shim.
+**Hub.** Unit: the flush (N queued migrations -> one shuffled, parallel publish), admission control (a migration that would not survive the next scheduled flush is refused, never early-flushed), dedup (identical-payload collapse; harmless cross-hub duplicate), and re-parse as telemetry (a shim/hub disagreement is logged, never a drop reason). Integration: a mock shim submitting over a local channel and a mock indexer capturing `SendTransaction`; assert a batch is published together, shuffled, once per payload. Enclave: reproducible StageX build; boot in a Nitro enclave; verify the `/attestation` doc carries the hub key; a shim submits a migration over TLS. **Done end to end (mainnet, TLS hop):** a migration flowed shim -> hub -> batch -> published through the indexer and landed on-chain, unlinkable at the point of publish. Still unproven: unlinkability *as batching* (needs a batch larger than one, i.e. adoption) and the Nym hop.
