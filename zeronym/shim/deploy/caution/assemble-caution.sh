@@ -17,10 +17,16 @@
 # Usage:
 #   sh .../assemble-caution.sh --name <enclave> --backend <ip:port> \
 #       --backend-tls <cert-name> --tls-domain <wallet-facing-domain> \
+#       [--app-source <public-git-url>] \
 #       [--hub <ip:port> --hub-tls <hub-cert-name>] [dest-dir]
 #
 # --hub turns diversion ON. Without it the shim is forward-only: it classifies
 # and logs, and still hands every migration to the operator's indexer.
+#
+# --app-source records, in the manifest's build block, the public git URL where
+# this assembled repository is published. `caution verify` clones that URL and
+# rebuilds; without it verify refuses outright and the attestation proves only
+# that SOME image runs in a real enclave.
 #
 # One enclave fronts exactly one indexer, so each backend gets its own app and
 # its own assembled repo. Both arguments are required rather than defaulted: a
@@ -37,8 +43,7 @@ BACKEND_TLS=""
 HUB=""
 HUB_TLS=""
 TLS_DOMAIN=""
-TLS_EMAIL="security@shieldedlabs.com"
-TLS_PRODUCTION="false"
+APP_SOURCE=""
 DEBUG="false"
 DEST=""
 while [ $# -gt 0 ]; do
@@ -49,8 +54,7 @@ while [ $# -gt 0 ]; do
 		--hub)         HUB=$2; shift 2 ;;
 		--hub-tls)     HUB_TLS=$2; shift 2 ;;
 		--tls-domain)  TLS_DOMAIN=$2; shift 2 ;;
-		--tls-email)   TLS_EMAIL=$2; shift 2 ;;
-		--production)  TLS_PRODUCTION="true"; shift ;;
+		--app-source)  APP_SOURCE=$2; shift 2 ;;
 		--debug)       DEBUG="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
@@ -62,16 +66,13 @@ done
 [ -n "$BACKEND_TLS" ] || { echo "error: --backend-tls is required (the DNS name the backend's cert carries)" >&2; exit 2; }
 [ -n "$TLS_DOMAIN" ] || { echo "error: --tls-domain is required (the name wallets connect to)" >&2; exit 2; }
 
-# Production is opt-in and announced, because it spends one of five weekly
-# duplicate-certificate issuances for this name and there is no way to get it
-# back. Staging has no meaningful ceiling and is where a change should first
-# prove itself.
-if [ "$TLS_PRODUCTION" = "true" ]; then
-	echo "==> Let's Encrypt PRODUCTION for $TLS_DOMAIN."
-	echo "    This spends one of 5 weekly issuances. Record it in RESTARTS.md."
-else
-	echo "==> Let's Encrypt STAGING for $TLS_DOMAIN (certificates will not be trusted by clients)."
-fi
+# There is no staging knob on this path: the in-enclave Caddy picks the ACME
+# directory itself and always uses production. Every push therefore spends one
+# of this hostname's five weekly duplicate-certificate issuances, and running
+# out fails closed (TCP accepts, TLS never completes) with no console to say
+# why. Iterate on throwaway hostnames; see RESTARTS.md.
+echo "==> Let's Encrypt PRODUCTION for $TLS_DOMAIN: every push spends one of this"
+echo "    name's 5 weekly issuances. Iterate on throwaway names; see RESTARTS.md."
 
 # ZIS_BACKEND parses as a Rust SocketAddr, so a hostname does not merely
 # degrade, it fails to parse and the enclave never starts. Catch that here,
@@ -93,8 +94,30 @@ echo "$BACKEND_PORT" | grep -qE '^[0-9]+$' || {
 # address gets working, honest, unchanged behaviour rather than a shim that
 # fails every migration.
 STAGE=$(mktemp -d)
-# shellcheck disable=SC2064
-trap "rm -rf '$STAGE'" EXIT INT TERM
+KEEP="$STAGE/keep"
+# On ANY exit, put a preserved deployment link (see the block above the
+# assemble.sh call) back in $DEST before the temp dir is swept. Losing
+# .caution/ orphans a live app: push has no remote, verify has no endpoint,
+# and teardown cannot find the resource to destroy, so on BYOC the AWS stack
+# sits there billing with nothing left that knows about it. If the restore
+# itself fails, keep $STAGE rather than delete the only copy.
+cleanup() {
+	if [ -d "$KEEP/.caution" ] || [ -d "$KEEP/.git" ]; then
+		mkdir -p "$DEST" || true
+	fi
+	if [ -d "$KEEP/.caution" ]; then
+		mv "$KEEP/.caution" "$DEST/.caution" || true
+	fi
+	if [ -d "$KEEP/.git" ]; then
+		mv "$KEEP/.git" "$DEST/.git" || true
+	fi
+	if [ -d "$KEEP/.caution" ] || [ -d "$KEEP/.git" ]; then
+		echo "warning: could not restore .caution/.git; recover them from $KEEP" >&2
+	else
+		rm -rf "$STAGE"
+	fi
+}
+trap cleanup EXIT INT TERM
 HUB_EGRESS="$STAGE/hub_egress.txt"
 HUB_ENV="$STAGE/hub_env.txt"
 : > "$HUB_EGRESS"
@@ -162,6 +185,29 @@ if [ -n "$HUB_TLS" ] && [ -z "$HUB" ]; then
 	exit 2
 fi
 
+# The manifest can record where this assembled repository is published, and
+# verification hangs on it: Caution's own git remote is push-only, so the
+# published repo is the ONLY route an auditor has to the deployed tree.
+# Injected as a marker (like the hub blocks) because a git URL may contain
+# characters sed treats as metacharacters in the replacement text.
+APP_SRC_FILE="$STAGE/app_source.txt"
+: > "$APP_SRC_FILE"
+if [ -n "$APP_SOURCE" ]; then
+	cat > "$APP_SRC_FILE" <<EOF
+
+    # Where this assembled repository is published. 'caution verify' clones
+    # this URL and rebuilds, so its root must be THIS directory, not the zero
+    # monorepo, and the deployed commit must be pushed there on main and
+    # tagged: the manifest pins branch AND commit.
+    app_sources = ["$APP_SOURCE"]
+EOF
+else
+	echo "==> WARNING: no --app-source. The manifest will record no application source,"
+	echo "    so 'caution verify' refuses (\"Cannot reproduce private code deployment\")"
+	echo "    and the attestation proves only that SOME image runs in a real enclave."
+	echo "    Create a public repo for this assembled directory and pass its URL."
+fi
+
 ZERO_ROOT=$(git rev-parse --show-toplevel)
 HERE="$ZERO_ROOT/zeronym/shim/deploy/caution"
 DEST=${DEST:-"$(dirname "$ZERO_ROOT")/$NAME"}
@@ -183,10 +229,36 @@ fi
 
 echo "==> assembling Caution deploy repo from zero@$SHORT into $DEST"
 
+# assemble.sh starts with `rm -rf "$DEST"`: the clean slate is what makes the
+# reproducibility argument work, and reproduce.sh depends on it staying that
+# way, so the preservation lives HERE, not there. After `caution apps create`
+# (or `caution init --byoc`) this directory also holds what binds it to the
+# deployed app: .caution/ (deployment.json carries the resource_id) and .git
+# (the 'caution' remote, and the history the platform already has). Wiping
+# those orphans the app: no remote to push to, nothing for verify to infer,
+# nothing for teardown to destroy. Step them aside for the duration; the
+# cleanup trap restores them even if assemble.sh fails. Preserving .git also
+# keeps every re-assembly on the same history, so a redeploy is a fast-forward
+# `git push caution main` instead of the destroy/create/repoint-DNS cycle.
+# (Reported by the zec.rocks operators, who lost a live deployment link to
+# exactly this and recovered it from a backup they happened to have.)
+if [ -d "$DEST/.caution" ] || [ -d "$DEST/.git" ]; then
+	echo "==> preserving .caution/ and .git across re-assembly"
+	mkdir -p "$KEEP"
+	if [ -d "$DEST/.caution" ]; then mv "$DEST/.caution" "$KEEP/.caution"; fi
+	if [ -d "$DEST/.git" ]; then mv "$DEST/.git" "$KEEP/.git"; fi
+fi
+
 # The build context: the shim crate plus the parts of zebra/ and zaino/ its path
 # dependencies need. Identical to what the reproducibility check builds, because
 # it is the same script.
 sh "$ZERO_ROOT/zeronym/shim/deploy/assemble.sh" "$DEST"
+
+# Put them straight back, so the git steps at the bottom of this script see the
+# preserved history and commit on top of it (files the new context no longer
+# carries become staged deletions via `add -A`).
+if [ -d "$KEEP/.caution" ]; then mv "$KEEP/.caution" "$DEST/.caution"; fi
+if [ -d "$KEEP/.git" ]; then mv "$KEEP/.git" "$DEST/.git"; fi
 
 # Caution's build.containerfile is resolved from the repo root, so the recipe
 # has to exist there. Copy it OUT OF THE ASSEMBLED CONTEXT, never from the
@@ -214,9 +286,10 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 # the files built above, so nothing has to survive sed quoting. Both are empty
 # in the forward-only case, and an empty file removes the marker line entirely.
 RENDERED="$STAGE/caution.hcl"
-awk -v egress="$HUB_EGRESS" -v env="$HUB_ENV" '
+awk -v egress="$HUB_EGRESS" -v env="$HUB_ENV" -v appsrc="$APP_SRC_FILE" '
 	/__HUB_EGRESS__/ { while ((getline l < egress) > 0) print l; next }
 	/__HUB_ENV__/    { while ((getline l < env) > 0) print l; next }
+	/__APP_SOURCE__/ { while ((getline l < appsrc) > 0) print l; next }
 	{ print }
 ' "$HERE/caution.hcl.tmpl" > "$RENDERED"
 
@@ -227,8 +300,6 @@ sed \
 	-e "s|__BACKEND_PORT__|$BACKEND_PORT|g" \
 	-e "s|__BACKEND_TLS_NAME__|$BACKEND_TLS|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
-	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
-	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
 	"$RENDERED" > "$DEST/caution.hcl"
 
 # --debug: flip the enclave into debug mode and turn on per-request shim logging.
@@ -265,10 +336,10 @@ EXPECTED=$(cat "$ZERO_ROOT/zeronym/shim/deploy/EXPECTED_SHA256" 2>/dev/null || e
 cat > "$DEST/PROVENANCE" <<EOF
 zero-indexer-shim Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
-serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME)
+serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME production)
 backend:         $BACKEND verified as $BACKEND_TLS
 diversion:       $([ -n "$HUB" ] && echo "ON -> hub $HUB${HUB_TLS:+ verified as $HUB_TLS}" || echo "OFF (forward-only, no privacy)")
-acme directory:  $([ "$TLS_PRODUCTION" = "true" ] && echo "letsencrypt PRODUCTION" || echo "letsencrypt staging")
+app source:      $([ -n "$APP_SOURCE" ] && echo "$APP_SOURCE" || echo "none (not independently verifiable)")
 source commit:   $SHA
 expected binary: $EXPECTED
 
@@ -293,7 +364,15 @@ echo "==> assembled: $DEST ($(du -sh "$DEST" | cut -f1))"
 echo
 echo "Next, from $DEST:"
 echo "  caution login --username <name> --qr     # FIDO2; session expires often"
-echo "  caution apps create --name '"$NAME"'"
-echo "  caution init <app-id>"
-echo "  git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git"
-echo "  git push caution main"
+echo "  caution apps create    # fully-managed (no --name; auto-names, adds the 'caution' remote)"
+echo "    or, in your own AWS account: AWS_PROFILE=<profile> caution init --byoc --region <region>"
+echo "  git push caution main  # builds and boots the enclave; prints its IP"
+echo ""
+echo "Then publish this repo at the --app-source URL: push main and tag the commit"
+echo "(the manifest pins branch AND commit), then 'caution verify' from this directory."
+echo ""
+echo "To REDEPLOY after re-assembling: git push caution main"
+echo "  (.caution/ and .git are preserved across re-assembly, so the push fast-forwards)."
+echo "If the push is refused (unrelated history, or the app is in a failed state):"
+echo "  echo y | caution apps destroy <app-id>"
+echo "  caution apps create && git push caution main   # new app id AND new IP: repoint DNS"

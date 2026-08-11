@@ -7,8 +7,8 @@ reproduces the build knows the code holding the plaintext is the code they read.
 
 Sibling of `zeronym/shim/deploy/caution/`. The shim's README covers the platform
 mechanics (in-enclave TLS termination on 8083, the FIDO2 login, Let's Encrypt
-staging-vs-production limits, debug-mode console); this covers only what differs
-for the hub.
+issuance limits, debug-mode console); this covers only what differs for the
+hub.
 
 ## What differs from the shim deploy
 
@@ -37,17 +37,15 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --indexers 66.42.124.202:443 \
   --indexer-tls lwd.shieldedinfra.net \
   --tls-domain hub.example.org \
-  [--production] [--debug]
+  [--debug]
 ```
 
 Then, from the assembled directory:
 
 ```sh
 caution login --username <name> --qr
-caution apps create --name zeronym-hub-1
-caution init <app-id>
-git remote add caution ssh://git@dashboard.caution.co:2222/<app-id>.git
-git push caution main
+caution apps create      # no --name: auto-names the app, adds the 'caution' remote
+git push caution main    # builds and boots the enclave; prints its IP
 ```
 
 Point the hub's DNS name at the enclave IP the deploy prints, and set the shim's
@@ -56,8 +54,8 @@ verifies the enclave's in-enclave certificate.
 
 ## Verify the attestation
 
-`caution verify <app-id>` (or `POST /attestation`) returns the measurement bound
-to the running EIF. Confirm it against a local reproduce:
+`caution verify` (from the assembled directory; or `POST /attestation`) returns
+the measurement bound to the running EIF. Confirm it against a local reproduce:
 
 ```sh
 git checkout <the PROVENANCE commit>

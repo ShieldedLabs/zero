@@ -13,9 +13,9 @@ to explain it.
 
 Two habits keep this from biting:
 
-- **Prove a change against Let's Encrypt staging first.** Staging has no
-  meaningful ceiling. `assemble-caution.sh` defaults to staging; `--production`
-  is a deliberate act.
+- **There is no staging on this path.** The in-enclave Caddy picks the ACME
+  directory itself and always uses production, so every push spends an
+  issuance; the throwaway-name habit below is the whole budget control.
 - **Use throwaway names while iterating** (`hub-test-1`, `hub-test-2`, ...): the
   budget is keyed on the hostname set, so each distinct name has its own 5/week.
   Promote to the real name only once green, and stop redeploying it.

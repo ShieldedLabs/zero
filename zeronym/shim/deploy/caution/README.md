@@ -67,7 +67,9 @@ sh zeronym/shim/deploy/caution/assemble-caution.sh \
   --tls-domain zis-lwd.shieldedinfra.net
 ```
 
-All four flags are required. `66.42.124.202` is Shielded Labs' own load balancer
+All four flags are required; add `--app-source <public-git-url>` so `caution
+verify` can rebuild what was deployed (OPERATORS.md covers publishing the
+assembled context). `66.42.124.202` is Shielded Labs' own load balancer
 (Traefik, terminating TLS in front of lightwalletd); a third-party operator points
 these at their own indexer instead (see [OPERATORS.md](OPERATORS.md)).
 
@@ -82,15 +84,25 @@ git push caution main
 ```
 
 `--qr` is not optional in practice: without it the CLI blocks on a local
-authenticator and gives no hint that a phone-based FIDO2 flow exists. `caution
-apps create` takes no `--name`; it reads the repo, assigns a generated name, and
-adds the `caution` git remote for you, so there is no separate `init` or `git
-remote add` step. Create a **new** app per shim; pushing into another app's repo
-replaces that enclave. Redeploying later is just `git push caution main` against
-the same app.
+authenticator and gives no hint that another flow exists (`--qr` prints a URL
+any browser can open, including on the same machine). `caution apps create`
+takes no `--name`; it reads the repo, assigns a generated name, and adds the
+`caution` git remote for you, so there is no separate `git remote add` step.
+Create a **new** app per shim; pushing into another app's repo replaces that
+enclave. To redeploy: re-assemble and push again. The assembler preserves
+`.caution/` and the git history, so the push fast-forwards onto the app the
+directory is already bound to. If the push is refused (an unrelated history
+from before the preservation fix, or an app stuck in a failed state), fall back
+to the destroy cycle: destroy the app, `git remote remove caution`, `apps
+create` a fresh one, push, repoint DNS. `apps destroy` prompts; pipe `echo y`
+when scripting.
 
-Enclave IPs change on most redeploys. On Shielded Labs' infra the enclave's egress
-IP must be allowed on the backend's ingress `ipAllowList` (in shielded-infra) and
+The enclave IP is stable across successful redeploys: Caution allocates an
+Elastic IP per app and re-associates it on each deploy, and it survives
+instance replacement. It is released only by teardown or by a failed deploy's
+rollback, so a changed IP means the previous deploy failed and rolled back.
+When the IP does change, on Shielded Labs' infra the enclave's egress IP must
+be re-allowed on the backend's ingress `ipAllowList` (in shielded-infra) and
 its DNS record updated together; a stale allowlist entry fails closed, and the
 symptom is the shim hanging on every upstream dial with no console to see why.
 
@@ -111,12 +123,17 @@ the shim is not transparent and that is a bug in the shim, not in the deployment
 Then the part that makes it more than a proxy:
 
 ```bash
-caution verify <app-id>
+caution verify        # from the assembled directory; it infers the app
 ```
 
 This takes a nonce, fetches a fresh attestation, rebuilds the image from the
-pushed source, and compares measurements. It is what turns "they say this is the
-code" into something checkable.
+published `app_sources` repo, and compares measurements. It is what turns "they
+say this is the code" into something checkable. Third parties can run
+`caution verify --attestation-url https://<domain>/attestation` with no Caution
+account and no checkout. See OPERATORS.md for the current PCR0/1 caveat: a
+Caution-side unpinned-framework bug makes verify report FAILED on healthy
+enclaves, and PCR2 (the application layer) is the check that matters until
+their fix lands.
 
 ## When it boots but does not serve
 

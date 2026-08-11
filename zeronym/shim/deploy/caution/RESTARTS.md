@@ -53,9 +53,9 @@ gRPC-ingress 500 that actually blocked this (see Resolution above).
 
 Two habits keep this from biting:
 
-* **Prove a change against Let's Encrypt staging first.** Staging has no
-  meaningful ceiling. `ZIS_TLS_PRODUCTION` is off by default precisely so that
-  reaching production is a deliberate act.
+* **There is no staging on this path.** The in-enclave Caddy picks the ACME
+  directory itself and always uses production, so every push spends an
+  issuance; the throwaway-name ladder above IS the budget control.
 * **Log every production issuance below, on the day it happens.** A count kept
   only in memory is a count nobody has.
 
@@ -100,7 +100,8 @@ does not spend the other's allowance.
 ## Rolling-window check, before any production redeploy
 
 Count the rows above for that enclave's domain in the last 7 days. At 4, stop
-and use staging unless the deploy genuinely has to be production. Let's
+and move to the next throwaway name unless the deploy genuinely has to be on
+this name. Let's
 Encrypt's own view of it is authoritative and can be checked against the
 Certificate Transparency logs, which is also how an auditor would notice a
 certificate this ledger does not list:
