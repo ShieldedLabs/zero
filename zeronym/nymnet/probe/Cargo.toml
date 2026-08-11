@@ -1,0 +1,19 @@
+[package]
+name = "zeronym-nymnet-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The probe drives real nym-sdk clients through the localnet started by
+# ../localnet.sh. The git tag here MUST match the PIN in localnet.sh: the
+# nodes and the clients have to come from the same nym release.
+
+[dependencies]
+nym-sdk = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz" }
+nym-topology = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz", features = ["persistence"] }
+nym-bin-common = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz" }
+
+anyhow = "1"
+serde_json = "1"
+time = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
