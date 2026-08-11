@@ -33,6 +33,10 @@ zebra-chain = { path = "../../zebra/zebra-chain" }
 zaino-proto = { path = "../../zaino/packages/zaino-proto", default-features = false }
 prost = "0.14"
 
+# Wipe framed transaction buffers on drop (wire.rs), the same discipline the
+# hub's queue uses. Pinned to the hub's version so the two lockfiles agree.
+zeroize = "1"
+
 # TLS. rustls with the `ring` provider rather than the default aws-lc-rs: ring
 # is the provider proven to build in the StageX musl image (measured, see
 # deploy/README.md), and aws-lc-rs additionally wants cmake, which that image

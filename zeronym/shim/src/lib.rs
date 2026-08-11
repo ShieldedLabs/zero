@@ -45,6 +45,7 @@ pub mod hub;
 pub mod intercept;
 pub mod proxy;
 pub mod tls;
+pub mod wire;
 
 /// Boxed error type shared by the proxy paths.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

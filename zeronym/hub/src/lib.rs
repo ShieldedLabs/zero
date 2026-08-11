@@ -40,6 +40,7 @@ pub mod config;
 pub mod queue;
 pub mod server;
 pub mod tls;
+pub mod wire;
 
 /// Boxed error type shared across the hub.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
