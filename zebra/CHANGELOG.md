@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Equal-work chain ties now prefer the first-received chain, per the protocol
+  specification, instead of the higher tip hash. Each block committed to the
+  non-finalized state is stamped with a receipt sequence (like zcashd's
+  `nSequenceId`), and `Chain::cmp` breaks work ties on the tip's sequence, so an
+  already-adopted tip is no longer displaced by a later-arriving equal-work
+  sibling ([#11240](https://github.com/ZcashFoundation/zebra/issues/11240)).
 - `getblocksubsidy` now returns NU6-era funding stream metadata (recipient names and
   specification URLs) for NU6.1 and later upgrades. Amounts and addresses were never
   affected ([#11172](https://github.com/ZcashFoundation/zebra/pull/11172)).

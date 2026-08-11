@@ -20,6 +20,18 @@ date) before dispatching the release.
   receiver is Orchard is rejected at startup, since paying an Orchard receiver after
   NU6.3 needs the V6-only Ironwood output.
 
+### Fixed
+
+- Zebra now prefers the first-received chain on equal-work ties, as the protocol
+  spec requires, instead of tie-breaking on the tip block hash
+  (ZcashFoundation/zebra#11240, reported by F2Pool with production logs of losing
+  blocks they had won by 0.4s of propagation). Siblings always tie on work in
+  Zcash, so the old rule turned won propagation races into coin flips and let an
+  equal-work sibling arriving arbitrarily late displace an already-adopted tip.
+  Blocks are stamped with a receipt order when committed (zcashd `nSequenceId`
+  analogue); strictly more work still always wins, and receipt order survives
+  invalidate/reconsider.
+
 ### CI
 
 - `z3-smoke` and `z3-regtest` no longer use GitHub's `paths:` trigger filter.
