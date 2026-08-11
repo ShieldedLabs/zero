@@ -64,7 +64,11 @@ async fn main() -> Result<()> {
             let vectors = PathBuf::from(args.get(3).context("usage: wire <network.json> <vectors.bin>")?);
             cmd_wire(&network, &vectors).await
         }
-        _ => bail!("usage: probe topology|smoke|lookup|wire ..."),
+        Some("e2e") => {
+            let network = PathBuf::from(args.get(2).context("usage: e2e <network.json>")?);
+            cmd_e2e(&network).await
+        }
+        _ => bail!("usage: probe topology|smoke|lookup|wire|e2e ..."),
     }
 }
 
@@ -402,6 +406,185 @@ async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
     println!("  - the committed golden vectors rode the real mixnet unmodified,");
     println!("    both directions, and an independent offset-level decode agreed");
     println!("    with the crates' codecs on every field");
+    Ok(())
+}
+
+/// The real shim transport and the real hub listener, end to end over the real
+/// mixnet.
+///
+/// This is the M5 prototype: the shim side runs `zero_indexer_shim`'s actual
+/// `run_transport` correlator behind `HubTransport::Nym`, the hub side runs
+/// `zero_indexer_hub`'s actual `run_listener` over the actual `Hub` admission
+/// and lookup cores, and each is glued to its own real Nym client by a driver
+/// task that does nothing but move bytes -- exactly the boundary both crates
+/// drew for the SDK. Asserts, over the public codepaths only:
+///
+/// 1. a submitted migration round-trips to an accepted ack, the wallet-facing
+///    txid is computed locally, and the hub's queue holds the bytes;
+/// 2. a lookup for that txid is answered found at the mempool sentinel with
+///    the exact bytes (the queue path; the indexer is unreachable on purpose);
+/// 3. a lookup for an unknown hash fails CLOSED (`error`, because the indexer
+///    cannot be reached), never a guess.
+async fn cmd_e2e(network: &Path) -> Result<()> {
+    use std::sync::Arc;
+
+    use nym_sdk::mixnet::AnonymousSenderTag;
+    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::chain::ChainClient;
+    use zero_indexer_hub::nym as hub_nym;
+    use zero_indexer_hub::queue::Queue;
+    use zero_indexer_hub::server::Hub;
+    use zero_indexer_shim::hub::{HubTransport, Submit};
+    use zero_indexer_shim::nym as shim_nym;
+    use zero_indexer_shim::wire as shim_wire;
+
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+    const LOOKUP_SURBS: u32 = 60;
+
+    // ---- The hub half: a real listener over the real cores, driven by a glue
+    // task that is the M5 hub driver in miniature.
+    println!("[hub] connecting...");
+    let mut hub_client = connect_client(network).await?;
+    let hub_addr = *hub_client.nym_address();
+    let hub_sender = hub_client.split_sender();
+    let queue = Arc::new(Queue::new());
+    let tip = Arc::new(TipTracker::new());
+    tip.observe(100);
+    // Unreachable on purpose: assertion 2 must be answered by the queue alone,
+    // and assertion 3 must fail closed.
+    let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
+    let hub = Hub {
+        queue: queue.clone(),
+        tip,
+        params: BatchParams::default(),
+        chain,
+    };
+    let (hub_in_tx, hub_in_rx) = tokio::sync::mpsc::channel(64);
+    let (hub_out_tx, mut hub_out_rx) = tokio::sync::mpsc::channel::<hub_nym::Reply>(64);
+    tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msgs = hub_client.wait_for_messages() => {
+                    let Some(msgs) = msgs else { break };
+                    for m in msgs {
+                        // No tag means no way to reply (SURB artifacts arrive
+                        // tagless); the listener's own empty-filter handles the
+                        // rest.
+                        let Some(tag) = m.sender_tag else { continue };
+                        let _ = hub_in_tx
+                            .send(hub_nym::Received {
+                                frame: m.message,
+                                sender_tag: hub_nym::SenderTag(tag.to_bytes()),
+                            })
+                            .await;
+                    }
+                }
+                reply = hub_out_rx.recv() => {
+                    let Some(reply) = reply else { break };
+                    let tag = AnonymousSenderTag::from_bytes(reply.sender_tag.0);
+                    if let Err(e) = hub_sender.send_reply(tag, reply.frame.to_vec()).await {
+                        eprintln!("[hub] send_reply failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+    println!("[hub] listening at {hub_addr}");
+
+    // ---- The shim half: the real correlator behind HubTransport::Nym, driven
+    // by a glue task that is the M5 shim driver in miniature.
+    println!("[shim] connecting...");
+    let mut shim_client = connect_client(network).await?;
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel(8);
+    let (shim_out_tx, mut shim_out_rx) = tokio::sync::mpsc::channel::<shim_nym::OutFrame>(8);
+    let (shim_in_tx, shim_in_rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(shim_nym::run_transport(req_rx, shim_out_tx, shim_in_rx));
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                out = shim_out_rx.recv() => {
+                    let Some(out) = out else { break };
+                    if let Err(e) = shim_client
+                        .send_message(hub_addr, out.frame.to_vec(), IncludedSurbs::new(13))
+                        .await
+                    {
+                        eprintln!("[shim] send failed: {e}");
+                    }
+                }
+                msgs = shim_client.wait_for_messages() => {
+                    let Some(msgs) = msgs else { break };
+                    for m in msgs {
+                        let _ = shim_in_tx.send(m.message).await;
+                    }
+                }
+            }
+        }
+    });
+    let transport = HubTransport::from(shim_nym::NymHandle::new(
+        req_tx,
+        Duration::from_secs(60),
+    ));
+
+    // 1) Submit through the whole real path.
+    let t0 = Instant::now();
+    let verdict = transport
+        .submit(V6_MIGRATION)
+        .await
+        .map_err(|e| anyhow::anyhow!("submit failed: {e}"))?;
+    let txid = match verdict {
+        Submit::Accepted { txid } => txid,
+        other => bail!("expected an accepted submit, got {other:?}"),
+    };
+    anyhow::ensure!(txid.len() == 64, "locally computed txid is display hex");
+    anyhow::ensure!(queue.len() == 1, "the hub queue holds the migration");
+    println!("[e2e] submit accepted in {:.2?}, txid computed locally, queue holds 1", t0.elapsed());
+
+    // 2) Look the migration up by its txid: answered from the queue, found at
+    // the mempool sentinel, byte-identical.
+    // Fixed nonces: correlation only has to hold within this one probe run,
+    // and skipping a rand dependency keeps the merged shim+hub+nym dependency
+    // graph resolvable.
+    let mut poll_client = connect_client(network).await?;
+    let nonce = [0xA7u8; 16];
+    let request = shim_wire::encode_lookup(&nonce, &hex::decode(&txid)?)?;
+    let t1 = Instant::now();
+    poll_client
+        .send_message(hub_addr, request.to_vec(), IncludedSurbs::new(LOOKUP_SURBS))
+        .await?;
+    let reply = wait_nonempty(&mut poll_client, Duration::from_secs(120)).await?;
+    let (echoed, verdict) = shim_wire::decode_lookup_reply(&reply)
+        .map_err(|e| anyhow::anyhow!("lookup reply did not decode: {e}"))?;
+    anyhow::ensure!(echoed == nonce, "the reply echoes the lookup nonce");
+    match verdict {
+        shim_wire::LookupReply::Found { height, tx } => {
+            anyhow::ensure!(height == 0, "a queued entry is at the mempool sentinel");
+            anyhow::ensure!(tx.as_slice() == V6_MIGRATION, "the exact bytes come back");
+        }
+        other => bail!("expected found, got {other:?}"),
+    }
+    println!("[e2e] lookup answered from the queue in {:.2?}", t1.elapsed());
+
+    // 3) An unknown hash fails closed: the indexer is unreachable, so the only
+    // honest answer is error, and that is what must come back.
+    let nonce = [0xA8u8; 16];
+    let request = shim_wire::encode_lookup(&nonce, &[0xEE; 32])?;
+    let t2 = Instant::now();
+    poll_client
+        .send_message(hub_addr, request.to_vec(), IncludedSurbs::new(LOOKUP_SURBS))
+        .await?;
+    let reply = wait_nonempty(&mut poll_client, Duration::from_secs(120)).await?;
+    let (echoed, verdict) = shim_wire::decode_lookup_reply(&reply)
+        .map_err(|e| anyhow::anyhow!("lookup reply did not decode: {e}"))?;
+    anyhow::ensure!(echoed == nonce && verdict == shim_wire::LookupReply::Error);
+    println!("[e2e] unknown hash failed closed (error) in {:.2?}", t2.elapsed());
+
+    poll_client.disconnect().await;
+    println!();
+    println!("e2e: PASS");
+    println!("  - the real shim correlator and the real hub listener, glued to");
+    println!("    real Nym clients, round-tripped a submit and both lookup");
+    println!("    verdicts over the local mixnet");
     Ok(())
 }
 

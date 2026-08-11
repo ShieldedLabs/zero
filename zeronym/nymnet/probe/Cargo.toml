@@ -14,6 +14,23 @@ nym-topology = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v20
 nym-bin-common = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz" }
 
 anyhow = "1"
+hex = "0.4"
 serde_json = "1"
 time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+# The REAL shim and hub crates, so the e2e probe drives their actual transport
+# correlator and listener (not reimplementations) over the local mixnet --
+# each glue task here is a prototype of the M5 SDK driver. Path deps: the
+# probe's lockfile is not part of either crate's reproducible build (D8).
+zero-indexer-hub = { path = "../../hub" }
+zero-indexer-shim = { path = "../../shim" }
+
+# Substitute the harness-local copy of nym-upgrade-mode-check (see
+# ../patched/nym-upgrade-mode-check/Cargo.toml): the real crate's jwt-simple
+# subtree cannot share a lockfile with the vendored zebra-chain, because
+# superboring's ml-dsa needs stable crypto-common ^0.2 while zcash_primitives
+# pins the pre-release =0.2.0-rc.1. Only the attestation data types are used
+# by the client-side closure; those are kept verbatim.
+[patch."https://github.com/nymtech/nym"]
+nym-upgrade-mode-check = { path = "../patched/nym-upgrade-mode-check" }

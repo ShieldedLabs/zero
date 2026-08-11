@@ -44,6 +44,8 @@ NYM_PLAN's M0/M5/M6 against real infrastructure.
 ./localnet.sh wire        # ship the crates' committed golden-vector frames
                           # through the mixnet; verify byte-identity both ways
                           # plus an independent offset-level decode
+./localnet.sh e2e         # the REAL shim transport and hub listener, glued to
+                          # real Nym clients: submit + both lookup verdicts
 ./localnet.sh status      # what's running
 ./localnet.sh env         # paths/ids for external consumers (gated tests)
 ./localnet.sh down        # stop the nodes
@@ -84,6 +86,23 @@ artifacts and are filtered, exactly as the hub listener does (D12).
 Recorded in `../NYM_PLAN.md` (the feature's master document): the harness
 subsection under "Status and handoff", and the corrections folded into D3, D4,
 the lookup wire rules, M0, and M4.
+
+## The dependency patch (`patched/`)
+
+The `e2e` probe links the shim and hub crates alongside `nym-sdk`, and those
+cannot share one lockfile as-is: the vendored zebra-chain (via
+`zcash_primitives` 0.30) pins the PRE-RELEASE `crypto-common =0.2.0-rc.1`,
+while `nym-sdk` reaches stable `crypto-common ^0.2` through
+`nym-upgrade-mode-check` -> `jwt-simple` -> `superboring` -> `ml-dsa`. Cargo
+unifies pre-releases only on an exact match, so resolution dead-ends.
+
+`patched/nym-upgrade-mode-check` is substituted via `[patch]` in
+`probe/Cargo.toml`: it keeps the `UpgradeModeAttestation` types verbatim (they
+are embedded in `nym-node-requests` API models) and stubs the JWT half, which
+drops the whole jwt-simple subtree. **This is not harness-only trivia** — the
+shim links zebra-chain today and will link `nym-sdk` at M5, so the same
+conflict lands there and needs this patch, an upstream fix, or a
+zcash_primitives bump.
 
 ## Extending
 

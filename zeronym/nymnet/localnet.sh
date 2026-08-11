@@ -66,7 +66,10 @@ ensure_node_bin() {
 ensure_probe_bin() {
   if [ ! -x "$PROBE_BIN" ]; then
     log "building probe (release; first build takes several minutes)..."
-    (cd "$PROBE_DIR" && cargo build --release)
+    # PROTOC must be unset: the probe links the shim/hub crates, whose
+    # zaino-proto dep would otherwise try to regenerate protos in the
+    # read-only vendored tree (see NYM_PLAN.md, build notes).
+    (cd "$PROBE_DIR" && env -u PROTOC -u protoc cargo build --release)
   fi
 }
 
@@ -221,6 +224,11 @@ cmd_wire() {
   "$PROBE_BIN" wire "$NETWORK_JSON" "$SCRIPT_DIR/../shim/tests/fixtures/wire_v1_vectors.bin"
 }
 
+cmd_e2e() {
+  require_up
+  "$PROBE_BIN" e2e "$NETWORK_JSON"
+}
+
 case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
@@ -228,7 +236,8 @@ case "${1:-}" in
   smoke) cmd_smoke ;;
   lookup) cmd_lookup "${2:-}" ;;
   wire) cmd_wire ;;
+  e2e) cmd_e2e ;;
   clean) cmd_clean ;;
   env) cmd_env ;;
-  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|wire|clean|env" ;;
+  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|wire|e2e|clean|env" ;;
 esac
