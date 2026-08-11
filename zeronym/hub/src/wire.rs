@@ -235,6 +235,20 @@ pub fn decode_submit(frame: &[u8]) -> Result<(Nonce, Zeroizing<Vec<u8>>), WireEr
     Ok((nonce, tx))
 }
 
+/// Best-effort recovery of the request nonce from a frame that FAILED to decode,
+/// so a `bad_frame` acknowledgement can still be correlated when the failure was
+/// only in the `tx_len` field (the magic and nonce are intact). Returns `None`
+/// when the frame is too short or lacks the submit magic, in which case there is
+/// no trustworthy nonce and the sender falls back to its submit timeout.
+pub fn peek_nonce(frame: &[u8]) -> Option<Nonce> {
+    if frame.len() < SUBMIT_HEADER_BYTES || frame[0..4] != SUBMIT_MAGIC {
+        return None;
+    }
+    let mut nonce = [0u8; NONCE_BYTES];
+    nonce.copy_from_slice(&frame[4..20]);
+    Some(nonce)
+}
+
 /// Build an `AckV1` frame echoing `nonce` and carrying `kind`, padded to
 /// [`ACK_BYTES`]. No transaction bytes, so no zeroizing needed.
 pub fn encode_ack(nonce: &Nonce, kind: AckKind) -> [u8; ACK_BYTES] {
@@ -467,6 +481,21 @@ mod tests {
         ] {
             assert_eq!(AckRefusal::from(refusal).as_str(), refusal.as_str());
         }
+    }
+
+    #[test]
+    fn peek_nonce_recovers_only_when_the_frame_is_structurally_ours() {
+        let nonce = vector_nonce();
+        let mut frame = encode_submit(&nonce, &vector_tx()).unwrap().to_vec();
+        // Only tx_len is wrong: decode fails, but the nonce is still recoverable
+        // for a correlatable bad_frame ack.
+        frame[20..24].copy_from_slice(&((MAX_NYM_TX_BYTES + 1) as u32).to_be_bytes());
+        assert!(decode_submit(&frame).is_err());
+        assert_eq!(peek_nonce(&frame), Some(nonce));
+        // Wrong magic or too short: no trustworthy nonce.
+        frame[0] ^= 0xff;
+        assert_eq!(peek_nonce(&frame), None);
+        assert_eq!(peek_nonce(&[0u8; 10]), None);
     }
 
     /// Rewrite the committed golden-vector file from the current encoder. Ignored

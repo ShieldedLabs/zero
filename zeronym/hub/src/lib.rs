@@ -37,6 +37,7 @@
 pub mod batcher;
 pub mod chain;
 pub mod config;
+pub mod nym;
 pub mod queue;
 pub mod server;
 pub mod tls;
