@@ -9,11 +9,12 @@
 #   ./smoke.sh --init --up        # first run (creates wallet encryption)
 #   ./smoke.sh                    # subsequent iterations: probes only, ~2 min
 #
-# The stack needs no synced chain: every probe passes against a fresh zebra
-# that is still downloading blocks. Probes carry PER-CALL timeouts on top of
-# retry deadlines: a hanging RPC (the production z_listunspent hang was this
-# class) becomes a named failed probe within seconds instead of an
-# unattributed job timeout.
+# The stack needs no synced chain: every probe except the zaino gRPC one
+# passes quickly against a fresh zebra that is still downloading blocks (that
+# probe waits out zaino's readiness gate; see its note). Probes carry PER-CALL
+# timeouts on top of retry deadlines: a hanging RPC (the production
+# z_listunspent hang was this class) becomes a named failed probe within
+# seconds instead of an unattributed job timeout.
 #
 # Flags:
 #   --init   one-time offline wallet init (age identity + encryption + mnemonic)
@@ -21,7 +22,8 @@
 # Environment:
 #   COMPOSE           compose invocation (default "docker compose")
 #   PROTO_DIR         walletrpc proto dir (default: derived from repo layout)
-#   ZEBRA_HEALTH_DEADLINE / PROBE_DEADLINE   seconds (defaults 300 / 180)
+#   ZEBRA_HEALTH_DEADLINE / PROBE_DEADLINE / ZAINO_GRPC_DEADLINE
+#                     seconds (defaults 300 / 180 / 720)
 
 set -euo pipefail
 
@@ -31,6 +33,9 @@ COMPOSE="${COMPOSE:-docker compose}"
 PROTO_DIR="${PROTO_DIR:-$REPO_ROOT/zaino/packages/zaino-proto/lightwallet-protocol/walletrpc}"
 ZEBRA_HEALTH_DEADLINE="${ZEBRA_HEALTH_DEADLINE:-300}"
 PROBE_DEADLINE="${PROBE_DEADLINE:-180}"
+# The zaino gRPC probe carries its own, much larger budget; the rationale
+# lives at that probe. Keep PROBE_DEADLINE tight for everything else.
+ZAINO_GRPC_DEADLINE="${ZAINO_GRPC_DEADLINE:-720}"
 
 INIT=0
 UP=0
@@ -184,6 +189,24 @@ else
 fi
 
 # --- probe: zaino serves lightwalletd gRPC -------------------------------
+# zainod binds this listener only after its whole indexer reads Ready at one
+# 100ms-poll instant: sync loop AND finalised-state writer AND mempool
+# (worst-of combine; zaino-state chain_index.rs status()). Against a
+# checkpoint-syncing zebra that gate is a lottery: the finalised writer
+# indexes ~60 blocks/s over JSON-RPC while zebra commits 200+/s, so the
+# writer is Syncing almost continuously and flashes Ready only between
+# finishing one target and being handed the next, minutes apart; the sync
+# loop is Ready only in ~500ms gaps between iterations; the mempool drops
+# Ready on every tip move. Most runs win the very first window while zebra is
+# still near-empty (gRPC up ~6s after start). Runs that lose it wait for a
+# later three-way alignment: in the measured 2026-08-10 failure (run
+# 31363106741) those windows fell ~3 and ~10.5 minutes after this probe
+# began, so a 180s budget flaked roughly weekly while zaino sat mid-sync
+# with zero restarts. 720s covers the measured windows with margin; a
+# healthy pass still returns in seconds, and genuine breakage still fails
+# fast via the crash-loop check. No zainod config serves gRPC earlier
+# (verified against the vendored subtree: no serve-before-ready option, and
+# the sync-loop timings are hardcoded pub(crate) upstream).
 zaino_grpc_answers() {
   timeout 20 docker run --rm --network "$STACK_NETWORK" \
     -v "$PROTO_DIR:/protos:ro" \
@@ -191,7 +214,7 @@ zaino_grpc_answers() {
     zaino:8137 cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo \
     | grep chainName
 }
-if [ -n "$STACK_NETWORK" ] && probe_until "$PROBE_DEADLINE" zaino_grpc_answers; then
+if [ -n "$STACK_NETWORK" ] && probe_until "$ZAINO_GRPC_DEADLINE" zaino_grpc_answers; then
   pass "zaino serves lightwalletd gRPC"
 else
   fail "zaino gRPC never answered"
