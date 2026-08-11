@@ -34,7 +34,9 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
+use crate::nym::NymHandle;
 use crate::tls::BackendTls;
+use crate::wire::AckKind;
 use crate::BoxError;
 
 /// The hub's lookup path.
@@ -187,13 +189,15 @@ impl HubClient {
 }
 
 /// The shim's link to the hub, as a tagged union over the transports the shim
-/// can speak. Closed at compile time: the clearnet HTTP path today, and the Nym
-/// mixnet transport as a second variant later. A match is the whole dispatch; an
-/// async method behind a trait object would need `async_trait` or hand-boxed
-/// futures for nothing.
+/// can speak. Closed at compile time: the transitional clearnet HTTP path and
+/// the Nym mixnet transport. A match is the whole dispatch; an async method
+/// behind a trait object would need `async_trait` or hand-boxed futures for
+/// nothing.
 pub enum HubTransport {
     /// The transitional clearnet path: a fresh HTTP/1.1 POST per operation.
     Http(HubClient),
+    /// The mixnet path: fixed-size frames through a persistent Nym client.
+    Nym(NymHandle),
 }
 
 impl HubTransport {
@@ -201,6 +205,18 @@ impl HubTransport {
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<Submit, BoxError> {
         match self {
             HubTransport::Http(client) => client.submit(tx_bytes).await,
+            HubTransport::Nym(handle) => Ok(match handle.submit(tx_bytes).await? {
+                // Accepted covers both a fresh admission and a duplicate (the
+                // ack does not distinguish them, matching the HTTP path's
+                // wallet-visible behaviour). The txid is computed locally: the
+                // ack never carries one (D5).
+                AckKind::Accepted => Submit::Accepted {
+                    txid: crate::nym::local_txid(tx_bytes),
+                },
+                AckKind::Refused(refusal) => Submit::Rejected {
+                    reason: refusal.as_str().to_string(),
+                },
+            }),
         }
     }
 
@@ -208,6 +224,12 @@ impl HubTransport {
     pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<Lookup, BoxError> {
         match self {
             HubTransport::Http(client) => client.get_transaction(wire_hash).await,
+            // The lookup frames exist on the wire but the transport loop does
+            // not carry them yet; erroring here fails CLOSED at the intercept
+            // path (the wallet hears UNAVAILABLE, never the operator's indexer).
+            HubTransport::Nym(_) => {
+                Err("GetTransaction is not carried over the mixnet yet".into())
+            }
         }
     }
 }
@@ -215,6 +237,12 @@ impl HubTransport {
 impl From<HubClient> for HubTransport {
     fn from(client: HubClient) -> Self {
         HubTransport::Http(client)
+    }
+}
+
+impl From<NymHandle> for HubTransport {
+    fn from(handle: NymHandle) -> Self {
+        HubTransport::Nym(handle)
     }
 }
 

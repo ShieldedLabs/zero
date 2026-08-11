@@ -43,6 +43,7 @@ pub mod classify;
 pub mod config;
 pub mod hub;
 pub mod intercept;
+pub mod nym;
 pub mod proxy;
 pub mod tls;
 pub mod wire;
