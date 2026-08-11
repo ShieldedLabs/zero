@@ -34,8 +34,6 @@ NAME=""
 INDEXERS=""
 INDEXER_TLS=""
 TLS_DOMAIN=""
-TLS_EMAIL="security@shieldedlabs.com"
-TLS_PRODUCTION="false"
 DEBUG="false"
 DEST=""
 while [ $# -gt 0 ]; do
@@ -44,8 +42,6 @@ while [ $# -gt 0 ]; do
 		--indexers)         INDEXERS=$2; shift 2 ;;
 		--indexer-tls)   INDEXER_TLS=$2; shift 2 ;;
 		--tls-domain)    TLS_DOMAIN=$2; shift 2 ;;
-		--tls-email)     TLS_EMAIL=$2; shift 2 ;;
-		--production)    TLS_PRODUCTION="true"; shift ;;
 		--debug)         DEBUG="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
@@ -65,16 +61,13 @@ done
 	exit 2
 }
 
-# Production is opt-in and announced, because it spends one of five weekly
-# duplicate-certificate issuances for this name and there is no way to get it
-# back. Staging has no meaningful ceiling and is where a change should first
-# prove itself.
-if [ "$TLS_PRODUCTION" = "true" ]; then
-	echo "==> Let's Encrypt PRODUCTION for $TLS_DOMAIN."
-	echo "    This spends one of 5 weekly issuances. Record it in RESTARTS.md."
-else
-	echo "==> Let's Encrypt STAGING for $TLS_DOMAIN (certificates will not be trusted by clients)."
-fi
+# There is no staging knob on this path: the in-enclave Caddy picks the ACME
+# directory itself and always uses production. Every push therefore spends one
+# of this hostname's five weekly duplicate-certificate issuances, and running
+# out fails closed (TCP accepts, TLS never completes) with no console to say
+# why. Iterate on throwaway hostnames; see RESTARTS.md.
+echo "==> Let's Encrypt PRODUCTION for $TLS_DOMAIN: every push spends one of this"
+echo "    name's 5 weekly issuances. Iterate on throwaway names; see RESTARTS.md."
 
 ZERO_ROOT=$(git rev-parse --show-toplevel)
 HERE="$ZERO_ROOT/zeronym/hub/deploy/caution"
@@ -168,8 +161,6 @@ sed \
 	-e "s|__INDEXERS__|$INDEXERS_ENV|g" \
 	-e "s|__INDEXER_TLS__|$INDEXER_TLS|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
-	-e "s|__TLS_EMAIL__|$TLS_EMAIL|g" \
-	-e "s|__TLS_PRODUCTION__|$TLS_PRODUCTION|g" \
 	"$RENDERED" > "$DEST/caution.hcl"
 
 # --debug: flip the enclave into debug mode. DIAGNOSTIC only: debug mode disables
@@ -198,9 +189,8 @@ EXPECTED=$(cat "$ZERO_ROOT/zeronym/hub/deploy/EXPECTED_SHA256" 2>/dev/null || ec
 cat > "$DEST/PROVENANCE" <<EOF
 zero-indexer-hub Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
-serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME)
+serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME production)
 broadcasts via:  $INDEXERS_ENV verified as $INDEXER_TLS
-acme directory:  $([ "$TLS_PRODUCTION" = "true" ] && echo "letsencrypt PRODUCTION" || echo "letsencrypt staging")
 source commit:   $SHA
 expected binary: $EXPECTED
 

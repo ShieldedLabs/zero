@@ -7,8 +7,8 @@ reproduces the build knows the code holding the plaintext is the code they read.
 
 Sibling of `zeronym/shim/deploy/caution/`. The shim's README covers the platform
 mechanics (in-enclave TLS termination on 8083, the FIDO2 login, Let's Encrypt
-staging-vs-production limits, debug-mode console); this covers only what differs
-for the hub.
+issuance limits, debug-mode console); this covers only what differs for the
+hub.
 
 ## What differs from the shim deploy
 
@@ -37,7 +37,7 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --indexers 66.42.124.202:443 \
   --indexer-tls lwd.shieldedinfra.net \
   --tls-domain hub.example.org \
-  [--production] [--debug]
+  [--debug]
 ```
 
 Then, from the assembled directory:

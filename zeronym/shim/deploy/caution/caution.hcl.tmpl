@@ -23,6 +23,7 @@ enclave "__ENCLAVE_NAME__" {
     # `git archive HEAD` context rather than the working tree, so the recipe is
     # pinned to the same commit as the sources it compiles. See the README.
     containerfile = "Containerfile"
+__APP_SOURCE__
   }
 
   resources {
@@ -169,12 +170,10 @@ __HUB_ENV__
       # and the only option for a deployment that is not on Caution; it simply
       # cannot work HERE, because ACME needs to answer a challenge on 80 or 443
       # and the platform owns both ports. If this ever runs somewhere the
-      # enclave owns 443, set ZIS_TLS_DOMAIN and ZIS_TLS_PRODUCTION and delete
-      # the http block instead.
+      # enclave owns 443, set the ZIS_TLS_* variables (see src/config.rs) and
+      # delete the http block instead.
       #
-      #   ZIS_TLS_DOMAIN     = "__TLS_DOMAIN__"
-      #   ZIS_TLS_EMAIL      = "__TLS_EMAIL__"
-      #   ZIS_TLS_PRODUCTION = "__TLS_PRODUCTION__"
+      #   ZIS_TLS_DOMAIN = "__TLS_DOMAIN__"
 
       # Default is `info`, which deliberately omits the per-request zis::proxy
       # line naming the method each wallet called. That line is exactly the
