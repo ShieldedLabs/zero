@@ -22,6 +22,7 @@ use rand::{rngs::OsRng, RngCore};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tower::{Service, ServiceExt};
 use zcash_keys::address::Address;
+use zcash_primitives::transaction::TxVersion;
 use zcash_protocol::memo::MemoBytes;
 
 use zcash_script::{opcode::PushValue, pv::push_value};
@@ -462,6 +463,9 @@ pub struct MinerParams {
     ///
     /// Applies only if [`Self::addr`] contains a shielded component.
     memo: Option<MemoBytes>,
+
+    /// Coinbase transaction version pinned by `mining.coinbase_tx_version`, if any.
+    tx_version: Option<TxVersion>,
 }
 
 /// Builds the coinbase input data for a block Zebra constructs: the [`ZEBRA_COINBASE_MARKER`],
@@ -481,10 +485,25 @@ impl MinerParams {
     // length-validated), not a recoverable error.
     #[allow(clippy::unwrap_in_result)]
     pub fn new(net: &Network, conf: config::mining::Config) -> Result<Self, MinerParamsError> {
+        let tx_version = conf.coinbase_tx_version.map(TxVersion::from);
+
         let addr = conf
             .miner_address
             .map(|addr| Address::try_from_zcash_address(net, addr))
             .ok_or(MinerParamsError::MissingAddr)??;
+
+        // From NU6.3 onward, an Orchard receiver is paid via the Ironwood output, which only a
+        // V6 coinbase can carry. A pinned V5 needs another receiver to fall back to, so reject
+        // the combination here rather than failing on every template build.
+        if let Some(version) = tx_version {
+            if !version.has_ironwood() {
+                if let Address::Unified(ua) = &addr {
+                    if ua.sapling().is_none() && ua.transparent().is_none() {
+                        return Err(MinerParamsError::PinnedVersionCantPayAddress);
+                    }
+                }
+            }
+        }
 
         // Always tag the coinbase with the Zebra marker, even without configured
         // `extra_coinbase_data`, so every block Zebra builds is identifiable. The type of
@@ -501,7 +520,12 @@ impl MinerParams {
             .map(|memo| MemoBytes::from_bytes(memo.as_bytes()))
             .transpose()?;
 
-        Ok(Self { addr, data, memo })
+        Ok(Self {
+            addr,
+            data,
+            memo,
+            tx_version,
+        })
     }
 
     /// Returns the miner address.
@@ -517,6 +541,11 @@ impl MinerParams {
     /// Returns the miner memo.
     pub fn memo(&self) -> Option<&MemoBytes> {
         self.memo.as_ref()
+    }
+
+    /// Returns the coinbase transaction version pinned by `mining.coinbase_tx_version`, if any.
+    pub fn tx_version(&self) -> Option<TxVersion> {
+        self.tx_version
     }
 
     /// Randomizes the memo.
@@ -540,6 +569,7 @@ impl From<Address> for MinerParams {
             addr,
             data: None,
             memo: None,
+            tx_version: None,
         }
     }
 }
@@ -553,6 +583,11 @@ pub enum MinerParamsError {
     InvalidAddr(zcash_address::ConversionError<&'static str>),
     #[error(transparent)]
     InvalidMemo(#[from] zcash_protocol::memo::Error),
+    #[error(
+        "mining.coinbase_tx_version = 5 can't pay a miner_address whose only receiver is \
+         Orchard: from NU6.3, an Orchard receiver needs the V6-only Ironwood coinbase output"
+    )]
+    PinnedVersionCantPayAddress,
 }
 
 impl From<zcash_address::ConversionError<&'static str>> for MinerParamsError {
@@ -674,7 +709,15 @@ where
         sync_status: SyncStatus,
         mined_block_sender: Option<mpsc::Sender<(block::Hash, block::Height)>>,
     ) -> Self {
-        let miner_params = MinerParams::new(net, conf).ok();
+        let miner_params = match MinerParams::new(net, conf) {
+            Ok(params) => Some(params),
+            // No `mining.miner_address` configured, the normal case for non-mining nodes.
+            Err(MinerParamsError::MissingAddr) => None,
+            Err(err) => {
+                tracing::error!(%err, "invalid mining config, mining RPCs are disabled");
+                None
+            }
+        };
 
         // On mining nodes, build the Sapling prover now (off the async runtime) so the
         // first `getblocktemplate` request doesn't pay the ~1-2s parameter-loading cost.

@@ -1,6 +1,9 @@
 //! Transaction-related types.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    convert::Infallible,
+    sync::{Arc, OnceLock},
+};
 
 use crate::methods::arrayhex;
 use chrono::{DateTime, Utc};
@@ -172,6 +175,18 @@ impl TransactionTemplate<NegativeOrZero> {
             },
         );
 
+        // Pin the operator-configured coinbase transaction version (`mining.coinbase_tx_version`)
+        // before adding outputs, so version validation and the output routing below both see it.
+        if let Some(version) = miner_params.tx_version() {
+            builder
+                .propose_version::<Infallible>(version)
+                .map_err(|err| {
+                    TransactionError::CoinbaseConstruction(format!(
+                        "can't pin the coinbase to {version:?} at height {height:?}: {err}"
+                    ))
+                })?;
+        }
+
         let default_memo = MemoBytes::empty();
         let memo = miner_params.memo().unwrap_or(&default_memo);
 
@@ -193,7 +208,21 @@ impl TransactionTemplate<NegativeOrZero> {
         // Orchard receiver just gets routed to the Ironwood output builder from NU6.3 onward.
         let use_ironwood = NetworkUpgrade::current(net, height) >= NetworkUpgrade::Nu6_3;
 
+        // Only a V6 coinbase can carry an Ironwood output, so a pinned V5 can't pay an Orchard
+        // receiver from NU6.3 onward. `MinerParams` rejects configs with no other receiver to
+        // fall back to.
+        let pinned_without_ironwood = miner_params
+            .tx_version()
+            .is_some_and(|version| !version.has_ironwood());
+
         let add_shielded_reward = |builder: &mut Builder<_, _>, addr: &_| {
+            if use_ironwood && pinned_without_ironwood {
+                tracing::warn!(
+                    "mining.coinbase_tx_version = 5 can't pay the miner address's Orchard \
+                     receiver after NU6.3; using the address's other receivers"
+                );
+                return None;
+            }
             let ovk = Some(::orchard::keys::OutgoingViewingKey::from([0u8; 32]));
             if use_ironwood {
                 trace_err!(

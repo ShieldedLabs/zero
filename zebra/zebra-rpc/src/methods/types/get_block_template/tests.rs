@@ -392,3 +392,135 @@ fn coinbase_at_nu6_3_routes_shielded_output_to_ironwood() {
     zebra_consensus::transaction::check::coinbase_outputs_are_decryptable(&coinbase, &net, height)
         .expect("Ironwood coinbase output is recoverable with the zero outgoing viewing key");
 }
+
+/// `mining.coinbase_tx_version = 5` pins the coinbase to the V5 format after NU6.3, when
+/// templates would otherwise switch to V6: the format change that broke mining-pool coinbase
+/// parsing at Ironwood activation.
+#[test]
+fn coinbase_tx_version_pin_forces_v5_after_nu6_3() {
+    use zcash_address::ZcashAddress;
+
+    use crate::config::mining::{CoinbaseTxVersion, Config};
+
+    let net = Network::new_default_testnet();
+    let height = NetworkUpgrade::Nu6_3
+        .activation_height(&net)
+        .expect("Nu6.3 is scheduled on Testnet");
+    let addr: ZcashAddress = default_miner_address(net.kind(), &MinerAddressType::Transparent)
+        .parse()
+        .expect("default miner address parses");
+
+    let params = |pin: Option<u32>| {
+        MinerParams::new(
+            &net,
+            Config {
+                miner_address: Some(addr.clone()),
+                coinbase_tx_version: pin
+                    .map(|version| CoinbaseTxVersion::try_from(version).expect("supported")),
+                ..Default::default()
+            },
+        )
+        .expect("valid mining config")
+    };
+
+    let build = |params: &MinerParams| {
+        TransactionTemplate::new_coinbase(&net, height, params, Amount::zero())
+            .expect("valid coinbase tx")
+            .data
+            .as_ref()
+            // Deserialization contains checks for elementary consensus rules, which must pass.
+            .zcash_deserialize_into::<Transaction>()
+            .expect("coinbase deserializes")
+    };
+
+    // Unpinned, the template follows the network upgrade's preferred version.
+    assert_eq!(
+        build(&params(None)).version(),
+        6,
+        "unpinned coinbase is v6 at NU6.3"
+    );
+
+    // Pinned, it stays on the V5 format, which remains consensus-valid after NU6.3.
+    assert_eq!(
+        build(&params(Some(5))).version(),
+        5,
+        "pinned coinbase is v5 at NU6.3"
+    );
+}
+
+/// With a pinned V5 coinbase after NU6.3, a Unified miner address is paid through its Sapling
+/// (or transparent) receiver, since only a V6 transaction can carry the Ironwood output that
+/// would otherwise pay its Orchard receiver. An address with no such fallback is rejected when
+/// the mining config is turned into miner parameters, and unsupported pins are rejected on
+/// construction.
+#[test]
+fn coinbase_tx_version_pin_v5_shielded_fallback_and_validation() {
+    use zcash_address::ZcashAddress;
+
+    use super::MinerParamsError;
+    use crate::config::mining::{CoinbaseTxVersion, Config};
+
+    // `CoinbaseTxVersion` accepts exactly 5 and 6. Its `Deserialize` impl delegates here, so an
+    // unsupported `mining.coinbase_tx_version` makes the config fail to load and the node
+    // refuse to start.
+    assert!(CoinbaseTxVersion::try_from(5).is_ok());
+    assert!(CoinbaseTxVersion::try_from(6).is_ok());
+    assert!(CoinbaseTxVersion::try_from(4).is_err());
+    assert!(CoinbaseTxVersion::try_from(7).is_err());
+
+    let net = Network::new_default_testnet();
+    let height = NetworkUpgrade::Nu6_3
+        .activation_height(&net)
+        .expect("Nu6.3 is scheduled on Testnet");
+    let pin_v5 = Some(CoinbaseTxVersion::try_from(5).expect("supported"));
+
+    // The default Unified miner address also has Sapling and transparent receivers to fall
+    // back to.
+    let addr: ZcashAddress = default_miner_address(net.kind(), &MinerAddressType::Unified)
+        .parse()
+        .expect("default miner address parses");
+    let params = MinerParams::new(
+        &net,
+        Config {
+            miner_address: Some(addr),
+            coinbase_tx_version: pin_v5,
+            ..Default::default()
+        },
+    )
+    .expect("valid mining config");
+
+    let template = TransactionTemplate::new_coinbase(&net, height, &params, Amount::zero())
+        .expect("valid coinbase tx");
+    let coinbase: Transaction = template.data.as_ref().zcash_deserialize_into().unwrap();
+
+    assert_eq!(coinbase.version(), 5, "pinned coinbase is v5");
+    assert!(
+        coinbase.ironwood_shielded_data().is_none(),
+        "a v5 coinbase can't carry an Ironwood output"
+    );
+    assert_eq!(
+        coinbase.sapling_outputs().count(),
+        1,
+        "the miner reward falls back to the address's Sapling receiver"
+    );
+    zebra_consensus::transaction::check::coinbase_outputs_are_decryptable(&coinbase, &net, height)
+        .expect("Sapling coinbase output is recoverable with the zero outgoing viewing key");
+
+    // A miner address whose only receiver is Orchard has no receiver a V5 coinbase can pay
+    // after NU6.3, so the config combination is rejected up front. The address is the
+    // commented-out Orchard row of `MINER_ADDRESS` in `config::mining`.
+    let orchard_only: ZcashAddress =
+        "utest10zg6frxk32ma8980kdv9473e4aclw7clq9hydzcj6l349pkqzxk2mmj3cn7j5x38w6l4wyryv50whnlrw0k9agzpdf5fxyj7kq96ukcp"
+            .parse()
+            .expect("hard-coded Orchard-only address parses");
+    let err = MinerParams::new(
+        &net,
+        Config {
+            miner_address: Some(orchard_only),
+            coinbase_tx_version: pin_v5,
+            ..Default::default()
+        },
+    )
+    .expect_err("an Orchard-only miner address with a v5 pin is rejected");
+    assert!(matches!(err, MinerParamsError::PinnedVersionCantPayAddress));
+}
