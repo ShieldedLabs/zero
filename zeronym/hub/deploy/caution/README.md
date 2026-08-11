@@ -54,8 +54,8 @@ verifies the enclave's in-enclave certificate.
 
 ## Verify the attestation
 
-`caution verify <app-id>` (or `POST /attestation`) returns the measurement bound
-to the running EIF. Confirm it against a local reproduce:
+`caution verify` (from the assembled directory; or `POST /attestation`) returns
+the measurement bound to the running EIF. Confirm it against a local reproduce:
 
 ```sh
 git checkout <the PROVENANCE commit>
