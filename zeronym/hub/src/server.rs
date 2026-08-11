@@ -39,6 +39,7 @@ use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
 use crate::batcher::{BatchParams, TipTracker};
+use crate::chain::{ChainClient, TxLookup};
 use crate::queue::{Admission, Queue, Refusal};
 use crate::BoxError;
 
@@ -48,18 +49,34 @@ use crate::BoxError;
 /// wallet's request into a shim and is unrelated.
 const MAX_TX_BYTES: usize = 64 * 1024;
 
-/// Everything the serving path needs to admit a submission.
+/// The submission path: `POST /` with a raw transaction body. The default so
+/// that an older shim, which knows only this path, keeps working unchanged.
+const SUBMIT_PATH: &str = "/";
+
+/// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
+const TRANSACTION_PATH: &str = "/transaction";
+
+/// Ceiling on a lookup body. A `TxFilter.hash` is 32 bytes; 64 leaves slack
+/// without letting the lookup path be used to buffer anything meaningful.
+const MAX_LOOKUP_BYTES: usize = 64;
+
+/// Header carrying the transaction's height on a `200` lookup reply. `0` means
+/// mempool (a queued, unflushed transaction), matching lightwalletd's sentinel.
+const TX_HEIGHT_HEADER: &str = "x-tx-height";
+
+/// Everything the serving path needs.
 ///
-/// Note what is NOT here: any way to reach the network. Admission never touches
-/// a node. Calling `testmempoolaccept` (or any per-submission node query) to
-/// filter junk at the door would leak each transaction to a node individually at
-/// arrival, which is precisely the per-transaction timing signal the batch
-/// exists to destroy, handed to the node operator.
+/// It reaches the network in exactly one way, through [`ChainClient`]: to
+/// publish a flushed batch and to answer a transaction lookup that missed the
+/// queue. Admission itself never touches a node (calling `testmempoolaccept` or
+/// any per-submission query would leak each transaction individually at arrival,
+/// the timing signal the batch exists to destroy).
 #[derive(Clone)]
 pub struct Hub {
     pub queue: Arc<Queue>,
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
+    pub chain: Arc<ChainClient>,
 }
 
 /// Accept and serve submissions on an already-bound listener until it errors.
@@ -87,16 +104,90 @@ pub async fn serve(listener: TcpListener, hub: Hub) -> Result<(), BoxError> {
     }
 }
 
-/// Handle one submission. Never returns `Err`: a bad request is a response, not
-/// a connection fault.
+/// Route one request. Never returns `Err`: a bad request is a response, not a
+/// connection fault.
+///
+/// Two paths, both POST: `/` submits a transaction into the batch, `/transaction`
+/// looks one up by txid. Any other path is `404`, a deliberate narrowing: the
+/// old hub treated EVERY POST as a submission, so a path typo (or a shim posting
+/// a lookup to the wrong URL) silently queued garbage. Now it fails loudly.
 async fn handle(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.method() != Method::POST {
-        return Ok(text(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "POST a raw transaction",
-        ));
+        return Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only"));
+    }
+    match req.uri().path() {
+        SUBMIT_PATH => submit(req, hub).await,
+        TRANSACTION_PATH => lookup(req, hub).await,
+        _ => Ok(text(StatusCode::NOT_FOUND, "unknown path")),
+    }
+}
+
+/// Answer a transaction lookup: the queue first (a diverted, not-yet-flushed
+/// migration exists nowhere else), then the hub's indexer.
+///
+/// This is why the shim can be stateless: it holds nothing about the migrations
+/// it diverted, and routes every `GetTransaction` here instead. Height 0 on a
+/// queue hit is the mempool sentinel, exactly what a wallet sees for an unmined
+/// transaction.
+///
+/// Note the flush-in-flight gap: `flush()` drains the queue before
+/// `broadcast_batch` has reached the indexer, so a lookup in that window gets a
+/// queue miss then an indexer NOT_FOUND for a transaction it was told height-0
+/// about seconds earlier. Wallets poll on multi-second intervals and tolerate a
+/// transient NOT_FOUND; a resubmit is harmless (deduped pre-flush, already-known
+/// post-flush). Holding entries until broadcast returns would extend how long
+/// the hub remembers a txid, which is the wrong trade.
+async fn lookup(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
+    let collected = match Limited::new(req.into_body(), MAX_LOOKUP_BYTES)
+        .collect()
+        .await
+    {
+        Ok(collected) => collected,
+        Err(_) => return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "lookup key too large")),
+    };
+    let wire_hash = collected.to_bytes();
+    if wire_hash.is_empty() {
+        return Ok(text(StatusCode::BAD_REQUEST, "empty lookup key"));
     }
 
+    if let Some(bytes) = hub.queue.find_by_txid(&wire_hash) {
+        tracing::debug!(source = "queue", "transaction lookup answered");
+        return Ok(found(&bytes, 0));
+    }
+
+    // Disposition only in every arm: an indexer's error message can echo the
+    // txid, so nothing but the outcome word reaches the log (#157).
+    match hub.chain.get_transaction(&wire_hash).await {
+        Ok(TxLookup::Found { data, height }) => {
+            tracing::debug!(source = "indexer", "transaction lookup answered");
+            Ok(found(&data, height))
+        }
+        Ok(TxLookup::NotFound) => {
+            tracing::debug!(source = "miss", "transaction lookup: not found");
+            Ok(text(StatusCode::NOT_FOUND, "transaction not found"))
+        }
+        Err(_) => {
+            tracing::debug!(source = "indexer_error", "transaction lookup failed");
+            Ok(text(StatusCode::BAD_GATEWAY, "indexer unavailable"))
+        }
+    }
+}
+
+/// A `200` lookup reply carrying the raw transaction and its height.
+fn found(tx_bytes: &[u8], height: u64) -> Response<Full<Bytes>> {
+    let mut resp = Response::new(Full::new(Bytes::copy_from_slice(tx_bytes)));
+    resp.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    resp.headers_mut()
+        .insert(TX_HEIGHT_HEADER, HeaderValue::from(height));
+    resp
+}
+
+/// Admit one transaction into the batch. Never returns `Err`: a bad request is a
+/// response, not a connection fault.
+async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
     // Buffer the body under a hard cap, refused strictly before anything else.
     let collected = match Limited::new(req.into_body(), MAX_TX_BYTES).collect().await {
         Ok(collected) => collected,

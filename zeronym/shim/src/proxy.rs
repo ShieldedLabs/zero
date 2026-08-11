@@ -83,6 +83,14 @@ pub const GRPC_RESOURCE_EXHAUSTED: u16 = 8;
 /// gRPC status code 1, CANCELLED.
 pub const GRPC_CANCELLED: u16 = 1;
 
+/// gRPC status code 5, NOT_FOUND. What a wallet gets for a txid the hub's lookup
+/// does not know, mirroring lightwalletd's answer for an unknown transaction.
+pub const GRPC_NOT_FOUND: u16 = 5;
+
+/// gRPC status code 3, INVALID_ARGUMENT. A malformed or empty `TxFilter`: caught
+/// locally so a bad filter never becomes a hub round trip or a dialled operator.
+pub const GRPC_INVALID_ARGUMENT: u16 = 3;
+
 /// Per-stream HTTP/2 flow-control window, both legs.
 ///
 /// The h2 default is 64 KiB, which throttles `GetBlockRange` to a crawl through

@@ -13,7 +13,6 @@ use zero_indexer_shim::config::Config;
 use zero_indexer_shim::hub::HubClient;
 use zero_indexer_shim::intercept::Diversion;
 use zero_indexer_shim::proxy::Backend;
-use zero_indexer_shim::state::DivertState;
 use zero_indexer_shim::tls::{BackendTls, ServerTls};
 use zero_indexer_shim::BoxError;
 
@@ -95,8 +94,12 @@ async fn main() -> Result<(), BoxError> {
     // forward-only for private.
     let diversion = match config.hub {
         Some(hub_addr) => {
+            // new_http1, NOT new: the hub's submission endpoint is a plain
+            // HTTP/1.1 POST, while the backing indexer above is gRPC. Offering
+            // `h2` here makes an ALPN-honouring server agree to HTTP/2 and then
+            // wait forever for a preface this client never sends.
             let hub_tls = match config.hub_tls.as_deref() {
-                Some(name) => Some(BackendTls::new(name)?),
+                Some(name) => Some(BackendTls::new_http1(name)?),
                 None => None,
             };
             if hub_tls.is_none() {
@@ -104,11 +107,11 @@ async fn main() -> Result<(), BoxError> {
             }
             tracing::info!(
                 hub = %hub_addr,
-                "diversion ENABLED: Orchard-touching transactions go to the hub, not the operator"
+                "diversion ENABLED: Orchard-touching sends and all GetTransaction go to the hub, \
+                 not the operator"
             );
             Some(Arc::new(Diversion {
                 hub: HubClient::new(hub_addr, hub_tls),
-                state: Arc::new(DivertState::new()),
             }))
         }
         None => {

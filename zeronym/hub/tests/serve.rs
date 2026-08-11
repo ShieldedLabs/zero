@@ -26,49 +26,97 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use tokio::net::TcpListener;
-use zaino_proto::proto::service::{RawTransaction, SendResponse};
+use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub};
 
+const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
 /// A height low enough that any realistic fixture expiry clears the admission
 /// deadline, so these tests exercise batching rather than expiry arithmetic.
 const TIP: u32 = 100;
 
-/// A mock `CompactTxStreamer`. It records EVERY transaction it is asked to
-/// broadcast, in order, and answers with a `SendResponse` carrying `code` and
-/// `message`. lightwalletd's convention: code 0 means success and the message is
-/// the txid. Returns its `host:port`.
+/// How the mock indexer answers a `GetTransaction`.
+#[derive(Clone)]
+enum GetTx {
+    /// gRPC NOT_FOUND, the lightwalletd unknown-txid answer.
+    NotFound,
+    /// A framed `RawTransaction` with these bytes and height.
+    Found { data: Vec<u8>, height: u64 },
+}
+
+/// A mock `CompactTxStreamer` that records broadcasts and answers
+/// `GetTransaction` with NOT_FOUND. `seen` collects the raw bytes of every
+/// transaction it was asked to broadcast; the shape the batching tests assert on.
 async fn spawn_mock_indexer(
     code: i32,
     message: &'static str,
     seen: Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> SocketAddr {
+    spawn_mock_indexer_full(
+        code,
+        message,
+        GetTx::NotFound,
+        seen,
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .await
+}
+
+/// The path-aware mock, with a configurable `GetTransaction` answer and a
+/// separate record of the `TxFilter.hash` bytes of every lookup it received.
+/// `SendTransaction` records the tx and replies `SendResponse { code, message }`.
+async fn spawn_mock_indexer_full(
+    code: i32,
+    message: &'static str,
+    get_tx: GetTx,
+    broadcast_seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    lookup_seen: Arc<Mutex<Vec<Vec<u8>>>>,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let seen = seen.clone();
+            let broadcast_seen = broadcast_seen.clone();
+            let lookup_seen = lookup_seen.clone();
+            let get_tx = get_tx.clone();
             tokio::spawn(async move {
                 let _ = http2::Builder::new(TokioExecutor::new())
                     .serve_connection(
                         TokioIo::new(stream),
                         service_fn(move |req: Request<Incoming>| {
-                            let seen = seen.clone();
+                            let broadcast_seen = broadcast_seen.clone();
+                            let lookup_seen = lookup_seen.clone();
+                            let get_tx = get_tx.clone();
                             async move {
+                                let path = req.uri().path().to_owned();
                                 let body = req.into_body().collect().await.unwrap().to_bytes();
-                                // Strip the 5-byte gRPC frame and record the raw
-                                // transaction the hub asked us to publish.
-                                if body.len() > 5 {
-                                    if let Ok(raw) = RawTransaction::decode(&body[5..]) {
-                                        if !raw.data.is_empty() {
-                                            seen.lock().unwrap().push(raw.data);
+                                let message_bytes =
+                                    if body.len() > 5 { &body[5..] } else { &[][..] };
+                                match path.as_str() {
+                                    GET_TRANSACTION => {
+                                        if let Ok(filter) = TxFilter::decode(message_bytes) {
+                                            lookup_seen.lock().unwrap().push(filter.hash);
                                         }
+                                        Ok::<_, Infallible>(match &get_tx {
+                                            GetTx::NotFound => grpc_not_found(),
+                                            GetTx::Found { data, height } => {
+                                                grpc_raw_tx(data, *height)
+                                            }
+                                        })
+                                    }
+                                    _ => {
+                                        if let Ok(raw) = RawTransaction::decode(message_bytes) {
+                                            if !raw.data.is_empty() {
+                                                broadcast_seen.lock().unwrap().push(raw.data);
+                                            }
+                                        }
+                                        Ok(grpc_send_response(code, message))
                                     }
                                 }
-                                Ok::<_, Infallible>(grpc_reply(code, message))
                             }
                         }),
                     )
@@ -79,18 +127,12 @@ async fn spawn_mock_indexer(
     addr
 }
 
-/// A framed unary `SendResponse` with a `grpc-status: 0` trailer, the shape a
-/// real indexer's reply has.
-fn grpc_reply(code: i32, message: &str) -> Response<BoxBody<Bytes, Infallible>> {
-    let encoded = SendResponse {
-        error_code: code,
-        error_message: message.to_owned(),
-    }
-    .encode_to_vec();
-    let mut framed = Vec::with_capacity(5 + encoded.len());
+/// Frame `payload` as a gRPC unary body with a `grpc-status: 0` trailer.
+fn grpc_ok(payload: Vec<u8>) -> Response<BoxBody<Bytes, Infallible>> {
+    let mut framed = Vec::with_capacity(5 + payload.len());
     framed.push(0);
-    framed.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
-    framed.extend_from_slice(&encoded);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
 
     let mut trailers = HeaderMap::new();
     trailers.insert("grpc-status", "0".parse().unwrap());
@@ -103,6 +145,38 @@ fn grpc_reply(code: i32, message: &str) -> Response<BoxBody<Bytes, Infallible>> 
                 .with_trailers(async move { Some(Ok(trailers)) })
                 .boxed(),
         )
+        .unwrap()
+}
+
+fn grpc_send_response(code: i32, message: &str) -> Response<BoxBody<Bytes, Infallible>> {
+    grpc_ok(
+        SendResponse {
+            error_code: code,
+            error_message: message.to_owned(),
+        }
+        .encode_to_vec(),
+    )
+}
+
+fn grpc_raw_tx(data: &[u8], height: u64) -> Response<BoxBody<Bytes, Infallible>> {
+    grpc_ok(
+        RawTransaction {
+            data: data.to_vec(),
+            height,
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// A trailers-only gRPC NOT_FOUND (status in the headers, empty body), the shape
+/// lightwalletd returns for an unknown txid.
+fn grpc_not_found() -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc")
+        .header("grpc-status", "5")
+        .header("grpc-message", "No such mempool or main chain transaction")
+        .body(Full::new(Bytes::new()).boxed())
         .unwrap()
 }
 
@@ -139,6 +213,7 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
             queue: queue.clone(),
             tip,
             params: BatchParams::default(),
+            chain: chain.clone(),
         },
     ));
 
@@ -147,6 +222,40 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
         queue,
         chain,
     }
+}
+
+/// POST a lookup body to `/transaction`, returning status, the parsed
+/// `x-tx-height` header (if present) and the response body.
+async fn lookup(hub_addr: &str, wire_hash: Vec<u8>) -> (StatusCode, Option<u64>, Vec<u8>) {
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{hub_addr}/transaction"))
+        .body(Full::new(Bytes::from(wire_hash)))
+        .unwrap();
+    let resp = client.request(req).await.unwrap();
+    let status = resp.status();
+    let height = resp
+        .headers()
+        .get("x-tx-height")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, height, body)
+}
+
+/// The wire-order (internal, little-endian) bytes for a display-order txid hex:
+/// decode, then reverse. This is what a wallet's `TxFilter.hash` carries.
+fn wire_hash(display_txid: &str) -> Vec<u8> {
+    let mut bytes = hex::decode(display_txid).unwrap();
+    bytes.reverse();
+    bytes
 }
 
 /// POST a body to the hub, returning the response status and body bytes.
@@ -322,6 +431,9 @@ async fn a_no_expiry_transaction_is_admissible_at_any_height() {
             queue: queue.clone(),
             tip,
             params: BatchParams::default(),
+            // Never reached in this test (no flush, no lookup), but the type
+            // needs one. Constructed, not connected.
+            chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
         },
     ));
 
@@ -349,6 +461,9 @@ async fn a_stale_tip_stops_admission_rather_than_forcing_a_flush() {
             queue: queue.clone(),
             tip,
             params: BatchParams::default(),
+            // Never reached in this test (no flush, no lookup), but the type
+            // needs one. Constructed, not connected.
+            chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
         },
     ));
 
@@ -385,4 +500,156 @@ async fn a_get_is_rejected() {
         .unwrap();
     let resp = client.request(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+// ----------------------------------------------------------- lookup (/transaction)
+
+const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin");
+
+#[tokio::test]
+async fn a_queued_transaction_is_served_from_the_queue_with_height_zero() {
+    // The whole reason the shim can be stateless: a diverted, not-yet-flushed
+    // migration exists only in the hub's queue, and a lookup for it is answered
+    // from there with height 0 (mempool), never touching the indexer.
+    let broadcast = Arc::new(Mutex::new(Vec::new()));
+    let looked_up = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer_full(
+        0,
+        "unused",
+        GetTx::NotFound,
+        broadcast.clone(),
+        looked_up.clone(),
+    )
+    .await;
+    let hub = spawn_hub(indexer).await;
+
+    let txid = post_json(&hub.addr, V6_ORCHARD_ONLY.to_vec()).await["txid"]
+        .as_str()
+        .expect("a computed txid")
+        .to_owned();
+
+    let (status, height, body) = lookup(&hub.addr, wire_hash(&txid)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(height, Some(0), "a queued tx is mempool: height 0");
+    assert_eq!(body, V6_ORCHARD_ONLY);
+    assert!(
+        looked_up.lock().unwrap().is_empty(),
+        "the queue answered, so the indexer was never queried"
+    );
+    assert!(
+        broadcast.lock().unwrap().is_empty(),
+        "and nothing was broadcast"
+    );
+}
+
+#[tokio::test]
+async fn both_byte_orders_hit_the_queue() {
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer(0, "unused", seen).await;
+    let hub = spawn_hub(indexer).await;
+
+    let txid = post_json(&hub.addr, V6_ORCHARD_ONLY.to_vec()).await["txid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Internal order (what a wallet sends) and display order both resolve.
+    let (internal_status, _, _) = lookup(&hub.addr, wire_hash(&txid)).await;
+    assert_eq!(internal_status, StatusCode::OK);
+    let (display_status, _, _) = lookup(&hub.addr, hex::decode(&txid).unwrap()).await;
+    assert_eq!(display_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn after_the_flush_a_lookup_falls_through_to_the_indexer() {
+    // Once flushed, the queue no longer holds the tx, so the lookup is served by
+    // the hub's indexer, whose height is relayed verbatim and whose TxFilter.hash
+    // must be exactly the bytes the wallet posted (unmodified pass-through).
+    let broadcast = Arc::new(Mutex::new(Vec::new()));
+    let looked_up = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer_full(
+        0,
+        "unused",
+        GetTx::Found {
+            data: V6_ORCHARD_ONLY.to_vec(),
+            height: 12345,
+        },
+        broadcast.clone(),
+        looked_up.clone(),
+    )
+    .await;
+    let hub = spawn_hub(indexer).await;
+
+    let txid = post_json(&hub.addr, V6_ORCHARD_ONLY.to_vec()).await["txid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(hub.flush().await, 1);
+
+    let posted = wire_hash(&txid);
+    let (status, height, body) = lookup(&hub.addr, posted.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(height, Some(12345), "the indexer's height is relayed");
+    assert_eq!(body, V6_ORCHARD_ONLY);
+    assert_eq!(
+        looked_up.lock().unwrap().as_slice(),
+        &[posted],
+        "the indexer received the wallet's bytes unmodified"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_txid_is_404() {
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer(0, "unused", seen).await; // GetTransaction -> NOT_FOUND
+    let hub = spawn_hub(indexer).await;
+
+    let (status, _, _) = lookup(&hub.addr, vec![0x55; 32]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(hub.queue.len(), 0, "a lookup never mutates the queue");
+}
+
+#[tokio::test]
+async fn an_unreachable_indexer_is_502_not_404() {
+    // The distinction the shim depends on: 404 means "known-absent" (map to
+    // NOT_FOUND), 502 means "could not ask" (map to UNAVAILABLE, fail closed).
+    let dead: SocketAddr = "127.0.0.1:9".parse().unwrap(); // discard port, nothing listening
+    let hub = spawn_hub(dead).await;
+
+    let (status, _, _) = lookup(&hub.addr, vec![0x55; 32]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn lookup_bodies_are_never_queued() {
+    // Regression guard against the any-POST-is-a-submission past: a lookup body
+    // must never become a queue entry, whatever its size.
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer(0, "unused", seen).await;
+    let hub = spawn_hub(indexer).await;
+
+    let (empty, _, _) = lookup(&hub.addr, vec![]).await;
+    assert_eq!(empty, StatusCode::BAD_REQUEST);
+    let (oversize, _, _) = lookup(&hub.addr, vec![0u8; 65]).await;
+    assert_eq!(oversize, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(hub.queue.len(), 0);
+}
+
+#[tokio::test]
+async fn an_unknown_path_is_404_not_a_submission() {
+    // The old hub queued any POST regardless of path; a typo silently queued
+    // garbage. Now it 404s.
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer(0, "unused", seen).await;
+    let hub = spawn_hub(indexer).await;
+
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}/submitx", hub.addr))
+        .body(Full::new(Bytes::from(vec![0u8; 32])))
+        .unwrap();
+    let resp = client.request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(hub.queue.len(), 0);
 }

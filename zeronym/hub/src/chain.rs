@@ -37,7 +37,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use zaino_proto::proto::service::{Empty, LightdInfo, RawTransaction, SendResponse};
+use zaino_proto::proto::service::{Empty, LightdInfo, RawTransaction, SendResponse, TxFilter};
 
 use crate::tls::IndexerTls;
 use crate::BoxError;
@@ -52,6 +52,41 @@ const GRPC_PREFIX_LEN: usize = 5;
 
 const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
+const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
+/// gRPC NOT_FOUND. The one status a transaction lookup treats as "the indexer
+/// answered, and this txid is not one it knows", distinct from the indexer being
+/// unreachable. lightwalletd returns exactly this for an unknown txid.
+const GRPC_NOT_FOUND: &str = "5";
+
+/// The outcome of a transaction lookup against the indexer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxLookup {
+    Found { data: Vec<u8>, height: u64 },
+    NotFound,
+}
+
+/// A non-zero gRPC status from an endpoint, carried as a typed error so a caller
+/// can tell NOT_FOUND (a real answer) from a transport failure. Its `Display` is
+/// byte-for-byte the string `round_trip` used to format, so `broadcast` and
+/// `tip_height`, which only stringify errors, are unchanged.
+#[derive(Debug)]
+pub(crate) struct GrpcStatusError {
+    pub code: String,
+    pub message: Option<String>,
+}
+
+impl std::fmt::Display for GrpcStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "grpc-status {}", self.code)?;
+        if let Some(message) = &self.message {
+            write!(f, ": {message}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for GrpcStatusError {}
 
 /// The outcome of publishing one transaction.
 ///
@@ -176,6 +211,62 @@ impl ChainClient {
         join_all(txs.iter().map(|tx| self.broadcast(tx))).await
     }
 
+    /// Fetch one transaction by the wallet's `TxFilter.hash` bytes.
+    ///
+    /// The bytes are passed through unmodified (the indexer reverses them to a
+    /// display txid itself, exactly as it would for a wallet talking to it
+    /// directly), so behaviour is identical to a direct query by construction.
+    /// Queried against every endpoint concurrently, folded like `broadcast`: any
+    /// `Found` wins, `NotFound` only if every endpoint that answered said so, and
+    /// an error only if none answered. A single endpoint returning NOT_FOUND does
+    /// not mask another that has the transaction.
+    pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<TxLookup, BoxError> {
+        let calls = self.endpoints.iter().map(|addr| {
+            let filter = TxFilter {
+                block: None,
+                index: 0,
+                hash: wire_hash.to_vec(),
+            };
+            async move {
+                match self
+                    .unary::<_, RawTransaction>(*addr, GET_TRANSACTION, filter)
+                    .await
+                {
+                    Ok(raw) => Ok(TxLookup::Found {
+                        data: raw.data,
+                        height: raw.height,
+                    }),
+                    // NOT_FOUND is a real answer, not a fault; anything else is a
+                    // transport or protocol failure the caller must surface as 502.
+                    Err(err)
+                        if err
+                            .downcast_ref::<GrpcStatusError>()
+                            .is_some_and(|status| status.code == GRPC_NOT_FOUND) =>
+                    {
+                        Ok(TxLookup::NotFound)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+        });
+
+        let mut saw_not_found = false;
+        let mut last_error: Option<BoxError> = None;
+        for outcome in join_all(calls).await {
+            match outcome {
+                Ok(found @ TxLookup::Found { .. }) => return Ok(found),
+                Ok(TxLookup::NotFound) => saw_not_found = true,
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        if saw_not_found {
+            Ok(TxLookup::NotFound)
+        } else {
+            Err(last_error.unwrap_or_else(|| "no indexer answered the lookup".into()))
+        }
+    }
+
     /// One unary gRPC call: dial, optionally wrap in TLS, frame, send, unframe.
     async fn unary<Req, Resp>(
         &self,
@@ -274,11 +365,12 @@ where
     match status.as_deref() {
         // Absent is tolerated: some servers omit it on a successful unary reply.
         None | Some("0") => Ok(body),
-        Some(code) => Err(format!(
-            "grpc-status {code}{}",
-            message.map(|m| format!(": {m}")).unwrap_or_default()
-        )
-        .into()),
+        // Typed so a lookup can distinguish NOT_FOUND from a transport fault. The
+        // Display of this error is the same string this arm used to build.
+        Some(code) => Err(Box::new(GrpcStatusError {
+            code: code.to_owned(),
+            message,
+        })),
     }
 }
 

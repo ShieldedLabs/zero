@@ -276,6 +276,45 @@ impl Queue {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// The held bytes for a transaction named by a wallet's `TxFilter.hash`, if
+    /// this hub is holding it unbroadcast.
+    ///
+    /// BOTH byte orders are checked: an `Entry.txid` is display-order hex (from
+    /// zebra's `Display`), while the wire hash is internal/little-endian order,
+    /// its reverse. Depending on one order alone would silently stop answering
+    /// for half the callers. Both candidate strings are computed BEFORE the lock
+    /// so the critical section is two `==` per entry, and the scan never holds
+    /// the lock across an await.
+    ///
+    /// Linear scan on purpose: the modal queue is 0 to 1 entries, and the two
+    /// hex strings are precomputed. If junk-stuffing ever makes the queue large
+    /// enough for this to matter, add a `txid -> key` index maintained in
+    /// `admit`/`drain_shuffled`; deferred until measured.
+    ///
+    /// The returned copy is `Zeroizing`, but note the response `hyper` builds
+    /// from it downstream is an ordinary buffer that cannot be wiped.
+    pub fn find_by_txid(&self, wire_hash: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+        let forward = hex::encode(wire_hash);
+        let mut reversed = wire_hash.to_vec();
+        reversed.reverse();
+        let reversed = hex::encode(reversed);
+
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poison) => poison.into_inner(),
+        };
+        inner
+            .entries
+            .values()
+            .find(|entry| {
+                entry
+                    .txid
+                    .as_deref()
+                    .is_some_and(|txid| txid == forward || txid == reversed)
+            })
+            .map(|entry| Zeroizing::new(entry.tx_bytes.to_vec()))
+    }
 }
 
 impl Default for Queue {
@@ -418,6 +457,76 @@ mod tests {
     /// A minimal payload that will not deserialize as a transaction.
     fn junk(seed: u8) -> Vec<u8> {
         vec![seed; 64]
+    }
+
+    /// A real Orchard transaction, shared with the shim. Admitting it gives an
+    /// entry with a genuine display-order txid, which is what `find_by_txid`
+    /// keys on.
+    const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin");
+
+    /// The wire-order (internal, little-endian) bytes a wallet's `TxFilter.hash`
+    /// would carry for a display-order txid hex: decode, then reverse.
+    fn wire_hash(display_txid: &str) -> Vec<u8> {
+        let mut bytes = hex::decode(display_txid).expect("txid is hex");
+        bytes.reverse();
+        bytes
+    }
+
+    #[test]
+    fn find_by_txid_matches_both_byte_orders() {
+        let q = Queue::new();
+        let txid = match q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN) {
+            Admission::Admitted { txid: Some(txid) } => txid,
+            other => panic!("expected an admitted tx with a txid, got {other:?}"),
+        };
+
+        // What a wallet actually sends (internal order) hits.
+        let internal = wire_hash(&txid);
+        let found = q
+            .find_by_txid(&internal)
+            .expect("internal-order lookup must hit");
+        assert_eq!(found.as_slice(), V6_ORCHARD_ONLY);
+
+        // Display order also hits, so a wallet that sends the reverse still works.
+        let display = hex::decode(&txid).expect("txid is hex");
+        assert!(
+            q.find_by_txid(&display).is_some(),
+            "display-order lookup must hit"
+        );
+    }
+
+    #[test]
+    fn find_by_txid_misses_an_unrelated_hash() {
+        let q = Queue::new();
+        let _ = q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN);
+        assert!(q.find_by_txid(&[0xab; 32]).is_none());
+    }
+
+    #[test]
+    fn find_by_txid_skips_entries_with_no_txid() {
+        // An unparseable payload is queued with txid None (REVIEW #5). It must be
+        // present but never match a lookup, so a poll for it falls through to the
+        // indexer rather than matching the wrong entry.
+        let q = Queue::new();
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        assert_eq!(q.len(), 1, "the None-txid entry is held");
+        assert!(q.find_by_txid(&[0x11; 32]).is_none());
+    }
+
+    #[test]
+    fn find_by_txid_misses_after_the_queue_is_drained() {
+        let q = Queue::new();
+        let txid = match q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN) {
+            Admission::Admitted { txid: Some(txid) } => txid,
+            other => panic!("expected an admitted tx, got {other:?}"),
+        };
+        let internal = wire_hash(&txid);
+        assert!(q.find_by_txid(&internal).is_some());
+        let _ = q.drain_shuffled();
+        assert!(
+            q.find_by_txid(&internal).is_none(),
+            "a flushed transaction is no longer held; the lookup must fall through to the indexer"
+        );
     }
 
     #[test]
