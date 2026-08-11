@@ -93,8 +93,30 @@ echo "$BACKEND_PORT" | grep -qE '^[0-9]+$' || {
 # address gets working, honest, unchanged behaviour rather than a shim that
 # fails every migration.
 STAGE=$(mktemp -d)
-# shellcheck disable=SC2064
-trap "rm -rf '$STAGE'" EXIT INT TERM
+KEEP="$STAGE/keep"
+# On ANY exit, put a preserved deployment link (see the block above the
+# assemble.sh call) back in $DEST before the temp dir is swept. Losing
+# .caution/ orphans a live app: push has no remote, verify has no endpoint,
+# and teardown cannot find the resource to destroy, so on BYOC the AWS stack
+# sits there billing with nothing left that knows about it. If the restore
+# itself fails, keep $STAGE rather than delete the only copy.
+cleanup() {
+	if [ -d "$KEEP/.caution" ] || [ -d "$KEEP/.git" ]; then
+		mkdir -p "$DEST" || true
+	fi
+	if [ -d "$KEEP/.caution" ]; then
+		mv "$KEEP/.caution" "$DEST/.caution" || true
+	fi
+	if [ -d "$KEEP/.git" ]; then
+		mv "$KEEP/.git" "$DEST/.git" || true
+	fi
+	if [ -d "$KEEP/.caution" ] || [ -d "$KEEP/.git" ]; then
+		echo "warning: could not restore .caution/.git; recover them from $KEEP" >&2
+	else
+		rm -rf "$STAGE"
+	fi
+}
+trap cleanup EXIT INT TERM
 HUB_EGRESS="$STAGE/hub_egress.txt"
 HUB_ENV="$STAGE/hub_env.txt"
 : > "$HUB_EGRESS"
@@ -183,10 +205,36 @@ fi
 
 echo "==> assembling Caution deploy repo from zero@$SHORT into $DEST"
 
+# assemble.sh starts with `rm -rf "$DEST"`: the clean slate is what makes the
+# reproducibility argument work, and reproduce.sh depends on it staying that
+# way, so the preservation lives HERE, not there. After `caution apps create`
+# (or `caution init --byoc`) this directory also holds what binds it to the
+# deployed app: .caution/ (deployment.json carries the resource_id) and .git
+# (the 'caution' remote, and the history the platform already has). Wiping
+# those orphans the app: no remote to push to, nothing for verify to infer,
+# nothing for teardown to destroy. Step them aside for the duration; the
+# cleanup trap restores them even if assemble.sh fails. Preserving .git also
+# keeps every re-assembly on the same history, so a redeploy is a fast-forward
+# `git push caution main` instead of the destroy/create/repoint-DNS cycle.
+# (Reported by the zec.rocks operators, who lost a live deployment link to
+# exactly this and recovered it from a backup they happened to have.)
+if [ -d "$DEST/.caution" ] || [ -d "$DEST/.git" ]; then
+	echo "==> preserving .caution/ and .git across re-assembly"
+	mkdir -p "$KEEP"
+	if [ -d "$DEST/.caution" ]; then mv "$DEST/.caution" "$KEEP/.caution"; fi
+	if [ -d "$DEST/.git" ]; then mv "$DEST/.git" "$KEEP/.git"; fi
+fi
+
 # The build context: the shim crate plus the parts of zebra/ and zaino/ its path
 # dependencies need. Identical to what the reproducibility check builds, because
 # it is the same script.
 sh "$ZERO_ROOT/zeronym/shim/deploy/assemble.sh" "$DEST"
+
+# Put them straight back, so the git steps at the bottom of this script see the
+# preserved history and commit on top of it (files the new context no longer
+# carries become staged deletions via `add -A`).
+if [ -d "$KEEP/.caution" ]; then mv "$KEEP/.caution" "$DEST/.caution"; fi
+if [ -d "$KEEP/.git" ]; then mv "$KEEP/.git" "$DEST/.git"; fi
 
 # Caution's build.containerfile is resolved from the repo root, so the recipe
 # has to exist there. Copy it OUT OF THE ASSEMBLED CONTEXT, never from the
@@ -296,6 +344,8 @@ echo "  caution login --username <name> --qr     # FIDO2; session expires often"
 echo "  caution apps create    # no --name; auto-names the app and adds the 'caution' remote"
 echo "  git push caution main  # builds and boots the enclave; prints its IP"
 echo ""
-echo "To REDEPLOY after changing this repo: a running app refuses pushes, so"
+echo "To REDEPLOY after re-assembling: git push caution main"
+echo "  (.caution/ and .git are preserved across re-assembly, so the push fast-forwards)."
+echo "If the push is refused (unrelated history, or the app is in a failed state):"
 echo "  echo y | caution apps destroy <app-id>"
 echo "  caution apps create && git push caution main   # new app id AND new IP: repoint DNS"
