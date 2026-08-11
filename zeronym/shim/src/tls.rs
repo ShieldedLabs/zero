@@ -52,6 +52,11 @@ use crate::BoxError;
 /// `http/1.1` here would advertise a protocol it cannot then speak.
 const ALPN_H2: &[u8] = b"h2";
 
+/// ALPN for the hub hop, which is a plain HTTP/1.1 POST rather than gRPC. See
+/// [`BackendTls::new_http1`] for why offering the wrong one here hangs rather
+/// than failing cleanly.
+const ALPN_HTTP11: &[u8] = b"http/1.1";
+
 /// Install the `ring` crypto provider as the process default.
 ///
 /// rustls requires exactly one process-wide default provider, and with
@@ -205,6 +210,31 @@ impl BackendTls {
     /// store the operator could edit would let them substitute their own CA and
     /// silently terminate this hop themselves.
     pub fn new(sni_name: &str) -> Result<Self, BoxError> {
+        Self::with_alpn(sni_name, ALPN_H2)
+    }
+
+    /// The same, but negotiating HTTP/1.1 instead of h2.
+    ///
+    /// **The hub hop needs this and the backend hop must not use it.** The
+    /// backing indexer speaks gRPC, which is HTTP/2 by definition, so that hop
+    /// advertises `h2`. The hub's submission endpoint is a plain HTTP/1.1 POST
+    /// of raw transaction bytes, so it must advertise `http/1.1`.
+    ///
+    /// Getting this wrong does not degrade gracefully, which is why it is a
+    /// separate constructor rather than a parameter with a default. A server
+    /// that honours ALPN (Caution's in-enclave Caddy does) will agree to `h2`
+    /// when we offer only `h2`, and then wait for an HTTP/2 connection preface
+    /// that an HTTP/1.1 client never sends. The connection hangs until it times
+    /// out and the shim reports the hub as unreachable, over a TLS session that
+    /// completed perfectly and a certificate that verified. Observed in
+    /// production 2026-08-10 on `hub-test-1`: every diverted migration failed
+    /// closed with `grpc-status 14` while the hub was healthy and answering
+    /// everyone else.
+    pub fn new_http1(sni_name: &str) -> Result<Self, BoxError> {
+        Self::with_alpn(sni_name, ALPN_HTTP11)
+    }
+
+    fn with_alpn(sni_name: &str, alpn: &[u8]) -> Result<Self, BoxError> {
         install_crypto_provider();
 
         let roots = RootCertStore {
@@ -213,7 +243,7 @@ impl BackendTls {
         let mut config = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        config.alpn_protocols = vec![ALPN_H2.to_vec()];
+        config.alpn_protocols = vec![alpn.to_vec()];
 
         let server_name = ServerName::try_from(sni_name.to_owned())
             .map_err(|_| -> BoxError { format!("invalid backend TLS name {sni_name:?}").into() })?;
@@ -266,6 +296,19 @@ mod tests {
         // proxy cannot speak, and the failure would appear at the first
         // request rather than at the handshake.
         assert_eq!(ALPN_H2, b"h2");
+    }
+
+    #[test]
+    fn the_hub_hop_negotiates_http1_and_the_backend_hop_negotiates_h2() {
+        // The distinction is load-bearing and invisible at the type level: both
+        // are BackendTls, so nothing but this test stops the hub hop being
+        // built with `new` again. A server that honours ALPN then agrees to h2
+        // and waits for a preface our HTTP/1.1 client never sends, so the
+        // symptom is a hang and a "hub unreachable" over a perfectly valid TLS
+        // session, not a handshake error. Cost us a production debug session on
+        // 2026-08-10.
+        assert_eq!(ALPN_HTTP11, b"http/1.1");
+        assert_ne!(ALPN_H2, ALPN_HTTP11);
     }
 
     #[test]

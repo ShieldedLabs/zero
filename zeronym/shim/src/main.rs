@@ -95,8 +95,12 @@ async fn main() -> Result<(), BoxError> {
     // forward-only for private.
     let diversion = match config.hub {
         Some(hub_addr) => {
+            // new_http1, NOT new: the hub's submission endpoint is a plain
+            // HTTP/1.1 POST, while the backing indexer above is gRPC. Offering
+            // `h2` here makes an ALPN-honouring server agree to HTTP/2 and then
+            // wait forever for a preface this client never sends.
             let hub_tls = match config.hub_tls.as_deref() {
-                Some(name) => Some(BackendTls::new(name)?),
+                Some(name) => Some(BackendTls::new_http1(name)?),
                 None => None,
             };
             if hub_tls.is_none() {
