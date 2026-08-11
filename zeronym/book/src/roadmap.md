@@ -18,20 +18,20 @@ The ladder walks the trust root down: operator (V1), hardware manufacturer (V2),
 
 The [shim + hub system](./architecture.md) is not V1. The ladder is query privacy for the full indexer; the near-term system addresses what the ladder does not urgently cover, the turnstile-crossing **broadcast** leak, driven by the Orchard to Ironwood migration and its ~Aug 10 deadline. So it sits alongside and ahead of the ladder: the **zeroith step**. Why it is a step toward the vision, not a detour:
 
-- **Same machinery, smaller surface.** It already uses Nym (only shim to hub) and an attested TEE (both the [shim and hub](./components.md) are Nitro enclaves), on a narrow, urgent, auditable problem first. Building them here de-risks the full indexer and vice versa: the V2 transport rehearsal directly de-risked the shim-to-hub tunnel and the shim/hub attestation.
+- **Same machinery, smaller surface.** It already uses an attested TEE (both the [shim and hub](./components.md) run as Nitro enclaves) and stages Nym on the shim-to-hub hop (rehearsed over the live mainnet mixnet; the shipped hop is a direct TLS dial until that integration lands), on a narrow, urgent, auditable problem first. Building them here de-risks the full indexer and vice versa: the V2 transport rehearsal directly de-risked the shim-to-hub tunnel and the shim/hub attestation.
 - **A deliberate 80% first step.** IP unlinking for the migration is the bulk of the practical privacy at stake in the acute window; query privacy, and the shield and non-Orchard deshield cases, are the remaining margin, which costs exponentially more to close.
 - **A scoped version of a deferred idea.** Splitting the crossing broadcast off from the operator to a different counterparty (the hub) is a narrow instance of the query-only / broadcast-only decoupling below.
 - **It sidesteps a decision the full product cannot avoid.** Sitting in front of the operator's existing backend, the shim need not choose an indexer base (lightwalletd vs Zaino) near-term. That decision is deferred, below.
 
-## Near-term status: the first component is built
+## Near-term status: shim and hub are built and deployed
 
-The [shim](./components.md) now exists as a proof of concept (commit `56394a1a54`, `zeronym/shim/`): a transparent h2c gRPC reverse proxy in front of an operator's existing indexer that forwards every method, stream and trailer verbatim, and decodes exactly one path, `SendTransaction`, classifying it with the real vendored `zebra-chain` parser. Transparency is tested rather than asserted, and the classifier runs on V6 wire bytes serialized by zebra's own codec, though no transaction a wallet produced has been classified yet (see [review](./review.md)). What it feeds is not yet a routing decision: the PoC is **non-destructive**, it logs a detected migration and then still forwards it. None of diversion, the hub, Nym, STEVE, TLS, the enclave, attestation or a reproducible build is in it.
+The [shim](./components.md) began as a proof of concept (commit `56394a1a54`, `zeronym/shim/`) that classified `SendTransaction` and only logged the verdict. The three milestones that were to turn it into the component this book describes have since landed:
 
-Three milestones turn it into the component this book describes:
+1. **Diversion to the hub** is implemented, with the ordering constraint the PoC surfaced honored in code: classify first, connect second, so a wallet whose transaction is diverted never causes the operator's indexer to see even a TCP connection.
+2. **The reproducible StageX build** exists for both binaries (machine-readable hashes in `zeronym/shim/deploy/EXPECTED_SHA256` and `zeronym/hub/deploy/EXPECTED_SHA256`), is checked in CI on every change, and has been reproduced on independent hardware, including by a third party.
+3. **The enclave and attestation** are live: Shielded Labs has run the shim as attested Nitro enclaves in front of its own indexers since 2026-08-01, in-enclave TLS termination landed 2026-08-05, and on 2026-08-10 the first third-party operator deployed an attested shim in their own AWS account from the runbook (`zeronym/shim/deploy/caution/OPERATORS.md`) and verified it.
 
-1. **Diversion to the hub**, the branch that makes a migration stop at the shim. It carries an ordering constraint the PoC surfaced: classify first, connect second, because a wallet whose transaction is about to be diverted must not cause the operator's indexer to see even a TCP connection.
-2. **The reproducible StageX build**, a prerequisite rather than polish, because the [Auditor Role](./trust.md) rests on rebuild-to-the-same-hash. The PoC is a plain `cargo build`; its three concrete blockers (a repo-root build context, `zaino-proto` feature pinning, a parser not yet identical to the node's) are identified in [trust](./trust.md).
-3. **The enclave and attestation**, the point at which [trust](./trust.md) applies to the shim at all.
+One gap remains against [review](./review.md)'s evidence list: no transaction a real wallet produced has been classified yet; the fixtures are zebra-serialized. And what separates the shipped system from the full design in this book: the shim-to-hub hop is a direct TLS dial to a pinned address (the Nym tunnel and STEVE remain design), and the keymaker quorum and consortium governance are still ahead (launch stands the hub up under a single trusted entity).
 
 ## V2 status: designed, platform-unblocked, transport-validated
 

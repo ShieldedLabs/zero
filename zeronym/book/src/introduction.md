@@ -11,7 +11,7 @@ Today a Zcash light wallet leaks. Under the ZIP 307 light-client protocol it tal
 
 Two efforts share a name and a direction but not a scope.
 
-**The near-term system** is urgent and narrowly scoped: stop transactions that take value out of the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP. It targets a soft ~Aug 10 deadline (a joint Nym and Shielded Labs blog post promised a mechanism by then). It is a small, attested system, deliberately an 80% first step, honest about the 20% it does not cover. Part of it exists as a proof of concept today; the rest is designed rather than built (see [the shim and the hub](./components.md)).
+**The near-term system** is urgent and narrowly scoped: stop transactions that take value out of the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP. It targeted a soft ~Aug 10 deadline (a joint Nym and Shielded Labs blog post promised a mechanism by then). It is a small, attested system, deliberately an 80% first step, honest about the 20% it does not cover. The shim and the hub are built and run as attested enclaves; the Nym hop, STEVE, and the key consortium remain design (see [the shim and the hub](./components.md) and [roadmap](./roadmap.md) for status).
 
 **The long-term vision** is the fuller product the name promises: a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer. That arc is deferred until the migration fix ships. [Roadmap](./roadmap.md) traces the three versions (V1 Nym, V2 +TEE, V3 +PIR). Most of this book is the near-term system, because that is what is being built now.
 
