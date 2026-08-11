@@ -79,6 +79,50 @@ pub struct Hub {
     pub chain: Arc<ChainClient>,
 }
 
+impl Hub {
+    /// Admit one migration's bytes into the batch, or refuse it. This is the
+    /// transport-independent core of the serving path: the stale-tip gate, the
+    /// queue admission, and the counts-only logging, with no HTTP and no framing
+    /// in it, so the mixnet listener admits through exactly this call and cannot
+    /// drift from the HTTP path.
+    ///
+    /// `Ok(txid)` means the hub holds these bytes and will publish them; the txid
+    /// is computed from the bytes and is `None` when they did not parse (queued
+    /// and published regardless, REVIEW #5). `Err(refusal)` is a typed refusal
+    /// the caller renders in its own wire shape. It must never be answered by
+    /// handing the migration to the operator.
+    pub fn admit(&self, tx_bytes: &[u8]) -> Result<Option<String>, Refusal> {
+        // A stale tip means neither the flush schedule nor the expiry check can
+        // be trusted, so admission stops. Fail-closed: the shim holds and
+        // retries, or tries another hub.
+        if self.tip.is_stale() {
+            return Err(Refusal::TipStale);
+        }
+
+        match self.queue.admit(
+            tx_bytes,
+            self.tip.observed_height(),
+            self.params.flush_interval,
+            self.params.mining_margin,
+        ) {
+            // Both are success: the hub holds these bytes and will publish them.
+            // Duplicate is not an error, because honest resends and cross-hub
+            // submission are the designed behaviour, and identical bytes collapse.
+            Admission::Admitted { txid } | Admission::Duplicate { txid } => {
+                // Counts and disposition only: no txid, no body reaches the log
+                // (#157). Whether it parsed is the one telemetry bit worth
+                // keeping, since an unparseable payload is queued regardless.
+                tracing::info!(parseable = txid.is_some(), "migration admitted to the batch");
+                Ok(txid)
+            }
+            Admission::Refused(refusal) => {
+                tracing::info!(reason = refusal.as_str(), "submission refused at admission");
+                Err(refusal)
+            }
+        }
+    }
+}
+
 /// Accept and serve submissions on an already-bound listener until it errors.
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
@@ -204,51 +248,23 @@ async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>
         return Ok(text(StatusCode::BAD_REQUEST, "empty body"));
     }
 
-    // A stale tip means neither the flush schedule nor the expiry check can be
-    // trusted, so admission stops. Refusing is fail-closed: the shim holds and
-    // retries, or tries another hub. It must never answer this by handing the
-    // migration to the operator.
-    if hub.tip.is_stale() {
-        return Ok(refused(Refusal::TipStale));
-    }
-
-    let admission = hub.queue.admit(
-        tx_bytes.as_slice(),
-        hub.tip.observed_height(),
-        hub.params.flush_interval,
-        hub.params.mining_margin,
-    );
-
-    match admission {
-        // Both are success: the hub holds these bytes and will publish them.
-        // Duplicate is not an error, because honest resends and cross-hub
-        // submission are the designed behaviour, and identical bytes collapse.
-        Admission::Admitted { txid } | Admission::Duplicate { txid } => {
-            // Counts and disposition only: no txid, no body reaches the log
-            // (#157). Whether it parsed is the one telemetry bit worth keeping,
-            // since an unparseable payload is queued and published regardless.
-            tracing::info!(
-                parseable = txid.is_some(),
-                "migration admitted to the batch"
-            );
-
-            // `accepted` because the hub has taken responsibility for it, which
-            // is what the shim needs in order to answer the wallet. The txid is
-            // computed from the bytes, so it is correct now even though the
-            // transaction will not reach a node until the next flush.
-            Ok(json(
-                StatusCode::OK,
-                &serde_json::json!({
-                    "disposition": "accepted",
-                    "txid": txid,
-                    "reason": serde_json::Value::Null,
-                }),
-            ))
-        }
-        Admission::Refused(refusal) => {
-            tracing::info!(reason = refusal.as_str(), "submission refused at admission");
-            Ok(refused(refusal))
-        }
+    // The transport-independent core does the stale-tip gate, the queue
+    // admission and the counts-only logging; this HTTP handler only shapes the
+    // result as JSON. The mixnet listener admits through the same `Hub::admit`.
+    match hub.admit(tx_bytes.as_slice()) {
+        // `accepted` because the hub has taken responsibility for it, which is
+        // what the shim needs in order to answer the wallet. The txid is computed
+        // from the bytes, so it is correct now even though the transaction will
+        // not reach a node until the next flush.
+        Ok(txid) => Ok(json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "disposition": "accepted",
+                "txid": txid,
+                "reason": serde_json::Value::Null,
+            }),
+        )),
+        Err(refusal) => Ok(refused(refusal)),
     }
 }
 

@@ -42,7 +42,7 @@ use prost::Message;
 use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use crate::classify::{classify_with_evidence, Class, Evidence};
-use crate::hub::{HubClient, Lookup, Submit};
+use crate::hub::{HubTransport, Lookup, Submit};
 use crate::proxy::{
     forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
     GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED, GRPC_UNAVAILABLE,
@@ -59,7 +59,7 @@ use crate::BoxError;
 /// leaking to the operator, because it recognises nothing: every
 /// `GetTransaction` goes to the hub regardless.
 pub struct Diversion {
-    pub hub: HubClient,
+    pub hub: HubTransport,
 }
 
 /// gRPC length-prefixed message header: 1 flag byte + 4 big-endian length bytes.

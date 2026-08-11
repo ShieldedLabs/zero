@@ -199,7 +199,7 @@ async fn spawn_diverting_shim(backend: SocketAddr, hub: SocketAddr) -> SocketAdd
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let diversion = Some(Arc::new(Diversion {
-        hub: HubClient::new(hub, None),
+        hub: HubClient::new(hub, None).into(),
     }));
     tokio::spawn(async move {
         let _ = zero_indexer_shim::serve_with_shutdown(

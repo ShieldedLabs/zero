@@ -111,7 +111,7 @@ async fn main() -> Result<(), BoxError> {
                  not the operator"
             );
             Some(Arc::new(Diversion {
-                hub: HubClient::new(hub_addr, hub_tls),
+                hub: HubClient::new(hub_addr, hub_tls).into(),
             }))
         }
         None => {
