@@ -7,6 +7,7 @@ use serde_with::{serde_as, DisplayFromStr};
 
 use strum_macros::EnumIter;
 use zcash_address::ZcashAddress;
+use zcash_primitives::transaction::TxVersion;
 use zcash_transparent::coinbase::{MAX_COINBASE_HEIGHT_LEN, MAX_COINBASE_SCRIPT_LEN};
 use zebra_chain::parameters::NetworkKind;
 
@@ -51,6 +52,19 @@ pub struct Config {
     ///
     /// Applies only if [`Self::miner_address`] contains a shielded component.
     pub miner_memo: Option<String>,
+
+    /// Pins the transaction version of the coinbase transaction built by `getblocktemplate`,
+    /// instead of following the network upgrade's preferred version.
+    ///
+    /// From NU6.3 (Ironwood) onward, templates default to V6 coinbase transactions, which
+    /// mining-pool software that parses the coinbase (to splice in extranonce data) may not
+    /// support yet. Setting this to `5` keeps templates on the V5 format, which remains
+    /// consensus-valid. Valid values: 5 and 6. Unset by default (follow the network upgrade).
+    ///
+    /// From NU6.3 onward, only a V6 coinbase can pay an Orchard receiver (via the Ironwood
+    /// output), so with `5`, [`Self::miner_address`] must include a Sapling or transparent
+    /// receiver.
+    pub coinbase_tx_version: Option<CoinbaseTxVersion>,
 
     /// Mine blocks using Zebra's internal miner, without an external mining pool or equihash solver.
     ///
@@ -122,6 +136,60 @@ impl Serialize for ExtraCoinbaseData {
         S: Serializer,
     {
         self.0.serialize(serializer)
+    }
+}
+
+/// A pinned coinbase transaction version for the `mining.coinbase_tx_version` config field.
+///
+/// Validated on construction, so an unsupported version can't be represented, and an
+/// unsupported `mining.coinbase_tx_version` in the config makes Zebra fail to start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoinbaseTxVersion(TxVersion);
+
+/// The error returned when [`CoinbaseTxVersion`] is constructed from an unsupported version.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("coinbase_tx_version is {0}, but the supported versions are 5 and 6")]
+pub struct UnsupportedCoinbaseTxVersion(u32);
+
+impl TryFrom<u32> for CoinbaseTxVersion {
+    type Error = UnsupportedCoinbaseTxVersion;
+
+    fn try_from(version: u32) -> Result<Self, Self::Error> {
+        match version {
+            5 => Ok(Self(TxVersion::V5)),
+            6 => Ok(Self(TxVersion::V6)),
+            unsupported => Err(UnsupportedCoinbaseTxVersion(unsupported)),
+        }
+    }
+}
+
+impl From<CoinbaseTxVersion> for TxVersion {
+    fn from(version: CoinbaseTxVersion) -> Self {
+        version.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CoinbaseTxVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(u32::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl Serialize for CoinbaseTxVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            TxVersion::V5 => 5u32,
+            TxVersion::V6 => 6u32,
+            // `TryFrom` is the only constructor and only builds V5 or V6.
+            _ => unreachable!("CoinbaseTxVersion only holds V5 or V6"),
+        }
+        .serialize(serializer)
     }
 }
 

@@ -1028,6 +1028,7 @@ pub async fn test_mining_rpcs<State, ReadState>(
         )),
         extra_coinbase_data: None,
         miner_memo: None,
+        coinbase_tx_version: None,
         // TODO: Use default field values when optional features are enabled in tests #8183
         internal_miner: true,
     };
