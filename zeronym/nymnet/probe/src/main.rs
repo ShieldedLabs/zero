@@ -32,6 +32,8 @@ use nym_topology::{
 const FRAME_BYTES: usize = 65536;
 /// Matches ACK_BYTES in the shim/hub wire modules.
 const ACK_BYTES: usize = 64;
+/// Matches LOOKUP_BYTES in the shim/hub wire modules.
+const LOOKUP_BYTES: usize = 64;
 /// D3's fixed submit SURB count (the 12-15 range; middle picked).
 const SUBMIT_SURBS: u32 = 13;
 
@@ -57,7 +59,12 @@ async fn main() -> Result<()> {
                 .parse()?;
             cmd_lookup(&network, surbs).await
         }
-        _ => bail!("usage: probe topology|smoke|lookup ..."),
+        Some("wire") => {
+            let network = PathBuf::from(args.get(2).context("usage: wire <network.json> <vectors.bin>")?);
+            let vectors = PathBuf::from(args.get(3).context("usage: wire <network.json> <vectors.bin>")?);
+            cmd_wire(&network, &vectors).await
+        }
+        _ => bail!("usage: probe topology|smoke|lookup|wire ..."),
     }
 }
 
@@ -269,6 +276,132 @@ async fn cmd_smoke(network: &Path) -> Result<()> {
     println!("  - rebuilt client presented fresh tag {rebuilt_tag}");
     println!("  - every submit was anonymous (tag present, no exposed self-address path)");
     println!("  - every ack was {ACK_BYTES} bytes and correlated");
+    Ok(())
+}
+
+/// Carry the crates' committed golden-vector frames through the real mixnet.
+///
+/// Reads `wire_v1_vectors.bin` (the fixture both the shim and hub commit
+/// byte-identically), sends its actual `SubmitV1` and `LookupV1` bytes from a
+/// shim-side client, has a hub-side client verify them byte-for-byte and
+/// answer with the fixture's own `AckV1` and found-`LookupReplyV1`, then
+/// verifies the replies byte-for-byte AND with an independent offset-level
+/// decode of the layout (a third implementation, so it doubles as a
+/// differential check on the codec). Proves the committed frames ride SDK
+/// chunking, sphinx transport, and SURB replies unmodified.
+async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
+    const ACKS: usize = 6;
+    const REPLIES: usize = 4;
+    let data = std::fs::read(vectors)
+        .with_context(|| format!("reading {}", vectors.display()))?;
+    let expect_len = FRAME_BYTES + ACKS * ACK_BYTES + LOOKUP_BYTES + REPLIES * FRAME_BYTES;
+    anyhow::ensure!(
+        data.len() == expect_len,
+        "fixture is {} bytes, expected {expect_len} (vector stream layout changed?)",
+        data.len()
+    );
+    let submit = data[..FRAME_BYTES].to_vec();
+    let ack_accepted = data[FRAME_BYTES..FRAME_BYTES + ACK_BYTES].to_vec();
+    let lookup_off = FRAME_BYTES + ACKS * ACK_BYTES;
+    let lookup = data[lookup_off..lookup_off + LOOKUP_BYTES].to_vec();
+    let reply_off = lookup_off + LOOKUP_BYTES;
+    let reply_found = data[reply_off..reply_off + FRAME_BYTES].to_vec();
+
+    println!("[hub] connecting...");
+    let mut hub = connect_client(network).await?;
+    let hub_addr = *hub.nym_address();
+    let hub_sender = hub.split_sender();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (submit_c, lookup_c) = (submit.clone(), lookup.clone());
+    let (ack_c, reply_c) = (ack_accepted.clone(), reply_found.clone());
+    let hub_task = tokio::spawn(async move {
+        let mut failures: Vec<String> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                msgs = hub.wait_for_messages() => {
+                    let Some(msgs) = msgs else { break };
+                    for m in msgs {
+                        if m.message.is_empty() {
+                            continue;
+                        }
+                        let Some(tag) = m.sender_tag else {
+                            failures.push("a request arrived without a sender tag".into());
+                            continue;
+                        };
+                        let (name, expected, reply) = match m.message.get(..4) {
+                            Some(magic) if magic == b"ZNS1" => ("SubmitV1", &submit_c, ack_c.clone()),
+                            Some(magic) if magic == b"ZNL1" => ("LookupV1", &lookup_c, reply_c.clone()),
+                            _ => {
+                                failures.push(format!(
+                                    "unexpected frame: {} bytes, magic {:?}",
+                                    m.message.len(),
+                                    m.message.get(..4)
+                                ));
+                                continue;
+                            }
+                        };
+                        if &m.message == expected {
+                            println!("[hub] {name} arrived byte-identical ({} bytes)", m.message.len());
+                        } else {
+                            failures.push(format!("{name} bytes were altered in transit"));
+                        }
+                        if let Err(e) = hub_sender.send_reply(tag, reply).await {
+                            failures.push(format!("send_reply failed: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        hub.disconnect().await;
+        failures
+    });
+
+    println!("[shim] connecting...");
+    let mut shim = connect_client(network).await?;
+
+    let t0 = Instant::now();
+    shim.send_message(hub_addr, submit.clone(), IncludedSurbs::new(13))
+        .await?;
+    let ack = wait_nonempty(&mut shim, Duration::from_secs(120)).await?;
+    anyhow::ensure!(ack == ack_accepted, "AckV1 bytes were altered in transit");
+    // Independent offset-level decode: magic, echoed nonce, accepted, no refusal.
+    anyhow::ensure!(&ack[0..4] == b"ZNA1" && ack[4..20] == submit[4..20]);
+    anyhow::ensure!(ack[20] == 0 && ack[21] == 0);
+    anyhow::ensure!(ack[22..].iter().all(|&b| b == 0), "ack padding not zero");
+    println!("[shim] SubmitV1 -> byte-identical accepted AckV1 in {:.2?}", t0.elapsed());
+
+    let t1 = Instant::now();
+    shim.send_message(hub_addr, lookup.clone(), IncludedSurbs::new(60))
+        .await?;
+    let reply = wait_nonempty(&mut shim, Duration::from_secs(300)).await?;
+    anyhow::ensure!(reply == reply_found, "LookupReplyV1 bytes were altered in transit");
+    // Independent offset-level decode: magic, echoed nonce, found at the
+    // canonical height, the canonical 64-byte transaction, zero padding.
+    anyhow::ensure!(&reply[0..4] == b"ZNR1" && reply[4..20] == lookup[4..20]);
+    anyhow::ensure!(reply[20] == 0, "disposition should be found");
+    let height = u64::from_be_bytes(reply[21..29].try_into().expect("eight bytes"));
+    anyhow::ensure!(height == 778_899, "height was {height}");
+    let tx_len = u32::from_be_bytes(reply[29..33].try_into().expect("four bytes")) as usize;
+    anyhow::ensure!(tx_len == 64, "tx_len was {tx_len}");
+    let tx_ok = reply[33..33 + 64]
+        .iter()
+        .enumerate()
+        .all(|(i, &b)| b == i as u8);
+    anyhow::ensure!(tx_ok, "transaction bytes do not match the canonical vector");
+    anyhow::ensure!(reply[33 + 64..].iter().all(|&b| b == 0), "reply padding not zero");
+    println!("[shim] LookupV1 -> byte-identical found LookupReplyV1 in {:.2?}", t1.elapsed());
+
+    shim.disconnect().await;
+    let _ = stop_tx.send(());
+    let failures = hub_task.await?;
+    anyhow::ensure!(failures.is_empty(), "hub-side failures: {failures:?}");
+
+    println!();
+    println!("wire: PASS");
+    println!("  - the committed golden vectors rode the real mixnet unmodified,");
+    println!("    both directions, and an independent offset-level decode agreed");
+    println!("    with the crates' codecs on every field");
     Ok(())
 }
 

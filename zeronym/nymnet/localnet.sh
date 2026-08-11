@@ -216,13 +216,19 @@ cmd_lookup() {
   "$PROBE_BIN" lookup "$NETWORK_JSON" "${1:-13}"
 }
 
+cmd_wire() {
+  require_up
+  "$PROBE_BIN" wire "$NETWORK_JSON" "$SCRIPT_DIR/../shim/tests/fixtures/wire_v1_vectors.bin"
+}
+
 case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
   smoke) cmd_smoke ;;
   lookup) cmd_lookup "${2:-}" ;;
+  wire) cmd_wire ;;
   clean) cmd_clean ;;
   env) cmd_env ;;
-  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|clean|env" ;;
+  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|wire|clean|env" ;;
 esac

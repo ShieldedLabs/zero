@@ -41,6 +41,9 @@ NYM_PLAN's M0/M5/M6 against real infrastructure.
 ./localnet.sh smoke       # 64 KiB submits + 64-byte SURB acks + tag assertions
 ./localnet.sh lookup 13   # 64-byte request, 64 KiB anonymous reply, 13 SURBs
 ./localnet.sh lookup 60   # ...compare elapsed times across counts
+./localnet.sh wire        # ship the crates' committed golden-vector frames
+                          # through the mixnet; verify byte-identity both ways
+                          # plus an independent offset-level decode
 ./localnet.sh status      # what's running
 ./localnet.sh env         # paths/ids for external consumers (gated tests)
 ./localnet.sh down        # stop the nodes
