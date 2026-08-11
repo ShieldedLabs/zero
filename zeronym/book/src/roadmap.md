@@ -1,6 +1,6 @@
 # Roadmap
 
-The near-term shim + hub system is the first step toward a fuller private indexer, not the whole of it. See [the architecture](./architecture.md) for what ships now; this chapter is the horizon behind it, deferred until the migration fix lands.
+The near-term shim + hub system is the first step toward a fuller private indexer, not the whole of it. See [the architecture](./architecture.md) for what ships now; this chapter is the horizon behind it: the layers that come after the near-term system, not blockers on it. That system has shipped and carried a real mainnet migration, so these are next, not prerequisites.
 
 ## The three-version vision
 
@@ -16,22 +16,24 @@ The ladder walks the trust root down: operator (V1), hardware manufacturer (V2),
 
 ## Where the near-term system sits: the zeroith step
 
-The [shim + hub system](./architecture.md) is not V1. The ladder is query privacy for the full indexer; the near-term system addresses what the ladder does not urgently cover, the turnstile-crossing **broadcast** leak, driven by the Orchard to Ironwood migration and its ~Aug 10 deadline. So it sits alongside and ahead of the ladder: the **zeroith step**. Why it is a step toward the vision, not a detour:
+The [shim + hub system](./architecture.md) is not V1. The ladder is full query privacy for the indexer; the near-term system covers what the ladder does not urgently reach, the turnstile-crossing **broadcast** leak, driven by the mandatory Orchard to Ironwood migration. So it sits alongside and ahead of the ladder: the **zeroith step**. It is already a partial down-payment on the ladder: transaction-detail lookups (`GetTransaction`) are served by the hub's own indexer today, so the query leak is no longer entirely future; the address-level queries (which addresses a wallet looks up) still reach the operator. Why it is a step toward the vision, not a detour:
 
 - **Same machinery, smaller surface.** It already uses an attested TEE (both the [shim and hub](./components.md) run as Nitro enclaves) and stages Nym on the shim-to-hub hop (rehearsed over the live mainnet mixnet; the shipped hop is a direct TLS dial until that integration lands), on a narrow, urgent, auditable problem first. Building them here de-risks the full indexer and vice versa: the V2 transport rehearsal directly de-risked the shim-to-hub tunnel and the shim/hub attestation.
-- **A deliberate 80% first step.** IP unlinking for the migration is the bulk of the practical privacy at stake in the acute window; query privacy, and the shield and non-Orchard deshield cases, are the remaining margin, which costs exponentially more to close.
+- **A deliberate 80% first step.** IP unlinking for the migration is the bulk of the practical privacy at stake in the acute window; the rest of query privacy, and the shield and non-Orchard deshield cases, are the remaining margin, which costs far more to close.
 - **A scoped version of a deferred idea.** Splitting the crossing broadcast off from the operator to a different counterparty (the hub) is a narrow instance of the query-only / broadcast-only decoupling below.
 - **It sidesteps a decision the full product cannot avoid.** Sitting in front of the operator's existing backend, the shim need not choose an indexer base (lightwalletd vs Zaino) near-term. That decision is deferred, below.
 
 ## Near-term status: shim and hub are built and deployed
 
-The [shim](./components.md) began as a proof of concept (commit `56394a1a54`, `zeronym/shim/`) that classified `SendTransaction` and only logged the verdict. The three milestones that were to turn it into the component this book describes have since landed:
+The [shim](./components.md) began as a proof of concept (commit `56394a1a54`, `zeronym/shim/`) that classified `SendTransaction` and only logged the verdict. The milestones that turn it into the component this book describes have since landed, and on 2026-08-11 a real Orchard to Ironwood migration traversed the full stack on mainnet:
 
-1. **Diversion to the hub** is implemented, with the ordering constraint the PoC surfaced honored in code: classify first, connect second, so a wallet whose transaction is diverted never causes the operator's indexer to see even a TCP connection.
-2. **The reproducible StageX build** exists for both binaries (machine-readable hashes in `zeronym/shim/deploy/EXPECTED_SHA256` and `zeronym/hub/deploy/EXPECTED_SHA256`), is checked in CI on every change, and has been reproduced on independent hardware, including by a third party.
+1. **Diversion to the hub** is implemented, and the shim is now **stateless**: the old held-bytes `DivertState` map is gone, so it classifies inline and then forwards or diverts, buffering no per-transaction state. The ordering constraint the PoC surfaced is honored in code (classify first, connect second), so a wallet whose transaction is diverted never causes the operator's indexer to see even a TCP connection.
+2. **The reproducible StageX build** exists for both binaries (machine-readable hashes in `zeronym/shim/deploy/EXPECTED_SHA256` and `zeronym/hub/deploy/EXPECTED_SHA256`), is checked in CI on every change, and has been reproduced on independent hardware, including by a third party. What reproduces today is the **application binary** (the attestation's PCR2); PCR0 and PCR1, the EnclaveOS base image and kernel, are not yet reproducible end to end, so full attestation reproducibility stays an open gap (see [review](./review.md)).
 3. **The enclave and attestation** are live: Shielded Labs has run the shim as attested Nitro enclaves in front of its own indexers since 2026-08-01, in-enclave TLS termination landed 2026-08-05, and on 2026-08-10 the first third-party operator deployed an attested shim in their own AWS account from the runbook (`zeronym/shim/deploy/caution/OPERATORS.md`) and verified it.
 
-One gap remains against [review](./review.md)'s evidence list: no transaction a real wallet produced has been classified yet; the fixtures are zebra-serialized. And what separates the shipped system from the full design in this book: the shim-to-hub hop is a direct TLS dial to a pinned address (the Nym tunnel and STEVE remain design), and the keymaker quorum and consortium governance are still ahead (launch stands the hub up under a single trusted entity).
+Beyond those three, the hub now **serves queries too**, not only broadcasts: transaction-detail lookups (`GetTransaction`) are answered by the **hub's own indexer** rather than the operator's. That splits the system into two indexer roles, the operator's (block sync and pass-through) and the hub's (transaction detail and batched broadcast), and makes the near-term system a partial down-payment on the query-privacy ladder. Address-level queries (`GetTaddressTxids`, balances, UTXOs) still reach the operator.
+
+The honest gaps that remain. The 2026-08-11 mainnet run proved the mechanics and content privacy end to end, but at today's adoption the batch was **size one**, so it does not yet prove batching *anonymity* (that needs many migrations in one flush window; see [honest limits](./trust.md)). Attestation reproducibility has the PCR0/PCR1 gap above. And what still separates the shipped system from the full design in this book: the shim-to-hub hop is a direct TLS dial to a pinned address, with the Nym tunnel and STEVE rehearsed but not yet wired into the binaries (Nym integration is now in progress), and the keymaker quorum and consortium governance are still ahead (launch stands the hub up under a single trusted entity).
 
 ## V2 status: designed, platform-unblocked, transport-validated
 

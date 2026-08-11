@@ -12,15 +12,15 @@ Component and term definitions, then the primary references. Where another chapt
 
 **Auditor Role.** Any independent third party verifying that a public endpoint runs the attested software without trusting the operator, via its attestation plus a Certificate Transparency check for no shadow certificate. Steps in [trust](./trust.md).
 
-**Backing lwd.** The operator's own unmodified light-wallet indexer (lightwalletd or Zaino) that the [shim](./components.md) fronts as a client. Queries and pass-through broadcasts reach it in cleartext as today; a diverted Orchard exit never does.
+**Backing lwd.** The operator's own unmodified light-wallet indexer (lightwalletd or Zaino) that the [shim](./components.md) fronts as a client. This is the *operator indexer* role: block sync and pass-through queries reach it in cleartext as today. Two requests never do, both routed to the hub instead: a diverted Orchard-touching transaction's `SendTransaction`, and (when a hub is configured) every `GetTransaction`. Transaction detail and broadcast are the hub indexer's role, not this one.
 
 **Batch / flush cadence.** The hub accumulates migrations (a batch) and publishes them together on a strict block cadence (a flush), every twenty blocks (about twenty-five minutes). The interval is capped by the least generous transaction expiry among the wallets in scope, which is forty blocks now that Brave is out of scope for v1. See [the hub](./components.md) and [honest limits](./trust.md).
 
 **Certificate Transparency (CT).** Public append-only logs of issued TLS certificates. All Let's Encrypt certificates are CT-logged, letting the Auditor Role confirm no second, non-enclave certificate exists for a domain (no shadow cert to MITM clients). See [trust](./trust.md).
 
-**CompactTxStreamer / SendTransaction.** The light-wallet gRPC service (`cash.z.wallet.sdk.rpc.CompactTxStreamer`) and the one method the shim decodes, `SendTransaction`, carrying a `RawTransaction`. Every other method and stream passes through opaquely. See [the shim](./components.md).
+**CompactTxStreamer / SendTransaction.** The light-wallet gRPC service (`cash.z.wallet.sdk.rpc.CompactTxStreamer`). The shim decodes two of its methods: `SendTransaction` (to classify and divert an Orchard-touching `RawTransaction`) and `GetTransaction` (to answer a migration's follow-up lookup from the hub, not the operator). Every other method and stream passes through opaquely. See [the shim](./components.md).
 
-**Deshield.** A turnstile crossing moving value from a shielded pool to the transparent pool. Batched near-term if it spends Orchard (it is then an **Orchard exit**), passed straight through otherwise.
+**Deshield.** A turnstile crossing moving value from a shielded pool to the transparent pool. Batched near-term if it spends Orchard (it is then **Orchard-touching**), passed straight through otherwise.
 
 **Drop-in LWD.** The shim looks like an ordinary light-wallet indexer to every wallet, so users need no config change and no new endpoint URL (wallets do need aligned anchors and expiry within a migration epoch, see [the problem](./problem.md)). Why TLS must terminate inside the enclave and the shim must present a normal CA-issued certificate.
 
@@ -28,23 +28,25 @@ Component and term definitions, then the primary references. Where another chapt
 
 **Fail-safe (classification).** The shim's rule that any `SendTransaction` body it cannot confidently read (unparseable bytes, a truncated or compressed gRPC frame, trailing bytes after the transaction) is routed to the diverted class, never passed through as ordinary traffic. A false negative is a privacy leak; a false positive is only a wasted diversion. See [the shim](./components.md).
 
+**Hub indexer.** The indexer the [hub](./components.md) uses for the two on-chain things it must do: read the tip height (which drives flush scheduling and expiry admission) and broadcast each flushed migration, both spoken over `CompactTxStreamer` and over TLS (not a node's JSON-RPC). It also serves a wallet's `GetTransaction` for a migration once flushed. This is the *hub* indexer role, distinct from the operator's backing lwd; it is not a Nym sidecar. See [the hub](./components.md).
+
 **Interception superset rule.** The shim routes on the request path alone, and its interception set must be a superset of every routing predicate any supported backend uses. Being stricter than the backend fails *open*: the backend acts on a request the classifier never saw. See [the shim](./components.md).
 
 **Key consortium.** Proposed multi-org governance of the enclave and hub keys: Caution, Nym, Shielded Labs, and the Zcash Foundation. Long-term trust-distribution goal; a single trusted entity (Caution) stands up the hub at launch, consortium to follow. See [trust](./trust.md).
 
-**Keymaker / locksmith quorum.** Caution's M-of-N quorum mechanism (across three to four consortium orgs) that persists enclave keys across cold boots and upgrades and provisions the single shared hub key to every hub instance. Separate from STEVE. See [trust](./trust.md).
+**Keymaker / locksmith quorum.** Caution's M-of-N quorum mechanism (across three to four consortium orgs) that would persist enclave keys across cold boots and upgrades and provision the single shared hub key to every hub instance. Designed, not yet built. Separate from STEVE. See [trust](./trust.md).
 
-**Migration.** The Orchard-to-Ironwood crossing that sets the deadline: the acute, mass, non-time-sensitive event. Also the legacy name the code (`Class::Migration`) and the shim-to-hub protocol (`SubmitMigration`) still give to the whole batched class, which is wider than a literal migration (see **Orchard exit**). See [the problem](./problem.md).
+**Migration.** The Orchard-to-Ironwood crossing that sets the deadline: the acute, mass, non-time-sensitive event. Also the legacy name the code (`Class::Migration`) and the shim-to-hub protocol (`SubmitMigration`) still give to the whole batched class, which is wider than a literal migration (see **Orchard-touching transaction**). See [the problem](./problem.md).
 
 **Migration epoch.** The batching window over which wallets choose identical anchors and expiry heights and the hub reveals migrations together in shuffled order. Batches are time or block-height based, never transaction-count based (else an attacker floods its own migrations to isolate a target's). See [the problem](./problem.md) and [the hub](./components.md).
 
-**Nym.** The 5-hop Sphinx mixnet with cover traffic, used near-term only between shim and hub. It makes shim-to-hub traffic unlinkable, hiding which operator or region a migration came from. See [the architecture](./architecture.md).
+**Nym.** The 5-hop Sphinx mixnet with cover traffic, the designed near-term transport for the shim-to-hub hop. Rehearsed once end to end, but not yet wired into either binary; the shipped hop is plain TLS. It would make shim-to-hub traffic unlinkable, hiding which operator or region a migration came from. See [the architecture](./architecture.md).
 
-**nym-proxy-client / nym-proxy-server.** The Nym SDK TcpProxy sidecars: the client runs shim-side and tunnels to the server fronting the hub. Both move only ciphertext (the migration is already encrypted to the hub key), so they can be untrusted. Their exact placement on managed Caution is an [open question](./review.md).
+**nym-proxy-client / nym-proxy-server.** The Nym SDK TcpProxy sidecars (designed, part of the Nym transport above): the client would run shim-side and tunnel to the server fronting the hub. Both move only ciphertext (the migration is encrypted to the hub key before it enters the tunnel), so they can be untrusted. Their exact placement on managed Caution is an [open question](./review.md).
 
-**Orchard exit.** Any transaction moving value out of the Orchard pool (`orchard_value_balance > 0`), whatever pool the value lands in. The class the shim batches near-term, and the accurate name for what the code calls a *migration*. Because NU6.3 closes Orchard to new value (not to activity: same-receiver change still lands there), spending Orchard at all identifies the spender as a holder of legacy Orchard funds, so the destination is irrelevant to the risk. Zooko's rule; see [the shim](./components.md).
+**Orchard-touching transaction** (formerly "Orchard exit"). Any transaction carrying Orchard actions, whatever its value balance or destination: the class the shim diverts and the hub batches, and the code's accurate name (`is_orchard_touching`) for what it still labels a *migration*. The value balance is evidence, not the test: a value-out exit (`> 0`), a same-receiver shuffle (`== 0`), and a consensus-invalid deposit (`< 0`) all carry Orchard actions, so all divert. NU6.3 closes Orchard to new value but not to activity, so spending Orchard at all marks the spender as holding legacy funds, whatever the destination. Zooko's rule; see [the shim](./components.md).
 
-**PCRs (Platform Configuration Registers).** The measurement values in a Nitro attestation that fix the enclave's software identity. An auditor or the shim's STEVE check verifies them against expected values and the AWS Nitro root before trusting an enclave. See [trust](./trust.md).
+**PCRs (Platform Configuration Registers).** The measurement values in a Nitro attestation that fix the enclave's software identity. An auditor (or, in the design, the shim's STEVE check) verifies them against expected values and the AWS Nitro root before trusting an enclave. See [trust](./trust.md).
 
 **PIR (Private Information Retrieval).** Cryptographic query privacy: a client retrieves a record without the server learning which. The hardware-independent, math-based trust root planned for long-term V3, complementary to the TEE (distinct failure modes). Candidate schemes: SimplePIR/DoublePIR, FrodoPIR, YPIR, ChalametPIR. See [the roadmap](./roadmap.md).
 
@@ -54,23 +56,23 @@ Component and term definitions, then the primary references. Where another chapt
 
 **StageX.** The reproducible, deterministic build system (`SOURCE_DATE_EPOCH=1`, static-musl) used to build the shim and hub binaries, so an auditor can rebuild from source and match the software root hash bound into the attestation. See [trust](./trust.md).
 
-**STEVE.** "Secure Transport Encryption Via Enclave," a Distrust protocol in Caution: a second encryption layer terminating inside the enclave, used only shim-to-hub, one-way (the client verifies the enclave). Handshake and primitives in [trust](./trust.md). Separate from the keymaker quorum.
+**STEVE.** "Secure Transport Encryption Via Enclave," a Distrust protocol in Caution: a second encryption layer terminating inside the enclave, used only shim-to-hub, one-way (the client verifies the enclave). Designed, not yet integrated: the shipped shim-to-hub hop is plain TLS with no separate encrypt-to-hub-key layer. Handshake and primitives in [trust](./trust.md). Separate from the keymaker quorum.
 
-**SubmitMigration.** The shim-to-hub request `SubmitMigration { ciphertext, txid, expiry_height }`, answered by `Ack { txid }`. The tx body is encrypted to the hub key; txid and expiry are in the clear to the hub for dedup and flush scheduling. See [the shim](./components.md) and [the hub](./components.md).
+**SubmitMigration.** The shim-to-hub submission of a diverted transaction, conceptually `SubmitMigration { ciphertext, txid, expiry_height } -> Ack`. As shipped it is simpler: the shim POSTs the raw transaction bytes over TLS, and the hub derives the txid and expiry itself, dedups identical bytes, and schedules the flush. The `ciphertext` (encrypt-to-hub-key) inner layer is designed, not yet built; today the TLS that terminates inside the hub enclave is the only encryption on this hop. See [the shim](./components.md) and [the hub](./components.md).
 
-**TEE / AWS Nitro enclave.** Trusted Execution Environment. Both shim and hub run as attested, diskless AWS Nitro enclaves, making operator-blindness and hub-blindness cryptographically checkable rather than merely trusted. See [trust](./trust.md).
+**TEE / AWS Nitro enclave.** Trusted Execution Environment. Both shim and hub run as attested, diskless AWS Nitro enclaves, making operator-blindness and hub-blindness checkable rather than merely trusted (the application layer reproduces today; the framework measurement does not yet, see [trust](./trust.md)).
 
 **Trusted Organization (TO).** The party that operates the hub and, for detection, verifies the shim's setup attestation, makes anonymous requests to confirm the attested key is served, monitors Certificate Transparency, and publicly announces detected attacks. The design is detection-based, not prevention. See [the problem](./problem.md).
 
-**Turnstile crossing.** Any transaction moving value across a value-pool boundary: a deshield, a shield, or a cross-pool migration. The classifier detects every crossing; near-term the system batches every crossing that takes value out of Orchard (see **Orchard exit**). See [the shim](./components.md).
+**Turnstile crossing.** Any transaction moving value across a value-pool boundary: a deshield, a shield, or a cross-pool migration. The classifier detects every crossing; near-term the system batches every crossing that touches Orchard (see **Orchard-touching transaction**). See [the shim](./components.md).
 
-**Value balance.** The signed net value leaving a shielded pool (positive when value leaves that pool). The **Orchard** value balance alone is the shim's predicate: positive means value left Orchard, which is what gets batched, with no threshold and no test on the destination. The Ironwood and Sapling balances are logged as evidence and gate nothing. See [the shim](./components.md).
+**Value balance.** The signed net value leaving a shielded pool (positive when value leaves that pool). It is **evidence, not the predicate**: the shim diverts on the mere presence of Orchard actions, so the Orchard, Ironwood and Sapling balances are all logged to show where value went while gating nothing. See [the shim](./components.md).
 
 **Zeronym.** The Shielded Labs privacy product for Zcash light wallets (name: zero + nym, a play on "pseudonym"). Two pillars: zero-leak indexing and the Nym mixnet. See [the introduction](./introduction.md).
 
-**zero-indexer-hub (ZIH).** The attested-TEE batcher (run as two or more instances with failover, earlier `zero-broadcaster`) that accumulates migrations from many shims over Nym, decrypts them in-enclave, dedups by txid, and publishes them together on a strict block cadence. See [the hub](./components.md).
+**zero-indexer-hub (ZIH).** The attested-TEE batcher (earlier `zero-broadcaster`) that accumulates diverted transactions from many shims, holds them in-enclave, dedups identical bytes, and publishes them together on a strict block cadence through its own hub indexer over `CompactTxStreamer`. It also answers a wallet's `GetTransaction` for a queued or flushed migration. Running two or more instances with failover, and the encrypt-to-hub-key layer it decrypts in-enclave, are designed; today the shim-to-hub payload arrives as raw bytes inside TLS. See [the hub](./components.md).
 
-**zero-indexer-shim (ZIS).** The lightweight, attested-TEE reverse proxy an operator deploys behind their existing public URL. It passes all traffic through to the backing lwd, except it classifies every turnstile crossing and isolates Orchard exits, encrypting each to the hub key and routing it over Nym. See [the shim](./components.md).
+**zero-indexer-shim (ZIS).** The lightweight, attested-TEE, stateless reverse proxy an operator deploys behind their existing public URL. It passes traffic through to the backing lwd, except that it classifies every turnstile crossing and diverts Orchard-touching transactions to the hub, and routes every `GetTransaction` to the hub as well (so a migration's follow-up lookup never reaches the operator). Encrypting each diverted transaction to the hub key and routing it over Nym is designed; today it goes over TLS. See [the shim](./components.md).
 
 ## References
 
