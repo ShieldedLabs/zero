@@ -109,6 +109,18 @@ In the recipe, ours to set:
   auditor to conclude "it does not reproduce" when it does.
 - `cargo fetch --locked` then `cargo build --frozen`, so the committed
   `Cargo.lock` is authoritative and any drift is a hard failure.
+- **Network exception, mixnet-driver build only.** The clearnet build
+  (`--build-arg CARGO_FEATURES=`) can run the compile phase `--network=none`; the
+  mixnet build (the default `CARGO_FEATURES=mixnet-driver`) cannot, because
+  `nym-network-defaults`'s build.rs shells out to `cargo metadata` over the whole
+  nym workspace, resolving git deps (e.g. `nymtech/smoltcp`) that are not in this
+  crate's lockfile and so were never `cargo fetch`ed. The compile RUN keeps the
+  network on for it. Determinism is unaffected: every version is pinned (this
+  crate's `--frozen` lock, and nym's own committed lock at the pinned tag for that
+  transitive resolution), so the network only fetches content already addressed by
+  rev/hash — demonstrated by two independent cold builds producing the identical
+  hash. A fully-offline mixnet build (pre-warm nym's workspace metadata cache in
+  the fetch phase, then `CARGO_NET_OFFLINE` for the compile) is the follow-up.
 - **No BuildKit cache mounts.** `docker build --no-cache` does not clear cache
   mounts, so a cache-mounted recipe cannot honestly claim a cold-build proof.
 - Context built with `git archive`, which stamps every file's mtime with the
@@ -274,10 +286,11 @@ machine-readable copy is `deploy/EXPECTED_SHA256`; the two must move together.
 
 | | binary sha256 | what it was built from |
 |---|---|---|
+| **current**, mixnet driver embedded (nym-sdk) | `418ce662de99108a0335b155f6086f52141bbeecc2cc129c6989608abcb9f2f4` | built `--features mixnet-driver` (the deploy default now): links `nym-sdk` so the shim can divert over the Nym mixnet (`--hub-nym`), via the vendored `nym-upgrade-mode-check` `[patch]` and `rand` pinned to 0.9.2. Two independent cold builds agree. See the network exception under Determinism ingredients: the compile RUN keeps the network on for `nym-network-defaults`'s build.rs. |
 | superseded, zebra v25 stack | `dde2ccccaa99b93ba1ef58b1f046366fb99ed7b0e85e3be7da4581569cf510df` | merged main's zebra v25 update: `zebra-chain` 11.2.0 to 11.3.0, which bumped `zcash_primitives` 0.29 to 0.30 (and `zcash_keys`, `zcash_proofs`, `zcash_transparent`). The classifier is unchanged and all 70 tests pass; the hash moved because the compiled dependency stack did, not the predicate or the recipe. |
 | superseded, GetTransaction interception | `51ccefed3eda14a55261b06ad3779f3e8c57e1d9c2915ebf3353981ac0b43d5d` | added the `GetTransaction` interception path (`Route::GetTransaction`, `intercept::get_transaction`, `diverted_txid`, `grpc_unary`) plus the divert path and its config, so compiled code changed. Cross-machine confirmed: a native x86_64 CI runner and a local arm64 build under Rosetta agree. |
 | superseded, hub-hop ALPN fix | `3e9e1cec7a74f55d66f1bbe7eb4d29534302a38d59310579db5fa0ea711a360c` | the hub hop now negotiates `http/1.1` instead of `h2` (`BackendTls::new_http1`). Found in production: the hub's ALPN-honouring Caddy agreed to h2 and waited for a preface our HTTP/1.1 client never sends, so every diverted migration failed closed as "hub unreachable" over a valid TLS session. |
-| **current**, stateless shim (hub-served GetTransaction) | `f498f8224071187220aaffa5408f07ca80c88a44c4fdffee16bf65ad7315ba5d` | removed `DivertState` and route every `GetTransaction` to the hub's new `POST /transaction` (`HubClient::get_transaction`), so the shim holds no per-migration state. Two cold builds agree; `zebra/` and `zaino/` clean. |
+| superseded, stateless shim (hub-served GetTransaction) | `f498f8224071187220aaffa5408f07ca80c88a44c4fdffee16bf65ad7315ba5d` | removed `DivertState` and route every `GetTransaction` to the hub's new `POST /transaction` (`HubClient::get_transaction`), so the shim holds no per-migration state. Two cold builds agree; `zebra/` and `zaino/` clean. |
 | superseded, TLS on both hops | `cd72daf30956fbdbeb76d9e55c723aad7d9d928d09213c37fed8a66d55b3b5a7` | rustls (`ring`) linked in and wired into the serving path: ACME-terminated wallet TLS, WebPKI-verified backend TLS. The binary grows 4.4 MB to 7.6 MB, which is the TLS stack. |
 | superseded, commit `c161012ff2` | `4143ce5fdffe396adf9937bb975971c850e6b43305a5d5ce3e36deaca3540b5a` | `is_orchard_touching(tx) := tx has at least one Orchard action`. Zooko's second ruling: every Orchard-touching transaction is diverted, whatever `orchard_value_balance` says. |
 | superseded, commit `2243adbdce` | `6257764933df4e2a907f2a0d7d371d42172d5b8350ee5916610c18731bda649f` | the first 2026-08-01 predicate, `is_orchard_exit(tx) := orchard_value_balance > 0`. |

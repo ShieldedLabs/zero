@@ -43,9 +43,10 @@
 #   zebra/zebra-test/             optional dep of zebra-chain, manifest only
 #   zaino/Cargo.toml              workspace root zaino-proto inherits from
 #   zaino/packages/zaino-proto/   the CompactTxStreamer codegen (the path dep)
-# The layout is the repo's own, so the shim's `../../zebra/zebra-chain` and
-# `../../zaino/packages/zaino-proto` path deps resolve unchanged. No manifest is
-# edited, anywhere.
+#   zeronym/vendor/nym-upgrade-mode-check/  the crypto-common [patch] target
+# The layout is the repo's own, so the shim's `../../zebra/zebra-chain`,
+# `../../zaino/packages/zaino-proto` and `../vendor/nym-upgrade-mode-check` path
+# references resolve unchanged. No manifest is edited, anywhere.
 #
 # BUILD THIS FILE FROM INSIDE THE CONTEXT, not from the working tree:
 #   docker build -f "$CTX/zeronym/shim/deploy/Containerfile" "$CTX" ...
@@ -79,6 +80,12 @@ FROM stagex/core-busybox:1.38.0@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735
 ############################################################
 FROM pallet-rust AS builder
 ARG TARGET_ARCH
+# Which cargo features to compile. The deploy target is the mixnet shim, so this
+# defaults to `mixnet-driver` (links nym-sdk; the binary still runs clearnet when
+# --hub-nym is unset). The feature CHANGES the binary and therefore EXPECTED_SHA256,
+# so a rebaseline goes with any change to it. Build the leaner clearnet-only shim
+# with `--build-arg CARGO_FEATURES=` (empty), which drops nym-sdk entirely.
+ARG CARGO_FEATURES="mixnet-driver"
 SHELL ["/bin/sh", "-euo", "pipefail", "-c"]
 
 # DO NOT add stagex/user-protobuf here. zaino-proto's build.rs regenerates its
@@ -132,8 +139,24 @@ RUN cargo fetch --locked --target ${TARGET_ARCH}
 # No BuildKit cache mounts, anywhere. `docker build --no-cache` does NOT clear
 # cache mounts, so a recipe that uses them cannot honestly support a
 # two-cold-builds reproducibility proof.
-RUN --network=none \
-    cargo build --release --frozen --target ${TARGET_ARCH} --bin zero-indexer-shim && \
+#
+# NETWORK RELAXATION, MIXNET BUILD ONLY IN SPIRIT. This RUN keeps the network ON.
+# The clearnet build does not need it, but nym-sdk (the mixnet-driver feature)
+# pulls nym-network-defaults, whose build.rs runs `cargo metadata` over the WHOLE
+# nym workspace purely to locate its own envs/mainnet.env. That resolves nym's
+# unrelated wasm members and their git deps (e.g. nymtech/smoltcp), which are NOT
+# in this crate's lockfile and so were never `cargo fetch`ed; offline it dies
+# resolving github. Determinism is NOT lost: every version is still pinned (our
+# --frozen lock here, nym's own committed lock at the tag for the transitive
+# resolution), so the network only fetches content already pinned by rev/hash.
+# git-fetch-with-cli makes those arbitrary-rev git deps fetch reliably.
+# CAVEAT: this weakens the "offline build (--network=none)" ingredient in
+# deploy/README.md. A fully hermetic mixnet build must pre-warm nym's workspace
+# metadata cache during the network-on fetch phase and set CARGO_NET_OFFLINE for
+# this RUN; that is the follow-up, tracked in NYM_PLAN.md M6.
+RUN CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    cargo build --release --frozen --target ${TARGET_ARCH} \
+      ${CARGO_FEATURES:+--features "${CARGO_FEATURES}"} --bin zero-indexer-shim && \
     install -D -m 0755 target/${TARGET_ARCH}/release/zero-indexer-shim \
       /usr/local/bin/zero-indexer-shim
 
