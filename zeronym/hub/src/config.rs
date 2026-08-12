@@ -51,6 +51,24 @@ pub struct Config {
     /// parent host reads every batch in the clear moments before it is public.
     #[arg(long = "indexer-tls", env = "ZIH_INDEXER_TLS")]
     pub indexer_tls: Option<String>,
+
+    /// Also accept submissions over the Nym mixnet (M5), alongside the clearnet
+    /// `--listen` socket. The hub's mixnet address is logged at startup; publish
+    /// it to shims as `--hub-nym`. Requires a build with the `mixnet-driver`
+    /// feature; set on a binary without it, it is a startup error.
+    ///
+    /// Takes an explicit `true`/`false` rather than being a bare flag, for the
+    /// same reason `--indexer-tls`-adjacent booleans do: it is usually set from
+    /// the environment, where a bare flag would read as set whenever the
+    /// variable merely exists.
+    #[arg(long, env = "ZIH_NYM", action = clap::ArgAction::Set, default_value_t = false)]
+    pub nym: bool,
+
+    /// Localnet end-to-end tests only: load the mixnet topology from this file
+    /// instead of connecting to the default network. Implies `--nym`. Requires a
+    /// build with the `mixnet-localnet` feature.
+    #[arg(long, env = "ZIH_NYM_TOPOLOGY")]
+    pub nym_topology: Option<std::path::PathBuf>,
 }
 
 impl Config {

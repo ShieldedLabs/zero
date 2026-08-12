@@ -1,0 +1,268 @@
+//! The mixnet driver: the one place in the shim that owns a `nym-sdk` client.
+//!
+//! Everything else in the outbound path ([`crate::nym`]) is SDK-free and speaks
+//! only in channels (D5): [`OutFrame`]s to put on the mixnet, raw bytes back,
+//! [`ClientCommand`]s in, [`ClientEvent`]s out. This module is the other end of
+//! those channels and nothing more. It owns one client, moves bytes across it,
+//! and obeys the supervisor:
+//!
+//!   * an [`OutFrame`] is sent to the hub address named by its `target` INDEX
+//!     (D10 multi-homing: the transport never learns what a Nym address is),
+//!     with the fixed reply-SURB count the frame already carries (D3/D4), as an
+//!     ANONYMOUS send so the hub sees a single-use sender tag and never the
+//!     shim's own address (D3);
+//!   * every inbound reconstructed message is handed back as raw bytes, except
+//!     the empty ones the SDK emits to replenish SURBs (D12), which are dropped
+//!     here exactly as the correlator would drop them;
+//!   * [`ClientCommand::Rebuild`] disconnects the current identity and builds a
+//!     fresh one (a new gateway registration, hence a fresh sender tag: the one
+//!     lever that bounds hub-side linkage, D11); [`ClientCommand::Disconnect`]
+//!     shuts the client down cleanly and stops;
+//!   * when the SDK gives up on its gateway (D12: 20 send failures and it stops
+//!     for good, no reconnect), `wait_for_messages` yields `None`; the driver
+//!     reports [`ClientEvent::Died`] and waits to be rebuilt.
+//!
+//! The client lifecycle is why `disconnect()` is a command rather than a drop:
+//! it is not cancel-safe and a dropped LIVE client leaks its background tasks
+//! (D12), so a clean rotation must run it to completion. A client that has
+//! already DIED has stopped those tasks on its own, so it is dropped rather than
+//! disconnected.
+
+#![cfg(feature = "mixnet-driver")]
+
+use tokio::sync::mpsc;
+use zeroize::Zeroizing;
+
+use nym_sdk::mixnet::{
+    IncludedSurbs, MixnetClient, MixnetClientBuilder, MixnetMessageSender, Recipient,
+};
+
+use crate::nym::{ClientCommand, ClientEvent, OutFrame, TargetCount};
+
+/// Which Nym network the driver connects to.
+///
+/// A plain-data choice, not a trait: production is the default network baked
+/// into the SDK; the localnet variant (compiled only with `mixnet-localnet`)
+/// points the same driver at the mixnet the nymnet harness starts, so the
+/// shipped driver is what the end-to-end test exercises rather than a stand-in.
+pub enum MixnetNetwork {
+    /// The default network the SDK ships with (mainnet). Production.
+    Default,
+    /// A hardcoded topology loaded from a file: the local mixnet started by
+    /// `nymnet/localnet.sh`, for end-to-end tests.
+    #[cfg(feature = "mixnet-localnet")]
+    TopologyFile(std::path::PathBuf),
+}
+
+/// Parse one operator-configured hub Nym address into the SDK recipient the
+/// driver sends to. A malformed address is a configuration error the operator
+/// must fix, surfaced at startup rather than swallowed into a silent fail-closed.
+pub fn parse_address(addr: &str) -> Result<Recipient, String> {
+    addr.parse::<Recipient>()
+        .map_err(|err| format!("invalid hub Nym address {addr:?}: {err}"))
+}
+
+/// Build (or rebuild) a mixnet client. Ephemeral by construction (D11): a fresh
+/// build is a fresh identity, a fresh gateway registration, and therefore a
+/// fresh `AnonymousSenderTag`, which is the only lever that bounds how long a
+/// hub can link one shim's submissions.
+async fn build_client(network: &MixnetNetwork) -> Result<MixnetClient, String> {
+    let builder = MixnetClientBuilder::new_ephemeral();
+    let builder = match network {
+        MixnetNetwork::Default => builder,
+        #[cfg(feature = "mixnet-localnet")]
+        MixnetNetwork::TopologyFile(path) => {
+            let provider = nym_topology::HardcodedTopologyProvider::new_from_file(path)
+                .map_err(|err| format!("loading topology {}: {err}", path.display()))?;
+            builder.custom_topology_provider(Box::new(provider))
+        }
+    };
+    builder
+        .build()
+        .map_err(|err| format!("building the mixnet client: {err}"))?
+        .connect_to_mixnet()
+        .await
+        .map_err(|err| format!("connecting to the mixnet: {err}"))
+}
+
+/// Own the mixnet client and move bytes across it until told to stop.
+///
+/// The channel ends mirror [`crate::nym::run_transport`] and
+/// [`crate::nym::run_supervisor`] exactly: `out_frames`/`inbound` are the driver
+/// side of the transport's `to_mixnet`/`from_mixnet`, and `commands`/`events`
+/// the driver side of the supervisor's `commands`/`events`. `hub_addresses` is
+/// the list `target` indexes into (D10); `targets` publishes its length to the
+/// handle so a caller never indexes an empty list.
+pub async fn run_driver(
+    network: MixnetNetwork,
+    hub_addresses: Vec<Recipient>,
+    targets: TargetCount,
+    mut out_frames: mpsc::Receiver<OutFrame>,
+    inbound: mpsc::Sender<Zeroizing<Vec<u8>>>,
+    mut commands: mpsc::Receiver<ClientCommand>,
+    events: mpsc::Sender<ClientEvent>,
+) {
+    use std::sync::atomic::Ordering;
+
+    targets.store(hub_addresses.len(), Ordering::Relaxed);
+
+    // The first client is the driver's own; the supervisor only ever asks for a
+    // REbuild (rotation, or recovery after a reported death). A failed initial
+    // connect enters the same wait-to-be-rebuilt path as a mid-run failure.
+    let mut client = match build_client(&network).await {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(error = %err, "initial mixnet connect failed; awaiting rebuild");
+            let _ = events.send(ClientEvent::Died).await;
+            match build_when_told(&mut commands, &network, &events).await {
+                Some(client) => client,
+                None => return,
+            }
+        }
+    };
+    // An owned, independent sender split off the client, so the send arm below
+    // touches `sender` while the receive arm touches `client`: two disjoint
+    // borrows in one `select!`, no dance between `&self` send and `&mut self`
+    // receive. Re-split on every rebuild, since the old sender points at the
+    // client that just went away.
+    let mut sender = client.split_sender();
+
+    // The select decides WHAT happened; the client lifecycle (which consumes the
+    // client to disconnect, or replaces it on rebuild) is handled AFTER the
+    // select, where none of its futures still borrow the client.
+    loop {
+        let step = tokio::select! {
+            command = commands.recv() => match command {
+                Some(ClientCommand::Rebuild) => Step::Rebuild,
+                // A dropped commands channel is the supervisor gone: nothing left
+                // to obey, so shut the client down cleanly like an explicit stop.
+                Some(ClientCommand::Disconnect) | None => Step::Stop,
+            },
+            frame = out_frames.recv() => match frame {
+                Some(out) => {
+                    send_frame(&sender, &hub_addresses, out).await;
+                    Step::Ferried
+                }
+                // The transport loop is gone; there is nothing to carry.
+                None => Step::Stop,
+            },
+            messages = client.wait_for_messages() => match messages {
+                Some(messages) => {
+                    for message in messages {
+                        // Empty inbound messages are SURB-replenishment artifacts,
+                        // not replies (D12); the correlator would drop them anyway,
+                        // but keeping them out of the channel keeps it for frames.
+                        // Zeroizing on the way in: a LookupReplyV1 carries a
+                        // transaction in cleartext.
+                        if !message.message.is_empty() {
+                            let _ = inbound.send(Zeroizing::new(message.message)).await;
+                        }
+                    }
+                    Step::Ferried
+                }
+                // The SDK has given up on its gateway for good (D12).
+                None => Step::Died,
+            },
+        };
+
+        match step {
+            Step::Ferried => {}
+            Step::Stop => {
+                client.disconnect().await;
+                return;
+            }
+            Step::Rebuild => {
+                // A live rotation: disconnect the current identity to completion
+                // (D12: disconnect is not cancel-safe), then mint a fresh one.
+                client.disconnect().await;
+                client = match build_client(&network).await {
+                    Ok(client) => client,
+                    Err(err) => {
+                        tracing::error!(error = %err, "rebuild failed; awaiting retry");
+                        let _ = events.send(ClientEvent::Died).await;
+                        match build_when_told(&mut commands, &network, &events).await {
+                            Some(client) => client,
+                            None => return,
+                        }
+                    }
+                };
+                sender = client.split_sender();
+            }
+            Step::Died => {
+                // The dead client's tasks have already stopped, so it is dropped
+                // (by the reassignment below), not disconnected. Report and wait
+                // for the supervisor to ask for a rebuild.
+                let _ = events.send(ClientEvent::Died).await;
+                client = match build_when_told(&mut commands, &network, &events).await {
+                    Some(client) => client,
+                    None => return,
+                };
+                sender = client.split_sender();
+            }
+        }
+    }
+}
+
+/// What one turn of the driver loop resolved to. Kept out of the `select!` so the
+/// client can be consumed (disconnect) or replaced (rebuild) once no arm future
+/// still borrows it.
+enum Step {
+    /// Bytes moved in one direction or the other; carry on.
+    Ferried,
+    /// Rotate the client's identity.
+    Rebuild,
+    /// The client died; report it and wait to be rebuilt.
+    Died,
+    /// Shut down cleanly and stop.
+    Stop,
+}
+
+/// Send one outbound frame to the hub address its `target` names, anonymously,
+/// with the reply-SURB count the frame carries.
+///
+/// A send failure is logged and dropped, not retried here: the SDK's own
+/// auto-reconnect covers a transient gateway blip, and a caller whose reply
+/// never comes fails closed on its own timeout. An out-of-range index is a
+/// transport/driver disagreement about the address list and is logged loudly.
+async fn send_frame(
+    sender: &nym_sdk::mixnet::MixnetClientSender,
+    hub_addresses: &[Recipient],
+    out: OutFrame,
+) {
+    let Some(recipient) = hub_addresses.get(out.target).copied() else {
+        tracing::error!(index = out.target, "no hub address at that index; dropping frame");
+        return;
+    };
+    if let Err(err) = sender
+        .send_message(recipient, out.frame.to_vec(), IncludedSurbs::new(out.reply_surbs))
+        .await
+    {
+        tracing::warn!(error = %err, "mixnet send failed; the caller will fail closed on timeout");
+    }
+}
+
+/// Wait for the supervisor to ask for a rebuild, then return the fresh client.
+///
+/// Entered whenever there is no live client: after a reported death, or after a
+/// build itself failed. Each failed build reports [`ClientEvent::Died`] again so
+/// the supervisor keeps pacing the retries with its backoff rather than this
+/// spinning. Returns `None` when told to disconnect (or the supervisor is gone),
+/// which is the driver's cue to stop.
+async fn build_when_told(
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    network: &MixnetNetwork,
+    events: &mpsc::Sender<ClientEvent>,
+) -> Option<MixnetClient> {
+    loop {
+        match commands.recv().await {
+            Some(ClientCommand::Rebuild) => match build_client(network).await {
+                Ok(client) => return Some(client),
+                Err(err) => {
+                    tracing::error!(error = %err, "rebuild failed; awaiting the next");
+                    let _ = events.send(ClientEvent::Died).await;
+                }
+            },
+            Some(ClientCommand::Disconnect) | None => return None,
+        }
+    }
+}

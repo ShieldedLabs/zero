@@ -77,6 +77,20 @@ async fn main() -> Result<(), BoxError> {
         shutdown_signal(),
     ));
 
+    // Optionally also accept submissions over the Nym mixnet (M5), sharing the
+    // same queue, tip and chain as the clearnet serving path below, so the two
+    // ingress paths admit into one queue and cannot drift.
+    #[cfg(feature = "mixnet-driver")]
+    spawn_nym_listener(&config, &queue, &tip, params, &chain)?;
+    #[cfg(not(feature = "mixnet-driver"))]
+    if config.nym || config.nym_topology.is_some() {
+        return Err(
+            "--nym is set but this binary was built WITHOUT the mixnet-driver feature; \
+             rebuild with --features mixnet-driver"
+                .into(),
+        );
+    }
+
     let serving = server::serve(
         listener,
         Hub {
@@ -94,6 +108,76 @@ async fn main() -> Result<(), BoxError> {
         result = serving => result,
         result = cadence => result.map_err(BoxError::from).and(Ok(())),
     }
+}
+
+/// Spawn the mixnet ingress when requested and this binary carries the driver.
+///
+/// The listener and the driver share the same [`Hub`] cores as the clearnet
+/// path, so a migration admitted over the mixnet lands in the same queue and
+/// flushes in the same batch. Both tasks are detached and torn down by their
+/// channels closing on shutdown; the driver also disconnects cleanly on its own
+/// ctrl-c. A no-op unless `--nym` (or `--nym-topology`) is set.
+#[cfg(feature = "mixnet-driver")]
+fn spawn_nym_listener(
+    config: &Config,
+    queue: &Arc<Queue>,
+    tip: &Arc<TipTracker>,
+    params: BatchParams,
+    chain: &Arc<ChainClient>,
+) -> Result<(), BoxError> {
+    use tokio::sync::mpsc;
+
+    use zero_indexer_hub::nym;
+    use zero_indexer_hub::nym_driver::{self, MixnetNetwork};
+
+    if !config.nym && config.nym_topology.is_none() {
+        return Ok(());
+    }
+
+    let network = match &config.nym_topology {
+        None => MixnetNetwork::Default,
+        Some(path) => {
+            #[cfg(feature = "mixnet-localnet")]
+            {
+                MixnetNetwork::TopologyFile(path.clone())
+            }
+            #[cfg(not(feature = "mixnet-localnet"))]
+            {
+                let _ = path;
+                return Err(
+                    "--nym-topology requires a build with the mixnet-localnet feature".into(),
+                );
+            }
+        }
+    };
+
+    let hub = Hub {
+        queue: queue.clone(),
+        tip: tip.clone(),
+        params,
+        chain: chain.clone(),
+    };
+    // The driver holds the opposite end of each channel: it sends inbound
+    // requests and its address, and receives replies.
+    let (in_tx, in_rx) = mpsc::channel(64);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    let (addr_tx, mut addr_rx) = mpsc::channel(4);
+
+    tokio::spawn(nym::run_listener(in_rx, out_tx, hub));
+    tokio::spawn(nym_driver::run_driver(network, in_tx, out_rx, addr_tx, async {
+        let _ = tokio::signal::ctrl_c().await;
+    }));
+    // The driver logs its address, but surfacing it here too keeps it in the
+    // startup log the operator reads to configure shims.
+    tokio::spawn(async move {
+        while let Some(address) = addr_rx.recv().await {
+            tracing::info!(
+                %address,
+                "hub reachable over the Nym mixnet; publish this to shims as --hub-nym"
+            );
+        }
+    });
+    Ok(())
 }
 
 /// Resolves on SIGTERM or ctrl-c, so the cadence can publish what it holds

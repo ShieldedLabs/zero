@@ -71,6 +71,21 @@ pub struct Config {
     #[arg(long, env = "ZIS_HUB_NYM", value_delimiter = ',')]
     pub hub_nym: Vec<String>,
 
+    /// Rotate the mixnet client's identity every N seconds (D11): the window
+    /// within which the hub can link one shim's submissions under a single
+    /// sender tag. Unset means NEVER rotate, which leaves that window at the
+    /// whole process uptime. Only meaningful with `--hub-nym`, and the period is
+    /// a deployment decision, which is why there is no default.
+    #[arg(long, env = "ZIS_NYM_ROTATION_SECS")]
+    pub nym_rotation_secs: Option<u64>,
+
+    /// Localnet end-to-end tests only: load the mixnet topology from this file
+    /// instead of connecting to the default network. Requires a build with the
+    /// `mixnet-localnet` feature; set on a production binary it is a startup
+    /// error, not a silent ignore.
+    #[arg(long, env = "ZIS_NYM_TOPOLOGY")]
+    pub nym_topology: Option<std::path::PathBuf>,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///

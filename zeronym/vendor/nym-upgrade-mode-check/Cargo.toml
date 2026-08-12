@@ -1,0 +1,29 @@
+# A harness-local patch of nym's upgrade-mode-check crate, substituted via
+# [patch] in probe/Cargo.toml. Why it exists: the real crate pulls jwt-simple,
+# whose superboring -> ml-dsa dependency requires stable crypto-common ^0.2,
+# while the vendored zebra-chain (via zcash_primitives 0.30) pins the
+# pre-release crypto-common =0.2.0-rc.1. Pre-releases only unify exactly, so
+# nym-sdk and zebra-chain cannot otherwise share one lockfile. The only item
+# the client-side closure actually uses is the UpgradeModeAttestation data
+# type, kept here verbatim; the JWT half is stubbed (see src/lib.rs).
+#
+# The same conflict awaits M5's real embed (the shim links zebra-chain AND
+# nym-sdk); this patch, or an upstream fix, is the resolution there too.
+
+[package]
+name = "nym-upgrade-mode-check"
+version = "1.21.5-rc.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+nym-crypto = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz", features = ["asymmetric", "serde"] }
+utoipa = { version = "5", optional = true }
+
+[features]
+openapi = ["utoipa"]

@@ -20,6 +20,17 @@ path = "src/lib.rs"
 name = "zero-indexer-hub"
 path = "src/main.rs"
 
+[features]
+# Compile the Nym mixnet driver (src/nym_driver.rs) and link nym-sdk. Off by
+# default: the shipped clearnet binary does not carry the SDK, so its
+# reproducible measurement is unchanged. The enclave build turns this on.
+mixnet-driver = ["dep:nym-sdk"]
+# The driver's localnet path: connect to the mixnet the nymnet harness starts
+# from a hardcoded topology file, for the end-to-end test. Test-only; the
+# production driver never loads a topology, so nym-topology stays out of the
+# enclave build.
+mixnet-localnet = ["mixnet-driver", "dep:nym-topology"]
+
 [dependencies]
 # The real Zcash parser, vendored, same as the shim. The hub re-parses every
 # migration it receives rather than trusting the shim, so it needs exactly the
@@ -86,5 +97,26 @@ webpki-roots = "1"
 # dependency rather than a convenience one. See flush ordering in src/.
 rand = "0.9"
 
+# The Nym mixnet client, behind the `mixnet-driver` feature (optional = true, so
+# the default clearnet build never compiles it). The git tag MUST match the nym
+# release the gateway and mixnodes run, and the shim's pin. The crypto-common
+# conflict this drags in is resolved by the [patch] at the bottom of this file.
+nym-sdk = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz", optional = true }
+
+# Only for the localnet end-to-end test (the mixnet-localnet feature): loads the
+# hardcoded topology the nymnet harness writes so the driver connects to the
+# local mixnet instead of the default network. Never in the production driver.
+nym-topology = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v2026.15-bydgoszcz", features = ["persistence"], optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+# Substitute the vendored slim copy of nym-upgrade-mode-check (see
+# vendor/nym-upgrade-mode-check/Cargo.toml). The real crate's jwt-simple subtree
+# cannot share a lockfile with the vendored zebra-chain: superboring's ml-dsa
+# wants stable crypto-common ^0.2, while zcash_primitives pins the pre-release
+# =0.2.0-rc.1. The slim copy keeps the attestation data types verbatim and drops
+# the JWT half the driver never touches. Unconditional (Cargo has no per-feature
+# patch), but only binds when nym-sdk is in the graph, i.e. with mixnet-driver.
+[patch."https://github.com/nymtech/nym"]
+nym-upgrade-mode-check = { path = "../vendor/nym-upgrade-mode-check" }

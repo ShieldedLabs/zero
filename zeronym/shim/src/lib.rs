@@ -44,6 +44,10 @@ pub mod config;
 pub mod hub;
 pub mod intercept;
 pub mod nym;
+/// The mixnet driver that owns the nym-sdk client (M5). Behind `mixnet-driver`
+/// so the default clearnet build carries neither the driver nor the SDK.
+#[cfg(feature = "mixnet-driver")]
+pub mod nym_driver;
 pub mod proxy;
 pub mod tls;
 pub mod wire;
