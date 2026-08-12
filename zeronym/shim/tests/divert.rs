@@ -33,7 +33,7 @@ mod common;
 use common::{
     connect_h2, dead_addr, decode_raw_transaction, decode_send_response, get_transaction,
     get_transaction_filter, send_tx, send_tx_reply, spawn_counting_backend,
-    spawn_forward_only_shim, V6_IRONWOOD_ONLY, V6_MIGRATION,
+    spawn_forward_only_shim, wire_hash, V6_IRONWOOD_ONLY, V6_MIGRATION,
 };
 
 // -------------------------------------------------------------- mock hub
@@ -227,7 +227,7 @@ async fn a_get_transaction_is_answered_by_the_hub_and_the_operator_is_never_dial
     let shim = spawn_diverting_shim(backend, hub).await;
 
     let mut sender = connect_h2(shim).await;
-    let hash = [0x11u8; 32];
+    let hash = wire_hash(V6_MIGRATION);
     let reply = get_transaction(&mut sender, shim, &hash).await;
 
     // The hub's transaction is relayed to the wallet as a normal reply.
@@ -262,7 +262,7 @@ async fn get_transaction_height_from_the_hub_is_relayed() {
     let shim = spawn_diverting_shim(backend, hub).await;
 
     let mut sender = connect_h2(shim).await;
-    let reply = get_transaction(&mut sender, shim, &[0x22u8; 32]).await;
+    let reply = get_transaction(&mut sender, shim, &wire_hash(V6_MIGRATION)).await;
     assert_eq!(decode_raw_transaction(&reply.body).height, 424242);
 }
 

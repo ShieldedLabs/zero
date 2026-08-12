@@ -283,7 +283,24 @@ pub(crate) async fn get_transaction(
     }
 
     match diversion.hub.get_transaction(&filter.hash).await {
-        Ok(Lookup::Found { data, height }) => Ok(get_transaction_response(&data, height)),
+        Ok(Lookup::Found { data, height }) => {
+            // L4: verify the hub returned the transaction that was ASKED for. A
+            // hub, buggy or hostile, that answers a query with a DIFFERENT
+            // transaction must not have it served to the wallet as the answer:
+            // the wallet asked for one txid and would take whatever bytes came
+            // back as that txid. On a mismatch, fail closed as not_found rather
+            // than serve the wrong transaction. This binds both transports, since
+            // both arrive here as `Lookup::Found`.
+            if lookup_is_for_query(&data, &filter.hash) {
+                Ok(get_transaction_response(&data, height))
+            } else {
+                tracing::warn!(
+                    target: "zis::classify",
+                    "the hub returned a transaction whose txid does not match the query; refusing it"
+                );
+                Ok(grpc_error(GRPC_NOT_FOUND, &not_found_message(&filter.hash)))
+            }
+        }
         Ok(Lookup::NotFound) => Ok(grpc_error(GRPC_NOT_FOUND, &not_found_message(&filter.hash))),
         Err(err) => {
             // Fail closed. Never fall back to the operator's indexer: answering a
@@ -317,6 +334,27 @@ fn decode_tx_filter(headers: &HeaderMap, frame: &[u8]) -> Result<TxFilter, &'sta
     }
     TxFilter::decode(&frame[GRPC_PREFIX_LEN..])
         .map_err(|_| "GetTransaction: could not decode TxFilter")
+}
+
+/// Whether the transaction the hub returned is actually the one that was queried
+/// (L4). Compute the returned transaction's txid and compare it to the queried
+/// hash. Bytes that do not parse cannot be verified and do not match. Both byte
+/// orders are accepted, because a txid's wire (internal) order is the reverse of
+/// its display order and the hub checks both against its queue; matching either
+/// confirms identity, and a different transaction matches neither.
+fn lookup_is_for_query(tx_bytes: &[u8], wire_hash: &[u8]) -> bool {
+    use zebra_chain::serialization::ZcashDeserialize;
+    let Ok(tx) = zebra_chain::transaction::Transaction::zcash_deserialize(&mut std::io::Cursor::new(
+        tx_bytes,
+    )) else {
+        return false;
+    };
+    let txid = tx.hash().to_string();
+    let direct = hex_prefix(wire_hash, wire_hash.len());
+    let mut reversed = wire_hash.to_vec();
+    reversed.reverse();
+    let reversed = hex_prefix(&reversed, reversed.len());
+    txid.eq_ignore_ascii_case(&direct) || txid.eq_ignore_ascii_case(&reversed)
 }
 
 /// The message lightwalletd returns for an unknown txid, naming the DISPLAY txid

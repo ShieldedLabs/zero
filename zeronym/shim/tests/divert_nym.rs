@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use zaino_proto::proto::service::TxFilter;
-use zebra_chain::serialization::ZcashDeserialize;
 use zeroize::Zeroizing;
 
 use zero_indexer_shim::intercept::Diversion;
@@ -34,14 +33,18 @@ use zero_indexer_shim::wire::{self, AckKind, AckRefusal, LookupReply, MAX_NYM_TX
 
 mod common;
 use common::{
-    connect_h2, decode_raw_transaction, decode_send_response, get_transaction,
-    get_transaction_filter, send_tx, send_tx_reply, spawn_counting_backend, V6_IRONWOOD_ONLY,
-    V6_MIGRATION,
+    connect_h2, decode_raw_transaction, decode_send_response, expected_txid, get_transaction,
+    get_transaction_filter, send_tx, send_tx_reply, spawn_counting_backend, wire_hash,
+    V6_IRONWOOD_ONLY, V6_MIGRATION,
 };
 
-/// Short, because two tests deliberately wait it out. Long enough that a
-/// loaded machine still answers the tests that expect a reply.
-const TIMEOUT: Duration = Duration::from_millis(400);
+/// The transport's per-request timeout for these tests. Generous on purpose:
+/// the two tests that deliberately wait it out pay this latency once each, which
+/// is a cheap price for the reply-expecting tests never flaking. At 400 ms a
+/// loaded machine could miss an instant local reply and fail with a confusing
+/// "expected a reply, got Timeout" panic (L5); seconds of margin makes that
+/// unreachable while keeping the wait-it-out tests bounded.
+const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How the mixnet hub answers a submission.
 #[derive(Clone)]
@@ -150,16 +153,6 @@ async fn spawn_nym_shim(
         .await;
     });
     (addr, seen)
-}
-
-/// The display-order txid of the fixture, computed here from the bytes with
-/// zebra-chain: the value the wallet must receive, derived independently of
-/// the shim's own code path rather than read back from it.
-fn expected_txid(tx_bytes: &[u8]) -> String {
-    zebra_chain::transaction::Transaction::zcash_deserialize(&mut std::io::Cursor::new(tx_bytes))
-        .expect("the fixture parses")
-        .hash()
-        .to_string()
 }
 
 #[tokio::test]
@@ -314,7 +307,7 @@ async fn a_get_transaction_is_answered_over_the_mixnet_and_the_operator_is_never
     .await;
 
     let mut sender = connect_h2(shim).await;
-    let hash = [0x11u8; 32];
+    let hash = wire_hash(V6_MIGRATION);
     let reply = get_transaction(&mut sender, shim, &hash).await;
 
     assert_eq!(reply.status, 0);
@@ -323,7 +316,7 @@ async fn a_get_transaction_is_answered_over_the_mixnet_and_the_operator_is_never
     assert_eq!(raw.height, 0, "height 0 is the mempool sentinel");
 
     // The hub was asked with the wallet's bytes unmodified.
-    assert_eq!(seen.lookups.lock().unwrap().as_slice(), &[hash.to_vec()]);
+    assert_eq!(seen.lookups.lock().unwrap().as_slice(), &[hash.clone()]);
     assert_eq!(
         backend_conns.load(Ordering::SeqCst),
         0,
@@ -345,8 +338,41 @@ async fn a_mined_height_from_the_hub_is_relayed() {
     .await;
 
     let mut sender = connect_h2(shim).await;
-    let reply = get_transaction(&mut sender, shim, &[0x22u8; 32]).await;
+    let reply = get_transaction(&mut sender, shim, &wire_hash(V6_MIGRATION)).await;
     assert_eq!(decode_raw_transaction(&reply.body).height, 424_242);
+}
+
+#[tokio::test]
+async fn a_hub_reply_for_a_different_txid_is_refused_not_served() {
+    // L4: a hub that answers a lookup with a transaction OTHER than the one
+    // queried must not have it served to the wallet as that txid. The shim
+    // verifies the reply against the query and fails closed as NOT_FOUND, rather
+    // than hand the wallet the wrong transaction under its own txid.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let (shim, _) = spawn_nym_shim(
+        backend,
+        OnSubmit::Accept,
+        OnLookup::Found {
+            data: V6_MIGRATION.to_vec(),
+            height: 0,
+        },
+    )
+    .await;
+
+    let mut sender = connect_h2(shim).await;
+    // Query a hash that is NOT V6_MIGRATION's txid; the hub returns V6_MIGRATION.
+    let reply = get_transaction(&mut sender, shim, &[0x11u8; 32]).await;
+
+    assert_eq!(
+        reply.status, 5,
+        "a mismatched lookup reply is refused as NOT_FOUND, not served"
+    );
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "refusing a mismatched reply must not fall back to the operator"
+    );
 }
 
 #[tokio::test]

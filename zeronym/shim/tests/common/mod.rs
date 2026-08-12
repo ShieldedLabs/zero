@@ -37,6 +37,27 @@ pub const V6_MIGRATION: &[u8] = include_bytes!("../fixtures/v6_migration.bin");
 /// V6 with an Ironwood bundle and no Orchard bundle: the pass-through case.
 pub const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("../fixtures/v6_ironwood_only.bin");
 
+/// The display-order txid of a fixture, computed from the bytes with zebra-chain,
+/// derived independently of the shim's own code path rather than read back from
+/// it.
+pub fn expected_txid(tx_bytes: &[u8]) -> String {
+    use zebra_chain::serialization::ZcashDeserialize;
+    zebra_chain::transaction::Transaction::zcash_deserialize(&mut std::io::Cursor::new(tx_bytes))
+        .expect("the fixture parses")
+        .hash()
+        .to_string()
+}
+
+/// The wallet's wire-order `TxFilter.hash` for a fixture: the display txid's
+/// bytes reversed, which is the internal (little-endian) order a wallet actually
+/// sends. Since the shim verifies a lookup reply against the query (L4), a served
+/// fixture must be queried by its real hash, not an arbitrary one.
+pub fn wire_hash(tx_bytes: &[u8]) -> Vec<u8> {
+    let mut bytes = hex::decode(expected_txid(tx_bytes)).expect("a hex txid");
+    bytes.reverse();
+    bytes
+}
+
 const LIMIT: StdDuration = StdDuration::from_secs(10);
 
 pub async fn bounded<F: Future>(fut: F) -> F::Output {
