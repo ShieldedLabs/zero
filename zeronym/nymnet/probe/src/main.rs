@@ -69,7 +69,12 @@ async fn main() -> Result<()> {
             let network = PathBuf::from(args.get(2).context("usage: e2e <network.json>")?);
             cmd_e2e(&network).await
         }
-        _ => bail!("usage: probe topology|smoke|lookup|wire|e2e ..."),
+        Some("e2e-driver") => {
+            let network =
+                PathBuf::from(args.get(2).context("usage: e2e-driver <network.json>")?);
+            cmd_e2e_driver(&network).await
+        }
+        _ => bail!("usage: probe topology|smoke|lookup|wire|e2e|e2e-driver ..."),
     }
 }
 
@@ -633,6 +638,160 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     println!("  - the real shim correlator and the real hub listener, glued to");
     println!("    real Nym clients, round-tripped a submit and both lookup");
     println!("    verdicts over the local mixnet");
+    Ok(())
+}
+
+/// The same three assertions as [`cmd_e2e`], but driven through the SHIPPED
+/// drivers (`shim::nym_driver::run_driver` and `hub::nym_driver::run_driver`)
+/// instead of the reimplemented glue, so this is M5's end-to-end coverage of the
+/// actual driver code over a real mixnet: build_client from the localnet
+/// topology, the send/receive loops, the address handoff, and the supervisor
+/// wiring.
+///
+/// `cmd_e2e`'s explicit exposed-address counter is gone here because the shipped
+/// hub driver DROPS a tagless request rather than counting it. It does not need
+/// counting: a successful submit or lookup is itself the proof of an anonymous
+/// send, because the hub's SURB reply cannot route back without the sender tag
+/// that only an anonymous send creates. A non-anonymous send would be dropped at
+/// the hub driver and the request would time out instead of being acked.
+async fn cmd_e2e_driver(network: &Path) -> Result<()> {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::chain::ChainClient;
+    use zero_indexer_hub::nym as hub_nym;
+    use zero_indexer_hub::nym_driver as hub_driver;
+    use zero_indexer_hub::queue::Queue;
+    use zero_indexer_hub::server::Hub;
+    use zero_indexer_shim::hub::{HubTransport, Lookup, Submit};
+    use zero_indexer_shim::nym as shim_nym;
+    use zero_indexer_shim::nym_driver as shim_driver;
+
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+
+    // ---- Hub: the real listener and cores, fed by the SHIPPED hub driver, which
+    // builds its own client from the localnet topology and reports its address.
+    println!("[hub] starting shipped driver...");
+    let queue = Arc::new(Queue::new());
+    let tip = Arc::new(TipTracker::new());
+    tip.observe(100);
+    // Unreachable on purpose: assertion 2 is answered by the queue alone, and
+    // assertion 3 must fail closed.
+    let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
+    let hub = Hub {
+        queue: queue.clone(),
+        tip,
+        params: BatchParams::default(),
+        chain,
+    };
+    let (hub_in_tx, hub_in_rx) = mpsc::channel::<hub_nym::Received>(64);
+    let (hub_out_tx, hub_out_rx) = mpsc::channel::<hub_nym::Reply>(64);
+    let (hub_addr_tx, mut hub_addr_rx) = mpsc::channel(4);
+    let (hub_stop_tx, hub_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
+    tokio::spawn(hub_driver::run_driver(
+        hub_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        hub_in_tx,
+        hub_out_rx,
+        hub_addr_tx,
+        async move {
+            let _ = hub_stop_rx.await;
+        },
+    ));
+    let hub_addr = hub_addr_rx
+        .recv()
+        .await
+        .context("the hub driver connected but reported no address")?;
+    println!("[hub] driver connected at {hub_addr}");
+
+    // ---- Shim: the real correlator and supervisor, fed by the SHIPPED shim
+    // driver. The driver owns the hub ADDRESS by index (D10); the transport only
+    // ever names index 0.
+    println!("[shim] starting shipped driver...");
+    let targets: shim_nym::TargetCount = Arc::new(AtomicUsize::new(0));
+    let inflight: shim_nym::InflightCount = Arc::new(AtomicUsize::new(0));
+    let (req_tx, req_rx) = mpsc::channel(32);
+    let (out_tx, out_rx) = mpsc::channel(8);
+    let (in_tx, in_rx) = mpsc::channel(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (evt_tx, evt_rx) = mpsc::channel(8);
+    let (shim_stop_tx, shim_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(shim_nym::run_transport(req_rx, out_tx, in_rx, inflight.clone()));
+    tokio::spawn(shim_nym::run_supervisor(
+        shim_nym::RotationPolicy::never(),
+        evt_rx,
+        cmd_tx,
+        inflight,
+        async move {
+            let _ = shim_stop_rx.await;
+        },
+    ));
+    tokio::spawn(shim_driver::run_driver(
+        shim_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        vec![hub_addr],
+        targets.clone(),
+        out_rx,
+        in_tx,
+        cmd_rx,
+        evt_tx,
+    ));
+    let transport = HubTransport::from(shim_nym::NymHandle::new(
+        req_tx,
+        shim_nym::REQUEST_TIMEOUT,
+        targets,
+    ));
+
+    // ---- The same three assertions as cmd_e2e.
+    let t0 = Instant::now();
+    let verdict = transport
+        .submit(V6_MIGRATION)
+        .await
+        .map_err(|e| anyhow::anyhow!("submit failed: {e}"))?;
+    let txid = match verdict {
+        Submit::Accepted { txid } => txid,
+        other => bail!("expected an accepted submit, got {other:?}"),
+    };
+    anyhow::ensure!(txid.len() == 64, "locally computed txid is display hex");
+    anyhow::ensure!(queue.len() == 1, "the hub queue holds the migration");
+    println!("[e2e] submit accepted in {:.2?}, txid computed locally, queue holds 1", t0.elapsed());
+
+    let t1 = Instant::now();
+    let found = transport
+        .get_transaction(&hex::decode(&txid)?)
+        .await
+        .map_err(|e| anyhow::anyhow!("lookup failed: {e}"))?;
+    match found {
+        Lookup::Found { data, height } => {
+            anyhow::ensure!(height == 0, "a queued entry is at the mempool sentinel");
+            anyhow::ensure!(data.as_ref() == V6_MIGRATION, "the exact bytes come back");
+        }
+        other => bail!("expected found, got {other:?}"),
+    }
+    println!("[e2e] lookup answered from the queue in {:.2?}", t1.elapsed());
+
+    let t2 = Instant::now();
+    let unknown = transport.get_transaction(&[0xEE; 32]).await;
+    anyhow::ensure!(
+        unknown.is_err(),
+        "an unanswerable lookup must fail closed, got {unknown:?}"
+    );
+    println!("[e2e] unknown hash failed closed in {:.2?}", t2.elapsed());
+
+    // Clean shutdown: the supervisor and the hub driver run disconnect() to
+    // completion (D12) rather than leaking their SDK clients.
+    let _ = shim_stop_tx.send(());
+    let _ = hub_stop_tx.send(());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    println!();
+    println!("e2e-driver: PASS");
+    println!("  - the SHIPPED shim and hub drivers (nym_driver::run_driver on both");
+    println!("    sides) round-tripped a submit and both lookup verdicts over the");
+    println!("    local mixnet; the successful SURB replies prove the sends were");
+    println!("    anonymous (no sender tag, no reply path back)");
     Ok(())
 }
 

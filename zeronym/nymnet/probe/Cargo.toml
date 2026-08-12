@@ -24,8 +24,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 # correlator and listener (not reimplementations) over the local mixnet --
 # each glue task here is a prototype of the M5 SDK driver. Path deps: the
 # probe's lockfile is not part of either crate's reproducible build (D8).
-zero-indexer-hub = { path = "../../hub" }
-zero-indexer-shim = { path = "../../shim" }
+# mixnet-localnet pulls in each crate's nym_driver + the MixnetNetwork::TopologyFile
+# path, so `e2e-driver` can drive the SHIPPED drivers against the localnet.
+zero-indexer-hub = { path = "../../hub", features = ["mixnet-localnet"] }
+zero-indexer-shim = { path = "../../shim", features = ["mixnet-localnet"] }
 
 # Substitute the harness-local copy of nym-upgrade-mode-check (see
 # ../patched/nym-upgrade-mode-check/Cargo.toml): the real crate's jwt-simple

@@ -229,6 +229,11 @@ cmd_e2e() {
   "$PROBE_BIN" e2e "$NETWORK_JSON"
 }
 
+cmd_e2e_driver() {
+  require_up
+  "$PROBE_BIN" e2e-driver "$NETWORK_JSON"
+}
+
 case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
@@ -237,7 +242,8 @@ case "${1:-}" in
   lookup) cmd_lookup "${2:-}" ;;
   wire) cmd_wire ;;
   e2e) cmd_e2e ;;
+  e2e-driver) cmd_e2e_driver ;;
   clean) cmd_clean ;;
   env) cmd_env ;;
-  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|wire|e2e|clean|env" ;;
+  *) die "usage: $0 up|down|status|smoke|lookup [surbs]|wire|e2e|e2e-driver|clean|env" ;;
 esac
