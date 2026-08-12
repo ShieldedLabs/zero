@@ -161,24 +161,39 @@ impl std::error::Error for ConfigError {}
 impl Config {
     /// Resolve the configured transport, rejecting anything ambiguous.
     pub fn hub_selection(&self) -> Result<HubSelection, ConfigError> {
-        match (self.hub, self.hub_nym.is_empty()) {
+        // Empty entries are dropped, not diagnosed. `ZIS_HUB_NYM=` reaches
+        // clap as one EMPTY value rather than as no value at all, because with
+        // a delimiter clap splits whatever the variable holds and an unset
+        // variable is not the same thing as an empty one. Without this an
+        // existing clearnet deployment that templates the new variable in as
+        // empty would stop booting, either because both transports look set or
+        // because "" looks like a malformed address. (The same trap is
+        // documented above for `--tls-production`; it is the environment's,
+        // not clap's.)
+        let addresses: Vec<&str> = self
+            .hub_nym
+            .iter()
+            .map(|addr| addr.trim())
+            .filter(|addr| !addr.is_empty())
+            .collect();
+
+        match (self.hub, addresses.is_empty()) {
             (Some(_), false) => Err(ConfigError::BothTransports),
             (Some(addr), true) => Ok(HubSelection::Http(addr)),
             (None, true) => Ok(HubSelection::ForwardOnly),
             (None, false) => {
                 let mut seen: Vec<&str> = Vec::new();
-                for addr in &self.hub_nym {
-                    let addr = addr.trim();
+                for addr in &addresses {
                     if !is_nym_address(addr) {
-                        return Err(ConfigError::MalformedNymAddress(addr.to_owned()));
+                        return Err(ConfigError::MalformedNymAddress((*addr).to_owned()));
                     }
-                    if seen.contains(&addr) {
-                        return Err(ConfigError::DuplicateNymAddress(addr.to_owned()));
+                    if seen.contains(addr) {
+                        return Err(ConfigError::DuplicateNymAddress((*addr).to_owned()));
                     }
                     seen.push(addr);
                 }
                 Ok(HubSelection::Nym(
-                    self.hub_nym.iter().map(|a| a.trim().to_owned()).collect(),
+                    addresses.iter().map(|addr| (*addr).to_owned()).collect(),
                 ))
             }
         }
@@ -310,6 +325,45 @@ mod hub_selection_tests {
         assert_eq!(
             config.hub_selection(),
             Err(ConfigError::DuplicateNymAddress(HUB_A.to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_empty_hub_nym_is_the_same_as_an_unset_one() {
+        // `ZIS_HUB_NYM=` arrives as one empty value, not as no value: with a
+        // delimiter clap splits whatever the variable holds. Both cases below
+        // used to abort startup, the first of them breaking a working clearnet
+        // deployment that merely templated the new variable in as empty.
+        let empty = parse(&["--hub-nym", ""]);
+        assert_eq!(
+            empty.hub_nym,
+            vec![String::new()],
+            "the field really does hold one empty entry"
+        );
+        assert_eq!(empty.hub_selection().unwrap(), HubSelection::ForwardOnly);
+
+        let with_http = parse(&["--hub", "10.0.0.5:9069", "--hub-nym", ""]);
+        assert_eq!(
+            with_http.hub_selection().unwrap(),
+            HubSelection::Http("10.0.0.5:9069".parse().unwrap()),
+            "an empty mixnet list must not make a clearnet deployment ambiguous"
+        );
+
+        // Whitespace and stray separators are empty too.
+        assert_eq!(
+            parse(&["--hub-nym", " , ,"]).hub_selection().unwrap(),
+            HubSelection::ForwardOnly
+        );
+    }
+
+    #[test]
+    fn a_stray_empty_entry_does_not_invalidate_a_real_list() {
+        let selection = parse(&["--hub-nym", &format!("{HUB_A},,{HUB_B}")])
+            .hub_selection()
+            .unwrap();
+        assert_eq!(
+            selection,
+            HubSelection::Nym(vec![HUB_A.to_owned(), HUB_B.to_owned()])
         );
     }
 

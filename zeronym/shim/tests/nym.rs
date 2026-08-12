@@ -40,8 +40,15 @@ fn start(timeout: Duration) -> Driver {
 /// The same, against a hub multi-homed at `targets` addresses (D10), also
 /// handing back the in-flight count the transport publishes for the supervisor.
 fn start_with_targets(timeout: Duration, targets: usize) -> (Driver, Arc<AtomicUsize>) {
+    start_full(timeout, targets, 8)
+}
+
+/// The same, with an explicit driver-channel capacity: the number of frames the
+/// driver can be handed before it must take one, which is what a real driver
+/// mid-emission exhausts.
+fn start_full(timeout: Duration, targets: usize, driver_capacity: usize) -> (Driver, Arc<AtomicUsize>) {
     let (req_tx, req_rx) = mpsc::channel(8);
-    let (out_tx, out_rx) = mpsc::channel(8);
+    let (out_tx, out_rx) = mpsc::channel(driver_capacity);
     let (in_tx, in_rx) = mpsc::channel(8);
     let inflight = Arc::new(AtomicUsize::new(0));
     tokio::spawn(run_transport(req_rx, out_tx, in_rx, inflight.clone()));
@@ -636,6 +643,43 @@ async fn no_configured_address_fails_closed_without_sending() {
         Err(NymError::TransportGone)
     );
     assert!(driver.from_transport.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_backed_up_driver_does_not_stall_replies_already_in_flight() {
+    // The correlator must keep delivering replies while the driver is busy.
+    // Handing a frame over used to be an awaited step inside the select loop,
+    // so a driver mid-emission (the design budgets ~1 s to emit a 64 KiB frame,
+    // more under backpressure) stopped inbound processing entirely: a request
+    // whose ack had ALREADY arrived timed out anyway, the divert failed closed,
+    // and the wallet retried a transaction the hub had admitted.
+    let (mut driver, _inflight) = start_full(Duration::from_millis(400), 1, 1);
+
+    // A is in flight, and its frame is off the channel, so the driver is idle.
+    let a = driver.handle.clone();
+    let a = tokio::spawn(async move { a.submit(b"a").await });
+    let (a_nonce, _) = next_frame(&mut driver).await;
+
+    // B fills the driver's capacity, C has nowhere to go: the transport is now
+    // holding a request it cannot hand over.
+    let b = driver.handle.clone();
+    let _b = tokio::spawn(async move { b.submit(b"b").await });
+    let c = driver.handle.clone();
+    let _c = tokio::spawn(async move { c.submit(b"c").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A's ack arrives while the driver is still backed up. It must be
+    // delivered, not left in the channel until A's budget expires.
+    driver
+        .to_transport
+        .send(wire::encode_ack(&a_nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        a.await.unwrap(),
+        Ok(AckKind::Accepted),
+        "a reply must land even while the driver cannot take more frames"
+    );
 }
 
 #[tokio::test]

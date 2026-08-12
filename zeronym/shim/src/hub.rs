@@ -34,9 +34,9 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
-use crate::nym::NymHandle;
+use crate::nym::{NymError, NymHandle};
 use crate::tls::BackendTls;
-use crate::wire::{AckKind, LookupReply};
+use crate::wire::{AckKind, LookupReply, WireError};
 use crate::BoxError;
 
 /// The hub's lookup path.
@@ -61,12 +61,22 @@ pub struct HubClient {
     authority: String,
 }
 
-/// The hub's verdict on a submitted migration.
+/// The outcome of a submission attempt: the hub's verdict, or the one refusal
+/// the shim makes on its own behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Submit {
     Accepted { txid: String },
     AlreadyKnown { txid: Option<String> },
     Rejected { reason: String },
+    /// The transaction does not fit the fixed frame, so this transport cannot
+    /// carry it at all.
+    ///
+    /// Distinct from `Rejected` because it is not a verdict and not a
+    /// transient condition: retrying cannot help, and the caller must say so
+    /// to the wallet rather than let it read a generic failure as "try again".
+    /// `limit` is the frame budget, deliberately NOT the transaction's length,
+    /// which must not reach a log (D4).
+    TooLarge { limit: usize },
 }
 
 /// The hub's answer to a transaction lookup.
@@ -108,13 +118,23 @@ impl HubClient {
             .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
             .body(Full::new(Bytes::copy_from_slice(tx_bytes)))?;
 
-        let (_parts, body) = match &self.tls {
+        let (parts, body) = match &self.tls {
             Some(tls) => {
                 let stream = tls.connect(self.addr, stream).await?;
                 round_trip(stream, req).await?
             }
             None => round_trip(stream, req).await?,
         };
+
+        // The hub caps a submission body at the frame size and answers `413`
+        // with a plain-text body, which would otherwise fail to parse as JSON
+        // and become an indistinguishable transport error. Same typed outcome
+        // as the mixnet path takes locally: retrying cannot help.
+        if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
+            return Ok(Submit::TooLarge {
+                limit: crate::wire::MAX_NYM_TX_BYTES,
+            });
+        }
 
         let parsed: HubResponse = serde_json::from_slice(&body)?;
         Ok(match parsed.disposition.as_str() {
@@ -205,15 +225,15 @@ impl HubTransport {
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<Submit, BoxError> {
         match self {
             HubTransport::Http(client) => client.submit(tx_bytes).await,
-            HubTransport::Nym(handle) => Ok(match handle.submit(tx_bytes).await? {
+            HubTransport::Nym(handle) => match handle.submit(tx_bytes).await {
                 // Accepted covers both a fresh admission and a duplicate (the
                 // ack does not distinguish them, matching the HTTP path's
                 // wallet-visible behaviour). The txid is computed locally: the
                 // ack never carries one (D5).
-                AckKind::Accepted => Submit::Accepted {
+                Ok(AckKind::Accepted) => Ok(Submit::Accepted {
                     txid: crate::nym::local_txid(tx_bytes),
-                },
-                AckKind::Refused(refusal) => {
+                }),
+                Ok(AckKind::Refused(refusal)) => {
                     // Safe to log, and only here: an `AckRefusal` is a closed
                     // vocabulary of hub-side reasons, so it carries nothing
                     // about the entry. The HTTP arm's `reason` is free text
@@ -221,11 +241,19 @@ impl HubTransport {
                     // reaches the parent host, so a hostile hub could otherwise
                     // use it to write a txid into the operator's view.
                     tracing::warn!(reason = refusal.as_str(), "the hub refused a submission");
-                    Submit::Rejected {
+                    Ok(Submit::Rejected {
                         reason: refusal.as_str().to_string(),
-                    }
+                    })
                 }
-            }),
+                // A transaction that cannot be framed is a typed outcome, not
+                // an error: `?` here would flatten it into the same opaque
+                // failure a dead mixnet produces, and the caller would tell
+                // the wallet to retry something that can never succeed.
+                Err(NymError::Encode(WireError::TxTooLarge { budget, .. })) => {
+                    Ok(Submit::TooLarge { limit: budget })
+                }
+                Err(err) => Err(err.into()),
+            },
         }
     }
 

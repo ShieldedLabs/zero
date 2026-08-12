@@ -390,26 +390,54 @@ fn fresh_nonce() -> Nonce {
 /// `LookupReplyV1` is [`wire::FRAME_BYTES`]. The decoders still verify the
 /// magic, so a frame of the right size and the wrong type is rejected there.
 pub async fn run_transport(
+    requests: mpsc::Receiver<Request>,
+    to_mixnet: mpsc::Sender<OutFrame>,
+    from_mixnet: mpsc::Receiver<Vec<u8>>,
+    inflight: InflightCount,
+) {
+    correlate(requests, to_mixnet, from_mixnet, &inflight).await;
+    // However this loop ends, nothing is in flight any more. Leaving the last
+    // count behind would have the supervisor defer every future rotation
+    // against a transport that no longer exists.
+    inflight.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+async fn correlate(
     mut requests: mpsc::Receiver<Request>,
     to_mixnet: mpsc::Sender<OutFrame>,
     mut from_mixnet: mpsc::Receiver<Vec<u8>>,
-    inflight: InflightCount,
+    inflight: &InflightCount,
 ) {
     let mut pending: HashMap<Nonce, Waiter> = HashMap::new();
     let mut requests_open = true;
+    // Capacity on the driver channel, taken BEFORE a request is accepted.
+    //
+    // Handing a frame over must never be an awaited step inside a select arm:
+    // while it waited, this loop would stop reading inbound messages, so the
+    // replies to requests ALREADY in flight would sit undelivered and time out.
+    // That is precisely the case the design expects, since a driver mid-emission
+    // holds the channel full for the ~1 s a 64 KiB frame takes to emit (more
+    // under backpressure). `reserve()` is cancel-safe in `select!` and no
+    // capacity is taken unless its branch completes, so the loop keeps serving
+    // inbound the whole time and the eventual `Permit::send` cannot block.
+    let mut permit: Option<mpsc::Permit<'_, OutFrame>> = None;
     loop {
         tokio::select! {
-            request = requests.recv(), if requests_open => match request {
+            reserved = to_mixnet.reserve(), if permit.is_none() && requests_open => {
+                match reserved {
+                    Ok(reserved) => permit = Some(reserved),
+                    // The driver is gone. Dropping every pending waiter
+                    // unblocks all callers with TransportGone.
+                    Err(_) => return,
+                }
+            }
+            request = requests.recv(), if permit.is_some() => match request {
                 Some(Request { nonce, frame, reply_surbs, waiter, target }) => {
-                    if to_mixnet
-                        .send(OutFrame { frame, reply_surbs, target })
-                        .await
-                        .is_err()
-                    {
-                        // The driver is gone. Dropping `waiter` and every
-                        // pending one unblocks all callers with TransportGone.
-                        return;
-                    }
+                    // Non-blocking: the capacity is already ours.
+                    permit
+                        .take()
+                        .expect("the arm is guarded on holding a permit")
+                        .send(OutFrame { frame, reply_surbs, target });
                     pending.insert(nonce, waiter);
                 }
                 None => requests_open = false,

@@ -113,10 +113,18 @@ const LOOKUP_HEADER_BYTES: usize = 21;
 /// magic (4) + nonce (16) + disp (1) + height (8) + tx_len (4).
 const LOOKUP_REPLY_HEADER_BYTES: usize = 33;
 
-/// The largest transaction a `SubmitV1` can carry. A transaction larger than this
-/// cannot be privately batched, which is the price of leaking zero bits of
+/// The largest transaction this transport will carry. A transaction larger than
+/// this cannot be privately batched, which is the price of leaking zero bits of
 /// length; the shim surfaces it to the wallet as an error rather than sending it.
-pub const MAX_NYM_TX_BYTES: usize = FRAME_BYTES - SUBMIT_HEADER_BYTES;
+///
+/// Bounded by the LOOKUP REPLY header, not the submit header, even though it
+/// gates a submit. The reply header is nine bytes wider, so a transaction sized
+/// between the two budgets could be admitted and then never served back: this
+/// hub would answer every later lookup `error`, and the wallet would see
+/// UNAVAILABLE forever for a migration that was accepted and will be published.
+/// Spending nine bytes of an unreachable budget makes that window
+/// unrepresentable rather than merely undocumented.
+pub const MAX_NYM_TX_BYTES: usize = FRAME_BYTES - LOOKUP_REPLY_HEADER_BYTES;
 
 /// The largest hash a `LookupV1` can carry (normally 32 bytes, a txid in wire
 /// order).
@@ -166,14 +174,19 @@ impl std::fmt::Display for WireError {
                 write!(f, "wrong frame length: expected {expected}, got {got}")
             }
             WireError::BadMagic => f.write_str("bad frame magic"),
-            WireError::TxTooLarge { len, budget } => {
-                write!(f, "transaction {len} bytes exceeds the {budget}-byte frame budget")
+            // The BUDGET, never the transaction's own length. This string ends
+            // up in a log, and in an enclave a log reaches the parent host: a
+            // refused migration's exact size is precisely the kind of bit D4
+            // and REVIEW #12 exist to keep off that channel. The length stays
+            // in the struct for a caller that legitimately needs it.
+            WireError::TxTooLarge { budget, .. } => {
+                write!(f, "transaction exceeds the {budget}-byte frame budget")
             }
             WireError::TxLenOverrunsFrame { declared } => {
                 write!(f, "declared tx_len {declared} overruns the frame")
             }
-            WireError::HashTooLarge { len } => {
-                write!(f, "hash {len} bytes exceeds the {MAX_LOOKUP_HASH_BYTES}-byte lookup budget")
+            WireError::HashTooLarge { .. } => {
+                write!(f, "hash exceeds the {MAX_LOOKUP_HASH_BYTES}-byte lookup budget")
             }
             WireError::HashLenOverrunsFrame { declared } => {
                 write!(f, "declared hash_len {declared} overruns the frame")
@@ -620,6 +633,49 @@ mod tests {
         let (got_nonce, got_tx) = decode_submit(&frame).unwrap();
         assert_eq!(got_nonce, nonce);
         assert_eq!(got_tx.as_slice(), tx.as_slice());
+    }
+
+    #[test]
+    fn an_over_budget_error_never_renders_the_transactions_own_size() {
+        // These strings reach a log, and in an enclave a log reaches the parent
+        // host. The budget is a constant the operator already knows; the
+        // transaction's size is a bit about a wallet's activity that D4 and
+        // REVIEW #12 exist to keep off that channel.
+        let secret_len = MAX_NYM_TX_BYTES + 12_345;
+        let rendered = WireError::TxTooLarge {
+            len: secret_len,
+            budget: MAX_NYM_TX_BYTES,
+        }
+        .to_string();
+        assert!(
+            !rendered.contains(&secret_len.to_string()),
+            "the length leaked into: {rendered}"
+        );
+        assert!(rendered.contains(&MAX_NYM_TX_BYTES.to_string()));
+
+        let hash_len = MAX_LOOKUP_HASH_BYTES + 7;
+        let rendered = WireError::HashTooLarge { len: hash_len }.to_string();
+        assert!(
+            !rendered.contains(&hash_len.to_string()),
+            "the length leaked into: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_submit_budget_is_bounded_by_what_a_lookup_reply_can_carry() {
+        // Otherwise a transaction between the two budgets is admissible and
+        // then permanently unlookupable: accepted, published, and answered
+        // `error` on every later lookup, so the wallet sees UNAVAILABLE forever
+        // for a migration that really was accepted.
+        assert!(MAX_NYM_TX_BYTES <= MAX_LOOKUP_REPLY_TX_BYTES);
+        let at_cap = LookupReply::Found {
+            height: 1,
+            tx: Zeroizing::new(vec![0x5a; MAX_NYM_TX_BYTES]),
+        };
+        assert!(
+            encode_lookup_reply(&vector_nonce(), &at_cap).is_ok(),
+            "anything the submit gate admits must fit a reply frame"
+        );
     }
 
     #[test]

@@ -145,6 +145,28 @@ async fn divert(
     };
 
     match diversion.hub.submit(&tx_data).await {
+        // Too large for the transport's fixed frame. RESOURCE_EXHAUSTED, not
+        // UNAVAILABLE: this can never succeed, and UNAVAILABLE is the status
+        // that tells a wallet to retry. It is never forwarded to the operator
+        // and never broadcast another way; not fitting the frame is the price
+        // of leaking zero bits of length.
+        //
+        // The log line carries the LIMIT, never the transaction's own size:
+        // that number would otherwise reach the parent host, which is the one
+        // reader D4 exists to keep it from.
+        Ok(Submit::TooLarge { limit }) => {
+            tracing::warn!(
+                target: "zis::classify",
+                limit,
+                "MIGRATION: too large for the hub frame; refusing rather than diverting or forwarding"
+            );
+            Ok(grpc_error(
+                GRPC_RESOURCE_EXHAUSTED,
+                &format!(
+                    "zero-indexer-shim: transaction exceeds the {limit}-byte hub frame limit"
+                ),
+            ))
+        }
         Ok(submit) => {
             // The SendTransaction reply is a `SendResponse { error_code,
             // error_message }`: on success `error_code` is 0 and `error_message`
@@ -154,6 +176,8 @@ async fn divert(
                 Submit::Accepted { txid } => (0, txid),
                 Submit::AlreadyKnown { txid } => (0, txid.unwrap_or_default()),
                 Submit::Rejected { reason } => (-1, reason),
+                // Answered above, as a gRPC status rather than a SendResponse.
+                Submit::TooLarge { .. } => unreachable!("handled in its own arm"),
             };
 
             // Nothing is recorded: the shim keeps no map of what it diverted. A

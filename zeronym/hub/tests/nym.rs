@@ -19,7 +19,8 @@ use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::Hub;
 use zero_indexer_hub::wire::{
     decode_ack, decode_lookup_reply, encode_lookup, encode_submit, AckKind, AckRefusal,
-    LookupReply, Nonce, MAX_LOOKUP_HASH_BYTES, MAX_LOOKUP_REPLY_TX_BYTES, MAX_NYM_TX_BYTES,
+    LookupReply, Nonce, LOOKUP_BYTES, MAX_LOOKUP_HASH_BYTES, MAX_LOOKUP_REPLY_TX_BYTES,
+    MAX_NYM_TX_BYTES,
 };
 
 mod common;
@@ -342,6 +343,47 @@ async fn a_malformed_lookup_is_answered_error_with_the_recovered_nonce() {
     assert_eq!(echoed, nonce(25), "the recoverable nonce is echoed");
     assert_eq!(verdict, LookupReply::Error);
     assert_eq!(hub.queue.len(), 0, "nothing was mistaken for a submission");
+}
+
+#[tokio::test]
+async fn a_runt_lookup_shaped_message_buys_no_reply_at_all() {
+    // Dispatching on the lookup magic alone was an amplifier: the magic plus a
+    // header is 21 bytes, and the lookup arm's every failure is a FULL frame,
+    // so 21 bytes in bought 65 536 bytes out -- 41 sphinx packets of the hub's
+    // own metered egress, available to anyone, since the hub's Nym address is
+    // public by design and has no operator ACL in front of it.
+    let hub = test_hub(Some(TIP));
+    let full = encode_lookup(&nonce(40), &[0x61; 32]).unwrap().to_vec();
+
+    // Every truncation that still carries the magic and a recoverable nonce.
+    let runts: Vec<Received> = [21usize, 32, LOOKUP_BYTES - 1]
+        .into_iter()
+        .map(|len| msg(TAG, full[..len].to_vec()))
+        .collect();
+    let replies = run_round(hub.clone(), runts).await;
+
+    assert!(
+        replies.is_empty(),
+        "a wrong-size lookup frame is dropped, not answered with a full frame"
+    );
+    assert_eq!(hub.queue.len(), 0, "and it is not mistaken for a submission");
+}
+
+#[tokio::test]
+async fn a_full_size_but_malformed_lookup_is_still_answered() {
+    // The other half of the size check: a frame of the RIGHT size whose
+    // contents are wrong is a real shim's bug or a corrupted frame, and it
+    // still deserves a correlatable answer rather than silence.
+    let hub = test_hub(Some(TIP));
+    let mut frame = encode_lookup(&nonce(41), &[0x62; 32]).unwrap().to_vec();
+    frame[20] = (MAX_LOOKUP_HASH_BYTES + 1) as u8;
+
+    let replies = run_round(hub, vec![msg(TAG, frame)]).await;
+
+    assert_eq!(replies.len(), 1);
+    let (echoed, verdict) = lookup_verdict(&replies[0]);
+    assert_eq!(echoed, nonce(41));
+    assert_eq!(verdict, LookupReply::Error);
 }
 
 #[tokio::test]

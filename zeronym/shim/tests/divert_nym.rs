@@ -30,7 +30,7 @@ use zeroize::Zeroizing;
 
 use zero_indexer_shim::intercept::Diversion;
 use zero_indexer_shim::nym::{run_transport, NymHandle};
-use zero_indexer_shim::wire::{self, AckKind, AckRefusal, LookupReply};
+use zero_indexer_shim::wire::{self, AckKind, AckRefusal, LookupReply, MAX_NYM_TX_BYTES};
 
 mod common;
 use common::{
@@ -264,6 +264,38 @@ async fn a_silent_hub_fails_the_divert_closed() {
         backend_conns.load(Ordering::SeqCst),
         0,
         "failing closed means the operator is never dialled"
+    );
+}
+
+#[tokio::test]
+async fn an_over_cap_transaction_is_resource_exhausted_not_a_retry_forever() {
+    // UNAVAILABLE is the status that tells a wallet to retry, and a
+    // transaction that does not fit the frame can never succeed on this
+    // transport: it would retry until it gave up. The intercept path buffers
+    // up to 4 MiB while the frame budget is ~64 KiB, so the window between
+    // them is wide and reachable.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let (shim, seen) = spawn_nym_shim(backend, OnSubmit::Accept, OnLookup::NotFound).await;
+
+    // An Orchard-touching migration padded past the frame budget. Trailing
+    // bytes after a valid transaction still classify as a migration, which is
+    // what routes it down the divert path in the first place.
+    let mut oversized = V6_MIGRATION.to_vec();
+    oversized.resize(MAX_NYM_TX_BYTES + 1, 0);
+
+    let mut sender = connect_h2(shim).await;
+    let reply = send_tx_reply(&mut sender, shim, &oversized).await;
+
+    assert_eq!(reply.status, 8, "over-cap maps to gRPC RESOURCE_EXHAUSTED");
+    assert!(
+        seen.submits.lock().unwrap().is_empty(),
+        "it is never framed, so it never enters the mixnet"
+    );
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "and it is never handed to the operator to broadcast instead"
     );
 }
 

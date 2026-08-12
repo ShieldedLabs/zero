@@ -27,6 +27,14 @@ use zeroize::Zeroizing;
 use crate::server::{Hub, LookupOutcome};
 use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
+/// How many inbound requests may be served concurrently.
+///
+/// Sized for the slow arm: a lookup that misses the queue dials the indexer,
+/// so this bounds how many of those can be in flight, and with them the hub's
+/// memory and its outbound connections. Generous enough that honest shims
+/// never queue behind it, small enough that a flood cannot spawn without limit.
+const MAX_CONCURRENT_REQUESTS: usize = 64;
+
 /// The mixnet's anonymous sender tag, carried but never interpreted. Sized to the
 /// SDK's tag (16 bytes); the driver converts the SDK value to and from this so
 /// nothing here depends on the SDK.
@@ -58,6 +66,17 @@ pub async fn run_listener(
     outgoing: mpsc::Sender<Reply>,
     hub: Hub,
 ) {
+    // A ceiling on requests being served at once.
+    //
+    // Spawning per message keeps a slow reply from head-of-line blocking the
+    // next admission, but an unbounded spawn also throws away the inbound
+    // channel's backpressure, and since the lookup arm landed a request can now
+    // hold a fresh dial to the operator's indexer with a 10 s budget on each of
+    // connect, request and body. Acquiring before spawning puts the
+    // backpressure back where it belongs: on the channel, and so on the driver,
+    // rather than on the hub's memory.
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS));
+
     while let Some(received) = incoming.recv().await {
         // Empty inbound messages are the SDK's SURB-replenishment artifacts, not
         // requests. Drop them before they reach the codec (they would decode as
@@ -65,9 +84,14 @@ pub async fn run_listener(
         if received.frame.is_empty() {
             continue;
         }
+        let Ok(permit) = permits.clone().acquire_owned().await else {
+            // The semaphore is never closed; this cannot happen short of a bug.
+            return;
+        };
         let hub = hub.clone();
         let outgoing = outgoing.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Some(frame) = build_reply(&hub, &received.frame).await {
                 let _ = outgoing
                     .send(Reply {
@@ -80,13 +104,23 @@ pub async fn run_listener(
     }
 }
 
-/// Dispatch one inbound frame to the submit or the lookup arm by its magic.
-/// A lookup-shaped frame (the lookup magic with at least a full header) takes
-/// the lookup arm even when malformed, so its failure is answered in lookup
-/// vocabulary; everything else takes the submit arm, whose bad-frame handling
-/// covers unknown magics too.
+/// Dispatch one inbound frame to the submit or the lookup arm.
+///
+/// On SIZE first, then magic. A lookup is a fixed [`wire::LOOKUP_BYTES`] frame,
+/// so anything else is not one however it starts, and only a frame of exactly
+/// that size can reach the lookup arm's full-frame `error` reply. Dispatching
+/// on the magic alone was an amplifier: `peek_lookup_nonce` needs just 21 bytes
+/// and the lookup magic, so a 21-byte message got a 65 536-byte answer — 41
+/// sphinx packets of the hub's own metered egress, from anyone at all, since
+/// the hub's Nym address is public by design and has no operator ACL in front
+/// of it.
+///
+/// A frame that is lookup-shaped but the wrong size now falls through to the
+/// submit arm, finds no submit magic, and is dropped with no reply. That
+/// mirrors the shim's own `deliver`, which has always dispatched on length
+/// first.
 async fn build_reply(hub: &Hub, frame: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    if wire::peek_lookup_nonce(frame).is_some() {
+    if frame.len() == wire::LOOKUP_BYTES && wire::peek_lookup_nonce(frame).is_some() {
         Some(build_lookup_reply(hub, frame).await)
     } else {
         build_ack(hub, frame).map(Zeroizing::new)
