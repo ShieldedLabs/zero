@@ -25,7 +25,7 @@ use zero_indexer_hub::wire::{
 };
 
 mod common;
-use common::{spawn_mock_indexer_full, GetTx};
+use common::{spawn_hanging_indexer, spawn_mock_indexer_full, GetTx};
 
 /// A real V6 carrying Orchard actions, the same corpus the shim uses.
 const V6_MIGRATION: &[u8] = include_bytes!("../../shim/tests/fixtures/v6_migration.bin");
@@ -344,6 +344,55 @@ async fn a_malformed_lookup_is_answered_error_with_the_recovered_nonce() {
     assert_eq!(echoed, nonce(25), "the recoverable nonce is echoed");
     assert_eq!(verdict, LookupReply::Error);
     assert_eq!(hub.queue.len(), 0, "nothing was mistaken for a submission");
+}
+
+#[tokio::test]
+async fn a_migration_is_admitted_while_lookups_are_stuck_on_the_indexer() {
+    // The listener's central scheduling property, and the one a concurrency
+    // bound is easiest to break: admission is pure queue work with no I/O, so
+    // it must never wait behind lookups that are dialling a half-dead indexer.
+    // This needs no attacker -- a slow operator indexer plus ordinary wallet
+    // polling produces it -- and what gets starved is the one path that must
+    // not fail.
+    let hub = test_hub_with_indexer(Some(TIP), spawn_hanging_indexer().await);
+
+    let (in_tx, in_rx) = mpsc::channel(256);
+    let (out_tx, mut out_rx) = mpsc::channel(256);
+    tokio::spawn(run_listener(in_rx, out_tx, hub.clone()));
+
+    // Saturate every lookup slot, and then some: each of these hangs for the
+    // hub's whole per-call budget.
+    for i in 0..80u16 {
+        let frame = encode_lookup(&[i as u8; 16], &[0xEE; 32]).unwrap().to_vec();
+        in_tx.send(msg(TAG, frame)).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Now a migration. It must be admitted and acked promptly.
+    let started = std::time::Instant::now();
+    let submit = encode_submit(&nonce(50), V6_MIGRATION).unwrap().to_vec();
+    in_tx.send(msg(TAG, submit)).await.unwrap();
+
+    let ack = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(reply) = out_rx.recv().await {
+            // The 64-byte reply is the ack; the lookups' full frames are not
+            // coming, but filter by size rather than assume that.
+            if reply.frame.len() == 64 {
+                return decode_ack(&reply.frame).expect("a well-formed ack").1;
+            }
+        }
+        panic!("the listener stopped before acking");
+    })
+    .await
+    .expect("a migration must not wait behind stuck lookups");
+
+    assert_eq!(ack, AckKind::Accepted);
+    assert_eq!(hub.queue.len(), 1, "and it really was admitted");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "admission took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

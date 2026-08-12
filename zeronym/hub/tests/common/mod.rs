@@ -154,6 +154,26 @@ fn grpc_raw_tx(data: &[u8], height: u64) -> Response<BoxBody<Bytes, Infallible>>
     )
 }
 
+/// An indexer that completes the TCP handshake and then never answers, holding
+/// every request for the hub's full per-call budget.
+///
+/// This is what a half-dead operator indexer looks like from the hub, and it is
+/// the condition under which the listener must still admit migrations: a
+/// refused connection fails fast and proves nothing.
+pub async fn spawn_hanging_indexer() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Accepted sockets are parked here so the peer sees an open connection
+        // rather than a reset.
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    addr
+}
+
 /// A trailers-only gRPC NOT_FOUND (status in the headers, empty body), the shape
 /// lightwalletd returns for an unknown txid.
 fn grpc_not_found() -> Response<BoxBody<Bytes, Infallible>> {

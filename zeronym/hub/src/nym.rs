@@ -27,13 +27,14 @@ use zeroize::Zeroizing;
 use crate::server::{Hub, LookupOutcome};
 use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
-/// How many inbound requests may be served concurrently.
+/// How many lookups may be dialling the operator's indexer at once.
 ///
-/// Sized for the slow arm: a lookup that misses the queue dials the indexer,
-/// so this bounds how many of those can be in flight, and with them the hub's
-/// memory and its outbound connections. Generous enough that honest shims
-/// never queue behind it, small enough that a flood cannot spawn without limit.
-const MAX_CONCURRENT_REQUESTS: usize = 64;
+/// Bounds the slow arm and ONLY the slow arm. Admission never waits on this:
+/// it does no I/O, so a ceiling on it would buy nothing and cost the one
+/// property this listener must hold, that a migration is admitted while
+/// lookups are stuck. Generous enough that honest polling never queues behind
+/// it, small enough that a flood cannot open unbounded connections.
+const MAX_CONCURRENT_LOOKUPS: usize = 64;
 
 /// The mixnet's anonymous sender tag, carried but never interpreted. Sized to the
 /// SDK's tag (16 bytes); the driver converts the SDK value to and from this so
@@ -63,25 +64,24 @@ pub struct Reply {
 
 /// Serve requests until the inbound channel closes.
 ///
-/// Each message is handled on its own task so a slow reply (a lookup awaiting
-/// the indexer, most of all) cannot head-of-line block the next admission; the
-/// queue is internally locked, and [`Hub`] is cheap to clone (it is `Arc`s and
-/// `Copy` params).
+/// Each message is handled on its own task, and the receive loop itself never
+/// waits on anything but the channel, so a slow reply (a lookup awaiting the
+/// indexer, most of all) cannot head-of-line block the next admission. That
+/// matters asymmetrically: admitting a migration is pure queue work with no I/O
+/// in it at all ([`build_ack`] is not even `async`), while a lookup that misses
+/// the queue dials the operator's indexer with a 10 s budget on each of
+/// connect, request and body. Only the second needs a ceiling, and it is
+/// applied around that dial rather than here — bounding the loop would starve
+/// the one path that must not fail behind the one that can afford to wait.
+///
+/// The queue is internally locked, and [`Hub`] is cheap to clone (it is `Arc`s
+/// and `Copy` params).
 pub async fn run_listener(
     mut incoming: mpsc::Receiver<Received>,
     outgoing: mpsc::Sender<Reply>,
     hub: Hub,
 ) {
-    // A ceiling on requests being served at once.
-    //
-    // Spawning per message keeps a slow reply from head-of-line blocking the
-    // next admission, but an unbounded spawn also throws away the inbound
-    // channel's backpressure, and since the lookup arm landed a request can now
-    // hold a fresh dial to the operator's indexer with a 10 s budget on each of
-    // connect, request and body. Acquiring before spawning puts the
-    // backpressure back where it belongs: on the channel, and so on the driver,
-    // rather than on the hub's memory.
-    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS));
+    let lookups = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_LOOKUPS));
 
     while let Some(received) = incoming.recv().await {
         // Empty inbound messages are the SDK's SURB-replenishment artifacts, not
@@ -90,15 +90,11 @@ pub async fn run_listener(
         if received.frame.is_empty() {
             continue;
         }
-        let Ok(permit) = permits.clone().acquire_owned().await else {
-            // The semaphore is never closed; this cannot happen short of a bug.
-            return;
-        };
         let hub = hub.clone();
         let outgoing = outgoing.clone();
+        let lookups = lookups.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            if let Some(frame) = build_reply(&hub, &received.frame).await {
+            if let Some(frame) = build_reply(&hub, &received.frame, &lookups).await {
                 let _ = outgoing
                     .send(Reply {
                         sender_tag: received.sender_tag,
@@ -125,9 +121,13 @@ pub async fn run_listener(
 /// submit arm, finds no submit magic, and is dropped with no reply. That
 /// mirrors the shim's own `deliver`, which has always dispatched on length
 /// first.
-async fn build_reply(hub: &Hub, frame: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+async fn build_reply(
+    hub: &Hub,
+    frame: &[u8],
+    lookups: &tokio::sync::Semaphore,
+) -> Option<Zeroizing<Vec<u8>>> {
     if frame.len() == wire::LOOKUP_BYTES && wire::peek_lookup_nonce(frame).is_some() {
-        Some(build_lookup_reply(hub, frame).await)
+        Some(build_lookup_reply(hub, frame, lookups).await)
     } else {
         build_ack(hub, frame).map(Zeroizing::new)
     }
@@ -138,7 +138,11 @@ async fn build_reply(hub: &Hub, frame: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
 /// recoverable, and every failure inside it (a malformed frame, an empty key,
 /// an unanswerable indexer, a transaction too large for the reply frame) is an
 /// `error` disposition, which fails CLOSED at the shim.
-async fn build_lookup_reply(hub: &Hub, frame: &[u8]) -> Zeroizing<Vec<u8>> {
+async fn build_lookup_reply(
+    hub: &Hub,
+    frame: &[u8],
+    lookups: &tokio::sync::Semaphore,
+) -> Zeroizing<Vec<u8>> {
     let error_reply = |nonce| {
         wire::encode_lookup_reply(&nonce, &LookupReply::Error)
             .expect("an error reply carries no transaction and always fits")
@@ -158,10 +162,27 @@ async fn build_lookup_reply(hub: &Hub, frame: &[u8]) -> Zeroizing<Vec<u8>> {
         tracing::warn!(reason = "empty lookup key", "lookup refused");
         return error_reply(nonce);
     }
-    let reply = match hub.lookup(&hash).await {
-        LookupOutcome::Found { data, height } => LookupReply::Found { height, tx: data },
-        LookupOutcome::NotFound => LookupReply::NotFound,
-        LookupOutcome::Unavailable => LookupReply::Error,
+    let reply = {
+        // The ceiling, applied exactly here: `Hub::lookup` is the only work in
+        // this module that leaves the process, dialling the operator's indexer
+        // fresh on a queue miss. Bounding it bounds the hub's outbound
+        // connections and the memory behind them, while a lookup that has to
+        // wait for a permit costs one 64-byte frame and a parked task.
+        //
+        // Deliberately NOT held across the framing and the reply send below: a
+        // driver slow to drain replies must not consume a slot meant for the
+        // indexer, and a permit is never held while an admission could be
+        // waiting on nothing.
+        let _permit = match lookups.acquire().await {
+            Ok(permit) => permit,
+            // The semaphore is never closed; this cannot happen short of a bug.
+            Err(_) => return error_reply(nonce),
+        };
+        match hub.lookup(&hash).await {
+            LookupOutcome::Found { data, height } => LookupReply::Found { height, tx: data },
+            LookupOutcome::NotFound => LookupReply::NotFound,
+            LookupOutcome::Unavailable => LookupReply::Error,
+        }
     };
     match wire::encode_lookup_reply(&nonce, &reply) {
         Ok(frame) => frame,
