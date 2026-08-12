@@ -126,13 +126,16 @@ impl HubClient {
             None => round_trip(stream, req).await?,
         };
 
-        // The hub caps a submission body at the frame size and answers `413`
-        // with a plain-text body, which would otherwise fail to parse as JSON
-        // and become an indistinguishable transport error. Same typed outcome
-        // as the mixnet path takes locally: retrying cannot help.
+        // The hub caps a clearnet submission body at its frame size and answers
+        // `413` with a plain-text body, which would otherwise fail to parse as
+        // JSON and become an indistinguishable transport error. Same typed
+        // outcome as the mixnet path takes locally: retrying cannot help. The
+        // reported limit is the hub's HTTP body cap (`FRAME_BYTES`), NOT the
+        // mixnet's `MAX_NYM_TX_BYTES`: this is the clearnet path, whose bound is
+        // the hub's frame, which is nine bytes wider than the mixnet tx budget.
         if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
             return Ok(Submit::TooLarge {
-                limit: crate::wire::MAX_NYM_TX_BYTES,
+                limit: crate::wire::FRAME_BYTES,
             });
         }
 
