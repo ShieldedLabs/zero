@@ -200,6 +200,16 @@ impl RotationPolicy {
     }
 }
 
+/// The next scheduled rotation instant, floored so a rotation can never fire
+/// faster than the rebuild backoff. A period at or above the backoff (the norm)
+/// is unaffected; the floor only stops a misconfigured near-zero period from
+/// hot-looping the supervisor (L2).
+fn next_rotation(policy: &RotationPolicy) -> Option<tokio::time::Instant> {
+    policy
+        .period
+        .map(|period| tokio::time::Instant::now() + period.max(policy.rebuild_backoff))
+}
+
 /// How often a deferred rotation re-checks whether the transport has gone idle.
 const DEFER_RECHECK: Duration = Duration::from_millis(250);
 
@@ -531,7 +541,7 @@ pub async fn run_supervisor(
     use tokio::time::Instant;
 
     tokio::pin!(shutdown);
-    let mut rotate_at = policy.period.map(|period| Instant::now() + period);
+    let mut rotate_at = next_rotation(&policy);
     // Set once a rotation comes due and is waiting for the transport to go
     // idle; the instant is when it stops waiting and rotates regardless.
     let mut defer_deadline: Option<Instant> = None;
@@ -554,10 +564,20 @@ pub async fn run_supervisor(
                     if commands.send(ClientCommand::Rebuild).await.is_err() {
                         return;
                     }
-                    tokio::time::sleep(policy.rebuild_backoff).await;
+                    // Back off before reacting again, so a client that dies
+                    // instantly on every rebuild is retried steadily rather than
+                    // in a hot loop. Interruptible: a shutdown during the backoff
+                    // must not have to wait it out.
+                    tokio::select! {
+                        _ = &mut shutdown => {
+                            let _ = commands.send(ClientCommand::Disconnect).await;
+                            return;
+                        }
+                        _ = tokio::time::sleep(policy.rebuild_backoff) => {}
+                    }
                     // A rebuild is a fresh identity, so the linkage window
                     // starts over: the rotation clock restarts with it.
-                    rotate_at = policy.period.map(|period| Instant::now() + period);
+                    rotate_at = next_rotation(&policy);
                     defer_deadline = None;
                 }
                 // The driver is gone; there is no client to supervise.
@@ -582,7 +602,7 @@ pub async fn run_supervisor(
                 if commands.send(ClientCommand::Rebuild).await.is_err() {
                     return;
                 }
-                rotate_at = policy.period.map(|period| Instant::now() + period);
+                rotate_at = next_rotation(&policy);
                 defer_deadline = None;
             }
         }
@@ -745,6 +765,39 @@ mod tests {
             .await
             .expect("the transport exits once pending drains")
             .unwrap();
+    }
+
+    /// L2: a zero (or sub-backoff) rotation period must not hot-loop the
+    /// supervisor. Before the floor, `rotate_at` reset to `now` and re-fired
+    /// immediately, filling the command channel with Rebuilds; the floor holds
+    /// rotations to at most one per rebuild_backoff.
+    #[tokio::test]
+    async fn a_zero_rotation_period_does_not_hot_loop() {
+        let policy = RotationPolicy {
+            period: Some(Duration::ZERO),
+            defer_limit: Duration::from_secs(60),
+            rebuild_backoff: Duration::from_millis(100),
+        };
+        let (_events_tx, events_rx) = mpsc::channel::<ClientEvent>(4);
+        let (commands_tx, mut commands_rx) = mpsc::channel::<ClientCommand>(64);
+        let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(run_supervisor(policy, events_rx, commands_tx, inflight, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        // A window well under the 100 ms backoff. A hot loop fills the 64-slot
+        // command channel before it elapses; the floor emits none in this window.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let mut rebuilds = 0;
+        while commands_rx.try_recv().is_ok() {
+            rebuilds += 1;
+        }
+        assert!(
+            rebuilds <= 1,
+            "a zero rotation period must not hot-loop; got {rebuilds} rebuilds"
+        );
     }
 }
 
