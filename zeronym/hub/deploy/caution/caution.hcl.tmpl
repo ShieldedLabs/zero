@@ -70,6 +70,14 @@ enclave "__ENCLAVE_NAME__" {
     # has nothing to poison, and a hijacked address cannot present a valid
     # certificate for the name. assemble-caution.sh generates one block per
     # endpoint from --indexers and enforces literal IPv4.
+    #
+    # With --nym, the hub also runs its OWN mixnet client (to receive submissions
+    # over the mixnet), so the operator-allowlisted gateway/nym-api egress rules
+    # from --nym-egress are appended here too. Note the residual inbound port
+    # above: a fully mixnet-only hub would drop the ingress + http block entirely
+    # (it receives over its outbound gateway link, no inbound port), which is the
+    # M7 tightening; today the HTTP submit path stays for transitional clearnet
+    # shims, so this deploy keeps both.
     __EGRESS_BLOCKS__
 
     # THE PART THAT MAKES THIS DEPLOYABLE AT ALL.
@@ -121,6 +129,7 @@ enclave "__ENCLAVE_NAME__" {
       # moments before it is public, which would undo most of the reason this
       # runs in an enclave at all.
       ZIH_INDEXER_TLS = "__INDEXER_TLS__"
+__NYM_ENV__
 
       # Default is `info`. The hub deliberately logs only counts and dispositions,
       # never a txid or a transaction body (REVIEW.md #157), because in an enclave

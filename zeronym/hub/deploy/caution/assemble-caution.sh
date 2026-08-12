@@ -17,7 +17,15 @@
 # Usage:
 #   sh .../assemble-caution.sh --name <enclave> \
 #       --indexers <ip:port[,ip:port...]> --indexer-tls <indexer-cert-name> \
-#       --tls-domain <hub-domain> [dest-dir]
+#       --tls-domain <hub-domain> \
+#       [--nym --nym-egress <cidr:port[:proto]> ...] \
+#       [dest-dir]
+#
+# --nym additionally runs the hub's own Nym mixnet client so shims can submit over
+# the mixnet (it logs its Nym address at startup; publish that to shims as
+# --hub-nym). It needs one or more --nym-egress rules for the gateway/nym-api set
+# (from the host operator). The HTTP submit path stays either way; a fully
+# mixnet-only hub (no inbound port) is the M7 tightening.
 #
 # Unlike the shim (one enclave fronts one indexer), the hub broadcasts through a
 # SET of endpoints, so --indexers takes a comma-separated list and one egress /32
@@ -34,14 +42,22 @@ NAME=""
 INDEXERS=""
 INDEXER_TLS=""
 TLS_DOMAIN=""
+NYM="false"
+NYM_EGRESS=""
 DEBUG="false"
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--name)          NAME=$2; shift 2 ;;
-		--indexers)         INDEXERS=$2; shift 2 ;;
+		--indexers)      INDEXERS=$2; shift 2 ;;
 		--indexer-tls)   INDEXER_TLS=$2; shift 2 ;;
 		--tls-domain)    TLS_DOMAIN=$2; shift 2 ;;
+		# Also receive submissions over the Nym mixnet: the hub runs its OWN mixnet
+		# client (ZIH_NYM), so the enclave needs egress to the gateway/nym-api set.
+		--nym)           NYM="true"; shift ;;
+		# One mixnet egress allowlist entry, repeatable: cidr:port[:proto]. The host
+		# operator supplies these (gateway(s), nym-api set, optionally DNS/Nyx).
+		--nym-egress)    NYM_EGRESS="$NYM_EGRESS $2"; shift 2 ;;
 		--debug)         DEBUG="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
@@ -113,6 +129,49 @@ EOF
 done
 IFS=$OLDIFS
 
+# Optional Nym mixnet reception. --nym runs the hub's own mixnet client so shims
+# can submit over the mixnet; the enclave then needs egress to the gateway/nym-api
+# set (operator-allowlisted via --nym-egress), APPENDED to the indexer egress
+# above, and ZIH_NYM in the env. Additive: the HTTP ingress stays for transitional
+# clearnet shims (the no-inbound-port tightening is M7).
+NYM_ENV_FILE="$STAGE/nym_env.txt"
+: > "$NYM_ENV_FILE"
+if [ -n "$NYM_EGRESS" ] && [ "$NYM" != true ]; then
+	echo "error: --nym-egress given without --nym. Nothing would use it." >&2
+	exit 2
+fi
+if [ "$NYM" = true ]; then
+	[ -n "$NYM_EGRESS" ] || {
+		echo "error: --nym needs at least one --nym-egress rule (the gateway(s) and" >&2
+		echo "       nym-api set the host operator allowlists). None given." >&2
+		exit 2
+	}
+	nym_has_dns=no
+	for rule in $NYM_EGRESS; do
+		cidr=${rule%%:*}; rest=${rule#*:}
+		port=${rest%%:*}; proto=${rest#*:}
+		[ "$proto" = "$rest" ] && proto=tcp
+		echo "$port" | grep -qE '^[0-9]+$' || {
+			echo "error: --nym-egress rule '$rule' has a non-numeric port" >&2; exit 2; }
+		[ "$port" = 53 ] && nym_has_dns=yes
+		printf '\n    # Nym mixnet egress (gateway / nym-api / DNS / Nyx), operator-allowlisted.\n' >> "$EGRESS"
+		printf '    egress {\n      cidr_ipv4   = "%s"\n      port        = %s\n      ip_protocol = "%s"\n    }\n' \
+			"$cidr" "$port" "$proto" >> "$EGRESS"
+	done
+	if [ "$nym_has_dns" = no ]; then
+		echo "==> WARNING: no DNS (udp:53) --nym-egress rule. On the DEFAULT Nym network"
+		echo "    the enclave resolves gateway/nym-api NAMES and has no resolver, so the"
+		echo "    hub's mixnet client fails closed on the server. Add a"
+		echo "    '<resolver>/32:53:udp' rule, or pin every endpoint by IP."
+	fi
+	{
+		printf '\n      # Also accept submissions over the Nym mixnet (M5). The hub logs its\n'
+		printf '      # own Nym address at startup; publish it to shims as --hub-nym.\n'
+		printf '      ZIH_NYM = "true"\n'
+	} > "$NYM_ENV_FILE"
+	echo "==> MIXNET RECEPTION ON: the hub also runs a mixnet client. egress allowlist:$NYM_EGRESS"
+fi
+
 # The endpoint list, normalised (no trailing/leading spaces), for the ZIH_INDEXERS env.
 INDEXERS_ENV=$INDEXERS
 
@@ -151,8 +210,9 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 # the files built above so no metacharacter has to survive sed. The scalar
 # fields go through sed afterwards.
 RENDERED="$STAGE/caution.hcl"
-awk -v egress="$EGRESS" '
+awk -v egress="$EGRESS" -v nymenv="$NYM_ENV_FILE" '
 	/__EGRESS_BLOCKS__/ { while ((getline l < egress) > 0) print l; next }
+	/__NYM_ENV__/       { while ((getline l < nymenv) > 0) print l; next }
 	{ print }
 ' "$HERE/caution.hcl.tmpl" > "$RENDERED"
 
@@ -191,6 +251,7 @@ zero-indexer-hub Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
 serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME production)
 broadcasts via:  $INDEXERS_ENV verified as $INDEXER_TLS
+mixnet:          $([ "$NYM" = true ] && echo "ON (ZIH_NYM; egress:$NYM_EGRESS)" || echo "OFF (clearnet HTTP submit only)")
 source commit:   $SHA
 expected binary: $EXPECTED
 
