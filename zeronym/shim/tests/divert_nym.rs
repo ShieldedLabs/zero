@@ -81,7 +81,12 @@ async fn spawn_nym_shim(
     let (req_tx, req_rx) = mpsc::channel(8);
     let (out_tx, mut out_rx) = mpsc::channel(8);
     let (in_tx, in_rx) = mpsc::channel(8);
-    tokio::spawn(run_transport(req_rx, out_tx, in_rx));
+    tokio::spawn(run_transport(
+        req_rx,
+        out_tx,
+        in_rx,
+        Arc::new(AtomicUsize::new(0)),
+    ));
 
     let seen = Arc::new(HubSeen::default());
     let hub_seen = seen.clone();

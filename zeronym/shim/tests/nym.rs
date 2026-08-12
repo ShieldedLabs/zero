@@ -4,7 +4,7 @@
 //! refusal mapping, filtering) runs with no SDK and no fake client, exactly as
 //! the hub's listener tests drive `run_listener`.
 
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,20 +34,25 @@ struct Driver {
 /// Spawn `run_transport` and hand back its driver ends. The timeout is short:
 /// these tests either answer promptly or assert the timeout itself.
 fn start(timeout: Duration) -> Driver {
-    start_with_targets(timeout, 1)
+    start_with_targets(timeout, 1).0
 }
 
-/// The same, against a hub multi-homed at `targets` addresses (D10).
-fn start_with_targets(timeout: Duration, targets: usize) -> Driver {
+/// The same, against a hub multi-homed at `targets` addresses (D10), also
+/// handing back the in-flight count the transport publishes for the supervisor.
+fn start_with_targets(timeout: Duration, targets: usize) -> (Driver, Arc<AtomicUsize>) {
     let (req_tx, req_rx) = mpsc::channel(8);
     let (out_tx, out_rx) = mpsc::channel(8);
     let (in_tx, in_rx) = mpsc::channel(8);
-    tokio::spawn(run_transport(req_rx, out_tx, in_rx));
-    Driver {
-        handle: NymHandle::new(req_tx, timeout, Arc::new(AtomicUsize::new(targets))),
-        from_transport: out_rx,
-        to_transport: in_tx,
-    }
+    let inflight = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(run_transport(req_rx, out_tx, in_rx, inflight.clone()));
+    (
+        Driver {
+            handle: NymHandle::new(req_tx, timeout, Arc::new(AtomicUsize::new(targets))),
+            from_transport: out_rx,
+            to_transport: in_tx,
+        },
+        inflight,
+    )
 }
 
 /// Read the next outbound submit frame and decode it back to (nonce, tx),
@@ -495,7 +500,7 @@ async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
 async fn a_timed_out_address_fails_over_to_the_next() {
     // A Nym address dies with its gateway (D10), so a hub is hosted at several
     // and a silent one must not take the shim's hub path down.
-    let mut driver = start_with_targets(Duration::from_millis(60), 3);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_millis(60), 3);
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx").await });
 
@@ -522,7 +527,7 @@ async fn a_timed_out_address_fails_over_to_the_next() {
 async fn every_attempt_carries_its_own_nonce() {
     // A late reply from an address that was given up on must not be mistaken
     // for the answer of the one that followed it.
-    let mut driver = start_with_targets(Duration::from_millis(40), 2);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_millis(40), 2);
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx").await });
 
@@ -546,7 +551,7 @@ async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
     // A refusal comes from a live hub. Asking another address would not change
     // the answer, and every extra attempt is another mixnet round trip inside
     // a wallet's call.
-    let mut driver = start_with_targets(Duration::from_secs(5), 3);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_secs(5), 3);
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx").await });
 
@@ -570,7 +575,7 @@ async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
 
 #[tokio::test]
 async fn a_silent_hub_fails_closed_only_after_every_address() {
-    let mut driver = start_with_targets(Duration::from_millis(40), 3);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_millis(40), 3);
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx").await });
 
@@ -599,7 +604,7 @@ async fn a_silent_hub_fails_closed_only_after_every_address() {
 async fn requests_start_at_rotating_addresses() {
     // Always starting at the first address would lean the whole shim's load on
     // one of a multi-homed hub's gateways.
-    let mut driver = start_with_targets(Duration::from_millis(30), 3);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_millis(30), 3);
     let mut starts = Vec::new();
     for _ in 0..3 {
         let handle = driver.handle.clone();
@@ -625,12 +630,57 @@ async fn requests_start_at_rotating_addresses() {
 
 #[tokio::test]
 async fn no_configured_address_fails_closed_without_sending() {
-    let mut driver = start_with_targets(Duration::from_secs(5), 0);
+    let (mut driver, _inflight) = start_with_targets(Duration::from_secs(5), 0);
     assert_eq!(
         driver.handle.submit(b"tx").await,
         Err(NymError::TransportGone)
     );
     assert!(driver.from_transport.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_inflight_count_tracks_requests_the_caller_still_wants() {
+    // This is what the supervisor reads before rotating the client's identity:
+    // rotating under a live request strands it, so the count must rise while a
+    // caller is waiting, fall when it is answered, and fall again when a
+    // caller gives up (whose entry no reply will ever remove).
+    let (mut driver, inflight) = start_with_targets(Duration::from_millis(60), 1);
+    assert_eq!(inflight.load(Ordering::Relaxed), 0);
+
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let (nonce, _) = next_frame(&mut driver).await;
+    assert_eq!(inflight.load(Ordering::Relaxed), 1, "a request is in flight");
+
+    driver
+        .to_transport
+        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(
+        inflight.load(Ordering::Relaxed),
+        0,
+        "an answered request is no longer in flight"
+    );
+
+    // A caller that timed out is not in flight either, even though nothing
+    // ever answered it and no further traffic arrives to prompt a sweep: the
+    // transport's own sweep tick is what clears it.
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let _ = next_frame(&mut driver).await;
+    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    let cleared = tokio::time::timeout(Duration::from_secs(3), async {
+        while inflight.load(Ordering::Relaxed) != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        cleared.is_ok(),
+        "an abandoned request must not pin the supervisor's rotation forever"
+    );
 }
 
 #[tokio::test]

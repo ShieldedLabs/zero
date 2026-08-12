@@ -117,6 +117,101 @@ pub struct OutFrame {
 /// its callers being rebuilt.
 pub type TargetCount = std::sync::Arc<std::sync::atomic::AtomicUsize>;
 
+/// How many requests are waiting for a reply, published by [`run_transport`].
+///
+/// Read by [`run_supervisor`], which will not rotate the client's identity out
+/// from under a request that is still expecting an answer.
+pub type InflightCount = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+/// What the driver reports about its mixnet client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientEvent {
+    /// The client is gone and nothing can be sent until it is rebuilt.
+    ///
+    /// The SDK reaches this on its own: auto-reconnect is only 10 attempts at
+    /// 5 s, and after 20 consecutive send failures it declares the gateway dead
+    /// and shuts the whole client down with no further reconnect (D12). There
+    /// is no recovery inside the SDK past that point, so the driver watches its
+    /// cancellation signal and reports here.
+    Died,
+}
+
+/// What [`run_supervisor`] tells the driver to do with its client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCommand {
+    /// Build a fresh client. A new client means a new identity, a new gateway
+    /// registration, and therefore a fresh `AnonymousSenderTag`, which is the
+    /// only lever that bounds how long a hub can link one shim's submissions
+    /// (D11).
+    Rebuild,
+    /// Shut the client down cleanly and stop.
+    ///
+    /// A command rather than a drop because the SDK's `disconnect()` is NOT
+    /// cancel-safe and dropping the client leaks its background tasks (D12):
+    /// the driver must run it to completion, which it can only do if it is
+    /// told rather than dropped.
+    Disconnect,
+}
+
+/// When the client's identity is rotated, and how patiently.
+///
+/// The PERIOD is the D11 decision this type exists to make a parameter rather
+/// than a redeploy: it is exactly the window within which a hub can link one
+/// shim's submissions under one sender tag. Never rotating leaves that window
+/// at the whole process uptime; rotating per submission is the condemned
+/// connect-burst pattern and drops cover between builds. The period itself is
+/// a humans decision (see the plan), so there is no default here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationPolicy {
+    /// How often to mint a fresh identity. `None` never rotates.
+    pub period: Option<Duration>,
+    /// How long a due rotation waits for in-flight requests to drain before
+    /// going ahead regardless.
+    ///
+    /// Rotating under an in-flight request strands it: its reply comes back
+    /// through SURBs the old client minted, so the caller waits out its
+    /// timeout and the wallet pays a retry. Waiting forever is the opposite
+    /// failure, where a busy shim never rotates and the linkage window is
+    /// unbounded in practice. This bounds the compromise.
+    pub defer_limit: Duration,
+    /// How long to wait after asking for a rebuild before acting on anything
+    /// else, so a client that cannot be rebuilt is retried steadily rather
+    /// than in a hot loop.
+    pub rebuild_backoff: Duration,
+}
+
+impl RotationPolicy {
+    /// Rotate every `period`, with the defaults for the two waits.
+    pub fn every(period: Duration) -> Self {
+        RotationPolicy {
+            period: Some(period),
+            ..RotationPolicy::never()
+        }
+    }
+
+    /// Never rotate: the sender-tag linkage window becomes the process uptime
+    /// (D11's residual, stated rather than hidden).
+    pub fn never() -> Self {
+        RotationPolicy {
+            period: None,
+            defer_limit: Duration::from_secs(60),
+            rebuild_backoff: Duration::from_secs(5),
+        }
+    }
+}
+
+/// How often a deferred rotation re-checks whether the transport has gone idle.
+const DEFER_RECHECK: Duration = Duration::from_millis(250);
+
+/// How long an outstanding request can sit before [`run_transport`] re-checks
+/// whether its caller is still there.
+///
+/// Without this the in-flight count only changes when a message arrives, so a
+/// request that timed out on a then-quiet transport would keep the count above
+/// zero and defer the supervisor's rotation against a caller that has already
+/// given up.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Why a request produced no verdict. Every variant fails closed at the caller.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NymError {
@@ -298,6 +393,7 @@ pub async fn run_transport(
     mut requests: mpsc::Receiver<Request>,
     to_mixnet: mpsc::Sender<OutFrame>,
     mut from_mixnet: mpsc::Receiver<Vec<u8>>,
+    inflight: InflightCount,
 ) {
     let mut pending: HashMap<Nonce, Waiter> = HashMap::new();
     let mut requests_open = true;
@@ -321,23 +417,125 @@ pub async fn run_transport(
             message = from_mixnet.recv() => match message {
                 Some(bytes) => {
                     // Empty inbound messages are the SDK's SURB-replenishment
-                    // artifacts, not replies (D12).
-                    if bytes.is_empty() {
-                        continue;
+                    // artifacts, not replies (D12). They are not delivered,
+                    // but they still turn the loop, which sweeps below: an
+                    // early `continue` here would skip that.
+                    if !bytes.is_empty() {
+                        deliver(&mut pending, &bytes);
                     }
-                    deliver(&mut pending, &bytes);
                 }
                 None => return,
             },
+            // Nothing to do; the loop turns so the sweep below runs while
+            // requests are outstanding. Armed only when there is something
+            // that could become abandoned, so an idle transport does not wake
+            // up at all.
+            _ = tokio::time::sleep(SWEEP_INTERVAL), if !pending.is_empty() => {}
         }
         // Callers that timed out (or were cancelled) have dropped their
         // receivers; without this sweep their entries would accumulate for the
         // life of the process, since the reply that would remove them is
         // exactly the one that never came.
         pending.retain(|_, waiter| !waiter.is_abandoned());
+        // Published after the sweep, so it counts requests whose caller is
+        // still listening: that is what the supervisor must not rotate out
+        // from under.
+        inflight.store(pending.len(), std::sync::atomic::Ordering::Relaxed);
         if !requests_open && pending.is_empty() {
             return;
         }
+    }
+}
+
+/// Own the mixnet client's lifecycle: rebuild it when it dies, rotate it on a
+/// schedule, and disconnect it cleanly on shutdown.
+///
+/// Like [`run_transport`], this touches no SDK. It consumes [`ClientEvent`]s
+/// the driver reports and emits [`ClientCommand`]s the driver executes, so the
+/// whole policy — when to rotate, how long to defer, how hard to retry — is
+/// exercised by holding the channel ends, and the driver stays a thin thing
+/// that owns a client and does what it is told.
+///
+/// Two rules the SDK's own behaviour dictates (D12). A dead client is rebuilt
+/// IMMEDIATELY and without waiting for in-flight requests, because after the
+/// SDK's 20-failure hard stop nothing is deliverable and those requests are
+/// already lost to their timeouts. Shutdown sends [`ClientCommand::Disconnect`]
+/// rather than simply returning, because `disconnect()` is not cancel-safe and
+/// a dropped client leaks its background tasks.
+pub async fn run_supervisor(
+    policy: RotationPolicy,
+    mut events: mpsc::Receiver<ClientEvent>,
+    commands: mpsc::Sender<ClientCommand>,
+    inflight: InflightCount,
+    shutdown: impl std::future::Future<Output = ()>,
+) {
+    use std::sync::atomic::Ordering;
+    use tokio::time::Instant;
+
+    tokio::pin!(shutdown);
+    let mut rotate_at = policy.period.map(|period| Instant::now() + period);
+    // Set once a rotation comes due and is waiting for the transport to go
+    // idle; the instant is when it stops waiting and rotates regardless.
+    let mut defer_deadline: Option<Instant> = None;
+
+    loop {
+        let wake = match (defer_deadline, rotate_at) {
+            (Some(_), _) => Some(Instant::now() + DEFER_RECHECK),
+            (None, Some(at)) => Some(at),
+            (None, None) => None,
+        };
+
+        tokio::select! {
+            _ = &mut shutdown => {
+                let _ = commands.send(ClientCommand::Disconnect).await;
+                return;
+            }
+            event = events.recv() => match event {
+                Some(ClientEvent::Died) => {
+                    tracing::warn!("the mixnet client died; rebuilding");
+                    if commands.send(ClientCommand::Rebuild).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(policy.rebuild_backoff).await;
+                    // A rebuild is a fresh identity, so the linkage window
+                    // starts over: the rotation clock restarts with it.
+                    rotate_at = policy.period.map(|period| Instant::now() + period);
+                    defer_deadline = None;
+                }
+                // The driver is gone; there is no client to supervise.
+                None => return,
+            },
+            _ = sleep_until_maybe(wake) => {
+                let deadline = *defer_deadline
+                    .get_or_insert_with(|| Instant::now() + policy.defer_limit);
+                let idle = inflight.load(Ordering::Relaxed) == 0;
+                if !idle && Instant::now() < deadline {
+                    // Something is still waiting for a reply its current SURBs
+                    // would carry. Re-check shortly rather than strand it.
+                    continue;
+                }
+                if !idle {
+                    tracing::warn!(
+                        "rotating the mixnet client with requests still in flight; \
+                         they will fail closed and be retried"
+                    );
+                }
+                tracing::info!("rotating the mixnet client's identity");
+                if commands.send(ClientCommand::Rebuild).await.is_err() {
+                    return;
+                }
+                rotate_at = policy.period.map(|period| Instant::now() + period);
+                defer_deadline = None;
+            }
+        }
+    }
+}
+
+/// Sleep until `at`, or forever when there is nothing scheduled.
+async fn sleep_until_maybe(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

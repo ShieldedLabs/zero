@@ -501,7 +501,12 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let (req_tx, req_rx) = tokio::sync::mpsc::channel(8);
     let (shim_out_tx, mut shim_out_rx) = tokio::sync::mpsc::channel::<shim_nym::OutFrame>(8);
     let (shim_in_tx, shim_in_rx) = tokio::sync::mpsc::channel(8);
-    tokio::spawn(shim_nym::run_transport(req_rx, shim_out_tx, shim_in_rx));
+    tokio::spawn(shim_nym::run_transport(
+        req_rx,
+        shim_out_tx,
+        shim_in_rx,
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    ));
     tokio::spawn(async move {
         loop {
             tokio::select! {

@@ -82,6 +82,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+# test-util only: `pause`/`advance` let the client-lifecycle tests drive a
+# rotation schedule in microseconds instead of waiting out real minutes.
+tokio = { version = "1", features = ["test-util"] }
 # proptest-impl lives ONLY here. It exposes transaction::arbitrary's
 # fake_v6_transaction / fake_v6_orchard_shielded_data, which the generator test
 # uses to build real V6 wire bytes. With resolver 2 (implied by edition 2021)
