@@ -494,6 +494,10 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     // by a glue task that is the M5 shim driver in miniature.
     println!("[shim] connecting...");
     let mut shim_client = connect_client(network).await?;
+    // The driver owns the hub ADDRESSES; the transport only ever names an index
+    // into this list (D10 multi-homing). One address here, but the indexing is
+    // the real thing the M5 driver does.
+    let hub_addresses = vec![hub_addr];
     let (req_tx, req_rx) = tokio::sync::mpsc::channel(8);
     let (shim_out_tx, mut shim_out_rx) = tokio::sync::mpsc::channel::<shim_nym::OutFrame>(8);
     let (shim_in_tx, shim_in_rx) = tokio::sync::mpsc::channel(8);
@@ -503,11 +507,17 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
             tokio::select! {
                 out = shim_out_rx.recv() => {
                     let Some(out) = out else { break };
-                    // The SURB count rides with the frame: the transport picks
-                    // it per frame type (D3/D4) and the driver only obeys.
+                    // Both the SURB count and the target address ride with the
+                    // frame: the transport picks the count per frame type
+                    // (D3/D4) and the address by index (D10), and the driver
+                    // only obeys.
+                    let Some(recipient) = hub_addresses.get(out.target).copied() else {
+                        eprintln!("[shim] no address at index {}", out.target);
+                        continue;
+                    };
                     if let Err(e) = shim_client
                         .send_message(
-                            hub_addr,
+                            recipient,
                             out.frame.to_vec(),
                             IncludedSurbs::new(out.reply_surbs),
                         )
@@ -528,6 +538,7 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let transport = HubTransport::from(shim_nym::NymHandle::new(
         req_tx,
         Duration::from_secs(60),
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
     ));
 
     // 1) Submit through the whole real path.

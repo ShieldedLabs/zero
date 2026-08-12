@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use zero_indexer_shim::config::Config;
+use zero_indexer_shim::config::{Config, HubSelection};
 use zero_indexer_shim::hub::HubClient;
 use zero_indexer_shim::intercept::Diversion;
 use zero_indexer_shim::proxy::Backend;
@@ -92,8 +92,12 @@ async fn main() -> Result<(), BoxError> {
     // name is a startup failure the operator sees, warned about loudly when the
     // hop is plaintext, and stated plainly when absent so nobody mistakes
     // forward-only for private.
-    let diversion = match config.hub {
-        Some(hub_addr) => {
+    // `to_string`, not `?` on the typed error: main renders a BoxError with
+    // Debug, and this message is the whole reason the check runs at startup
+    // rather than at the first divert.
+    let selection = config.hub_selection().map_err(|err| err.to_string())?;
+    let diversion = match selection {
+        HubSelection::Http(hub_addr) => {
             // new_http1, NOT new: the hub's submission endpoint is a plain
             // HTTP/1.1 POST, while the backing indexer above is gRPC. Offering
             // `h2` here makes an ALPN-honouring server agree to HTTP/2 and then
@@ -114,7 +118,21 @@ async fn main() -> Result<(), BoxError> {
                 hub: HubClient::new(hub_addr, hub_tls).into(),
             }))
         }
-        None => {
+        HubSelection::Nym(addresses) => {
+            // The frames, the transport and the hub's listener are all built
+            // and tested, but the mixnet client that carries them is not (it
+            // arrives with the SDK). Refusing to start is the only honest
+            // option: starting anyway would either forward migrations to the
+            // operator or silently fall back to clearnet, and an operator who
+            // set --hub-nym is asking for neither.
+            return Err(format!(
+                "--hub-nym is configured with {} address(es) but the mixnet transport is not \
+                 wired up yet; use --hub for the transitional clearnet path",
+                addresses.len()
+            )
+            .into());
+        }
+        HubSelection::ForwardOnly => {
             tracing::warn!(
                 "no --hub: FORWARD-ONLY. Migrations are classified and logged but forwarded to \
                  the operator's indexer. No privacy until a hub is set."

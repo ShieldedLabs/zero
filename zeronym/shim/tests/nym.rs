@@ -4,6 +4,8 @@
 //! refusal mapping, filtering) runs with no SDK and no fake client, exactly as
 //! the hub's listener tests drive `run_listener`.
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -32,12 +34,17 @@ struct Driver {
 /// Spawn `run_transport` and hand back its driver ends. The timeout is short:
 /// these tests either answer promptly or assert the timeout itself.
 fn start(timeout: Duration) -> Driver {
+    start_with_targets(timeout, 1)
+}
+
+/// The same, against a hub multi-homed at `targets` addresses (D10).
+fn start_with_targets(timeout: Duration, targets: usize) -> Driver {
     let (req_tx, req_rx) = mpsc::channel(8);
     let (out_tx, out_rx) = mpsc::channel(8);
     let (in_tx, in_rx) = mpsc::channel(8);
     tokio::spawn(run_transport(req_rx, out_tx, in_rx));
     Driver {
-        handle: NymHandle::new(req_tx, timeout),
+        handle: NymHandle::new(req_tx, timeout, Arc::new(AtomicUsize::new(targets))),
         from_transport: out_rx,
         to_transport: in_tx,
     }
@@ -482,6 +489,148 @@ async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
 
     assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
     assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
+}
+
+#[tokio::test]
+async fn a_timed_out_address_fails_over_to_the_next() {
+    // A Nym address dies with its gateway (D10), so a hub is hosted at several
+    // and a silent one must not take the shim's hub path down.
+    let mut driver = start_with_targets(Duration::from_millis(60), 3);
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+
+    // The first two addresses stay silent; the third answers.
+    let first = driver.from_transport.recv().await.expect("first attempt");
+    let second = driver.from_transport.recv().await.expect("second attempt");
+    let third = driver.from_transport.recv().await.expect("third attempt");
+    assert_ne!(
+        first.target, second.target,
+        "a retry must go to a different address"
+    );
+    assert_ne!(second.target, third.target);
+    let (nonce, _) = wire::decode_submit(&third.frame).unwrap();
+    driver
+        .to_transport
+        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+
+    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+}
+
+#[tokio::test]
+async fn every_attempt_carries_its_own_nonce() {
+    // A late reply from an address that was given up on must not be mistaken
+    // for the answer of the one that followed it.
+    let mut driver = start_with_targets(Duration::from_millis(40), 2);
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+
+    let first = driver.from_transport.recv().await.expect("first attempt");
+    let second = driver.from_transport.recv().await.expect("second attempt");
+    let (first_nonce, _) = wire::decode_submit(&first.frame).unwrap();
+    let (second_nonce, _) = wire::decode_submit(&second.frame).unwrap();
+    assert_ne!(first_nonce, second_nonce);
+
+    // The abandoned attempt's ack arrives late: it correlates to nothing.
+    driver
+        .to_transport
+        .send(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+}
+
+#[tokio::test]
+async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
+    // A refusal comes from a live hub. Asking another address would not change
+    // the answer, and every extra attempt is another mixnet round trip inside
+    // a wallet's call.
+    let mut driver = start_with_targets(Duration::from_secs(5), 3);
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+
+    let first = driver.from_transport.recv().await.expect("first attempt");
+    let (nonce, _) = wire::decode_submit(&first.frame).unwrap();
+    driver
+        .to_transport
+        .send(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        submit.await.unwrap(),
+        Ok(AckKind::Refused(AckRefusal::QueueFull))
+    );
+    assert!(
+        driver.from_transport.try_recv().is_err(),
+        "no second address was tried"
+    );
+}
+
+#[tokio::test]
+async fn a_silent_hub_fails_closed_only_after_every_address() {
+    let mut driver = start_with_targets(Duration::from_millis(40), 3);
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+
+    let mut targets = Vec::new();
+    for _ in 0..3 {
+        targets.push(
+            driver
+                .from_transport
+                .recv()
+                .await
+                .expect("an attempt per address")
+                .target,
+        );
+    }
+    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+
+    targets.sort_unstable();
+    assert_eq!(targets, vec![0, 1, 2], "every address was tried exactly once");
+    assert!(
+        driver.from_transport.try_recv().is_err(),
+        "and no more than once"
+    );
+}
+
+#[tokio::test]
+async fn requests_start_at_rotating_addresses() {
+    // Always starting at the first address would lean the whole shim's load on
+    // one of a multi-homed hub's gateways.
+    let mut driver = start_with_targets(Duration::from_millis(30), 3);
+    let mut starts = Vec::new();
+    for _ in 0..3 {
+        let handle = driver.handle.clone();
+        let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+        starts.push(
+            driver
+                .from_transport
+                .recv()
+                .await
+                .expect("a first attempt")
+                .target,
+        );
+        // Drain this request's remaining attempts before the next request.
+        let _ = submit.await.unwrap();
+        while driver.from_transport.try_recv().is_ok() {}
+    }
+    assert_eq!(
+        starts,
+        vec![0, 1, 2],
+        "consecutive requests begin at successive addresses"
+    );
+}
+
+#[tokio::test]
+async fn no_configured_address_fails_closed_without_sending() {
+    let mut driver = start_with_targets(Duration::from_secs(5), 0);
+    assert_eq!(
+        driver.handle.submit(b"tx").await,
+        Err(NymError::TransportGone)
+    );
+    assert!(driver.from_transport.try_recv().is_err());
 }
 
 #[tokio::test]

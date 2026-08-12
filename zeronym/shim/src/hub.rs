@@ -213,9 +213,18 @@ impl HubTransport {
                 AckKind::Accepted => Submit::Accepted {
                     txid: crate::nym::local_txid(tx_bytes),
                 },
-                AckKind::Refused(refusal) => Submit::Rejected {
-                    reason: refusal.as_str().to_string(),
-                },
+                AckKind::Refused(refusal) => {
+                    // Safe to log, and only here: an `AckRefusal` is a closed
+                    // vocabulary of hub-side reasons, so it carries nothing
+                    // about the entry. The HTTP arm's `reason` is free text
+                    // from the hub and is NEVER logged: in an enclave the log
+                    // reaches the parent host, so a hostile hub could otherwise
+                    // use it to write a txid into the operator's view.
+                    tracing::warn!(reason = refusal.as_str(), "the hub refused a submission");
+                    Submit::Rejected {
+                        reason: refusal.as_str().to_string(),
+                    }
+                }
             }),
         }
     }

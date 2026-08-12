@@ -92,15 +92,30 @@ pub struct Request {
     frame: Zeroizing<Vec<u8>>,
     reply_surbs: u32,
     waiter: Waiter,
+    target: usize,
 }
 
 /// One outbound frame for the driver to put on the mixnet, with the fixed
-/// number of reply SURBs to attach to it (D3/D4). [`Zeroizing`] because a
-/// submit frame holds the transaction bytes.
+/// number of reply SURBs to attach to it (D3/D4) and which configured hub
+/// address to send it to. [`Zeroizing`] because a submit frame holds the
+/// transaction bytes.
+///
+/// The target is an INDEX into the driver's configured address list, never an
+/// address: nothing in this module knows what a Nym address is, which is the
+/// same boundary that keeps the SDK out of the hub's listener.
 pub struct OutFrame {
     pub frame: Zeroizing<Vec<u8>>,
     pub reply_surbs: u32,
+    pub target: usize,
 }
+
+/// How many hub addresses the driver currently holds, shared with the handle.
+///
+/// A count rather than the addresses themselves, and atomic rather than fixed,
+/// because a hub's Nym address changes on every restart of its diskless enclave
+/// (D10): the driver can swap its list and update this without the transport or
+/// its callers being rebuilt.
+pub type TargetCount = std::sync::Arc<std::sync::atomic::AtomicUsize>;
 
 /// Why a request produced no verdict. Every variant fails closed at the caller.
 #[derive(Debug, PartialEq, Eq)]
@@ -135,58 +150,119 @@ impl std::error::Error for NymError {}
 pub struct NymHandle {
     requests: mpsc::Sender<Request>,
     timeout: Duration,
+    targets: TargetCount,
+    /// Where the next request starts its sweep of the address list, so load is
+    /// spread across a multi-homed hub's gateways instead of always leaning on
+    /// the first.
+    cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl NymHandle {
-    pub fn new(requests: mpsc::Sender<Request>, timeout: Duration) -> Self {
-        NymHandle { requests, timeout }
+    pub fn new(requests: mpsc::Sender<Request>, timeout: Duration, targets: TargetCount) -> Self {
+        NymHandle {
+            requests,
+            timeout,
+            targets,
+            cursor: Default::default(),
+        }
     }
 
-    /// Frame `tx_bytes` under a fresh nonce, hand it to the transport, and wait
-    /// for the correlated ack.
+    /// Frame `tx_bytes` and submit it, trying each configured hub address in
+    /// turn until one acknowledges.
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<AckKind, NymError> {
-        let nonce = fresh_nonce();
-        let frame = wire::encode_submit(&nonce, tx_bytes).map_err(NymError::Encode)?;
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.dispatch(Request {
-            nonce,
-            frame,
-            reply_surbs: SUBMIT_REPLY_SURBS,
-            waiter: Waiter::Ack(ack_tx),
+        self.each_target(|target| {
+            let nonce = fresh_nonce();
+            let frame = wire::encode_submit(&nonce, tx_bytes)?;
+            let (tx, rx) = oneshot::channel();
+            Ok((
+                Request {
+                    nonce,
+                    frame,
+                    reply_surbs: SUBMIT_REPLY_SURBS,
+                    waiter: Waiter::Ack(tx),
+                    target,
+                },
+                rx,
+            ))
         })
-        .await?;
-        self.await_reply(ack_rx).await
+        .await
     }
 
-    /// Frame `wire_hash` as a lookup under a fresh nonce, hand it to the
-    /// transport, and wait for the correlated reply. The hash is the wallet's
-    /// `TxFilter.hash` in wire order, passed through unmodified exactly as the
-    /// HTTP transport posts it.
+    /// Look a transaction up, trying each configured hub address in turn. The
+    /// hash is the wallet's `TxFilter.hash` in wire order, passed through
+    /// unmodified exactly as the HTTP transport posts it.
     pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<LookupReply, NymError> {
-        let nonce = fresh_nonce();
-        // The frame is small and holds no transaction bytes, but the request
-        // channel carries one type, so it travels in the same Zeroizing buffer.
-        let frame = Zeroizing::new(
-            wire::encode_lookup(&nonce, wire_hash)
-                .map_err(NymError::Encode)?
-                .to_vec(),
-        );
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.dispatch(Request {
-            nonce,
-            frame,
-            reply_surbs: LOOKUP_REPLY_SURBS,
-            waiter: Waiter::Lookup(reply_tx),
+        self.each_target(|target| {
+            let nonce = fresh_nonce();
+            // The frame is small and holds no transaction bytes, but the request
+            // channel carries one type, so it travels in the same buffer.
+            let frame = Zeroizing::new(wire::encode_lookup(&nonce, wire_hash)?.to_vec());
+            let (tx, rx) = oneshot::channel();
+            Ok((
+                Request {
+                    nonce,
+                    frame,
+                    reply_surbs: LOOKUP_REPLY_SURBS,
+                    waiter: Waiter::Lookup(tx),
+                    target,
+                },
+                rx,
+            ))
         })
-        .await?;
-        self.await_reply(reply_rx).await
+        .await
     }
 
-    async fn dispatch(&self, request: Request) -> Result<(), NymError> {
-        self.requests
-            .send(request)
-            .await
-            .map_err(|_| NymError::TransportGone)
+    /// Try `build` against each configured hub address until one answers.
+    ///
+    /// Only a TIMEOUT moves on to the next address: that is the shape a dead
+    /// gateway takes, and a Nym address dies with its gateway (D10). Every
+    /// other outcome is an answer or a permanent failure — a refusal is a live
+    /// hub's verdict and asking another would not change it, an encode failure
+    /// is about the request itself, and a gone transport is gone for all
+    /// addresses alike.
+    ///
+    /// Each attempt mints a FRESH nonce, so a late reply from an address that
+    /// was given up on cannot be mistaken for the answer of the one that
+    /// followed it. Resending is safe by construction: the hub's queue is keyed
+    /// on the payload hash, so a resend collapses to a duplicate (D6).
+    ///
+    /// The wallet-visible cost of a fully dead mixnet is therefore
+    /// `timeout * addresses`, which is the reason to keep the list short: it
+    /// bounds how long a wallet waits before hearing UNAVAILABLE.
+    async fn each_target<T, F>(&self, mut build: F) -> Result<T, NymError>
+    where
+        F: FnMut(usize) -> Result<(Request, oneshot::Receiver<T>), WireError>,
+    {
+        let targets = self.targets.load(std::sync::atomic::Ordering::Relaxed);
+        if targets == 0 {
+            // No hub address to send to. Fail closed rather than hand the
+            // driver an index into an empty list.
+            return Err(NymError::TransportGone);
+        }
+        let start = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut last = NymError::TransportGone;
+        for attempt in 0..targets {
+            let target = start.wrapping_add(attempt) % targets;
+            let (request, rx) = build(target).map_err(NymError::Encode)?;
+            self.requests
+                .send(request)
+                .await
+                .map_err(|_| NymError::TransportGone)?;
+            match self.await_reply(rx).await {
+                Err(NymError::Timeout) => {
+                    tracing::warn!(
+                        target_index = target,
+                        "no reply from a hub address; trying the next"
+                    );
+                    last = NymError::Timeout;
+                }
+                other => return other,
+            }
+        }
+        Err(last)
     }
 
     async fn await_reply<T>(&self, rx: oneshot::Receiver<T>) -> Result<T, NymError> {
@@ -228,9 +304,9 @@ pub async fn run_transport(
     loop {
         tokio::select! {
             request = requests.recv(), if requests_open => match request {
-                Some(Request { nonce, frame, reply_surbs, waiter }) => {
+                Some(Request { nonce, frame, reply_surbs, waiter, target }) => {
                     if to_mixnet
-                        .send(OutFrame { frame, reply_surbs })
+                        .send(OutFrame { frame, reply_surbs, target })
                         .await
                         .is_err()
                     {

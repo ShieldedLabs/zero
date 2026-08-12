@@ -57,6 +57,20 @@ pub struct Config {
     #[arg(long, env = "ZIS_HUB_TLS")]
     pub hub_tls: Option<String>,
 
+    /// Divert over the Nym mixnet instead of the clearnet HTTP hop: a
+    /// comma-separated LIST of hub Nym addresses. Mutually exclusive with
+    /// `--hub`; setting both is a startup error, because which transport is in
+    /// use decides whether the operator can see a divert at all.
+    ///
+    /// A LIST, never a single value, for three independent reasons (D10). A Nym
+    /// address embeds its gateway and dies with it, so one hub is hosted at
+    /// several gateways for uptime; a diskless hub mints a new address on every
+    /// restart, so shims carry the current and the just-rotated one at once;
+    /// and send-to-all-hubs (REVIEW #6) is a config change on top of this shape,
+    /// not a schema break.
+    #[arg(long, env = "ZIS_HUB_NYM", value_delimiter = ',')]
+    pub hub_nym: Vec<String>,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///
@@ -93,6 +107,103 @@ pub struct Config {
     pub tls_production: bool,
 }
 
+/// Which transport carries diversions, decided once at startup.
+///
+/// The set is closed and the choice is explicit: a shim is forward-only, or it
+/// diverts over the transitional clearnet hop, or it diverts over the mixnet.
+/// There is no default and no fallback between them, because silently
+/// answering "the other way" is exactly the leak the hub exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubSelection {
+    /// No hub: classify and log, forward everything. No privacy.
+    ForwardOnly,
+    /// The transitional clearnet path.
+    Http(SocketAddr),
+    /// The mixnet path, over one or more gateway-bound hub addresses.
+    Nym(Vec<String>),
+}
+
+/// Why a hub selection is unusable. Every variant aborts startup: a shim that
+/// guessed here would divert somewhere its operator did not intend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// Both transports were configured. Which one carries a divert decides
+    /// whether the operator can observe it, so this is never inferred.
+    BothTransports,
+    /// A hub Nym address is not of the form `identity.encryption@gateway`.
+    /// Checked structurally here; the authoritative parse is the SDK's, in the
+    /// driver.
+    MalformedNymAddress(String),
+    /// The same hub address appears twice. Harmless to send to, but it means
+    /// the operator believes there is redundancy that does not exist.
+    DuplicateNymAddress(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::BothTransports => f.write_str(
+                "--hub and --hub-nym are mutually exclusive: set exactly one transport",
+            ),
+            ConfigError::MalformedNymAddress(addr) => write!(
+                f,
+                "--hub-nym entry is not a Nym address of the form identity.encryption@gateway: {addr}"
+            ),
+            ConfigError::DuplicateNymAddress(addr) => {
+                write!(f, "--hub-nym lists the same address twice: {addr}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl Config {
+    /// Resolve the configured transport, rejecting anything ambiguous.
+    pub fn hub_selection(&self) -> Result<HubSelection, ConfigError> {
+        match (self.hub, self.hub_nym.is_empty()) {
+            (Some(_), false) => Err(ConfigError::BothTransports),
+            (Some(addr), true) => Ok(HubSelection::Http(addr)),
+            (None, true) => Ok(HubSelection::ForwardOnly),
+            (None, false) => {
+                let mut seen: Vec<&str> = Vec::new();
+                for addr in &self.hub_nym {
+                    let addr = addr.trim();
+                    if !is_nym_address(addr) {
+                        return Err(ConfigError::MalformedNymAddress(addr.to_owned()));
+                    }
+                    if seen.contains(&addr) {
+                        return Err(ConfigError::DuplicateNymAddress(addr.to_owned()));
+                    }
+                    seen.push(addr);
+                }
+                Ok(HubSelection::Nym(
+                    self.hub_nym.iter().map(|a| a.trim().to_owned()).collect(),
+                ))
+            }
+        }
+    }
+}
+
+/// A structural check for `identity.encryption@gateway`, the form a Nym address
+/// takes. Deliberately shallow: it catches a truncated or empty entry at
+/// startup rather than at the first divert, and leaves the real parse (base58,
+/// key lengths) to the SDK in the driver, so this cannot reject an address the
+/// SDK would have accepted.
+fn is_nym_address(addr: &str) -> bool {
+    let Some((keys, gateway)) = addr.split_once('@') else {
+        return false;
+    };
+    let Some((identity, encryption)) = keys.split_once('.') else {
+        return false;
+    };
+    !gateway.is_empty()
+        && !identity.is_empty()
+        && !encryption.is_empty()
+        && !gateway.contains('@')
+        && !encryption.contains('.')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +228,102 @@ mod tests {
         ]);
         assert_eq!(config.listen.to_string(), "0.0.0.0:443");
         assert_eq!(config.backend.to_string(), "10.0.0.5:9067");
+    }
+}
+
+#[cfg(test)]
+mod hub_selection_tests {
+    use super::*;
+
+    /// Two syntactically valid hub addresses, in the shape the SDK prints.
+    const HUB_A: &str = "8HUf4wdaTTmjBZTWY2QpzHxxPGaSfvyg7QHfGYLD6Sea.FhXtgW892fPF2PBQKh22op36fRpJv5aJSmhRnRL63hWV@HdneFpALdZYPhjJ7KVc2MPmsGosUoHWdP4dCVbvr4Kzg";
+    const HUB_B: &str = "E9eGFHtTXiwNLFvTxXmBNcDocud3ZUbt7rq8WQJcmx1z.FjjFUxWiZ7pLjSkQdoJzuzH9ia2y1TfJgN8XpvTUBPgp@GdneFpALdZYPhjJ7KVc2MPmsGosUoHWdP4dCVbvr4Kzg";
+
+    fn parse(args: &[&str]) -> Config {
+        let mut argv = vec!["zero-indexer-shim"];
+        argv.extend_from_slice(args);
+        Config::parse_from(argv)
+    }
+
+    #[test]
+    fn no_hub_is_forward_only() {
+        assert_eq!(
+            parse(&[]).hub_selection().unwrap(),
+            HubSelection::ForwardOnly
+        );
+    }
+
+    #[test]
+    fn a_hub_address_selects_the_http_transport() {
+        assert_eq!(
+            parse(&["--hub", "10.0.0.5:9069"]).hub_selection().unwrap(),
+            HubSelection::Http("10.0.0.5:9069".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_nym_address_list_selects_the_mixnet_transport() {
+        let selection = parse(&["--hub-nym", &format!("{HUB_A},{HUB_B}")])
+            .hub_selection()
+            .unwrap();
+        assert_eq!(
+            selection,
+            HubSelection::Nym(vec![HUB_A.to_owned(), HUB_B.to_owned()]),
+            "the list keeps its order: the first is tried first"
+        );
+    }
+
+    #[test]
+    fn setting_both_transports_is_an_error() {
+        // Which transport carries a divert decides whether the operator can see
+        // it, so this must never be inferred from precedence.
+        let config = parse(&["--hub", "10.0.0.5:9069", "--hub-nym", HUB_A]);
+        assert_eq!(config.hub_selection(), Err(ConfigError::BothTransports));
+    }
+
+    #[test]
+    fn a_malformed_nym_address_is_rejected_at_startup() {
+        // Each of these would otherwise fail at the first divert, long after
+        // the operator has walked away from the deploy.
+        for bad in [
+            "not-an-address",
+            "identity.encryption",        // no gateway
+            "identityencryption@gateway", // no key separator
+            "@gateway",
+            "identity.@gateway",
+            ".encryption@gateway",
+            "identity.encryption@",
+        ] {
+            assert_eq!(
+                parse(&["--hub-nym", bad]).hub_selection(),
+                Err(ConfigError::MalformedNymAddress(bad.to_owned())),
+                "{bad} should not parse as a hub address"
+            );
+        }
+    }
+
+    #[test]
+    fn a_duplicated_address_is_rejected() {
+        // Not harmful to send to, but it means the operator believes there is
+        // gateway redundancy that does not exist.
+        let config = parse(&["--hub-nym", &format!("{HUB_A},{HUB_A}")]);
+        assert_eq!(
+            config.hub_selection(),
+            Err(ConfigError::DuplicateNymAddress(HUB_A.to_owned()))
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_in_a_list_is_tolerated() {
+        // A hand-edited environment variable with a space after the comma is
+        // an operator typo that costs nothing to accept.
+        let selection = parse(&["--hub-nym", &format!("{HUB_A} , {HUB_B}")])
+            .hub_selection()
+            .unwrap();
+        assert_eq!(
+            selection,
+            HubSelection::Nym(vec![HUB_A.to_owned(), HUB_B.to_owned()])
+        );
     }
 }
 
