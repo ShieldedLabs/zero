@@ -147,10 +147,11 @@ __NYM_ENV__
     # If the enclave boots but never serves, flip this to true and redeploy to
     # open the parent's SSH so the console can be read at
     # /var/log/nitro_enclaves/enclave-console.log; the Caution CLI has no logs
-    # command. The key is already listed so the flip is one boolean.
+    # command. The SSH key(s) come from --ssh-key at assemble time, so the operator
+    # who deploys is the one who can read the console, not a key baked into the repo.
+    # With --debug the flip is one boolean and the key is already listed; without
+    # --debug this list renders empty and is moot (SSH is closed under attestation).
     enabled  = false
-    ssh_keys = [
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINcRkPvdbZJ4PJMTT6rjAsmeWO84rp8TAfSURX4Scjq4 shieldedmark@Mac",
-    ]
+    __DEBUG_SSH_KEYS__
   }
 }

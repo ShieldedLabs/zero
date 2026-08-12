@@ -57,6 +57,7 @@ NYM_ROTATION=""
 TLS_DOMAIN=""
 APP_SOURCE=""
 DEBUG="false"
+SSH_KEYS=""
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -81,6 +82,11 @@ while [ $# -gt 0 ]; do
 		--tls-domain)       TLS_DOMAIN=$2; shift 2 ;;
 		--app-source)       APP_SOURCE=$2; shift 2 ;;
 		--debug)            DEBUG="true"; shift ;;
+		# One authorized debug-console SSH public key, repeatable. Required with
+		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
+		# spaces (type, base64, comment), so accumulate with a newline separator.
+		--ssh-key)          SSH_KEYS="${SSH_KEYS}${2}
+"; shift 2 ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
 	esac
@@ -90,6 +96,20 @@ done
 [ -n "$BACKEND" ] || { echo "error: --backend is required (e.g. 66.42.124.202:443)" >&2; exit 2; }
 [ -n "$BACKEND_TLS" ] || { echo "error: --backend-tls is required (the DNS name the backend's cert carries)" >&2; exit 2; }
 [ -n "$TLS_DOMAIN" ] || { echo "error: --tls-domain is required (the name wallets connect to)" >&2; exit 2; }
+
+# Debug mode opens SSH on the parent host; without a key you hold, the console you
+# are turning on is one only someone else can read. Require the key as an explicit
+# input so the operator deploying is the operator who can read it.
+if [ "$DEBUG" = "true" ] && [ -z "$SSH_KEYS" ]; then
+	echo "error: --debug opens the enclave console over SSH, but no --ssh-key was given." >&2
+	echo "       Pass your own key so YOU can read it, e.g.:" >&2
+	echo "         --ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" >&2
+	exit 2
+fi
+if [ -n "$SSH_KEYS" ] && [ "$DEBUG" != "true" ]; then
+	echo "==> NOTE: --ssh-key given without --debug. SSH is closed when attestation is"
+	echo "    on, so the key is recorded in the HCL but unused until a --debug build."
+fi
 
 # There is no staging knob on this path: the in-enclave Caddy picks the ACME
 # directory itself and always uses production. Every push therefore spends one
@@ -331,6 +351,25 @@ else
 	echo "    Create a public repo for this assembled directory and pass its URL."
 fi
 
+# The debug-console SSH key list, rendered into the debug{} block by awk below. One
+# quoted entry per --ssh-key, at the block's indentation; an empty list otherwise.
+# The require-with-debug rule is enforced up top, so "empty" here means a non-debug
+# build where the list is inert anyway.
+SSH_BLOCK="$STAGE/ssh_keys.txt"
+if [ -n "$SSH_KEYS" ]; then
+	printf '%s' "$SSH_KEYS" > "$STAGE/ssh_keys_raw.txt"
+	{
+		echo "    ssh_keys = ["
+		while IFS= read -r ssh_key; do
+			[ -n "$ssh_key" ] || continue
+			printf '      "%s",\n' "$ssh_key"
+		done < "$STAGE/ssh_keys_raw.txt"
+		echo "    ]"
+	} > "$SSH_BLOCK"
+else
+	echo "    ssh_keys = []" > "$SSH_BLOCK"
+fi
+
 ZERO_ROOT=$(git rev-parse --show-toplevel)
 HERE="$ZERO_ROOT/zeronym/shim/deploy/caution"
 DEST=${DEST:-"$(dirname "$ZERO_ROOT")/$NAME"}
@@ -409,10 +448,11 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 # the files built above, so nothing has to survive sed quoting. Both are empty
 # in the forward-only case, and an empty file removes the marker line entirely.
 RENDERED="$STAGE/caution.hcl"
-awk -v egress="$HUB_EGRESS" -v env="$HUB_ENV" -v appsrc="$APP_SRC_FILE" '
-	/__HUB_EGRESS__/ { while ((getline l < egress) > 0) print l; next }
-	/__HUB_ENV__/    { while ((getline l < env) > 0) print l; next }
-	/__APP_SOURCE__/ { while ((getline l < appsrc) > 0) print l; next }
+awk -v egress="$HUB_EGRESS" -v env="$HUB_ENV" -v appsrc="$APP_SRC_FILE" -v sshkeys="$SSH_BLOCK" '
+	/__HUB_EGRESS__/     { while ((getline l < egress) > 0) print l; next }
+	/__HUB_ENV__/        { while ((getline l < env) > 0) print l; next }
+	/__APP_SOURCE__/     { while ((getline l < appsrc) > 0) print l; next }
+	/__DEBUG_SSH_KEYS__/ { while ((getline l < sshkeys) > 0) print l; next }
 	{ print }
 ' "$HERE/caution.hcl.tmpl" > "$RENDERED"
 

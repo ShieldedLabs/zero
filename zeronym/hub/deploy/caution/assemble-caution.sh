@@ -19,7 +19,14 @@
 #       --indexers <ip:port[,ip:port...]> --indexer-tls <indexer-cert-name> \
 #       --tls-domain <hub-domain> \
 #       [--nym --nym-egress <cidr:port[:proto]> ...] \
+#       [--debug --ssh-key "<ssh pubkey>" ...] \
 #       [dest-dir]
+#
+# --debug opens the enclave console over SSH (attestation OFF; diagnostic only). It
+# REQUIRES --ssh-key: the authorized console key is an input, not a value baked into
+# the repo, so whoever deploys is whoever can read the console. --ssh-key is
+# repeatable and takes a full public-key line, e.g.
+#   --ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
 #
 # --nym additionally runs the hub's own Nym mixnet client so shims can submit over
 # the mixnet (it logs its Nym address at startup; publish that to shims as
@@ -45,6 +52,7 @@ TLS_DOMAIN=""
 NYM="false"
 NYM_EGRESS=""
 DEBUG="false"
+SSH_KEYS=""
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -59,6 +67,11 @@ while [ $# -gt 0 ]; do
 		# operator supplies these (gateway(s), nym-api set, optionally DNS/Nyx).
 		--nym-egress)    NYM_EGRESS="$NYM_EGRESS $2"; shift 2 ;;
 		--debug)         DEBUG="true"; shift ;;
+		# One authorized debug-console SSH public key, repeatable. Required with
+		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
+		# spaces (type, base64, comment), so accumulate with a newline separator.
+		--ssh-key)       SSH_KEYS="${SSH_KEYS}${2}
+"; shift 2 ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
 	esac
@@ -76,6 +89,20 @@ done
 	echo "       Without it the hop is plaintext and the parent host reads every batch." >&2
 	exit 2
 }
+
+# Debug mode opens SSH on the parent host; without a key you hold, the console you
+# are turning on is one only someone else can read. Require the key as an explicit
+# input so the operator deploying is the operator who can read it.
+if [ "$DEBUG" = "true" ] && [ -z "$SSH_KEYS" ]; then
+	echo "error: --debug opens the enclave console over SSH, but no --ssh-key was given." >&2
+	echo "       Pass your own key so YOU can read it, e.g.:" >&2
+	echo "         --ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" >&2
+	exit 2
+fi
+if [ -n "$SSH_KEYS" ] && [ "$DEBUG" != "true" ]; then
+	echo "==> NOTE: --ssh-key given without --debug. SSH is closed when attestation is"
+	echo "    on, so the key is recorded in the HCL but unused until a --debug build."
+fi
 
 # There is no staging knob on this path: the in-enclave Caddy picks the ACME
 # directory itself and always uses production. Every push therefore spends one
@@ -172,6 +199,25 @@ if [ "$NYM" = true ]; then
 	echo "==> MIXNET RECEPTION ON: the hub also runs a mixnet client. egress allowlist:$NYM_EGRESS"
 fi
 
+# The debug-console SSH key list, rendered into the debug{} block by awk below. One
+# quoted entry per --ssh-key, at the block's indentation; an empty list otherwise.
+# The require-with-debug rule is enforced up top, so "empty" here means a non-debug
+# build where the list is inert anyway.
+SSH_BLOCK="$STAGE/ssh_keys.txt"
+if [ -n "$SSH_KEYS" ]; then
+	printf '%s' "$SSH_KEYS" > "$STAGE/ssh_keys_raw.txt"
+	{
+		echo "    ssh_keys = ["
+		while IFS= read -r ssh_key; do
+			[ -n "$ssh_key" ] || continue
+			printf '      "%s",\n' "$ssh_key"
+		done < "$STAGE/ssh_keys_raw.txt"
+		echo "    ]"
+	} > "$SSH_BLOCK"
+else
+	echo "    ssh_keys = []" > "$SSH_BLOCK"
+fi
+
 # The endpoint list, normalised (no trailing/leading spaces), for the ZIH_INDEXERS env.
 INDEXERS_ENV=$INDEXERS
 
@@ -205,14 +251,15 @@ cmp "$NESTED" "$DEST/Containerfile" || {
 	exit 1
 }
 
-# Render the enclave definition. Two markers carry multi-line content (the
-# per-node egress blocks and the optional node-auth env), injected with awk from
-# the files built above so no metacharacter has to survive sed. The scalar
-# fields go through sed afterwards.
+# Render the enclave definition. Three markers carry multi-line content (the
+# per-node egress blocks, the optional node-auth env, and the debug SSH key list),
+# injected with awk from the files built above so no metacharacter has to survive
+# sed. The scalar fields go through sed afterwards.
 RENDERED="$STAGE/caution.hcl"
-awk -v egress="$EGRESS" -v nymenv="$NYM_ENV_FILE" '
-	/__EGRESS_BLOCKS__/ { while ((getline l < egress) > 0) print l; next }
-	/__NYM_ENV__/       { while ((getline l < nymenv) > 0) print l; next }
+awk -v egress="$EGRESS" -v nymenv="$NYM_ENV_FILE" -v sshkeys="$SSH_BLOCK" '
+	/__EGRESS_BLOCKS__/  { while ((getline l < egress) > 0) print l; next }
+	/__NYM_ENV__/        { while ((getline l < nymenv) > 0) print l; next }
+	/__DEBUG_SSH_KEYS__/ { while ((getline l < sshkeys) > 0) print l; next }
 	{ print }
 ' "$HERE/caution.hcl.tmpl" > "$RENDERED"
 

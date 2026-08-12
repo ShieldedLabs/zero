@@ -191,11 +191,12 @@ __HUB_ENV__
     # that opens port 22 on the parent so the console can be read at
     # /var/log/nitro_enclaves/enclave-console.log. Every previous "boots but
     # never serves" bug here was diagnosed that way and none was diagnosable
-    # without it, because the Caution CLI has no logs command. The key is
-    # already listed so the flip is one boolean.
+    # without it, because the Caution CLI has no logs command. The SSH key(s) come
+    # from --ssh-key at assemble time, so the operator who deploys is the one who
+    # can read the console, not a key baked into the repo. With --debug the flip is
+    # one boolean and the key is already listed; without --debug this list renders
+    # empty and is moot (SSH is closed under attestation).
     enabled  = false
-    ssh_keys = [
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINcRkPvdbZJ4PJMTT6rjAsmeWO84rp8TAfSURX4Scjq4 shieldedmark@Mac",
-    ]
+    __DEBUG_SSH_KEYS__
   }
 }
