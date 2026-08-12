@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
 use zero_indexer_hub::batcher::{BatchParams, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
@@ -79,7 +80,7 @@ fn nonce(seed: u8) -> Nonce {
 
 fn msg(tag: SenderTag, frame: Vec<u8>) -> Received {
     Received {
-        frame,
+        frame: Zeroizing::new(frame),
         sender_tag: tag,
     }
 }

@@ -128,7 +128,7 @@ async fn spawn_nym_shim(
                     }
                 }
             };
-            if in_tx.send(reply).await.is_err() {
+            if in_tx.send(Zeroizing::new(reply)).await.is_err() {
                 break;
             }
         }

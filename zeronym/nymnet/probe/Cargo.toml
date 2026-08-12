@@ -15,6 +15,7 @@ nym-bin-common = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v
 
 anyhow = "1"
 hex = "0.4"
+zeroize = "1"
 serde_json = "1"
 time = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }

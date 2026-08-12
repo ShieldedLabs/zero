@@ -11,6 +11,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 use tracing_subscriber::fmt::MakeWriter;
 
 use zero_indexer_hub::batcher::{BatchParams, TipTracker};
@@ -88,28 +89,28 @@ async fn the_listener_logs_counts_and_reasons_but_never_a_txid_tag_or_nonce() {
     tokio::spawn(run_listener(in_rx, out_tx, hub));
     in_tx
         .send(Received {
-            frame: good,
+            frame: Zeroizing::new(good),
             sender_tag: tag,
         })
         .await
         .unwrap();
     in_tx
         .send(Received {
-            frame: bad,
+            frame: Zeroizing::new(bad),
             sender_tag: tag,
         })
         .await
         .unwrap();
     in_tx
         .send(Received {
-            frame: lookup,
+            frame: Zeroizing::new(lookup),
             sender_tag: tag,
         })
         .await
         .unwrap();
     in_tx
         .send(Received {
-            frame: bad_lookup,
+            frame: Zeroizing::new(bad_lookup),
             sender_tag: tag,
         })
         .await

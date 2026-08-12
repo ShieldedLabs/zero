@@ -42,8 +42,14 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 pub struct SenderTag(pub [u8; 16]);
 
 /// One inbound request: the frame bytes and the tag to reply to.
+///
+/// [`Zeroizing`], like everything outbound. Inbound is in fact where the
+/// cleartext matters MOST on this side: a `SubmitV1` arriving here carries a
+/// diverted migration that no node has seen yet, and the frame outlives the
+/// copy `decode_submit` takes. Freeing it un-wiped is the one thing an
+/// attestation cannot excuse in a diskless enclave.
 pub struct Received {
-    pub frame: Vec<u8>,
+    pub frame: Zeroizing<Vec<u8>>,
     pub sender_tag: SenderTag,
 }
 

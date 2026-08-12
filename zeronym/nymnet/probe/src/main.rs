@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use zeroize::Zeroizing;
 use nym_sdk::mixnet::{
     IncludedSurbs, MixnetClient, MixnetClientBuilder, MixnetMessageSender,
 };
@@ -460,22 +461,50 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let (hub_in_tx, hub_in_rx) = tokio::sync::mpsc::channel(64);
     let (hub_out_tx, mut hub_out_rx) = tokio::sync::mpsc::channel::<hub_nym::Reply>(64);
     tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
+    // Counts requests that arrived WITHOUT a sender tag, i.e. sent with the
+    // shim's own address exposed. Asserted zero at the end: this is the
+    // executable half of D3's promise that "a future refactor cannot silently
+    // downgrade" the anonymous send, and it is checkable only from the
+    // receiving side.
+    let exposed_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let exposed_hub = exposed_seen.clone();
     tokio::spawn(async move {
+        let exposed_seen = exposed_hub;
         loop {
             tokio::select! {
                 msgs = hub_client.wait_for_messages() => {
                     let Some(msgs) = msgs else { break };
                     for m in msgs {
-                        // No tag means no way to reply (SURB artifacts arrive
-                        // tagless); the listener's own empty-filter handles the
-                        // rest.
-                        let Some(tag) = m.sender_tag else { continue };
-                        let _ = hub_in_tx
-                            .send(hub_nym::Received {
-                                frame: m.message,
-                                sender_tag: hub_nym::SenderTag(tag.to_bytes()),
-                            })
-                            .await;
+                        // An empty message is an SDK SURB-replenishment
+                        // artifact and legitimately arrives tagless.
+                        if m.message.is_empty() {
+                            continue;
+                        }
+                        // A REQUEST without a sender tag is the failure this
+                        // whole hop exists to prevent (D3): a tag is present
+                        // exactly when the sender used the SDK's anonymous
+                        // send. Had it used `IncludedSurbs::ExposeSelfAddress`
+                        // instead, this would be `None` and the hub would be
+                        // holding the shim's full Nym address, gateway
+                        // included. Recorded rather than skipped, so the probe
+                        // fails loudly instead of quietly proving nothing.
+                        match m.sender_tag {
+                            Some(tag) => {
+                                let _ = hub_in_tx
+                                    .send(hub_nym::Received {
+                                        frame: Zeroizing::new(m.message),
+                                        sender_tag: hub_nym::SenderTag(tag.to_bytes()),
+                                    })
+                                    .await;
+                            }
+                            None => {
+                                exposed_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                eprintln!(
+                                    "[hub] a request arrived with NO sender tag: the shim exposed \
+                                     its own address"
+                                );
+                            }
+                        }
                     }
                 }
                 reply = hub_out_rx.recv() => {
@@ -534,7 +563,9 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
                 msgs = shim_client.wait_for_messages() => {
                     let Some(msgs) = msgs else { break };
                     for m in msgs {
-                        let _ = shim_in_tx.send(m.message).await;
+                        // Zeroizing on the way in too: a LookupReplyV1 arriving
+                        // here carries a transaction in cleartext.
+                        let _ = shim_in_tx.send(Zeroizing::new(m.message)).await;
                     }
                 }
             }
@@ -587,6 +618,15 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
         "an unanswerable lookup must fail closed, got {unknown:?}"
     );
     println!("[e2e] unknown hash failed closed in {:.2?}", t2.elapsed());
+
+    // Every request in this run reached the hub anonymously. If any had been
+    // sent with the shim's address exposed, the hub would have received it
+    // tagless and this count would be non-zero.
+    anyhow::ensure!(
+        exposed_seen.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        "a request reached the hub with the shim's own address exposed"
+    );
+    println!("[e2e] every request arrived anonymously (sender tag present, no self-address)");
 
     println!();
     println!("e2e: PASS");

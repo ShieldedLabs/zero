@@ -10050,6 +10050,7 @@ dependencies = [
  "tokio",
  "zero-indexer-hub",
  "zero-indexer-shim",
+ "zeroize",
 ]
 
 [[package]]

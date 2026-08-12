@@ -392,7 +392,7 @@ fn fresh_nonce() -> Nonce {
 pub async fn run_transport(
     requests: mpsc::Receiver<Request>,
     to_mixnet: mpsc::Sender<OutFrame>,
-    from_mixnet: mpsc::Receiver<Vec<u8>>,
+    from_mixnet: mpsc::Receiver<Zeroizing<Vec<u8>>>,
     inflight: InflightCount,
 ) {
     correlate(requests, to_mixnet, from_mixnet, &inflight).await;
@@ -405,7 +405,7 @@ pub async fn run_transport(
 async fn correlate(
     mut requests: mpsc::Receiver<Request>,
     to_mixnet: mpsc::Sender<OutFrame>,
-    mut from_mixnet: mpsc::Receiver<Vec<u8>>,
+    mut from_mixnet: mpsc::Receiver<Zeroizing<Vec<u8>>>,
     inflight: &InflightCount,
 ) {
     let mut pending: HashMap<Nonce, Waiter> = HashMap::new();

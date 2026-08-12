@@ -28,7 +28,7 @@ const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_migration.bin");
 struct Driver {
     handle: NymHandle,
     from_transport: mpsc::Receiver<OutFrame>,
-    to_transport: mpsc::Sender<Vec<u8>>,
+    to_transport: mpsc::Sender<Zeroizing<Vec<u8>>>,
 }
 
 /// Spawn `run_transport` and hand back its driver ends. The timeout is short:
@@ -109,7 +109,7 @@ async fn a_submit_is_framed_sent_and_acked() {
     assert_eq!(tx, b"tx bytes");
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -131,7 +131,9 @@ async fn every_refusal_comes_back_typed() {
         let (nonce, _) = next_frame(&mut driver).await;
         driver
             .to_transport
-            .send(wire::encode_ack(&nonce, AckKind::Refused(refusal)).to_vec())
+            .send(Zeroizing::new(
+                wire::encode_ack(&nonce, AckKind::Refused(refusal)).to_vec(),
+            ))
             .await
             .unwrap();
         assert_eq!(submit.await.unwrap(), Ok(AckKind::Refused(refusal)));
@@ -159,12 +161,12 @@ async fn an_unknown_nonce_is_dropped_and_the_real_ack_still_lands() {
     wrong[0] ^= 0xff;
     driver
         .to_transport
-        .send(wire::encode_ack(&wrong, AckKind::Refused(AckRefusal::QueueFull)).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&wrong, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
         .await
         .unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -180,11 +182,11 @@ async fn empty_and_undecodable_inbound_messages_are_filtered() {
 
     // An empty message (SURB replenishment artifact) and garbage bytes, then
     // the real ack: the first two must not disturb the correlation.
-    driver.to_transport.send(Vec::new()).await.unwrap();
-    driver.to_transport.send(vec![0x77; 30]).await.unwrap();
+    driver.to_transport.send(Zeroizing::new(Vec::new())).await.unwrap();
+    driver.to_transport.send(Zeroizing::new(vec![0x77; 30])).await.unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -218,12 +220,12 @@ async fn concurrent_submits_correlate_independently() {
     // Answer in reverse order; each waiter gets its own verdict.
     driver
         .to_transport
-        .send(wire::encode_ack(&second_nonce, AckKind::Refused(AckRefusal::TipStale)).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&second_nonce, AckKind::Refused(AckRefusal::TipStale)).to_vec()))
         .await
         .unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -261,7 +263,7 @@ async fn the_transport_arm_maps_verdicts_for_the_wallet() {
     assert_eq!(tx, V6_MIGRATION);
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     match submit.await.unwrap().unwrap() {
@@ -279,7 +281,7 @@ async fn the_transport_arm_maps_verdicts_for_the_wallet() {
     let (nonce, _) = next_frame(&mut driver).await;
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
         .await
         .unwrap();
     assert_eq!(
@@ -300,7 +302,7 @@ async fn an_unparseable_accepted_divert_has_an_empty_txid() {
     let (nonce, _) = next_frame(&mut driver).await;
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(
@@ -322,7 +324,7 @@ async fn a_lookup_is_framed_sent_and_answered_found() {
     assert_eq!(hash, wanted, "the wallet's hash travels unmodified");
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(
                 &nonce,
                 &LookupReply::Found {
@@ -332,7 +334,7 @@ async fn a_lookup_is_framed_sent_and_answered_found() {
             )
             .unwrap()
             .to_vec(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -356,7 +358,7 @@ async fn a_mempool_lookup_keeps_the_height_zero_sentinel() {
     let (nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(
                 &nonce,
                 &LookupReply::Found {
@@ -366,7 +368,7 @@ async fn a_mempool_lookup_keeps_the_height_zero_sentinel() {
             )
             .unwrap()
             .to_vec(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -385,11 +387,11 @@ async fn a_not_found_lookup_maps_to_not_found() {
     let (nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
                 .unwrap()
                 .to_vec(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -408,11 +410,11 @@ async fn an_error_lookup_fails_closed_and_is_never_a_not_found() {
     let (nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(&nonce, &LookupReply::Error)
                 .unwrap()
                 .to_vec(),
-        )
+        ))
         .await
         .unwrap();
 
@@ -452,7 +454,7 @@ async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
     let (lookup_nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(wire::encode_ack(&lookup_nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&lookup_nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
@@ -462,11 +464,11 @@ async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
     let (submit_nonce, _) = next_frame(&mut driver).await;
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(&submit_nonce, &LookupReply::NotFound)
                 .unwrap()
                 .to_vec(),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
@@ -486,16 +488,16 @@ async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
     // Answer the lookup first: each waiter takes its own reply.
     driver
         .to_transport
-        .send(
+        .send(Zeroizing::new(
             wire::encode_lookup_reply(&lookup_nonce, &LookupReply::NotFound)
                 .unwrap()
                 .to_vec(),
-        )
+        ))
         .await
         .unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&submit_nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&submit_nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -523,7 +525,7 @@ async fn a_timed_out_address_fails_over_to_the_next() {
     let (nonce, _) = wire::decode_submit(&third.frame).unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
 
@@ -547,7 +549,7 @@ async fn every_attempt_carries_its_own_nonce() {
     // The abandoned attempt's ack arrives late: it correlates to nothing.
     driver
         .to_transport
-        .send(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
@@ -566,7 +568,7 @@ async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
     let (nonce, _) = wire::decode_submit(&first.frame).unwrap();
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
         .await
         .unwrap();
 
@@ -646,6 +648,39 @@ async fn no_configured_address_fails_closed_without_sending() {
 }
 
 #[tokio::test]
+async fn every_outbound_frame_asks_for_an_anonymous_reply() {
+    // The in-crate half of the hop's central property (D3). The transport
+    // cannot ask for `IncludedSurbs::ExposeSelfAddress` -- `OutFrame` has no
+    // field that could -- and what it DOES carry is a non-zero reply-SURB
+    // count on every frame of both types. That count is what forces the
+    // driver's anonymous send: a zero would leave the driver with no reply
+    // path and a reason to reach for the self-address variant.
+    //
+    // The other half, that the driver actually sends anonymously, is only
+    // observable from the receiving side and is asserted by the nymnet e2e
+    // probe, which fails if any request reaches the hub without a sender tag.
+    let (mut driver, _inflight) = start_with_targets(Duration::from_millis(60), 1);
+
+    let submit_handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { submit_handle.submit(b"tx").await });
+    let out = driver.from_transport.recv().await.expect("a submit frame");
+    assert!(
+        out.reply_surbs > 0,
+        "a submit with no reply SURBs could not be acknowledged anonymously"
+    );
+    let _ = submit.await;
+
+    let lookup_handle = driver.handle.clone();
+    let lookup = tokio::spawn(async move { lookup_handle.get_transaction(&[0x43; 32]).await });
+    let out = driver.from_transport.recv().await.expect("a lookup frame");
+    assert!(
+        out.reply_surbs > 0,
+        "a lookup with no reply SURBs could not be answered anonymously"
+    );
+    let _ = lookup.await;
+}
+
+#[tokio::test]
 async fn a_backed_up_driver_does_not_stall_replies_already_in_flight() {
     // The correlator must keep delivering replies while the driver is busy.
     // Handing a frame over used to be an awaited step inside the select loop,
@@ -672,7 +707,7 @@ async fn a_backed_up_driver_does_not_stall_replies_already_in_flight() {
     // delivered, not left in the channel until A's budget expires.
     driver
         .to_transport
-        .send(wire::encode_ack(&a_nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&a_nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(
@@ -698,7 +733,7 @@ async fn the_inflight_count_tracks_requests_the_caller_still_wants() {
 
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
@@ -746,7 +781,7 @@ async fn abandoned_waiters_do_not_accumulate() {
     let (nonce, _) = next_frame(&mut driver).await;
     driver
         .to_transport
-        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
         .await
         .unwrap();
     assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
