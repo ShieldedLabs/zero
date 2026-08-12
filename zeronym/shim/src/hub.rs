@@ -36,7 +36,7 @@ use tokio::net::TcpStream;
 
 use crate::nym::NymHandle;
 use crate::tls::BackendTls;
-use crate::wire::AckKind;
+use crate::wire::{AckKind, LookupReply};
 use crate::BoxError;
 
 /// The hub's lookup path.
@@ -224,12 +224,17 @@ impl HubTransport {
     pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<Lookup, BoxError> {
         match self {
             HubTransport::Http(client) => client.get_transaction(wire_hash).await,
-            // The lookup frames exist on the wire but the transport loop does
-            // not carry them yet; erroring here fails CLOSED at the intercept
-            // path (the wallet hears UNAVAILABLE, never the operator's indexer).
-            HubTransport::Nym(_) => {
-                Err("GetTransaction is not carried over the mixnet yet".into())
-            }
+            HubTransport::Nym(handle) => match handle.get_transaction(wire_hash).await? {
+                LookupReply::Found { height, tx } => Ok(Lookup::Found {
+                    data: Bytes::copy_from_slice(&tx),
+                    height,
+                }),
+                LookupReply::NotFound => Ok(Lookup::NotFound),
+                // The hub could not answer (its indexer failed, or it could not
+                // frame the reply). An error, never a NotFound: the caller must
+                // fail closed rather than tell a wallet its transaction is gone.
+                LookupReply::Error => Err("hub could not answer the lookup".into()),
+            },
         }
     }
 }

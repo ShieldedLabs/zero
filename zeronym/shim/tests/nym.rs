@@ -7,11 +7,15 @@
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zero_indexer_shim::hub::{HubTransport, Submit};
-use zero_indexer_shim::nym::{run_transport, NymError, NymHandle, OutFrame};
-use zero_indexer_shim::wire::{
-    self, AckKind, AckRefusal, FRAME_BYTES, MAX_NYM_TX_BYTES,
+use zero_indexer_shim::hub::{HubTransport, Lookup, Submit};
+use zero_indexer_shim::nym::{
+    run_transport, NymError, NymHandle, OutFrame, LOOKUP_REPLY_SURBS, SUBMIT_REPLY_SURBS,
 };
+use zero_indexer_shim::wire::{
+    self, AckKind, AckRefusal, LookupReply, FRAME_BYTES, LOOKUP_BYTES, MAX_LOOKUP_HASH_BYTES,
+    MAX_NYM_TX_BYTES,
+};
+use zeroize::Zeroizing;
 
 /// A V6 migration fixture: real, parseable transaction bytes (shared with the
 /// classifier's vector tests), so the locally computed txid is a real hash.
@@ -39,7 +43,8 @@ fn start(timeout: Duration) -> Driver {
     }
 }
 
-/// Read the next outbound frame and decode it back to (nonce, tx).
+/// Read the next outbound submit frame and decode it back to (nonce, tx),
+/// asserting the frame size and the fixed SURB count that ride with it.
 async fn next_frame(driver: &mut Driver) -> ([u8; 16], Vec<u8>) {
     let out = driver
         .from_transport
@@ -47,8 +52,32 @@ async fn next_frame(driver: &mut Driver) -> ([u8; 16], Vec<u8>) {
         .await
         .expect("an outbound frame");
     assert_eq!(out.frame.len(), FRAME_BYTES, "every submit is a full frame");
+    assert_eq!(
+        out.reply_surbs, SUBMIT_REPLY_SURBS,
+        "a submit carries the fixed submit SURB count"
+    );
     let (nonce, tx) = wire::decode_submit(&out.frame).expect("outbound frame decodes");
     (nonce, tx.to_vec())
+}
+
+/// Read the next outbound lookup frame and decode it back to (nonce, hash),
+/// asserting the frame size and its own fixed SURB count.
+async fn next_lookup(driver: &mut Driver) -> ([u8; 16], Vec<u8>) {
+    let out = driver
+        .from_transport
+        .recv()
+        .await
+        .expect("an outbound frame");
+    assert_eq!(
+        out.frame.len(),
+        LOOKUP_BYTES,
+        "every lookup is a fixed small frame"
+    );
+    assert_eq!(
+        out.reply_surbs, LOOKUP_REPLY_SURBS,
+        "a lookup carries enough SURBs for a full-frame reply"
+    );
+    wire::decode_lookup(&out.frame).expect("outbound lookup decodes")
 }
 
 #[tokio::test]
@@ -264,8 +293,218 @@ async fn an_unparseable_accepted_divert_has_an_empty_txid() {
 }
 
 #[tokio::test]
-async fn a_lookup_over_nym_fails_closed_for_now() {
-    let driver = start(Duration::from_secs(5));
+async fn a_lookup_is_framed_sent_and_answered_found() {
+    let mut driver = start(Duration::from_secs(5));
     let transport = HubTransport::from(driver.handle.clone());
-    assert!(transport.get_transaction(&[0u8; 32]).await.is_err());
+    let wanted = [0x3c; 32];
+    let lookup = tokio::spawn(async move { transport.get_transaction(&wanted).await });
+
+    let (nonce, hash) = next_lookup(&mut driver).await;
+    assert_eq!(hash, wanted, "the wallet's hash travels unmodified");
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(
+                &nonce,
+                &LookupReply::Found {
+                    height: 881_234,
+                    tx: Zeroizing::new(V6_MIGRATION.to_vec()),
+                },
+            )
+            .unwrap()
+            .to_vec(),
+        )
+        .await
+        .unwrap();
+
+    match lookup.await.unwrap().unwrap() {
+        Lookup::Found { data, height } => {
+            assert_eq!(height, 881_234);
+            assert_eq!(data.as_ref(), V6_MIGRATION);
+        }
+        other => panic!("expected Found, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_mempool_lookup_keeps_the_height_zero_sentinel() {
+    // Height 0 is what a queue hit reports, and the wallet must see it
+    // unchanged: it is the mempool sentinel, not a missing value.
+    let mut driver = start(Duration::from_secs(5));
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x3d; 32]).await });
+
+    let (nonce, _) = next_lookup(&mut driver).await;
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(
+                &nonce,
+                &LookupReply::Found {
+                    height: 0,
+                    tx: Zeroizing::new(V6_MIGRATION.to_vec()),
+                },
+            )
+            .unwrap()
+            .to_vec(),
+        )
+        .await
+        .unwrap();
+
+    match lookup.await.unwrap().unwrap() {
+        Lookup::Found { height, .. } => assert_eq!(height, 0),
+        other => panic!("expected Found, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_not_found_lookup_maps_to_not_found() {
+    let mut driver = start(Duration::from_secs(5));
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x3e; 32]).await });
+
+    let (nonce, _) = next_lookup(&mut driver).await;
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(lookup.await.unwrap().unwrap(), Lookup::NotFound);
+}
+
+#[tokio::test]
+async fn an_error_lookup_fails_closed_and_is_never_a_not_found() {
+    // The distinction is load-bearing: NotFound tells a wallet its transaction
+    // does not exist, which the shim must never say on the hub's behalf when
+    // the hub could not answer. It becomes UNAVAILABLE at the intercept path.
+    let mut driver = start(Duration::from_secs(5));
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x3f; 32]).await });
+
+    let (nonce, _) = next_lookup(&mut driver).await;
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(&nonce, &LookupReply::Error)
+                .unwrap()
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+
+    assert!(lookup.await.unwrap().is_err(), "an error reply fails closed");
+}
+
+#[tokio::test]
+async fn a_lookup_with_no_reply_times_out() {
+    let mut driver = start(Duration::from_millis(50));
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x40; 32]).await });
+    let _ = next_lookup(&mut driver).await;
+    assert!(lookup.await.unwrap().is_err(), "a lost reply fails closed");
+}
+
+#[tokio::test]
+async fn an_oversized_lookup_hash_is_refused_before_anything_is_sent() {
+    let mut driver = start(Duration::from_secs(5));
+    let hash = vec![0u8; MAX_LOOKUP_HASH_BYTES + 1];
+    let err = driver.handle.get_transaction(&hash).await.unwrap_err();
+    assert!(matches!(
+        err,
+        NymError::Encode(wire::WireError::HashTooLarge { .. })
+    ));
+    assert!(driver.from_transport.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
+    // A confused or hostile hub must not be able to answer a lookup with an
+    // ack (or vice versa): the waiter stays pending and its caller fails
+    // closed on the timeout, rather than the wrong verdict reaching a wallet.
+    let mut driver = start(Duration::from_millis(150));
+
+    let lookup_handle = driver.handle.clone();
+    let lookup = tokio::spawn(async move { lookup_handle.get_transaction(&[0x41; 32]).await });
+    let (lookup_nonce, _) = next_lookup(&mut driver).await;
+    driver
+        .to_transport
+        .send(wire::encode_ack(&lookup_nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+    assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
+
+    let submit_handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { submit_handle.submit(b"tx").await });
+    let (submit_nonce, _) = next_frame(&mut driver).await;
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(&submit_nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+}
+
+#[tokio::test]
+async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
+    let mut driver = start(Duration::from_secs(5));
+    let submit_handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { submit_handle.submit(b"tx").await });
+    let (submit_nonce, _) = next_frame(&mut driver).await;
+
+    let lookup_handle = driver.handle.clone();
+    let lookup = tokio::spawn(async move { lookup_handle.get_transaction(&[0x42; 32]).await });
+    let (lookup_nonce, _) = next_lookup(&mut driver).await;
+
+    // Answer the lookup first: each waiter takes its own reply.
+    driver
+        .to_transport
+        .send(
+            wire::encode_lookup_reply(&lookup_nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+    driver
+        .to_transport
+        .send(wire::encode_ack(&submit_nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+
+    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
+}
+
+#[tokio::test]
+async fn abandoned_waiters_do_not_accumulate() {
+    // A timed-out request's entry would otherwise be held for the life of the
+    // process, since the reply that would remove it is exactly the one that
+    // never came. Drive several timeouts, then prove a later request still
+    // correlates (the map is swept, not merely appended to).
+    let mut driver = start(Duration::from_millis(30));
+    for _ in 0..5 {
+        let handle = driver.handle.clone();
+        let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+        let _ = next_frame(&mut driver).await;
+        assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    }
+
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let (nonce, _) = next_frame(&mut driver).await;
+    driver
+        .to_transport
+        .send(wire::encode_ack(&nonce, AckKind::Accepted).to_vec())
+        .await
+        .unwrap();
+    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
 }

@@ -423,8 +423,8 @@ async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
 ///    txid is computed locally, and the hub's queue holds the bytes;
 /// 2. a lookup for that txid is answered found at the mempool sentinel with
 ///    the exact bytes (the queue path; the indexer is unreachable on purpose);
-/// 3. a lookup for an unknown hash fails CLOSED (`error`, because the indexer
-///    cannot be reached), never a guess.
+/// 3. a lookup for an unknown hash fails CLOSED (the indexer cannot be
+///    reached), never a NotFound the wallet would read as "it is gone".
 async fn cmd_e2e(network: &Path) -> Result<()> {
     use std::sync::Arc;
 
@@ -434,12 +434,10 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::queue::Queue;
     use zero_indexer_hub::server::Hub;
-    use zero_indexer_shim::hub::{HubTransport, Submit};
+    use zero_indexer_shim::hub::{HubTransport, Lookup, Submit};
     use zero_indexer_shim::nym as shim_nym;
-    use zero_indexer_shim::wire as shim_wire;
 
     const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
-    const LOOKUP_SURBS: u32 = 60;
 
     // ---- The hub half: a real listener over the real cores, driven by a glue
     // task that is the M5 hub driver in miniature.
@@ -505,8 +503,14 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
             tokio::select! {
                 out = shim_out_rx.recv() => {
                     let Some(out) = out else { break };
+                    // The SURB count rides with the frame: the transport picks
+                    // it per frame type (D3/D4) and the driver only obeys.
                     if let Err(e) = shim_client
-                        .send_message(hub_addr, out.frame.to_vec(), IncludedSurbs::new(13))
+                        .send_message(
+                            hub_addr,
+                            out.frame.to_vec(),
+                            IncludedSurbs::new(out.reply_surbs),
+                        )
                         .await
                     {
                         eprintln!("[shim] send failed: {e}");
@@ -540,46 +544,34 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     anyhow::ensure!(queue.len() == 1, "the hub queue holds the migration");
     println!("[e2e] submit accepted in {:.2?}, txid computed locally, queue holds 1", t0.elapsed());
 
-    // 2) Look the migration up by its txid: answered from the queue, found at
-    // the mempool sentinel, byte-identical.
-    // Fixed nonces: correlation only has to hold within this one probe run,
-    // and skipping a rand dependency keeps the merged shim+hub+nym dependency
-    // graph resolvable.
-    let mut poll_client = connect_client(network).await?;
-    let nonce = [0xA7u8; 16];
-    let request = shim_wire::encode_lookup(&nonce, &hex::decode(&txid)?)?;
+    // 2) Look the migration up by its txid, through the shim's REAL lookup
+    // path: answered from the hub's queue, found at the mempool sentinel,
+    // byte-identical.
     let t1 = Instant::now();
-    poll_client
-        .send_message(hub_addr, request.to_vec(), IncludedSurbs::new(LOOKUP_SURBS))
-        .await?;
-    let reply = wait_nonempty(&mut poll_client, Duration::from_secs(120)).await?;
-    let (echoed, verdict) = shim_wire::decode_lookup_reply(&reply)
-        .map_err(|e| anyhow::anyhow!("lookup reply did not decode: {e}"))?;
-    anyhow::ensure!(echoed == nonce, "the reply echoes the lookup nonce");
-    match verdict {
-        shim_wire::LookupReply::Found { height, tx } => {
+    let found = transport
+        .get_transaction(&hex::decode(&txid)?)
+        .await
+        .map_err(|e| anyhow::anyhow!("lookup failed: {e}"))?;
+    match found {
+        Lookup::Found { data, height } => {
             anyhow::ensure!(height == 0, "a queued entry is at the mempool sentinel");
-            anyhow::ensure!(tx.as_slice() == V6_MIGRATION, "the exact bytes come back");
+            anyhow::ensure!(data.as_ref() == V6_MIGRATION, "the exact bytes come back");
         }
         other => bail!("expected found, got {other:?}"),
     }
     println!("[e2e] lookup answered from the queue in {:.2?}", t1.elapsed());
 
     // 3) An unknown hash fails closed: the indexer is unreachable, so the only
-    // honest answer is error, and that is what must come back.
-    let nonce = [0xA8u8; 16];
-    let request = shim_wire::encode_lookup(&nonce, &[0xEE; 32])?;
+    // honest answer is an error the wallet sees as UNAVAILABLE. Never a
+    // NotFound, which would tell a wallet its transaction does not exist.
     let t2 = Instant::now();
-    poll_client
-        .send_message(hub_addr, request.to_vec(), IncludedSurbs::new(LOOKUP_SURBS))
-        .await?;
-    let reply = wait_nonempty(&mut poll_client, Duration::from_secs(120)).await?;
-    let (echoed, verdict) = shim_wire::decode_lookup_reply(&reply)
-        .map_err(|e| anyhow::anyhow!("lookup reply did not decode: {e}"))?;
-    anyhow::ensure!(echoed == nonce && verdict == shim_wire::LookupReply::Error);
-    println!("[e2e] unknown hash failed closed (error) in {:.2?}", t2.elapsed());
+    let unknown = transport.get_transaction(&[0xEE; 32]).await;
+    anyhow::ensure!(
+        unknown.is_err(),
+        "an unanswerable lookup must fail closed, got {unknown:?}"
+    );
+    println!("[e2e] unknown hash failed closed in {:.2?}", t2.elapsed());
 
-    poll_client.disconnect().await;
     println!();
     println!("e2e: PASS");
     println!("  - the real shim correlator and the real hub listener, glued to");
