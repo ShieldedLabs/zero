@@ -54,7 +54,16 @@ other.
 3. `RUSTFLAGS`, `SOURCE_DATE_EPOCH`, `CARGO_HOME`, `WORKDIR`.
 4. The committed `Cargo.lock`, and the `zebra-chain` and `zaino-proto` sources
    archived into the context (a subtree pull in either can move the hash; the
-   reproduce workflow fires on those paths for that reason).
+   reproduce workflow fires on those paths for that reason). The vendored
+   `nym-upgrade-mode-check` (the crypto-common `[patch]` target) is archived too.
+5. **Network exception, mixnet-driver build.** The default deploy build
+   (`CARGO_FEATURES=mixnet-driver`) keeps the compile RUN's network on, because
+   `nym-network-defaults`'s build.rs runs `cargo metadata` over the whole nym
+   workspace and pulls git deps (e.g. `nymtech/smoltcp`) not in this crate's lock.
+   Determinism is unaffected — every version is lock-pinned, so the network only
+   fetches content already addressed by rev/hash — and the two cold builds still
+   agree. A fully-offline mixnet build (pre-warm nym's workspace metadata cache in
+   the fetch phase, then `CARGO_NET_OFFLINE`) is the follow-up.
 
 ## Reproduce it
 
