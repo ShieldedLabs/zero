@@ -342,11 +342,28 @@ impl NymHandle {
         for attempt in 0..targets {
             let target = start.wrapping_add(attempt) % targets;
             let (request, rx) = build(target).map_err(NymError::Encode)?;
-            self.requests
-                .send(request)
-                .await
-                .map_err(|_| NymError::TransportGone)?;
-            match self.await_reply(rx).await {
+            // ONE deadline covers both the wait to be ACCEPTED by the transport
+            // and the wait for the reply, so the wallet-visible cost of a dead
+            // mixnet stays `timeout * addresses`. Bounding only the reply, and
+            // letting the accept `send().await` block unbounded on a
+            // backpressured transport (a driver mid-emission holds the channel
+            // full for the ~1 s a 64 KiB frame takes), would make the wait
+            // unbounded above and falsify the latency claim in the plan.
+            let deadline = tokio::time::Instant::now() + self.timeout;
+            match tokio::time::timeout_at(deadline, self.requests.send(request)).await {
+                Ok(Ok(())) => {}
+                // The transport loop is gone; nothing can be sent to any address.
+                Ok(Err(_)) => return Err(NymError::TransportGone),
+                Err(_) => {
+                    tracing::warn!(
+                        target_index = target,
+                        "the transport did not accept the request in time; trying the next"
+                    );
+                    last = NymError::Timeout;
+                    continue;
+                }
+            }
+            match self.await_reply(deadline, rx).await {
                 Err(NymError::Timeout) => {
                     tracing::warn!(
                         target_index = target,
@@ -360,8 +377,15 @@ impl NymHandle {
         Err(last)
     }
 
-    async fn await_reply<T>(&self, rx: oneshot::Receiver<T>) -> Result<T, NymError> {
-        match tokio::time::timeout(self.timeout, rx).await {
+    /// Await one reply until `deadline`, the same instant the accept wait shares,
+    /// so a single attempt cannot exceed the per-request timeout however the time
+    /// is split between being accepted and being answered (M1').
+    async fn await_reply<T>(
+        &self,
+        deadline: tokio::time::Instant,
+        rx: oneshot::Receiver<T>,
+    ) -> Result<T, NymError> {
+        match tokio::time::timeout_at(deadline, rx).await {
             Err(_) => Err(NymError::Timeout),
             // The transport dropped the waiter without firing it: it is exiting.
             Ok(Err(_)) => Err(NymError::TransportGone),
@@ -431,7 +455,13 @@ async fn correlate(
                     Err(_) => return,
                 }
             }
-            request = requests.recv(), if permit.is_some() => match request {
+            // `requests_open` guards this arm too, not just `reserve`: once the
+            // requests channel has closed while a permit is still held, `recv()`
+            // returns `None` instantly on every turn, and without this guard that
+            // arm stays ready and hot-loops the whole select (pegging a core)
+            // while the last replies drain. Guarded, the loop falls through to
+            // serving inbound and the sweep until `pending` empties.
+            request = requests.recv(), if permit.is_some() && requests_open => match request {
                 Some(Request { nonce, frame, reply_surbs, waiter, target }) => {
                     // Non-blocking: the capacity is already ours.
                     permit
@@ -642,6 +672,79 @@ mod tests {
         assert!(!pending.contains_key(&[1u8; 16]));
         assert!(pending.contains_key(&[2u8; 16]));
         assert!(pending.contains_key(&[3u8; 16]));
+    }
+
+    /// M1': the wait to be ACCEPTED by the transport must be inside the request
+    /// timeout, not outside it. A requests channel whose one slot is held blocks
+    /// the accept `send`; the submit must still fail closed with `Timeout` within
+    /// the budget, rather than hang unbounded above it (which is what falsified
+    /// the plan's `timeout * addresses` latency claim before this fix).
+    #[tokio::test]
+    async fn a_backpressured_transport_times_out_within_the_budget() {
+        let (tx, _rx) = mpsc::channel::<Request>(1);
+        // Hold the one slot so the handle's send has nowhere to go, and keep the
+        // receiver alive so the channel is full-but-open rather than closed.
+        let _permit = tx.reserve().await.expect("channel open");
+        let targets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let handle = NymHandle::new(tx.clone(), Duration::from_millis(150), targets);
+
+        let started = std::time::Instant::now();
+        let result = handle.submit(&[0u8; 8]).await;
+
+        assert_eq!(result, Err(NymError::Timeout));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the accept wait must be bounded by the request timeout"
+        );
+    }
+
+    /// L1': a closed requests channel with a request still in flight must not
+    /// hot-loop the select. On the current-thread runtime this test uses, a spin
+    /// that never yields (the pre-fix behaviour, the request arm firing on
+    /// `recv() == None` every turn) starves this very delivery and the test hangs;
+    /// with the `requests_open` guard the loop parks on inbound and the reply is
+    /// delivered and the transport exits.
+    #[tokio::test]
+    async fn a_closed_requests_channel_with_a_reply_in_flight_does_not_spin() {
+        let (req_tx, req_rx) = mpsc::channel::<Request>(4);
+        let (out_tx, mut out_rx) = mpsc::channel::<OutFrame>(4);
+        let (in_tx, in_rx) = mpsc::channel::<Zeroizing<Vec<u8>>>(4);
+        let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task = tokio::spawn(run_transport(req_rx, out_tx, in_rx, inflight));
+
+        // One submit goes out: a permit is taken and a waiter is left pending.
+        let nonce = [9u8; 16];
+        let frame = wire::encode_submit(&nonce, &[0u8; 8]).unwrap();
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        req_tx
+            .send(Request {
+                nonce,
+                frame,
+                reply_surbs: SUBMIT_REPLY_SURBS,
+                waiter: Waiter::Ack(waiter_tx),
+                target: 0,
+            })
+            .await
+            .unwrap();
+        out_rx.recv().await.expect("the frame is emitted to the driver");
+
+        // Close requests while the reply is still outstanding, then deliver it.
+        drop(req_tx);
+        let ack = wire::encode_ack(&nonce, AckKind::Accepted);
+        in_tx.send(Zeroizing::new(ack.to_vec())).await.unwrap();
+
+        let delivered = tokio::time::timeout(Duration::from_secs(2), waiter_rx)
+            .await
+            .expect("the reply must be delivered, not starved by a spin")
+            .expect("the waiter fired");
+        assert_eq!(delivered, AckKind::Accepted);
+
+        // With the last reply drained and requests closed, the transport exits.
+        drop(in_tx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the transport exits once pending drains")
+            .unwrap();
     }
 }
 
