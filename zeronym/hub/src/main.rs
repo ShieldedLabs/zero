@@ -164,9 +164,11 @@ fn spawn_nym_listener(
     let (addr_tx, mut addr_rx) = mpsc::channel(4);
 
     tokio::spawn(nym::run_listener(in_rx, out_tx, hub));
-    tokio::spawn(nym_driver::run_driver(network, in_tx, out_rx, addr_tx, async {
-        let _ = tokio::signal::ctrl_c().await;
-    }));
+    // Shut the driver's client down on the SAME signal as the rest of the hub
+    // (SIGTERM or ctrl-c), not ctrl-c alone: a container stop is SIGTERM, and the
+    // driver must run disconnect() to completion then (D12: it is not cancel-safe
+    // and a dropped live client leaks its background tasks).
+    tokio::spawn(nym_driver::run_driver(network, in_tx, out_rx, addr_tx, shutdown_signal()));
     // The driver logs its address, but surfacing it here too keeps it in the
     // startup log the operator reads to configure shims.
     tokio::spawn(async move {

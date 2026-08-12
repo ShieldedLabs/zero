@@ -215,6 +215,24 @@ if [ -n "$HUB_NYM" ]; then
 			"$cidr" "$port" "$proto" >> "$HUB_EGRESS"
 	done
 
+	# The DEFAULT Nym network reaches gateways and nym-apis by NAME, and this
+	# enclave resolves nothing without a DNS egress rule (udp:53). A missing one is
+	# a fail-closed at connect_to_mixnet() discovered only on the server. It cannot
+	# be hard-required (an IP-literal / custom-topology deployment needs no DNS at
+	# all), so warn loudly rather than block.
+	nym_has_dns=no
+	for rule in $NYM_EGRESS; do
+		rest=${rule#*:}; port=${rest%%:*}
+		[ "$port" = 53 ] && nym_has_dns=yes
+	done
+	if [ "$nym_has_dns" = no ]; then
+		echo "==> WARNING: no DNS (udp:53) --nym-egress rule. On the DEFAULT Nym network"
+		echo "    the enclave resolves gateway/nym-api NAMES and has no resolver, so"
+		echo "    connect_to_mixnet() fails closed on the server. Add a"
+		echo "    '<resolver>/32:53:udp' rule, or pin every endpoint by IP (which also"
+		echo "    needs driver support not yet shipped; see the note above)."
+	fi
+
 	# ZIS_HUB_NYM is the address list; the driver picks a live one and fails over
 	# (D10). No ZIS_HUB_TLS: the mixnet IS the confidentiality boundary, so there
 	# is no TLS name to verify on this hop. Rotation is the D11 linkage-window knob.

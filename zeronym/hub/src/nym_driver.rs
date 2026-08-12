@@ -17,12 +17,17 @@
 //! Unlike the shim's driver there is no rotation and no supervisor: the hub's
 //! address is what every shim sends to (D10), so it holds ONE identity for the
 //! life of the process. It still handles the client dying (D12: after 20 send
-//! failures the SDK stops for good) by rebuilding — which mints a NEW address,
-//! logged so the operator can re-publish it — because a reachable hub at a moved
-//! address beats an unreachable one at the old address. Shutdown disconnects the
-//! client cleanly (D12: `disconnect()` is not cancel-safe and a dropped LIVE
-//! client leaks its background tasks); a client that already died is dropped,
-//! its tasks having already stopped.
+//! failures the SDK stops for good) by rebuilding and logging the NEW address it
+//! mints. Be honest about the limit (D10): a diskless hub's address changes on
+//! every restart or rebuild regardless, and existing shims hold the OLD one, so
+//! this recovery restores the shim->hub path ONLY for shims that then learn the
+//! new address through whatever address distribution the deployment uses — an
+//! open humans decision, not something this rebuild fixes on its own. It rebuilds
+//! rather than exiting so the hub's clearnet serving and batcher stay up, but for
+//! the mixnet path a rebuild without republication is a moved address, not a
+//! recovered one. Shutdown disconnects the client cleanly (D12: `disconnect()` is
+//! not cancel-safe and a dropped LIVE client leaks its background tasks); a
+//! client that already died is dropped, its tasks having already stopped.
 
 #![cfg(feature = "mixnet-driver")]
 
@@ -181,23 +186,29 @@ enum Step {
 /// Hand one inbound reconstructed message to the listener as a [`Received`],
 /// unless it is an artifact or an anonymity failure.
 async fn deliver(incoming: &mpsc::Sender<Received>, message: nym_sdk::mixnet::ReconstructedMessage) {
-    // Empty inbound messages are SURB-replenishment artifacts, not requests
-    // (D12); the listener would drop them anyway, but keeping them out of the
-    // channel keeps it for real frames.
-    if message.message.is_empty() {
+    // Wrap the cleartext in Zeroizing FIRST, so EVERY return path below wipes it
+    // on drop, not only the one that reaches the listener. A SubmitV1 here holds a
+    // diverted migration in cleartext, and freeing it un-wiped is the one thing an
+    // attestation cannot excuse in a diskless enclave (nym.rs) — the empty-artifact
+    // and tagless-drop returns free the same Vec and must wipe it too.
+    let frame = Zeroizing::new(message.message);
+    // Empty inbound messages are SURB-replenishment artifacts, not requests (D12);
+    // the listener would drop them anyway, but keeping them out of the channel
+    // keeps it for real frames.
+    if frame.is_empty() {
         return;
     }
     // A request WITHOUT a sender tag is a shim that exposed its own address
     // instead of sending anonymously (D3). There is no tag to reply to, and
-    // holding the frame is exactly what this hop exists to avoid, so drop it.
+    // holding the frame is exactly what this hop exists to avoid, so drop it —
+    // wiped, via the Zeroizing wrapper above.
     let Some(tag) = message.sender_tag else {
         tracing::warn!("a request arrived with no sender tag; dropping it");
         return;
     };
     let _ = incoming
         .send(Received {
-            // Zeroizing: a SubmitV1 here carries a diverted migration in cleartext.
-            frame: Zeroizing::new(message.message),
+            frame,
             sender_tag: SenderTag(tag.to_bytes()),
         })
         .await;

@@ -132,16 +132,45 @@ async fn main() -> Result<(), BoxError> {
         .await
 }
 
-/// Resolves on the first ctrl-c, which stops the accept loop and drains.
+/// Resolves on ctrl-c or (on unix) SIGTERM, which stops the accept loop and
+/// drains. SIGTERM matters for a container/enclave stop: an orchestrator sends
+/// it, not ctrl-c, and without it the process is hard-killed with the proxy
+/// mid-drain and the mixnet supervisor never told to disconnect its client
+/// cleanly (D12). Awaited from more than one place (the proxy and the supervisor);
+/// tokio allows multiple waiters on the same signal.
 async fn shutdown() {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => tracing::info!("ctrl-c received"),
-        // Without a working signal handler the shim would exit immediately, so
-        // report it and keep serving instead.
-        Err(err) => {
-            tracing::error!(%err, "cannot listen for ctrl-c, shutdown must be a kill signal");
-            std::future::pending::<()>().await
+    let ctrl_c = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => tracing::info!("ctrl-c received"),
+            // Without a working handler this arm would fire immediately, so report
+            // and park it, leaving SIGTERM as the shutdown path.
+            Err(err) => {
+                tracing::error!(%err, "cannot listen for ctrl-c");
+                std::future::pending::<()>().await
+            }
         }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+                tracing::info!("SIGTERM received");
+            }
+            Err(err) => {
+                tracing::warn!(%err, "cannot listen for SIGTERM; ctrl-c only");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }
 
@@ -239,9 +268,10 @@ fn build_nym_transport(
     let (evt_tx, evt_rx) = mpsc::channel(8);
 
     tokio::spawn(nym::run_transport(req_rx, out_tx, in_rx, inflight.clone()));
-    tokio::spawn(nym::run_supervisor(rotation, evt_rx, cmd_tx, inflight, async {
-        let _ = tokio::signal::ctrl_c().await;
-    }));
+    // Shut the supervisor (and through it, the driver's client) down on the same
+    // SIGTERM-or-ctrl-c signal the proxy uses, so a container stop disconnects the
+    // mixnet client cleanly (D12) rather than leaking it on a hard kill.
+    tokio::spawn(nym::run_supervisor(rotation, evt_rx, cmd_tx, inflight, shutdown()));
     tokio::spawn(nym_driver::run_driver(
         network,
         recipients,
