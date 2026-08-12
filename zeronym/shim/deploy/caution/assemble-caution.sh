@@ -18,10 +18,19 @@
 #   sh .../assemble-caution.sh --name <enclave> --backend <ip:port> \
 #       --backend-tls <cert-name> --tls-domain <wallet-facing-domain> \
 #       [--app-source <public-git-url>] \
-#       [--hub <ip:port> --hub-tls <hub-cert-name>] [dest-dir]
+#       ( --hub <ip:port> --hub-tls <hub-cert-name>              # clearnet hop
+#       | --hub-nym <addr1,addr2> --nym-egress <cidr:port[:proto]> ... # mixnet
+#           [--nym-rotation-secs <n>] )                          \
+#       [dest-dir]
 #
-# --hub turns diversion ON. Without it the shim is forward-only: it classifies
-# and logs, and still hands every migration to the operator's indexer.
+# --hub (clearnet) or --hub-nym (mixnet) turns diversion ON; they are mutually
+# exclusive. Without either, the shim is forward-only: it classifies and logs,
+# and still hands every migration to the operator's indexer.
+#
+# --hub-nym diverts over the Nym mixnet. It needs one or more --nym-egress
+# allowlist rules (the gateway(s) and nym-api set, from the host operator), and
+# the enclave reaches those, NOT the hub directly. See the long note in the Nym
+# transport block for the DNS / breadth / ticketbook decisions this requires.
 #
 # --app-source records, in the manifest's build block, the public git URL where
 # this assembled repository is published. `caution verify` clones that URL and
@@ -42,20 +51,36 @@ BACKEND=""
 BACKEND_TLS=""
 HUB=""
 HUB_TLS=""
+HUB_NYM=""
+NYM_EGRESS=""
+NYM_ROTATION=""
 TLS_DOMAIN=""
 APP_SOURCE=""
 DEBUG="false"
 DEST=""
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--name)        NAME=$2; shift 2 ;;
-		--backend)     BACKEND=$2; shift 2 ;;
-		--backend-tls) BACKEND_TLS=$2; shift 2 ;;
-		--hub)         HUB=$2; shift 2 ;;
-		--hub-tls)     HUB_TLS=$2; shift 2 ;;
-		--tls-domain)  TLS_DOMAIN=$2; shift 2 ;;
-		--app-source)  APP_SOURCE=$2; shift 2 ;;
-		--debug)       DEBUG="true"; shift ;;
+		--name)             NAME=$2; shift 2 ;;
+		--backend)          BACKEND=$2; shift 2 ;;
+		--backend-tls)      BACKEND_TLS=$2; shift 2 ;;
+		--hub)              HUB=$2; shift 2 ;;
+		--hub-tls)          HUB_TLS=$2; shift 2 ;;
+		# Divert over the Nym mixnet instead of the clearnet --hub hop. A
+		# comma-separated list of hub Nym addresses (identity.encryption@gateway),
+		# mutually exclusive with --hub. See the transport block below.
+		--hub-nym)          HUB_NYM=$2; shift 2 ;;
+		# One enclave egress allowlist entry for the mixnet, repeatable:
+		# `cidr:port[:proto]`, e.g. --nym-egress 1.2.3.4/32:9001:tcp. The host
+		# operator supplies these (gateway(s), nym-api set, optionally DNS/Nyx);
+		# see the long note in the Nym transport block for what they cover and why
+		# a plain /32 is not enough this time.
+		--nym-egress)       NYM_EGRESS="$NYM_EGRESS $2"; shift 2 ;;
+		# Rotate the shim's mixnet identity every N seconds (D11: the sender-tag
+		# linkage window). Unset never rotates. A deployment decision.
+		--nym-rotation-secs) NYM_ROTATION=$2; shift 2 ;;
+		--tls-domain)       TLS_DOMAIN=$2; shift 2 ;;
+		--app-source)       APP_SOURCE=$2; shift 2 ;;
+		--debug)            DEBUG="true"; shift ;;
 		-*) echo "unknown option: $1" >&2; exit 2 ;;
 		*)  DEST=$1; shift ;;
 	esac
@@ -123,7 +148,87 @@ HUB_ENV="$STAGE/hub_env.txt"
 : > "$HUB_EGRESS"
 : > "$HUB_ENV"
 
-if [ -n "$HUB" ]; then
+# Transports are mutually exclusive: --hub is the clearnet hop, --hub-nym the
+# mixnet. Which one carries a divert decides whether the operator can observe it,
+# and whether this enclave needs mixnet egress at all, so it is never inferred.
+if [ -n "$HUB_NYM" ] && [ -n "$HUB" ]; then
+	echo "error: --hub and --hub-nym are mutually exclusive. Pick one transport." >&2
+	exit 2
+fi
+if [ -n "$NYM_EGRESS" ] && [ -z "$HUB_NYM" ]; then
+	echo "error: --nym-egress given without --hub-nym. Nothing would use it." >&2
+	exit 2
+fi
+
+if [ -n "$HUB_NYM" ]; then
+	# DIVERT OVER THE NYM MIXNET. Fundamentally different from the clearnet --hub
+	# hop, and the egress reflects it. The shim does NOT reach the hub directly; it
+	# hands Sphinx packets to a Nym ENTRY GATEWAY, which routes them through the
+	# mixnet to the hub. So the destinations this enclave must reach are the
+	# gateway(s) and the nym-api set (topology refresh), NOT the hub's IP. And
+	# unlike the single /32 of the clearnet rule, this set is plural and it CHURNS:
+	# the active gateway set reshuffles and keys rotate, so the allowlist is not a
+	# static pin.
+	#
+	# THREE THINGS THE HOST OPERATOR MUST DECIDE, because they are not ours to
+	# choose and this script does not invent them:
+	#   1. DNS. The default Nym network reaches its nym-apis and gateways by NAME,
+	#      and this enclave resolves nothing (no port 53 today). Either add a
+	#      `--nym-egress <resolver>/32:53:udp` rule and accept DNS, or pin every
+	#      endpoint by IP and keep the no-DNS posture. The no-DNS path ALSO needs
+	#      shim-side support the driver does not yet expose (IP-literal --nym-apis,
+	#      no_hostname, a custom topology), so today the deployable configuration is
+	#      DNS-permitted. Tracked in NYM_PLAN.md M6.
+	#   2. Breadth. One /32 per gateway and per nym-api is tightest but must be
+	#      updated as the set churns; a broader mixnet CIDR is looser but stable.
+	#   3. Ticketbooks. A public-network run needs bandwidth credentials, and if
+	#      they are acquired on-chain in-enclave, a Nyx RPC egress rule as well.
+	#
+	# The operator passes each allowlist entry as --nym-egress cidr:port[:proto],
+	# and every one becomes an egress block. At least one is required: a mixnet
+	# enclave with no egress reaches no gateway and diverts nothing.
+	[ -n "$NYM_EGRESS" ] || {
+		echo "error: --hub-nym needs at least one --nym-egress rule (the gateway(s)" >&2
+		echo "       and nym-api set the host operator allowlists). None given." >&2
+		exit 2
+	}
+	# Shallow structural check on each address (identity.encryption@gateway), the
+	# same shape the shim's own config enforces; the SDK does the real parse.
+	OLDIFS=$IFS; IFS=','
+	for addr in $HUB_NYM; do
+		case "$addr" in
+			?*.?*@?*) : ;;
+			*) echo "error: --hub-nym entry '$addr' is not identity.encryption@gateway" >&2; exit 2 ;;
+		esac
+	done
+	IFS=$OLDIFS
+
+	# One egress block per --nym-egress rule (cidr:port[:proto], proto default tcp).
+	for rule in $NYM_EGRESS; do
+		cidr=${rule%%:*}; rest=${rule#*:}
+		port=${rest%%:*}; proto=${rest#*:}
+		[ "$proto" = "$rest" ] && proto=tcp
+		echo "$port" | grep -qE '^[0-9]+$' || {
+			echo "error: --nym-egress rule '$rule' has a non-numeric port" >&2; exit 2; }
+		printf '\n    # Nym mixnet egress (gateway / nym-api / DNS / Nyx), operator-allowlisted.\n' >> "$HUB_EGRESS"
+		printf '    egress {\n      cidr_ipv4   = "%s"\n      port        = %s\n      ip_protocol = "%s"\n    }\n' \
+			"$cidr" "$port" "$proto" >> "$HUB_EGRESS"
+	done
+
+	# ZIS_HUB_NYM is the address list; the driver picks a live one and fails over
+	# (D10). No ZIS_HUB_TLS: the mixnet IS the confidentiality boundary, so there
+	# is no TLS name to verify on this hop. Rotation is the D11 linkage-window knob.
+	{
+		printf '\n      # Divert Orchard-touching transactions over the Nym mixnet to these hub\n'
+		printf '      # addresses. The mixnet is the confidentiality boundary; there is no TLS\n'
+		printf '      # name to verify on this hop. The driver tries each address until one acks.\n'
+		printf '      ZIS_HUB_NYM = "%s"\n' "$HUB_NYM"
+		[ -n "$NYM_ROTATION" ] && printf '      ZIS_NYM_ROTATION_SECS = "%s"\n' "$NYM_ROTATION"
+	} >> "$HUB_ENV"
+	echo "==> DIVERSION ON over the Nym mixnet to: $HUB_NYM"
+	echo "    egress allowlist:$NYM_EGRESS"
+	[ -n "$NYM_ROTATION" ] && echo "    identity rotation: every ${NYM_ROTATION}s" || echo "    identity rotation: never (--nym-rotation-secs unset; linkage window = process uptime)"
+elif [ -n "$HUB" ]; then
 	# ZIS_HUB parses as a Rust SocketAddr and the enclave resolves no DNS (there
 	# is no port 53 egress), so a hostname does not degrade, it fails to parse
 	# and the enclave never starts. Catch it here where the error is readable.
@@ -338,7 +443,7 @@ zero-indexer-shim Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
 serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME production)
 backend:         $BACKEND verified as $BACKEND_TLS
-diversion:       $([ -n "$HUB" ] && echo "ON -> hub $HUB${HUB_TLS:+ verified as $HUB_TLS}" || echo "OFF (forward-only, no privacy)")
+diversion:       $(if [ -n "$HUB_NYM" ]; then echo "ON -> Nym mixnet, hub(s): $HUB_NYM"; elif [ -n "$HUB" ]; then echo "ON -> hub $HUB${HUB_TLS:+ verified as $HUB_TLS}"; else echo "OFF (forward-only, no privacy)"; fi)
 app source:      $([ -n "$APP_SOURCE" ] && echo "$APP_SOURCE" || echo "none (not independently verifiable)")
 source commit:   $SHA
 expected binary: $EXPECTED
