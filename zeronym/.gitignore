@@ -1,0 +1,3 @@
+
+# local deploy config (holds inputs; secrets stay in env)
+deploy.env
