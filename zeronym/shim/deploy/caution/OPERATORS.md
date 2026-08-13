@@ -7,11 +7,12 @@ The two backends are equals: the shim routes purely on the request path
 (`src/proxy.rs`), so it never cares which indexer answers. lightwalletd is what
 Shielded Labs run themselves.
 
-**This is Phase 1: forward-only, so it adds no privacy yet.** It classifies and
-logs but forwards everything. What it buys you is the integration, the TLS, and
-the attestation, all in place. **Phase 2 (next): diversion** routes Orchard-touching
-transactions to Shielded Labs' hub instead of your indexer, which is where privacy
-begins. For you that is a redeploy, not a new integration.
+**Phase 1 is forward-only, so it adds no privacy yet.** It classifies and logs
+but forwards everything. What it buys you is the integration, the TLS, and the
+attestation, all in place. **Phase 2, diversion, now works**: pass `--hub` and
+Orchard-touching transactions go to Shielded Labs' hub instead of your indexer,
+which is where privacy begins. For you that is a redeploy, not a new integration.
+See "Diversion" below for what is proven and what is not.
 
 ## Why an attested enclave
 
@@ -162,6 +163,55 @@ at a testnet indexer. A worked example, courtesy of zec.rocks:
 `--backend 199.170.132.107:443 --backend-tls na-jfk.testnet.metal.zec.rocks`,
 and `GetLightdInfo` through the shim answers `chainName: "test"`.
 
+## Diversion (Phase 2)
+
+The hub is live and diversion works end to end. Add to `assemble-caution.sh`:
+
+```
+  --hub     <hub-ipv4>:<port> \
+  --hub-tls <name-on-hub-cert>
+```
+
+Shielded Labs supply both values. The flags add a second locked `/32` egress for
+the hub and set `ZIS_HUB`, so the diverted path is fixed in the audited binary
+and the enclave's egress rules at assemble time. Forward-only stays the default:
+no `--hub`, no diversion.
+
+What changes for you: an Orchard-touching `SendTransaction` never reaches your
+indexer (proven in CI by a connection-counting backend, `tests/divert.rs`), and
+the wallet gets the usual lightwalletd reply, `errorCode 0` with the txid in
+`errorMessage`. Every `GetTransaction` is served by the hub too, since a shim
+that held no state could not tell a migration's txid from any other. If the hub
+is unreachable the shim answers gRPC `UNAVAILABLE` and still never falls back to
+your indexer: it fails closed, by design.
+
+Proven on mainnet 2026-08-11: a real Orchard-to-Ironwood migration from an
+unmodified wallet was held on submission and published on the hub's 20-block
+cadence, landing two blocks after the flush boundary. **Batch size was one**, so
+that run proves the mechanics and content privacy, not batching anonymity. The
+anonymity set is the cross-operator batch, which means it is worth exactly as
+much as the number of operators running diversion.
+
+### Nym: in the tree, not yet deployable
+
+The shim and hub both carry a Nym mixnet transport as of 2026-08-13, behind a
+`mixnet-driver` build feature that the deploy images now enable, with
+`--hub-nym` and `--nym-egress` flags on the assembler. Do not plan a deployment
+around it yet. It has run end to end only against a local mixnet harness, never
+against the public Nym network, and two things must land first:
+
+- The hub's Nym address is minted fresh on every client build and only written
+  to its log, which an attested enclave does not expose (debug mode, which would
+  expose it, disables attestation). There is no way to learn the address you
+  would configure.
+- A Nym client picks its entry gateway from the live topology and re-picks it on
+  every rebuild, while this deploy model allowlists egress per `/32`. Until the
+  gateway can be pinned, the only assemblable configuration is a wide egress,
+  which gives up the property that makes the enclave worth running.
+
+When it lands it is another redeploy, not a new integration. Until then, `--hub`
+is the transport that works.
+
 ## Config reference
 
 Every option is a CLI flag and an environment variable (prefix `ZIS_`). On
@@ -211,8 +261,8 @@ set at runtime: an operator cannot silently repoint it.
   `/var/log/nitro_enclaves/*.log` over SSH. Debug disables attestation, so it is a
   diagnostic only, never the deployed config.
 
-## Phase 1 caveat
+## Forward-only caveat
 
-Say it plainly to anyone relying on this: Phase 1 forwards **every** request,
-including Orchard-touching `SendTransaction`s, to your indexer. Nothing is diverted
-or hidden. Privacy begins with Phase 2.
+Say it plainly to anyone relying on a shim deployed without `--hub`: it forwards
+**every** request, including Orchard-touching `SendTransaction`s, to your
+indexer. Nothing is diverted or hidden. Privacy begins when diversion is on.
