@@ -51,6 +51,7 @@ use http::{HeaderMap, HeaderValue, Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
+use hyper::client::conn::http1 as client_h1;
 use hyper::client::conn::http2 as client_h2;
 use hyper::server::conn::http2 as server_h2;
 use hyper::service::service_fn;
@@ -73,6 +74,17 @@ pub const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/Sen
 /// and the diversion removed from the link, so it is intercepted and answered
 /// from the bytes the shim holds. See `crate::intercept::get_transaction`.
 pub const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
+/// Caution platform control-plane paths, served on the SAME host the shim serves.
+/// Normally the in-enclave proxy answers these before our process, but we own them
+/// defensively so a transparent proxy can never forward Caution's own endpoints to
+/// the Zcash indexer. `/.well-known/caution/health` is answered locally; the
+/// attestation POST is relayed to bootproofd, the platform's real NSM source
+/// (INTERNAL_BOOTPROOFD_PORT). TEST: the bootproofd port is a Caution internal;
+/// revisit if this turns out to be the fix for the h2c attestation-health failure.
+pub const CAUTION_HEALTH: &str = "/.well-known/caution/health";
+pub const CAUTION_ATTESTATION: &str = "/attestation";
+const BOOTPROOFD_ADDR: &str = "127.0.0.1:49502";
 
 /// gRPC status code 14, UNAVAILABLE.
 pub const GRPC_UNAVAILABLE: u16 = 14;
@@ -488,6 +500,10 @@ async fn handle(
     // connection to the operator: the reason the pool is lazy and the dial lives
     // here rather than at accept time.
     let result = match route_for(&path) {
+        // Caution's control-plane paths. Owned here so they are NEVER proxied to
+        // the indexer: health answered locally, attestation relayed to bootproofd.
+        Route::CautionHealth => Ok(caution_health_ok()),
+        Route::CautionAttestation => forward_to_bootproofd(req).await,
         Route::PassThrough => pass_through(req, pool).await,
         // GetTransaction may name a diverted migration; the interceptor decides,
         // and forwards (dialling the operator) only when it does not.
@@ -538,6 +554,12 @@ pub enum Route {
     /// Exactly [`GET_TRANSACTION`]: buffer the `TxFilter`, and if it names a
     /// diverted migration serve it from held bytes; otherwise forward.
     GetTransaction,
+    /// Caution's [`CAUTION_HEALTH`]: answered locally with HTTP 200, never
+    /// proxied to the indexer.
+    CautionHealth,
+    /// Caution's [`CAUTION_ATTESTATION`]: relayed to bootproofd (the platform's
+    /// NSM source), never proxied to the indexer.
+    CautionAttestation,
     /// Opaque. Relayed without being read.
     PassThrough,
 }
@@ -556,6 +578,13 @@ pub fn route_for(path: &str) -> Route {
     }
     if path == GET_TRANSACTION {
         return Route::GetTransaction;
+    }
+    // Caution's own endpoints, served on our host: never hand them to the indexer.
+    if path == CAUTION_HEALTH {
+        return Route::CautionHealth;
+    }
+    if path == CAUTION_ATTESTATION {
+        return Route::CautionAttestation;
     }
 
     // Trailing slashes are tolerated here, not because tonic accepts them (it
@@ -719,6 +748,48 @@ fn sanitize_grpc_message(message: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Caution's `/.well-known/caution/health`, answered locally with HTTP 200 so it
+/// is never proxied to the indexer. The platform normally serves this itself; we
+/// own it defensively (and in case the platform routes it to us under h2c).
+fn caution_health_ok() -> Response<ProxyBody> {
+    let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed();
+    Response::builder()
+        .status(200)
+        .body(body)
+        .expect("static health response builds")
+}
+
+/// Relay Caution's `/attestation` POST to bootproofd over the enclave loopback,
+/// so the attestation stays genuine (bootproofd is the platform's NSM source)
+/// rather than being handed to the Zcash indexer. bootproofd speaks HTTP/1.1.
+///
+/// TEST/WORKAROUND: this exists to check whether the platform routes `/attestation`
+/// to the app under h2c (see [`BOOTPROOFD_ADDR`]). If it is not the fix, remove it.
+async fn forward_to_bootproofd(req: Request<Incoming>) -> Result<Response<ProxyBody>, BoxError> {
+    let stream = TcpStream::connect(BOOTPROOFD_ADDR).await?;
+    let (mut sender, conn) = client_h1::handshake(TokioIo::new(stream)).await?;
+    spawn_connection_driver(conn);
+
+    let (mut parts, body) = req.into_parts();
+    // HTTP/1.1 origin-form: the request target is the path only, plus a Host
+    // header. The inbound h2 request carries scheme+authority pseudo-headers that
+    // would make it absolute-form, so reduce the URI to its path-and-query.
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| PathAndQuery::from_static("/attestation"));
+    parts.uri = Uri::from(path_and_query);
+    parts.headers.remove(http::header::HOST);
+    parts
+        .headers
+        .insert(http::header::HOST, HeaderValue::from_static(BOOTPROOFD_ADDR));
+
+    let body = body.map_err(BoxError::from).boxed();
+    let resp = sender.send_request(Request::from_parts(parts, body)).await?;
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
 }
 
 #[cfg(test)]
