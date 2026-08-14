@@ -149,7 +149,7 @@ async fn build_client(
 /// disconnect cleanly and return.
 pub async fn run_driver(
     network: MixnetNetwork,
-    gateway: Option<String>,
+    mut gateway: Option<String>,
     incoming: mpsc::Sender<Received>,
     mut outgoing: mpsc::Receiver<Reply>,
     address_out: mpsc::Sender<Recipient>,
@@ -191,11 +191,21 @@ pub async fn run_driver(
                 if failed_rebuilds >= REBUILDS_BEFORE_NEW_IDENTITY {
                     storage = Ephemeral::default();
                     failed_rebuilds = 0;
+                    // Also DROP any pinned gateway. The pin exists only to keep
+                    // the address stable (D10); once we have accepted a fresh
+                    // identity (and so a new address) that rationale is gone, and
+                    // re-requesting the same gateway would just fail forever if it
+                    // is what died -- resetting storage but re-pinning a dead
+                    // gateway is an infinite fresh-identity loop that never
+                    // reconnects. Letting the SDK choose lands us on a live
+                    // gateway (as far as the enclave's egress rule allows).
+                    gateway = None;
                     tracing::warn!(
                         after_failures = REBUILDS_BEFORE_NEW_IDENTITY,
                         "the hub's gateway registration is unrecoverable; taking a FRESH \
-                         identity. The hub's Nym address WILL change: read the new one from \
-                         /nym-address and re-point every shim, or migrations keep failing closed"
+                         identity and dropping the gateway pin. The hub's Nym address WILL \
+                         change: read the new one from /nym-address and re-point every shim, \
+                         or migrations keep failing closed"
                     );
                 }
                 tokio::select! {

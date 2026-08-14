@@ -600,11 +600,13 @@ pub enum Route {
     /// Exactly [`GET_TRANSACTION`]: buffer the `TxFilter`, and if it names a
     /// diverted migration serve it from held bytes; otherwise forward.
     GetTransaction,
-    /// Caution's [`CAUTION_HEALTH`]: answered locally with HTTP 200, never
-    /// proxied to the indexer.
+    /// Caution's [`CAUTION_HEALTH`]. When the relay is enabled ([`CautionRelay`]),
+    /// answered locally with HTTP 200 and never proxied to the indexer; when it is
+    /// disabled the shim is a pure proxy and this falls through to `PassThrough`.
     CautionHealth,
-    /// Caution's [`CAUTION_ATTESTATION`]: relayed to bootproofd (the platform's
-    /// NSM source), never proxied to the indexer.
+    /// Caution's [`CAUTION_ATTESTATION`]. When the relay is enabled, relayed to
+    /// bootproofd (the platform's NSM source) and never proxied to the indexer;
+    /// when it is disabled this falls through to `PassThrough`.
     CautionAttestation,
     /// Opaque. Relayed without being read.
     PassThrough,

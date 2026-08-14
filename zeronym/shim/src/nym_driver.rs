@@ -267,8 +267,11 @@ enum Step {
 /// with the reply-SURB count the frame carries.
 ///
 /// A send failure is logged and dropped, not retried here: the SDK's own
-/// auto-reconnect covers a transient gateway blip, and a caller whose reply
-/// never comes fails closed on its own timeout. An out-of-range index is a
+/// auto-reconnect covers a transient gateway blip. For a LOOKUP the caller then
+/// fails closed on its own timeout; for a best-effort SUBMIT the wallet has
+/// ALREADY been answered success on dispatch, so a dropped submit frame is
+/// unrecoverable at this layer and the wallet only learns of it via
+/// no-confirmation (a resend is safe, D6 dedup). An out-of-range index is a
 /// transport/driver disagreement about the address list and is logged loudly.
 async fn send_frame(
     sender: &nym_sdk::mixnet::MixnetClientSender,

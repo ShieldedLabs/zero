@@ -63,6 +63,15 @@ pub const SUBMIT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// measured in the nymnet harness, where 13 acked with no re-request at all.
 /// Fixed, because the on-wire packet count is a function of frame size PLUS
 /// attached-SURB count (D4).
+///
+/// NOTE (dispatch-only submit): the shim no longer awaits the ack, so most of
+/// these SURBs are now unused send-path overhead — the hub spends them replying
+/// into a dropped receiver. They stay NON-ZERO because a zero count is what would
+/// push the driver off the anonymous-send path (M6/D3); the count simply no
+/// longer needs to be large enough to carry an ack. Trimming it toward the
+/// anonymity minimum is a throughput follow-up, gated on validating
+/// SURB-replenishment behaviour on the localnet — and low priority, since submits
+/// are rare (a migration is ~0.77 per block) next to the continuous cover traffic.
 pub const SUBMIT_REPLY_SURBS: u32 = 13;
 
 /// Reply SURBs attached to a `LookupV1` (D3 as corrected). The reply is a FULL

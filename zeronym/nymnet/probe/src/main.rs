@@ -612,8 +612,21 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
         other => bail!("expected an accepted submit, got {other:?}"),
     };
     anyhow::ensure!(txid.len() == 64, "locally computed txid is display hex");
-    anyhow::ensure!(queue.len() == 1, "the hub queue holds the migration");
-    println!("[e2e] submit accepted in {:.2?}, txid computed locally, queue holds 1", t0.elapsed());
+    // Best-effort submit answers on dispatch, so the frame still has to traverse
+    // the real mixnet and be enqueued at the hub. Wait for it before asserting the
+    // queue AND before the lookup below, which would otherwise race delivery.
+    let queue_deadline = Instant::now() + Duration::from_secs(15);
+    while queue.len() != 1 {
+        anyhow::ensure!(
+            Instant::now() < queue_deadline,
+            "the hub queue never received the migration"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    println!(
+        "[e2e] submit accepted in {:.2?}, migration reached the hub queue",
+        t0.elapsed()
+    );
 
     // 2) Look the migration up by its txid, through the shim's REAL lookup
     // path: answered from the hub's queue, found at the mempool sentinel,
@@ -804,8 +817,20 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
         other => bail!("expected an accepted submit, got {other:?}"),
     };
     anyhow::ensure!(txid.len() == 64, "locally computed txid is display hex");
-    anyhow::ensure!(queue.len() == 1, "the hub queue holds the migration");
-    println!("[e2e] submit accepted in {:.2?}, txid computed locally, queue holds 1", t0.elapsed());
+    // Best-effort submit answers on dispatch; wait for the frame to reach the hub
+    // queue before asserting on it and before the racing lookup below.
+    let queue_deadline = Instant::now() + Duration::from_secs(15);
+    while queue.len() != 1 {
+        anyhow::ensure!(
+            Instant::now() < queue_deadline,
+            "the hub queue never received the migration"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    println!(
+        "[e2e] submit accepted in {:.2?}, migration reached the hub queue",
+        t0.elapsed()
+    );
 
     let t1 = Instant::now();
     let found = transport
