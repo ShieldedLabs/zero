@@ -13,3 +13,9 @@ default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/ShieldedLabs/zero"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
+# Where the rendered book is served from, so 404.html can build absolute links
+# back into the site. Every other page links relatively and does not need this.
+# GitHub Pages serves this repo at https://shieldedlabs.github.io/zero/, and
+# .github/workflows/zeronym-book.yml stages the book into zeronym/ under that
+# root. Change both together or the 404 page points at nothing.
+site-url = "/zero/zeronym/"
