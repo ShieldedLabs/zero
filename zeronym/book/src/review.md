@@ -22,14 +22,13 @@ STEVE is **one-way** by default: the shim verifies the hub, extracts its key, an
 
 **The question for Anton:** should the hub also verify the shim (mutual STEVE, to gate abuse), or accept from anyone with rate-limiting (one-way)?
 
-### 4. Deploying the mixnet transport in an attested enclave
+### 4. Mixnet transport in an attested enclave (resolved, with one residual)
 
-The sidecar-placement question this section used to ask is moot: there are no sidecars to place, because both sides link `nym-sdk` and run it in-process. Two concrete platform blockers replaced it, and together they are why the mixnet transport is built but not deployed.
+Both blockers this section used to name are closed, which is what let the transport deploy. Address publication: the hub serves its Nym address at `GET /nym-address`, and the identity now survives a client rebuild rather than being minted fresh each time. Gateway pinning: both sides accept a gateway list and the shim rotates through it on rebuild, which was the real lever, since the throughput constraint turned out to be gateway **backpressure** rather than any credential limit.
 
-- **Address publication.** The hub's Nym address is minted per client build and written only to a log. An attested enclave does not expose that log, so a shim has no supported way to learn the address of the hub it is meant to reach.
-- **Gateway pinning.** Egress from an enclave is locked to a `/32` allowlist, but a Nym client chooses its gateway dynamically and that choice cannot currently be pinned to the allowlisted address.
+One operational residual, and it is a genuine platform question. `request_gateway` takes the gateway's **identity**, while a locked egress allowlist is written in terms of its **IP**. The two are different namespaces, a mismatch fails closed inside an enclave with no console to debug it from, and because the shim rotates, an allowlist has to cover every gateway it might rotate onto rather than one.
 
-**The question for Anton:** what is the supported way for an attested enclave to publish a value minted at boot (here, its Nym address), and can gateway selection be pinned so a mixnet client works under a locked egress allowlist?
+**The question for Anton:** can egress be allowlisted by gateway identity rather than by IP, or is there a supported way to resolve a pinned gateway's address at deploy time so the allowlist and the pin cannot drift apart?
 
 ### 5. Zero-ingress and attestation delivery
 

@@ -70,7 +70,7 @@ The batching window over which wallets choose identical anchors and expiry heigh
 
 ### Nym
 
-The 5-hop Sphinx mixnet with cover traffic, the near-term transport for the shim-to-hub hop: it makes that traffic unlinkable, hiding which operator or region a migration came from. Both binaries link `nym-sdk` and run a mixnet client in-process (no proxy sidecars), proven end to end over a local mixnet, but not yet deployable in an attested enclave and never run on the public mixnet. See [the architecture](./architecture.md) and the status table in [roadmap](./roadmap.md).
+The 5-hop Sphinx mixnet with cover traffic, the near-term transport for the shim-to-hub hop: it makes that traffic unlinkable, hiding which operator or region a migration came from. Both binaries link `nym-sdk` and run a mixnet client in-process (no proxy sidecars). An attested pair has run it on the public mixnet since 2026-08-14. See [the architecture](./architecture.md) and the status table in [roadmap](./roadmap.md).
 
 ### Orchard-touching transaction
 
@@ -102,7 +102,7 @@ The reproducible, deterministic build system (`SOURCE_DATE_EPOCH=1`, static-musl
 
 ### SubmitV1 / AckV1
 
-The shim-to-hub wire frames. `SubmitV1` is magic `ZNS1`, a 16-byte correlation nonce, and the transaction, zero-padded to exactly 64 KiB so every submission is the same size; `AckV1` is magic `ZNA1`, the echoed nonce, and a disposition, exactly 64 bytes. `LookupV1` / `LookupReplyV1` carry `GetTransaction`. **No txid and no expiry travel on the wire**: the hub derives both, because a txid would otherwise be a correlation handle. Over the clearnet transport the shim instead POSTs raw bytes. The encrypt-to-hub-key inner layer is designed, not built. See [the shim](./components.md).
+The shim-to-hub wire frames. `SubmitV1` is magic `ZNS1`, a 16-byte correlation nonce, and the transaction, zero-padded to exactly 64 KiB so every submission is the same size; `AckV1` is magic `ZNA1`, the echoed nonce, and a disposition, exactly 64 bytes. `LookupV1` / `LookupReplyV1` carry `GetTransaction`. **No txid and no expiry travel on the wire**: the hub derives both, because a txid would otherwise be a correlation handle. Over the clearnet path, when `ZIH_HTTP_SUBMIT` re-opens it, the shim instead POSTs raw bytes. The encrypt-to-hub-key inner layer is designed, not built. See [the shim](./components.md).
 
 ### TEE / AWS Nitro enclave
 
@@ -126,11 +126,11 @@ The Shielded Labs privacy product for Zcash light wallets (name: zero + nym, a p
 
 ### zero-indexer-hub (ZIH)
 
-The attested-TEE batcher (earlier `zero-broadcaster`) that accumulates diverted transactions from many shims, holds them in-enclave, dedups identical bytes, and publishes them together on a strict block cadence through its own hub indexer over `CompactTxStreamer`. It also answers a wallet's `GetTransaction` for a queued or flushed migration. Running two or more instances with failover, and the encrypt-to-hub-key layer it decrypts in-enclave, are designed; on the deployed hop the payload arrives as raw bytes inside TLS, and over the mixnet build as fixed 64 KiB frames. See [the hub](./components.md).
+The attested-TEE batcher (earlier `zero-broadcaster`) that accumulates diverted transactions from many shims, holds them in-enclave, dedups identical bytes, and publishes them together on a strict block cadence through its own hub indexer over `CompactTxStreamer`. It also answers a wallet's `GetTransaction` for a queued or flushed migration. Running two or more instances with failover, and the encrypt-to-hub-key layer it decrypts in-enclave, are designed; the payload arrives as fixed 64 KiB frames over the mixnet, or as raw bytes inside TLS on the clearnet path when `ZIH_HTTP_SUBMIT` re-opens it. See [the hub](./components.md).
 
 ### zero-indexer-shim (ZIS)
 
-The lightweight, attested-TEE, stateless reverse proxy an operator deploys behind their existing public URL. It passes traffic through to the backing lwd, except that it classifies every turnstile crossing and diverts Orchard-touching transactions to the hub, and routes every `GetTransaction` to the hub as well (so a migration's follow-up lookup never reaches the operator). Encrypting each diverted transaction to the hub key is designed; the Nym route is built but not yet deployed, so the deployed hop is TLS. See [the shim](./components.md).
+The lightweight, attested-TEE, stateless reverse proxy an operator deploys behind their existing public URL. It passes traffic through to the backing lwd, except that it classifies every turnstile crossing and diverts Orchard-touching transactions to the hub, and routes every `GetTransaction` to the hub as well (so a migration's follow-up lookup never reaches the operator). Encrypting each diverted transaction to the hub key is designed; the Nym route is deployed. See [the shim](./components.md).
 
 ## References
 

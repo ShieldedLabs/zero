@@ -8,7 +8,7 @@ Two new pieces of attested software plus a transport put an **attested, verifiab
 
 - **zero-indexer-shim (ZIS)**: a lightweight, attested router each operator deploys behind its existing public URL (for example `zec.rocks:443`). To every wallet it looks exactly like the indexer already there, so wallets need no reconfiguration. It forwards almost all traffic untouched to the operator's backing indexer, and isolates two things: transactions that **touch Orchard** (diverted to the hub) and `GetTransaction` (answered by the hub, so a wallet's lookup for its own migration never reaches the operator). Everything else passes straight through instantly; the backend still sees those contents, but arriving from the shim, not the wallet's IP. The shim is **stateless**, holding nothing about what it diverted, which is exactly why every `GetTransaction` must go to the hub.
 - **zero-indexer-hub (ZIH)**: a central, attested service, designed to run as two or more instances with failover. It does two jobs. It **batches**: an Orchard-touching transaction is encrypted to a key the local operator cannot access, routed to a hub, batched with those from every other shim, and co-published on a strict block cadence after a short delay, so an observer holding "IP X connected at time T" cannot time-match it to the transaction when it appears on-chain. And it **answers lookups**: a `GetTransaction` is served from the hub's queue while the migration is unflushed (height 0, mempool), otherwise from the hub's own indexer.
-- **Nym, embedded in both binaries** (built, not deployed): each side links `nym-sdk` and runs its own mixnet client **in-process**, inside the enclave, so there are no proxy sidecars and no untrusted process on the path. It runs only between shim and hub, never wallet-to-shim. The transport is proven end to end over a local mixnet but is not yet deployable in an attested enclave, so the deployed hop is still plain TLS to a pinned address ([roadmap](./roadmap.md) has the status and the two blockers).
+- **Nym, embedded in both binaries** (deployed): each side links `nym-sdk` and runs its own mixnet client **in-process**, inside the enclave, so there are no proxy sidecars and no untrusted process on the path. It runs only between shim and hub, never wallet-to-shim. An attested pair has run it on the public mixnet since 2026-08-14; the clearnet dial remains in the code but is off at the hub by default ([roadmap](./roadmap.md) has the status table).
 - **The operator's backing indexer**: the unmodified lightwalletd or Zaino the operator already runs, on its internal address. To it the shim is a single ordinary gRPC client. It serves block sync, address queries, and pass-through broadcasts in cleartext, exactly as today; a diverted Orchard-touching transaction and a wallet's `GetTransaction` never reach it.
 - **The hub's indexer**: a CompactTxStreamer (lightwalletd or Zaino), distinct from any operator's, that the hub connects out to over TLS to read the chain tip, publish each flushed batch, and answer a `GetTransaction` its queue does not hold. Neither enclave runs a validator of its own. (In a single-operator deployment the two indexer roles can collapse onto one instance, which removes the lookup privacy but not the batching.)
 
@@ -94,7 +94,7 @@ flowchart TB
   HFLUSH ==>|"SendTransaction (batched, shuffled)"| FN
   FN -->|"P2P relay"| ZNET
   HFLUSH -.->|"tip (GetLightdInfo) + lookup fallthrough"| FN
-  HDEC -.->|"AckV1 (64 bytes, SURB return)"| SHUB
+  HDEC -.->|"AckV1 (SURB return; not awaited)"| SHUB
   SHUB -.->|"failover (dedup by payload hash)"| HUB2
   SHUB -.->|"last resort near expiry: direct broadcast over Nym"| NYM
   HUB2 -.-> FN
@@ -123,10 +123,10 @@ flowchart TB
 
 **Reading it:** *migration* is the code's label for the diverted class ([the shim](./components.md) has the predicate). Thin arrows = the **pass-through path** (queries other than `GetTransaction`, and non-migration txs), which go to the operator's unmodified backing indexer as **plaintext the operator can read**, exactly as today. Thick arrows = the paths that **bypass the operator**: the migration broadcast, encrypted end to end, and the hub-served `GetTransaction`. Green = attested enclave processes, the only things that ever see migration cleartext, and note that this now includes each side's mixnet client, which is linked in-process rather than run as a sidecar; red = the untrusted host and the operator's own indexer, which never sees the migration path at all; gray = external networks; blue = the drop-in wallet.
 
-**Three nested encryption layers are designed for the migration (shim to hub) path**, so that only the two attested enclaves ever see cleartext. **The deployed hop today is a single layer, plain TLS**, terminated by the platform's in-enclave proxy.
+**Three nested encryption layers are designed for the migration (shim to hub) path**, so that only the two attested enclaves ever see cleartext. **The deployed hop today has the outer layer only**: Sphinx across the mixnet, with the wallet's own TLS terminated by the platform's in-enclave proxy before it.
 1. **Inner** (designed): the tx is encrypted to the **hub key** at the classifier, so it survives a compromised host.
 2. **Middle** (designed): **STEVE** (AES-256-GCM) terminates inside the hub enclave.
-3. **Outer** (built, not deployed): **Nym** Sphinx across the 5-hop mixnet.
+3. **Outer** (deployed): **Nym** Sphinx across the 5-hop mixnet.
 
 ---
 

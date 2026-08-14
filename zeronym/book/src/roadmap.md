@@ -30,25 +30,27 @@ It is already a partial down-payment. Transaction-detail lookups (`GetTransactio
 | Stateless shim | Deployed | No per-migration state, so a restart or a second instance loses nothing |
 | Hub queue, batch, flush on cadence | Deployed | |
 | `GetTransaction` served by the hub | Deployed | Address-level queries still reach the operator |
-| Reproducible StageX build, both binaries | Deployed | CI-checked on every change; **PCR2 only**, see the gap below |
+| Reproducible StageX build, both binaries | Deployed, **currently drifted** | Checked on pull requests and manual dispatch, **not on every push**; as of 2026-08-14 both published hashes are stale against tip of main and both jobs report DOES NOT REPRODUCE. **PCR2 only**, see the gap below |
 | Attested Nitro enclaves | Deployed | Shielded Labs' own indexers since 2026-08-01; first third-party operator 2026-08-10 |
 | In-enclave TLS termination | Deployed | Landed 2026-08-05, so the TLS key is enclave-born |
-| Nym transport | Built, not deployed | Linked into both binaries, proven end to end over a local mixnet; never run on the public mixnet |
-| Multi-hub failover | Partly built | Address rotation within one request exists on the mixnet transport; holding a migration across requests does not |
+| Nym transport | Deployed | An attested shim and hub pair has run on the **public** mixnet since 2026-08-14; the hub publishes its address at `GET /nym-address`. The deployed pair's provenance does not yet reproduce, see below |
+| Multi-hub failover | Partly built | The shim rotates which hub address each submit targets; holding a migration across requests does not exist |
 | STEVE handshake | Designed | |
 | Encrypt-to-hub-key layer | Designed | |
 | Keymaker quorum, consortium governance | Designed | Launch stands the hub up under a single trusted entity |
 | Confirmation tracking and re-submit | Designed | Nothing tracks whether a flushed batch was mined |
 
-On **2026-08-11** a real Orchard to Ironwood migration traversed the full stack on mainnet: held at the shim, batched at the hub, published on the cadence, with the operator's indexer never seeing it.
+On **2026-08-11** a real Orchard to Ironwood migration traversed the full stack on mainnet: held at the shim, batched at the hub, published on the cadence, with the operator's indexer never seeing it. That run predates the mixnet deployment and used the clearnet hop.
 
-**The honest gaps that remain.** That mainnet run proved the mechanics and content privacy end to end, but at today's adoption the batch was **size one**, so it does not yet prove batching *anonymity*; that needs many migrations in one flush window (see [honest limits](./trust.md)). Attestation reproducibility covers the application binary but not the EnclaveOS base image and kernel (PCR0 and PCR1), so `caution verify` cannot yet establish the whole stack (see [review](./review.md)). And two things block deploying the Nym transport in an attested enclave: the hub's Nym address is minted per client build and written only to a log the enclave does not expose, and gateway selection cannot be pinned to the locked egress allowlist.
+**The honest gaps that remain.** That mainnet run proved the mechanics and content privacy end to end, but at today's adoption the batch was **size one**, so it does not yet prove batching *anonymity*; that needs many migrations in one flush window (see [honest limits](./trust.md)). No migration has yet been observed crossing Nym in production.
+
+The larger gap is **verifiability, which currently lags capability**. Attestation reproducibility covers the application binary but not the EnclaveOS base image and kernel (PCR0 and PCR1), so `caution verify` cannot establish the whole stack. On top of that, the live pair's published provenance does not currently check out: the shim's cites a source commit that is not public, the hub's quotes a hash its own cited commit does not produce, and at tip of main both reproduce jobs fail. The enclaves are attested and running; an independent auditor cannot yet tie either one back to a public commit. Closing that is the near-term priority, and until it closes the system should not be described as independently verifiable.
 
 ## V2 status: designed, platform-unblocked, transport-validated
 
 As of the 2026-07-30 V2 sync, the three hardest gates of the indexer + Nym + TEE version are answered.
 
-**Designed.** The full wallet-facing private indexer, serving queries (not just broadcasts) over Nym, terminated inside an attested enclave. The in-enclave Nym integration has since been built for the near-term system; what remains is operating it on the public mixnet and clearing the two attested-deploy blockers above. The TEE substrate, an attested Zebra + Zaino testnet enclave built reproducibly with StageX, is already live and synced to tip on testnet.
+**Designed.** The full wallet-facing private indexer, serving queries (not just broadcasts) over Nym, terminated inside an attested enclave. The in-enclave Nym integration has since been built and deployed for the near-term system; what remains is the provenance and hash correction above. The TEE substrate, an attested Zebra + Zaino testnet enclave built reproducibly with StageX, is already live and synced to tip on testnet.
 
 **Platform-unblocked.** Caution answered every platform question the design depended on. Attestation binding is achievable three ways (the STEVE handshake, the enclave pubkey injected via `metadata.json` into `user_data`, or a new runtime `arbitrary_data` field). Key persistence across cold boots and upgrades is solved by a keymaker/locksmith **M-of-N quorum across 3-4 orgs**, which survives upgrades where KMS-seal-to-PCR does not, and gives the service a stable address. Egress just works (broad NAT). Mechanics for all three are in [trust](./trust.md).
 
