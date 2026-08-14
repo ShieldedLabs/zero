@@ -397,8 +397,21 @@ allowance is exhausted the mixnet client stops working and every divert fails
 closed. There is **no ticketbook (paid credential) mechanism wired up yet**, so
 today the recovery is manual.
 
-- **Detect:** the shim's own reachability is not enough — the clearnet proxy path
-  keeps working fine while the mixnet hop is dead. Test a divert end to end.
+- **Detect:** ⚠ **there is currently no reliable way, and you should know that
+  before you deploy.** The shim's own reachability proves nothing: the clearnet
+  proxy path keeps answering normally while the mixnet hop is dead. Nor does the
+  wallet's reply — the shim answers success as soon as a migration is handed to
+  its internal transport, so a dead mixnet client still looks like a successful
+  send. And an end-to-end divert test does not close it either: the
+  `GetTransaction` lookup that would confirm arrival is itself a mixnet round trip
+  and times out under current latency (measured 2026-08-14: 12 consecutive
+  failures over 10 minutes on a healthy attested pair).
+- **Consequence:** an attested shim (no SSH) whose mixnet client has died is
+  **externally indistinguishable** from one working perfectly, while every
+  migration is silently dropped. A shim status endpoint reporting mixnet-client
+  health is the fix and is not built yet. Until it is, treat a debug-mode shim
+  with console access as the only way to confirm the mixnet hop is alive, and
+  raise this with Shielded Labs before relying on an attested shim in production.
 
 **Related, and not a failure:** the mixnet is **slow**. A migration can take
 minutes to reach the hub. That is expected and acceptable for a migration, which
