@@ -2,19 +2,13 @@
 
 The [shim and hub](./components.md) designs are settled enough to build. What remains are cross-party items to close: platform unknowns for Caution (Anton), and a security-model checklist for Taylor and Zooko. Where the [architecture](./architecture.md) or [trust](./trust.md) chapters own a mechanism, this chapter states the question and cross-links rather than restating it.
 
-**The upstream gate (moved, not lifted).** This work initially sat behind one gate: the threat-model doc (Taylor and Zooko) was treated as the dependency that had to land before the code was written, and the proof of concept sat deliberately inside it, classifying and logging while diverting nothing. Building has since proceeded: the shim and hub are shipped and run as attested enclaves ([roadmap](./roadmap.md) has the status). The gate did not disappear, it **moved**, from *may we build this* to *may we rely on these claims*. The questions below are that second gate: the review agenda, now read against running code rather than a design.
+**The gate moved.** The threat-model doc was once the dependency that had to land before code was written. The shim and hub now ship as attested enclaves ([roadmap](./roadmap.md)), so the question is no longer *may we build this* but *may we rely on these claims*. The list below is that second gate, read against running code.
 
 ## Open questions for Caution (Anton)
 
-Most of these concern the boundary between our software and Caution's managed enclave platform: where TLS terminates, what STEVE carries and how it authenticates, where the Nym sidecars run, and how a service can be both attested and zero-ingress. A few block code directly; others only need Caution to confirm a default we have already chosen.
+### 1. TLS termination (resolved)
 
-### 1. TLS termination: who owns :443?
-
-**Resolved.** The drop-in model depends on the wallet's TLS terminating **inside the shim enclave**, so neither the operator host nor the Caution platform reads the migration in cleartext. The fear was a managed platform terminating TLS in a parent-side **Caddy** before traffic reached attested code, which breaks operator-blindness for exactly the naive TLS wallets (not STEVE- or Nym-aware) whose only protection is that the shim is a TEE and the hub batches (see [components](./components.md) and [the problem](./problem.md)).
-
-**That was the platform default (measured 2026-08-02).** Declaring `ingress { port = 443 }` failed Caution's own provisioning while port 8443 deployed cleanly, and a running app answered on 443 with a self-signed instance-IP cert and a `Server: Caddy` header, so 443 was decrypted on the parent. It also blocked in-enclave ACME, since Let's Encrypt validates over ports 80/443 and the platform owned both, so the enclave could not prove control of its own domain.
-
-**Caution then shipped the fix (2026-08-03/05):** `e2e_encryption { mode = "tls" }` runs a Caddy **inside** the enclave that obtains the Let's Encrypt cert itself and terminates the wallet's TLS there, so the private key is enclave-born and the operator never holds it; `upstream_protocol = "h2c"` carries the gRPC. Verified end to end on deployed enclaves (`GetLightdInfo` clean, trailers intact). The shim's own rustls/ACME stack stays dormant on Caution as the vendor-independent path.
+The wallet's TLS terminates inside the shim enclave. The platform default terminated it parent-side, which would have broken operator-blindness for exactly the naive TLS wallets the shim exists to protect; Caution shipped in-enclave termination on 2026-08-05 and it is verified end to end (see [components](./components.md)).
 
 ### 2. STEVE wire form over Nym
 
@@ -24,7 +18,7 @@ Most of these concern the boundary between our software and Caution's managed en
 
 ### 3. STEVE: mutual or one-way?
 
-STEVE is **one-way** by default: the shim verifies the enclave (the hub), extracts its key, and derives a session key ([trust](./trust.md)). One-way is enough for privacy: the shim confirms it is talking to the genuine attested hub before handing over any migration, which is all operator- and hub-blindness require. **Mutual** STEVE would additionally have the hub verify the shim's attestation, gating abuse (only attested shims could submit, rather than the hub accepting from anyone with rate-limiting). The trade-off is real: mutual raises the abuse bar but couples every shim to attestation provisioning and complicates onboarding a new operator. One-way plus per-channel rate-limiting and the hub's own re-validation of every incoming tx (see [components](./components.md)) keeps the submit path open and simple, and already bounds garbage regardless of choice.
+STEVE is **one-way** by default: the shim verifies the hub, extracts its key, and derives a session key ([trust](./trust.md)). That is enough for privacy. Mutual STEVE would raise the abuse bar but couple every shim to attestation provisioning and complicate onboarding a new operator, and one-way plus rate-limiting plus the hub's own re-validation already bounds garbage.
 
 **The question for Anton:** should the hub also verify the shim (mutual STEVE, to gate abuse), or accept from anyone with rate-limiting (one-way)?
 
@@ -75,11 +69,11 @@ A practical open item, separate from the technical unknowns: who hosts and funds
 
 ## For review by Taylor and Zooko
 
-The security-relevant claims and assumptions that need expert review before we rely on them. A living checklist, not a finished argument, aimed at the **security model** (platform questions above are Caution's). Some items below were written against the shim proof of concept, a non-destructive classifier that logged and still forwarded; the shipped shim now diverts, the hub exists, and both run as attested enclaves, so read each item against running code: where it settles a question the item says what is settled and what is left.
+The security-relevant claims that need expert review before we rely on them. A living checklist, not a finished argument, aimed at the **security model**; the platform questions above are Caution's.
 
 ### The attested edge
 
-- **Verifiable no-IP-logging (protection 2).** We claim the operator's indexer is blinded to requester IPs by default: the shim proxies, so the queries that still go to the operator reach its backing lwd from the shim, not the wallet, and attested no-logging makes that checkable. (Transaction-detail lookups, `GetTransaction`, no longer reach the operator at all: the hub's indexer serves them now. Address-level queries still do.) Is the framing ("removes the passive, default leak, not a guarantee against an active operator") fair and correctly bounded? See [the problem](./problem.md).
+- **Verifiable no-IP-logging (protection 2).** Is the framing ("removes the passive, default leak, not a guarantee against an active operator") fair and correctly bounded? See [the problem](./problem.md).
 - **The network-layer residual.** On Nitro the parent host still sees the wallet's source IP at the TCP layer, so a bad-faith operator can packet-capture and timing-correlate to re-link IP to query. Is that the correct and complete residual, or are there other cross-layer re-linking paths we are missing?
 - **Tamper-proof front-end.** We claim attestation plus Certificate Transparency lets a wallet or auditor verify it is talking to the real attested shim, not an impostor or a modified front-end. Does the CT check fully close cert substitution for the drop-in URL?
 - **Reproducible-attestation gap (PCR0/PCR1).** The application binary reproduces (its measurement is the attestation's PCR2), but the EnclaveOS base image and kernel (PCR0, PCR1) are not yet reproducible end to end, and `caution verify` cannot currently confirm them (a known Caution limitation, so PCR2 is the measurement that carries weight today). Is PCR2-only reproducibility an acceptable interim, and what closes PCR0/PCR1? See [roadmap](./roadmap.md).
@@ -96,7 +90,7 @@ The security-relevant claims and assumptions that need expert review before we r
 
 ### Trust and transport
 
-- **STEVE.** One-way (the shim verifies the hub), X25519 ECDH plus an Ed25519 signature, HKDF-SHA256, CBOR and AES-256-GCM. Is one-way sufficient, or is mutual attestation needed to gate abuse at the hub? Is the corrected STEVE understanding right? See [trust](./trust.md).
+- **STEVE.** One-way, X25519 ECDH plus an Ed25519 signature, HKDF-SHA256, CBOR and AES-256-GCM. Is that understanding right? See [trust](./trust.md). (Mutual versus one-way is question 3 above.)
 - **The trust root.** V2 privacy trusts AWS and the hardware, not math. Is the TEE-now-PIR-later (defense-in-depth, distinct failure modes) posture the right long-term answer? See [trust](./trust.md) and [roadmap](./roadmap.md).
 - **Nym.** A 5-hop mixnet for the shim-to-hub path, with STEVE only shim-to-hub and wallet-to-shim being plain TLS terminating in the enclave. Any transport assumptions to challenge?
 
@@ -110,4 +104,4 @@ The security-relevant claims and assumptions that need expert review before we r
 
 ### Coverage against the wallet threat model
 
-We claim Zeronym targets the **server-side and network-metadata** concerns in Taylor's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), specifically the surveilling-lightwalletd and compromised-lightwalletd adversaries, and not the wallet-app-local concerns (key and seed storage, memo integrity, dust resilience, wallet fingerprinting, supply chain), which the model itself lists as the wallet's to address. Near-term the system eliminates one item on that list (migration-broadcast IP linkage) and blinds the operator's indexer to requester IPs; the full vision (indexer + Nym + TEE + PIR) is meant to close the rest of the metadata list. Is that boundary drawn correctly? A full concern-by-concern coverage matrix is planned as a follow-up.
+We claim Zeronym targets the **server-side and network-metadata** concerns in Taylor's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), specifically the surveilling-lightwalletd and compromised-lightwalletd adversaries, and not the wallet-app-local concerns (key and seed storage, memo integrity, dust resilience, wallet fingerprinting, supply chain), which the model itself lists as the wallet's to address. Is that boundary drawn correctly?

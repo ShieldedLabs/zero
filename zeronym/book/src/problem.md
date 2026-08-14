@@ -6,12 +6,9 @@ This chapter describes the system in the present tense. The shim and hub are dep
 
 ## The ZIP 307 light-client leak
 
-A light wallet does not run a full node. It delegates chain validation to an indexer (a lightwalletd or Zaino instance) and speaks to it over the light-client protocol defined in [ZIP 307](https://zips.z.cash/zip-0307), the CompactTxStreamer gRPC service. The wallet asks for compact blocks, trial-decrypts them locally to find its own notes, and submits its own transactions back through the same indexer.
+A light wallet delegates chain validation to an indexer (lightwalletd or Zaino) over [ZIP 307](https://zips.z.cash/zip-0307)'s CompactTxStreamer gRPC service: it pulls compact blocks, trial-decrypts them locally to find its own notes, and submits its transactions back through the same indexer.
 
-Two properties matter:
-
-- **Note contents stay private from the server.** Trial decryption happens on the client, so the indexer never learns which notes belong to the wallet. This is the part the protocol gets right.
-- **Metadata does not.** The indexer terminates the wallet's connection, so it sees the source IP, the timing of every request, and the addresses and block ranges queried. See the ECC and ZecSec writeups of the light-client leak (referenced in [the glossary](./glossary.md)).
+The protocol gets one half right and the other half wrong. Note contents stay private, since trial decryption is client-side and the indexer never learns which notes are yours. Metadata does not: the indexer terminates the connection, so it sees the source IP, the timing of every request, and the addresses and block ranges queried (ECC and ZecSec have written this up, see [the glossary](./glossary.md)).
 
 The near-term system targets the **broadcast** half. When a wallet submits a transaction it calls SendTransaction on the indexer over clearnet TLS; the operator terminates that TLS and sees the raw transaction bytes, the source IP, and the arrival moment. The other half, which addresses a wallet looks up, is the **query** leak, still largely out of near-term scope, with one exception now closed: transaction-detail lookups (`GetTransaction`) are served by the hub's indexer rather than the operator's (see [the roadmap](./roadmap.md)).
 
@@ -26,7 +23,7 @@ Joining the two by timing links **IP address to on-chain transaction to balance*
 
 ## The acute event: the Orchard to Ironwood migration
 
-Ironwood is the new shielded pool; to migrate, a wallet must broadcast a transaction moving value out of the Orchard pool and into Ironwood. This is not optional and not niche: it is a mandatory, mass event that plays out across a migration window rather than in a single instant, so a large fraction of the user base each broadcasts at least one pool-crossing transaction over a bounded period. Sent the way light wallets send transactions today, every one exposes a source IP and a timestamp joinable to the resulting on-chain migration. Zooko framed this on the 2026-07-30 all-hands as **the worst privacy-loss event in Zcash history**: users linking their IP address to their Zcash balance, hourly, for the duration of the migration window.
+Ironwood is the new shielded pool; to migrate, a wallet must broadcast a transaction moving value out of the Orchard pool and into Ironwood. Sent the way light wallets send transactions today, every one exposes a source IP and a timestamp joinable to the resulting on-chain migration. Zooko framed this on the 2026-07-30 all-hands as **the worst privacy-loss event in Zcash history**: users linking their IP address to their Zcash balance, hourly, for the duration of the migration window.
 
 Migrations are the acute case for three compounding reasons:
 
@@ -34,7 +31,7 @@ Migrations are the acute case for three compounding reasons:
 - **Mass:** a large population migrates, so the leak is broad rather than isolated.
 - **Concentrated:** the window is bounded, so many correlatable broadcasts land close together in time.
 
-The same properties make migrations the ideal thing to protect first: because they are mandatory, mass, and not time-sensitive, a large population of them can be batched together and published at once, which is exactly what the near-term system does (see [the architecture](./architecture.md)).
+Those same properties make migrations the ideal thing to protect first: a mandatory, non-urgent mass of transactions can be batched and published together ([the architecture](./architecture.md)).
 
 ## Every turnstile crossing leaks
 
@@ -46,8 +43,6 @@ The migration is the acute driver, but the underlying leak is general. Any **tur
 
 The shim's classifier detects **every** crossing, but what it isolates is drawn by pool, not by crossing shape: near-term it protects every transaction that **touches Orchard**, and everything else passes straight through. So an Orchard-to-transparent deshield is batched exactly like an Orchard-to-Ironwood migration, while shields and deshields out of any other pool pass through ([the shim](./components.md) has the predicate and the argument for drawing the line there). Deshield and shield crossings exist on mainnet today, independent of Ironwood, so the leak is real for current mainnet traffic, not only for the future migration.
 
-The all-hands judgment was that IP protection for the migration broadcast is the bulk of the practical privacy at stake right now; query privacy is the deferred vision (see [the roadmap](./roadmap.md)).
-
 ## The adversaries
 
 Against the migration broadcast as it works today (clearnet), three adversaries can perform the IP-to-balance linkage:
@@ -56,13 +51,9 @@ Against the migration broadcast as it works today (clearnet), three adversaries 
 - **A passive network observer.** Anyone on the path between wallet and operator (an ISP, a transit provider, a hosting network) sees the connection metadata: which IP contacted the operator and when. Even without the transaction contents, the timing plus the public chain is enough to correlate.
 - **The retrospective correlator.** Because the public chain is permanent and logs persist, any party that later obtains operator logs or network captures can perform the same join after the fact. The window for this attack does not close when the migration does.
 
-The near-term system's job is to break these specific linkages: blind the operator to the transaction contents, unlink the broadcast from the source IP, and break the timing correlation. Exactly which properties change, and which do not, is the rest of this chapter.
-
 ## The migration-broadcast threat table
 
-This model is deliberately narrow: it covers the **migration broadcast path**, the one thing the near-term system is built to defend, and is explicit about everything that passes through unprotected. It reflects Zooko's revisions from the 2026-07-30 all-hands (earlier drafts distinguished "query hidden from operator" from "query hidden from indexer"; those redundant rows were replaced with explicit broadcast rows). **Verifiable** means the wallet can check the property cryptographically via attestation, not merely trust that it holds. See [architecture](./architecture.md) for the encryption layers that back these claims and [trust](./trust.md) for how attestation works.
-
-The table compares the migration broadcast as it works today (clearnet, straight to the operator) against the near-term Zeronym system.
+This model is deliberately narrow: the **migration broadcast path**, and explicit about everything that passes through unprotected. **Verifiable** means the wallet can check the property cryptographically via attestation, not merely trust that it holds. See [architecture](./architecture.md) for the encryption layers and [trust](./trust.md) for how attestation works.
 
 | Property (migration broadcast) | Today (clearnet) | Zeronym (shim + hub) |
 |---|---|---|
@@ -80,7 +71,7 @@ Two rows need more than a cell.
 
 ## Naive vs Nym-aware wallets
 
-Most wallets today do not speak Nym; they reach the shim over ordinary TLS. The model must hold for such a wallet, but not for a *completely* unmodified one: there is exactly one wallet-side requirement, covered right after this.
+Most wallets today do not speak Nym; they reach the shim over ordinary TLS. The model must hold for such a wallet, but not for a *completely* unmodified one, as the next section explains.
 
 - For a **naive TLS wallet**, TLS terminates inside the shim's enclave, so the operator cannot read the migration transaction. But the operator's own network still observed that "IP X connected at time T." What protects that wallet is the **batching at the hub**: by holding the migration and co-publishing it with others after a delay, the hub ensures the operator cannot time-match "IP X active at T" against the on-chain migration. This is precisely why the shim must be a TEE (to blind the operator to the contents) and why the hub must batch (to break the timing link for the majority of wallets that cannot hide their own IP).
 - A future **Nym-aware wallet** could encrypt the migration end-to-end to the hub key and route it itself, so the shim would only forward, not decrypt. The near-term design is built so that path drops in later; near-term wallets are assumed naive.
@@ -119,11 +110,11 @@ Beyond the two, the front-end is **tamper-proof and verifiable**: a wallet or au
 
 One leak survives by construction, and the model names it rather than hide it. Because the shim is a drop-in in front of the operator's own backend, a migration is the single request the shim does **not** forward to the backing lwd, so an operator watching its own traffic can infer *that* a given source IP submitted a migration, and roughly when. It does **not** learn *which* on-chain transaction or *what amount*: the hub's batch mixes that client's migration with others' from operators it never sees. So the residual is "IP X migrated something," not "IP X migrated amount Y," which is why the table's source-IP row reads No for the amount even though the bare fact leaks.
 
-This residual is inherent to the drop-in model, and it is why shim-side batching and shim-to-hub cover traffic are rejected as mitigations. [Honest limits](./trust.md) is the single owner of that argument, along with the anonymity-set dependence, delayed broadcast, and the AWS-not-math trust root.
+This residual is inherent to the drop-in model, and it is why shim-side batching and shim-to-hub cover traffic are rejected as mitigations. [Honest limits](./trust.md) develops that argument.
 
 ## Defense-in-depth: detection, not prevention
 
-This is an emergency defense-in-depth measure. It does not cryptographically *prevent* every attack; it makes the attacks that matter **detectable after the fact**, which raises their cost and risk. The detection rests on two observable facts: the shim's TLS key is bound into its attestation, and every legitimate certificate for the domain appears in Certificate Transparency logs. Concretely, an attacker who can neither obtain a certificate that stays out of CT logs nor fully break the TEE cannot observe a direct IP-to-migration linkage without the attack later being detected.
+This is an emergency defense-in-depth measure. It does not cryptographically *prevent* every attack; it makes the attacks that matter **detectable after the fact**, which raises their cost and risk. The detection rests on two observable facts: the shim's TLS key is bound into its attestation, and every legitimate certificate for the domain appears in Certificate Transparency logs.
 
 A **Trusted Organization** (the party operating the hub) watches both. It verifies the shim's setup attestation (the private key lives only in the enclave, and no other certificate for the domain is still valid, ideally a fresh domain with no prior certificates), re-verifies whenever the certificate is renewed for any reason, makes anonymous requests to the public URL to confirm the attested key is the one actually served (at least for untargeted users), and monitors CT for any new certificate. If it sees a different public key in use, or a new key appear in CT, it **publicly announces that it has detected signs of an attack**.
 
@@ -133,7 +124,7 @@ The bar this clears is specific: the design aims to be secure against attacks th
 
 ## What this does not defend against
 
-Beyond the query leak (out of scope above) and the residual (above), two active attacks are explicitly out of scope, and one side channel constrains deployment:
+Beyond the query leak (out of scope above) and the residual (above), two active attacks are out of scope, and one side channel constrains deployment:
 
 - **Active wallet-tagging.** An attacker who can feed a target wallet a false chain can force it to build migrations against uniquely identifiable anchors; those transactions will not be valid, but they become uniquely findable in the revealed batch. An attacker can also hold a target back on the legitimate chain so it uses identifiably old anchors; the only visible symptom is that the user's incoming funds confirm much more slowly than usual. These are active wallet-breaking attacks, not passive observation, and this design does not stop them.
 - **The transaction-size side channel.** An attacker can read a migration's size (its arity) from the TLS ciphertext length at submission time. If one migration in the revealed batch has a distinctive size, that IP is re-linked to it. So migration sizes must overlap across users; if they do not, the batching does not hide a large or unusual transaction.

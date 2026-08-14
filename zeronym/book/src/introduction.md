@@ -3,7 +3,7 @@
 Zeronym is privacy for Zcash light wallets, a Shielded Labs product named by Jason McGee Stramaglia: a play on "pseudonym," zero + nym. The name encodes two pillars:
 
 - **zero**: zero-leak indexing. A light wallet should sync and transact without handing an indexer the raw material to deanonymize it.
-- **nym**: the [Nym](./glossary.md) mixnet, the transport that unlinks a wallet's traffic from its source IP and region.
+- **nym**: the [Nym](./glossary.md#nym) mixnet, the transport that unlinks a wallet's traffic from its source IP and region.
 
 Today a Zcash light wallet leaks. Under the ZIP 307 light-client protocol it talks to an indexer over clearnet, so the operator sees the wallet's source IP and the timing of everything it does. [The problem and threat model](./problem.md) lays out that leak and its worst instance, the Orchard to Ironwood migration, which Zooko called the worst privacy-loss event in Zcash history.
 
