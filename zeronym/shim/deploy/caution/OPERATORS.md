@@ -9,10 +9,20 @@ Shielded Labs run themselves.
 
 **Phase 1 is forward-only, so it adds no privacy yet.** It classifies and logs
 but forwards everything. What it buys you is the integration, the TLS, and the
-attestation, all in place. **Phase 2, diversion, now works**: pass `--hub` and
-Orchard-touching transactions go to Shielded Labs' hub instead of your indexer,
-which is where privacy begins. For you that is a redeploy, not a new integration.
-See "Diversion" below for what is proven and what is not.
+attestation, all in place. **Phase 2, diversion, works and is what you should
+deploy**: pass `--hub-nym` and Orchard-touching transactions go to Shielded Labs'
+hub over the **Nym mixnet** instead of to your indexer, which is where privacy
+begins. For you that is a redeploy, not a new integration. See "Diversion" below
+for what is proven and what is not.
+
+> **If you have read an older copy of this guide:** `--hub`/`--hub-tls` (the
+> transitional clearnet hop) is **legacy and no longer works against the current
+> hub**, which refuses clearnet submissions by default. Use `--hub-nym`. An
+> otherwise healthy shim built with `--hub` will fail every divert closed.
+
+> **Read "What this does and does not hide" before you tell anyone what this
+> gives them.** At today's volumes the anonymity set is one transaction. Content
+> privacy and IP unlinking are real; batching anonymity is not yet.
 
 ## Why an attested enclave
 
@@ -103,13 +113,38 @@ deployed commit: a branch tip moves and can be garbage-collected, the tag keeps
 the manifest's commit reachable. Caution's own remote is push-only, so this
 published repo is the only route an auditor has to the deployed tree.
 
-**DNS**: create the `A` record for `--tls-domain` the moment the push prints the
-IP. Measured: with DNS already correct when the enclave boots, the certificate
-appears in ~30 seconds; created after boot, still nothing after 5 minutes. The
-record must be **DNS-only**: a Cloudflare-proxied (orange cloud) record
+**DNS — ordering is load-bearing.** On fully-managed Caution the record is a
+**CNAME to `<app-id>.apps.caution.sh`**, not an A record, and the app id does not
+exist until `caution apps create` has run. So the sequence is:
+
+```
+caution apps create      # prints the app id
+  -> create the CNAME:   <tls-domain>  CNAME  <app-id>.apps.caution.sh
+git push caution main    # boots the enclave AND orders the certificate
+```
+
+Create the record **before** the push: the push is what orders the certificate,
+and ACME can only validate a name that already resolves. Every push spends one of
+that hostname's **5 weekly production issuances** (there is no staging on this
+path), so a push into missing DNS burns one. `zeronym/deploy.sh` automates this
+in the right order.
+
+Expect the first ACME attempt to fail with `NXDOMAIN` and **recover on its own in
+about a minute**: Caution publishes the A record on `…apps.caution.sh` only after
+the health check passes, so the chain cannot resolve when Caddy first tries.
+Measured on the attested hub: deploy completed 15:03:33Z, TLS still failing at
+15:04, valid production Let's Encrypt certificate serving by 15:05. Only escalate
+if it is still failing after ~5 minutes.
+
+The record must be **DNS-only**: a Cloudflare-proxied (orange cloud) record
 terminates TLS at Cloudflare, which destroys the in-enclave-key property the
-whole attestation argument rests on, and blocks the ACME TLS-ALPN-01 challenge
-so no certificate ever issues. Both failures are silent.
+whole attestation argument rests on, and blocks the ACME challenge so no
+certificate ever issues. Both failures are silent.
+
+**Choose the wallet-facing name carefully.** It must be a name your *indexer's*
+operator holds no certificate for. A shim served on a hostname they can obtain a
+certificate for can be transparently impersonated by them, which defeats the
+guarantee for exactly the naive-TLS wallets it protects.
 
 Then point wallets at `<tls-domain>:443`. One app per enclave.
 
@@ -132,23 +167,32 @@ printf '\x00\x00\x00\x00\x00' | curl -s --http2 \
   https://<tls-domain>/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo | strings
 ```
 
-`caution verify` takes no app id: it infers the deployment from `.caution/`.
-Anyone else verifies with no Caution account and no checkout:
+**On fully-managed apps, pass the attestation URL explicitly.** `caution apps
+create` does not write a `.caution/deployment.json` (that is `caution init`, the
+BYOC path), so verify has nothing to infer from and fails with *"No deployment
+found. Either run 'caution init' first or provide --url"*. That message is
+misleading here — do **not** run `caution init`, which would provision a second
+AWS stack. Just name the endpoint:
 
 ```bash
 caution verify --attestation-url https://<tls-domain>/attestation
 ```
 
-Two caveats, as of Caution platform `8e31ea7`:
+The same command is what anyone else uses, with no Caution account and no
+checkout of yours.
 
-- Without `app_sources` in the manifest (the `--app-source` flag), verify
-  refuses outright: "Cannot reproduce private code deployment".
-- Verify currently reports FAILED on a perfectly healthy enclave: Caution's
-  builder fetches its framework from a floating `main.tar.gz` rather than the
-  pinned commit, so PCR0/1 stop reproducing whenever that branch moves. PCR2,
-  the application layer, reproduces and is the check that matters today: a
-  genuine, unmodified enclave whose application is the published source. The
-  one-line fix is reported to Caution.
+Caveats:
+
+- Without `app_sources` in the manifest (the `--app-source` flag), verify cannot
+  reproduce the deployment, and the attestation then proves only that *some*
+  image runs in a genuine enclave.
+- Older copies of this guide warned that verify reports PCR0/1 FAILED on a
+  healthy enclave, because Caution's builder fetched its framework from a
+  floating `main.tar.gz`. **That is fixed**: on the attested hub deployed
+  2026-08-14 the manifest pinned both the enclave and framework sources to
+  commits, and **all three PCRs reproduced**, with the TLS certificate binding
+  verified as well. Expect a clean `✓ Attestation verification PASSED`. If PCR0/1
+  do mismatch, suspect a moved framework pin rather than your application.
 
 For `reproduce.sh`, the result that counts is a match on independent hardware:
 two builds on one machine share CPU, kernel, and Docker. On an arm64 Mac it runs
@@ -163,19 +207,32 @@ at a testnet indexer. A worked example, courtesy of zec.rocks:
 `--backend 199.170.132.107:443 --backend-tls na-jfk.testnet.metal.zec.rocks`,
 and `GetLightdInfo` through the shim answers `chainName: "test"`.
 
-## Diversion (Phase 2)
+## Diversion (Phase 2) — over the Nym mixnet
 
-The hub is live and diversion works end to end. Add to `assemble-caution.sh`:
+The hub is live and diversion works end to end **over Nym**. Add to
+`assemble-caution.sh`:
 
 ```
-  --hub     <hub-ipv4>:<port> \
-  --hub-tls <name-on-hub-cert>
+  --hub-nym    <hub-nym-address> \
+  --nym-egress 92.39.63.14/32:443:tcp \
+  --nym-egress 0.0.0.0/0:9000:tcp \
+  --nym-egress 1.1.1.1/32:53:udp
 ```
 
-Shielded Labs supply both values. The flags add a second locked `/32` egress for
-the hub and set `ZIS_HUB`, so the diverted path is fixed in the audited binary
-and the enclave's egress rules at assemble time. Forward-only stays the default:
-no `--hub`, no diversion.
+Shielded Labs supply the hub address; it is also readable from the hub itself at
+`https://<hub-domain>/nym-address`, which is the authoritative copy (see
+"Operating" for why it can change). The `--nym-egress` rules are the enclave's
+entire allowlist for reaching the mixnet: the nym-api, a gateway, and a DNS
+resolver. Forward-only stays the default: no `--hub-nym`, no diversion.
+
+`--hub`/`--hub-tls` is the **legacy** clearnet hop. The current hub refuses
+clearnet submissions by default, so do not use it.
+
+**Do NOT use `--nym-gateway` yet.** The flag pins the entry gateway (and would let
+you narrow the `0.0.0.0/0:9000` rule to a `/32`), but it has not been exercised
+against the public Nym network. It takes the gateway's IDENTITY key while the
+egress rule takes its IP ADDRESS, and a mismatch fails closed with no console on
+an attested enclave.
 
 What changes for you: an Orchard-touching `SendTransaction` never reaches your
 indexer (proven in CI by a connection-counting backend, `tests/divert.rs`), and
@@ -185,32 +242,44 @@ that held no state could not tell a migration's txid from any other. If the hub
 is unreachable the shim answers gRPC `UNAVAILABLE` and still never falls back to
 your indexer: it fails closed, by design.
 
-Proven on mainnet 2026-08-11: a real Orchard-to-Ironwood migration from an
-unmodified wallet was held on submission and published on the hub's 20-block
-cadence, landing two blocks after the flush boundary. **Batch size was one**, so
-that run proves the mechanics and content privacy, not batching anonymity. The
-anonymity set is the cross-operator batch, which means it is worth exactly as
-much as the number of operators running diversion.
+Proven on mainnet 2026-08-11 over the clearnet hop: a real Orchard-to-Ironwood
+migration from an unmodified wallet was held on submission and published on the
+hub's 20-block cadence. Proven again over **Nym** on 2026-08-13: a migration went
+wallet → shim → mixnet → hub → broadcast, and since the hub's clearnet submit
+path is now closed, its arrival is proof the mixnet carried it rather than
+inference. **Batch size was one in both**, so these runs prove the mechanics and
+content privacy, not batching anonymity.
 
-### Nym: in the tree, not yet deployable
+### What this does and does not hide
 
-The shim and hub both carry a Nym mixnet transport as of 2026-08-13, behind a
-`mixnet-driver` build feature that the deploy images now enable, with
-`--hub-nym` and `--nym-egress` flags on the assembler. Do not plan a deployment
-around it yet. It has run end to end only against a local mixnet harness, never
-against the public Nym network, and two things must land first:
+State this plainly to anyone relying on a shim you run. It is the claim the whole
+system stands on, and overclaiming is worse than the limit itself:
 
-- The hub's Nym address is minted fresh on every client build and only written
-  to its log, which an attested enclave does not expose (debug mode, which would
-  expose it, disables attestation). There is no way to learn the address you
-  would configure.
-- A Nym client picks its entry gateway from the live topology and re-picks it on
-  every rebuild, while this deploy model allowlists egress per `/32`. Until the
-  gateway can be pinned, the only assemblable configuration is a wide egress,
-  which gives up the property that makes the enclave worth running.
+> Given a verified attestation, the code holding your migration in plaintext is
+> the published code: it broadcasts the transaction and retains nothing
+> identifying. It does **not** hide from the hub's host that a migration was
+> submitted at a given time, and at current volumes that timing is linkable to
+> the resulting on-chain transaction. **The anonymity set is the batch, and the
+> batch is currently size one.** For an Orchard **deshield**, the amount remains
+> recoverable by the operator through address-level queries the shim does not
+> intercept.
 
-When it lands it is another redeploy, not a new integration. Until then, `--hub`
-is the transport that works.
+So: content privacy and IP unlinking are real today. **Batching anonymity is
+not** — it only becomes true above an adoption threshold, because the anonymity
+set is the cross-operator batch and is worth exactly as many operators as are
+running diversion.
+
+### What it costs to run
+
+The shim holds a **persistent, shaped Nym client**. It emits cover traffic
+continuously — **order of gigabytes per day, per shim** — whether or not anyone
+diverts anything. That is not waste: uniform traffic is what hides *that* a
+divert happened. The knobs that would reduce it
+(`disable_loop_cover_traffic_stream`, `--no-cover`, `--fastmode`) are
+**forbidden**, because each one forfeits the shaping.
+
+Budget for it, and know that Nym's free tier meters **volume** (currently
+250 GB / 30 days). See "Known failure modes" for what happens when it runs out.
 
 ## Config reference
 
@@ -224,6 +293,11 @@ understanding what they mean.
 | `ZIS_BACKEND` | backing indexer address, a literal `SocketAddr` | **your own indexer** |
 | `ZIS_BACKEND_TLS` | DNS name to authenticate the backend cert as | the name on your indexer's cert |
 | `ZIS_TLS_DOMAIN` | wallet-facing ACME domain | left **unset** on Caution; the in-enclave Caddy owns the cert |
+| `ZIS_HUB_NYM` | hub Nym address(es) to divert to — a comma-separated LIST | the address from `https://<hub-domain>/nym-address` |
+| `ZIS_NYM_GATEWAY` | pin the entry gateway by IDENTITY key (repeatable; rotates across rebuilds) | **leave unset for now** — untested against public Nym |
+| `ZIS_NYM_ROTATION_SECS` | rotate the shim's mixnet identity every N seconds, bounding how long the hub can link your submissions | a deployment decision; unset = never |
+| `ZIS_CAUTION_ATTESTATION` | let the shim answer Caution's own `/attestation` and health paths | **`true` on managed Caution** (the default). Under h2c the platform routes these to the app, and a shim that proxied them to your indexer would fail its health check and never boot |
+| `ZIS_HUB` / `ZIS_HUB_TLS` | **legacy** clearnet hop | unset — the current hub refuses clearnet submissions |
 
 `ZIS_BACKEND_TLS` does double duty: the name the backend's certificate must
 present, and the request `:authority` your ingress routes on. Hence the one
@@ -232,7 +306,7 @@ confusing symptom: a bare `grpcurl <ip>:443` with no name fails with
 default certificate to a client that sent no SNI. That is expected, not a
 backend fault; the shim always sends the name.
 
-When diversion is configured (`--hub`), the diverted path is baked into the
+When diversion is configured (`--hub-nym`), the diverted path is baked into the
 audited binary and the enclave's egress rules at assemble time, not a knob you
 set at runtime: an operator cannot silently repoint it.
 
@@ -254,12 +328,69 @@ set at runtime: an operator cannot silently repoint it.
 - **Watch Certificate Transparency** (crt.sh) for your `--tls-domain`: as the
   domain's operator you are best placed to notice a certificate you cannot
   account for.
-- **Session expiry**: when a command claims "No deployment found. Either run
-  'caution init' first", re-run `caution login --qr` before believing it. The
-  stated remedy would provision a second AWS stack.
+- **Session expiry**: FIDO2 sessions expire often, and the resulting errors point
+  the wrong way. "No deployment found. Either run 'caution init' first" has two
+  causes — an expired session, and a fully-managed app (which never writes
+  `.caution/deployment.json`). Re-run `caution login --qr --username <name>`, and
+  for verify pass `--attestation-url`. **Never** run the suggested `caution init`:
+  it would provision a second AWS stack.
+- **Reading state from an attested enclave**: there is no SSH. Use
+  `https://<tls-domain>/attestation` and, on the hub, `/healthz` and
+  `/nym-address`. Deliberately, no endpoint exposes queue depth or counts —
+  that would be an oracle for the anonymity-set size.
 - Boots but will not serve? Set `debug.enabled = true`, push, and read
-  `/var/log/nitro_enclaves/*.log` over SSH. Debug disables attestation, so it is a
-  diagnostic only, never the deployed config.
+  `/var/log/nitro_enclaves/*.log` over SSH. Debug **disables attestation**, so it
+  is a diagnostic only, never the deployed config — and note the SSH key is
+  whatever you passed to `--ssh-key` at assemble time, so the person who deploys
+  is the one who can read the console.
+
+## Known failure modes
+
+All three of these fail **quietly**. None throws an error you would see without
+looking, which is what makes them worth reading before you deploy.
+
+**1. The hub's Nym address changes, and your shim is baked to the old one.**
+The hub's identity lives in RAM (an enclave is diskless), so a hub **process
+restart** mints a new address. Your shim carries the old one in its immutable
+enclave config, so every divert then fails closed until you re-assemble and
+redeploy against the new address. A client *reconnect* is fine — the address
+survives that — but a restart is not.
+
+- **Detect:** poll `https://<hub-domain>/nym-address` and alert on any change.
+- **Recover:** re-assemble with the new `--hub-nym`, redeploy, repoint DNS if the
+  app id changed.
+
+**2. A hub restart drops migrations your wallets were already told succeeded.**
+The shim answers `SendTransaction` as soon as the migration is **dispatched onto
+the mixnet** — it does not wait for the hub's acknowledgement, because that is a
+full mixnet round trip (10s at best, minutes under load) and would stall wallets.
+The hub then holds submissions in a RAM-only queue until its next flush. If it
+restarts in that window, those migrations are gone and **no error ever reached
+the wallet**.
+
+This is deliberate, not a bug: persisting the queue would mean writing plaintext
+migrations to disk, which is the one thing the hub exists to prevent. A
+`SendTransaction` success has never promised block inclusion anyway — an ordinary
+send only reaches a mempool. But say it plainly to your users: **the wallet must
+resend if the transaction never confirms.** Resends are safe; the hub deduplicates
+on the payload hash.
+
+**3. Mixnet bandwidth runs out, and diversion stops.** Nym's free tier meters
+volume, and a shim's continuous cover traffic consumes gigabytes per day. When the
+allowance is exhausted the mixnet client stops working and every divert fails
+closed. There is **no ticketbook (paid credential) mechanism wired up yet**, so
+today the recovery is manual.
+
+- **Detect:** the shim's own reachability is not enough — the clearnet proxy path
+  keeps working fine while the mixnet hop is dead. Test a divert end to end.
+
+**Related, and not a failure:** the mixnet is **slow**. A migration can take
+minutes to reach the hub. That is expected and acceptable for a migration, which
+is time-insensitive by design. What it does affect is `GetTransaction` for a
+just-diverted migration: that path *does* wait for a hub round trip, and under
+mixnet backpressure it can time out and answer `UNAVAILABLE` rather than showing
+the wallet its own pending transaction. It resolves itself once the transaction
+is mined and the wallet sees it through ordinary sync.
 
 ## Forward-only caveat
 
