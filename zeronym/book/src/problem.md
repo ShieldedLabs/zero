@@ -2,7 +2,7 @@
 
 Zcash's shielded pools hide the sender, receiver, and amount of a transaction on-chain. They do not hide the network metadata a light wallet exposes when it talks to the server that indexes the chain for it: the wallet's source IP address and the timing of its requests. For most traffic that is a background privacy cost. For a transaction that crosses a value-pool boundary, and above all for the mandatory Orchard to Ironwood migration, it is enough to link a real-world network identity to an on-chain balance. Zeronym's near-term system (the [zero-indexer-shim and zero-indexer-hub](./components.md), with Nym between them) targets exactly one half of that leak: the migration **broadcast**.
 
-Build status, since this chapter describes the system in the present tense: the shim and hub are deployed as attested enclaves, and a real Orchard to Ironwood migration ran through the full stack on mainnet on 2026-08-11. The Nym hop is built into both binaries but not yet deployable in an attested enclave, so the deployed hop is plain TLS to a pinned hub. The status table is in [the roadmap](./roadmap.md).
+This chapter describes the system in the present tense. The shim and hub are deployed as attested enclaves and a real migration ran the full stack on mainnet on 2026-08-11; the Nym hop is built but not deployed. Per-mechanism status is the table in [the roadmap](./roadmap.md).
 
 ## The ZIP 307 light-client leak
 

@@ -23,17 +23,29 @@ The [shim + hub system](./architecture.md) is not V1. The ladder is full query p
 - **A scoped version of a deferred idea.** Splitting the crossing broadcast off from the operator to a different counterparty (the hub) is a narrow instance of the query-only / broadcast-only decoupling below.
 - **It sidesteps a decision the full product cannot avoid.** Sitting in front of the operator's existing backend, the shim need not choose an indexer base (lightwalletd vs Zaino) near-term. That decision is deferred, below.
 
-## Near-term status: shim and hub are built and deployed
+## Near-term status
 
-The [shim](./components.md) began as a proof of concept (commit `56394a1a54`, `zeronym/shim/`) that classified `SendTransaction` and only logged the verdict. The milestones that turn it into the component this book describes have since landed, and on 2026-08-11 a real Orchard to Ironwood migration traversed the full stack on mainnet:
+**This table is the one place status is maintained.** Elsewhere the book marks a mechanism *(deployed)*, *(built, not deployed)* or *(designed)* and links here. Three states, meaning: **deployed** runs in production today; **built, not deployed** exists in the binaries and passes tests but does not yet run in an attested deploy; **designed** has no code.
 
-1. **Diversion to the hub** is implemented, and the shim is now **stateless**: the old held-bytes `DivertState` map is gone, so it classifies inline and then forwards or diverts, buffering no per-transaction state. The ordering constraint the PoC surfaced is honored in code (classify first, connect second), so a wallet whose transaction is diverted never causes the operator's indexer to see even a TCP connection.
-2. **The reproducible StageX build** exists for both binaries (machine-readable hashes in `zeronym/shim/deploy/EXPECTED_SHA256` and `zeronym/hub/deploy/EXPECTED_SHA256`) and is checked in CI on every change. Cross-machine reproduction, including by a third party on their own hardware, has been demonstrated on earlier hashes; of the current pair, the hub's is confirmed by three builds and the shim's is so far one build on one host, awaiting CI confirmation before it is treated as published. What reproduces at all is the **application binary** (the attestation's PCR2); PCR0 and PCR1, the EnclaveOS base image and kernel, are not yet reproducible end to end, so full attestation reproducibility stays an open gap (see [review](./review.md)).
-3. **The enclave and attestation** are live: Shielded Labs has run the shim as attested Nitro enclaves in front of its own indexers since 2026-08-01, in-enclave TLS termination landed 2026-08-05, and on 2026-08-10 the first third-party operator deployed an attested shim in their own AWS account from the runbook (`zeronym/shim/deploy/caution/OPERATORS.md`) and verified it.
+| Mechanism | Status | Detail |
+|---|---|---|
+| Classify and divert Orchard-touching transactions | Deployed | Classify before connect, so a diverted transaction never opens even a TCP connection to the operator's indexer |
+| Stateless shim | Deployed | No per-migration state, so a restart or a second instance loses nothing |
+| Hub queue, batch, flush on cadence | Deployed | |
+| `GetTransaction` served by the hub | Deployed | Address-level queries still reach the operator |
+| Reproducible StageX build, both binaries | Deployed | CI-checked on every change; **PCR2 only**, see the gap below |
+| Attested Nitro enclaves | Deployed | Shielded Labs' own indexers since 2026-08-01; first third-party operator 2026-08-10 |
+| In-enclave TLS termination | Deployed | Landed 2026-08-05, so the TLS key is enclave-born |
+| Nym transport | Built, not deployed | Linked into both binaries, proven end to end over a local mixnet; never run on the public mixnet |
+| Multi-hub failover | Partly built | Address rotation within one request exists on the mixnet transport; holding a migration across requests does not |
+| STEVE handshake | Designed | |
+| Encrypt-to-hub-key layer | Designed | |
+| Keymaker quorum, consortium governance | Designed | Launch stands the hub up under a single trusted entity |
+| Confirmation tracking and re-submit | Designed | Nothing tracks whether a flushed batch was mined |
 
-Beyond those three, the hub now **serves queries too**, not only broadcasts: transaction-detail lookups (`GetTransaction`) are answered by the **hub's own indexer** rather than the operator's. That splits the system into two indexer roles, the operator's (block sync and pass-through) and the hub's (transaction detail and batched broadcast), and makes the near-term system a partial down-payment on the query-privacy ladder. Address-level queries (`GetTaddressTxids`, balances, UTXOs) still reach the operator.
+On **2026-08-11** a real Orchard to Ironwood migration traversed the full stack on mainnet: held at the shim, batched at the hub, published on the cadence, with the operator's indexer never seeing it.
 
-The honest gaps that remain. The 2026-08-11 mainnet run proved the mechanics and content privacy end to end, but at today's adoption the batch was **size one**, so it does not yet prove batching *anonymity* (that needs many migrations in one flush window; see [honest limits](./trust.md)). Attestation reproducibility has the PCR0/PCR1 gap above. And what still separates the shipped system from the full design in this book: the **deployed** shim-to-hub hop is a direct TLS dial to a pinned address. The Nym transport is now built into both binaries and proven end to end over a local mixnet, but it is not yet deployable in an attested enclave (the hub's Nym address is minted per client build and written only to a log the enclave does not expose, and gateway selection cannot be pinned to the locked egress allowlist), and it has never run against the public mixnet. STEVE, the encrypt-to-hub-key layer, and the keymaker quorum and consortium governance are still ahead (launch stands the hub up under a single trusted entity).
+**The honest gaps that remain.** That mainnet run proved the mechanics and content privacy end to end, but at today's adoption the batch was **size one**, so it does not yet prove batching *anonymity*; that needs many migrations in one flush window (see [honest limits](./trust.md)). Attestation reproducibility covers the application binary but not the EnclaveOS base image and kernel (PCR0 and PCR1), so `caution verify` cannot yet establish the whole stack (see [review](./review.md)). And two things block deploying the Nym transport in an attested enclave: the hub's Nym address is minted per client build and written only to a log the enclave does not expose, and gateway selection cannot be pinned to the locked egress allowlist.
 
 ## V2 status: designed, platform-unblocked, transport-validated
 
