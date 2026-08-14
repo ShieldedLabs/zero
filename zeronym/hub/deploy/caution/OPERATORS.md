@@ -201,6 +201,56 @@ emits continuous cover traffic. When it runs out, reception stops. No ticketbook
 **4. Anyone who knows your address can submit.** There is no submitter ACL. The
 64 MiB queue budget is the only thing bounding an abusive submitter.
 
+## If the hub goes down: the failover runbook
+
+There is **no standby today**. Failover is a manual, multi-party operation, and it
+is worth reading before you need it rather than during.
+
+**What breaks, and how it looks.** The hub's identity lives in RAM, so a *process
+restart* — crash, redeploy, enclave replacement — comes back with a **new Nym
+address**, while every shim is baked with the old one. Then:
+
+- **Submits are silently lost.** A shim answers its wallet the moment a migration
+  is handed to the mixnet; a frame addressed to an address nobody is listening at
+  is simply undeliverable, and no error reaches anyone.
+- **Lookups fail closed** (`UNAVAILABLE`), which is the visible symptom.
+
+A client *reconnect* is different and safe: the address survives it deliberately,
+and that has been observed holding for ~13 hours across gateway churn.
+
+**Detect it:** poll `/nym-status` for `mixnet_connected`, and watch `/nym-address`
+for a *changed* value. Do not infer health from `/nym-address` returning 200 — it
+answers with the last address published even after the client is gone, which is
+precisely how a dead hub went unnoticed for hours on 2026-08-14.
+
+**Recover:**
+
+1. Redeploy the hub (destroy → create → CNAME → push; managed apps are
+   immutable, so the app id and CNAME both change). **~20 min.**
+2. Confirm `mixnet_connected: true` — do not skip this; a hub can boot, serve TLS,
+   and answer `/healthz` while receiving nothing.
+3. Read the new address from `/nym-address`.
+4. **Send it to every shim operator.** There is no discovery mechanism; the
+   handoff is a human message.
+5. Each shim operator re-assembles with the new `--hub-nym` and redeploys
+   (**~20 min each**, and their app id and CNAME change too).
+
+Budget over an hour end to end, during which migrations are failing.
+
+**Why it cannot currently be better.** A standby cannot be pre-baked into shims,
+because a diskless hub has no address until it runs — and if it runs, it is *hot*,
+so both hubs broadcast and the batch splits across two moments. Nor can the
+identity be supplied by config to keep the address stable: that would put the
+hub's Nym private key where the host operator can read it, and anyone holding it
+can impersonate the hub and **receive migrations**. Downtime is the better
+failure.
+
+**What would fix it** (not built): shims fetch the current hub address at runtime
+from a published endpoint, but accept it only if signed by a key baked into their
+audited config. That keeps the property the baking exists for — an operator
+cannot silently repoint a shim at a hub they control — while reducing failover to
+a poll interval. Until then, treat hub restarts as expensive and rare.
+
 ## Operating rules
 
 - **Never `--debug`.** It disables attestation.
