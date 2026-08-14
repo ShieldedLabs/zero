@@ -44,7 +44,7 @@ The migration is the acute driver, but the underlying leak is general. Any **tur
 - **Shield:** transparent input moving into a shielded pool.
 - **Migration:** shielded value moving from one shielded pool into a different shielded pool (Orchard to Ironwood).
 
-The shim's classifier detects **every** crossing, but what it isolates is drawn by pool, not by crossing shape: near-term it protects every transaction that **touches Orchard**, and everything else passes straight through. So an Orchard-to-transparent deshield is batched exactly like an Orchard-to-Ironwood migration, because after NU6.3 closes Orchard to new value both reveal the same fact, that this IP controls legacy Orchard funds ([the shim](./components.md) has the predicate and the argument). Shields, and deshields out of any other pool, pass through: a shield is privacy-positive already (the transparent side is public regardless), and a non-Orchard deshield is time-sensitive commerce that says nothing about legacy Orchard holdings. The batched set is a policy knob rather than a hardcoded shape, so it can widen later without re-architecting. Deshield and shield crossings exist on mainnet today, independent of Ironwood, so the leak is real for current mainnet traffic, not only for the future migration.
+The shim's classifier detects **every** crossing, but what it isolates is drawn by pool, not by crossing shape: near-term it protects every transaction that **touches Orchard**, and everything else passes straight through. So an Orchard-to-transparent deshield is batched exactly like an Orchard-to-Ironwood migration, while shields and deshields out of any other pool pass through ([the shim](./components.md) has the predicate and the argument for drawing the line there). Deshield and shield crossings exist on mainnet today, independent of Ironwood, so the leak is real for current mainnet traffic, not only for the future migration.
 
 The all-hands judgment was that IP protection for the migration broadcast is the bulk of the practical privacy at stake right now; query privacy is the deferred vision (see [the roadmap](./roadmap.md)).
 
@@ -73,13 +73,9 @@ The table compares the migration broadcast as it works today (clearnet, straight
 | Guarantee is **verifiable** by the wallet | No | Yes (attested shim + hub) |
 | **Query** *content* privacy (which addresses you look up) | No | **No** (content passes through; but requester IPs are blinded, see below) |
 
-Row by row:
+Two rows need more than a cell.
 
-- **Contents hidden from the operator.** Today the operator terminates the wallet's TLS and reads the raw migration transaction. Under Zeronym the connection terminates inside the shim's enclave (a TEE) and the migration leaves the operator host inside TLS the operator cannot read, so it never sees the cleartext. Re-encrypting to the hub's own key underneath that is designed, not built. See [architecture](./architecture.md) for the three encryption layers.
-- **Linkable to source IP.** Today the operator (and any on-path observer) sees the source IP that submitted the broadcast. Under Zeronym the migration is published by the hub, so the source IP is unlinked from the on-chain transaction. That much holds on the deployed system. Routing the hop over the Nym mixnet, so the hub cannot tell which operator a migration came from either, is built but not yet deployed.
 - **Timing correlatable.** Today the broadcast arrives at a moment the operator records, matching the on-chain appearance. Under Zeronym the hub accumulates migrations from every shim and publishes them together on a block cadence, so the on-chain publish time no longer matches any one wallet's submission time. **This row is conditional, and the condition is not currently met.** The protection is the batch, so it is worth exactly what the batch contains: at a batch of one there is nothing to hide among, and the shuffle, the simultaneous publish, Nym and the TEE all do nothing for that transaction's timing. An earlier draft of this table answered "No" flat, which overclaimed. At the migration volume measured on mainnet the modal batch is expected to be zero or one; [honest limits](./trust.md) gives the arithmetic and the adoption threshold at which the row becomes true.
-- **Contents hidden from the hub.** The hub is a new counterparty, so this row has no "today" analogue. The hub is itself an attested TEE: only the attested hub software decrypts migrations, to batch and publish them, and the hub's host operator (Caution at launch) stays blind. See [the hub](./components.md) and [trust](./trust.md).
-- **Verifiable by the wallet.** Today the wallet has no cryptographic way to check any of this. Under Zeronym both the shim and the hub publish attestations, so the properties can be verified rather than trusted. See [trust](./trust.md) for the attestation and reproducible-build mechanics and [review](./review.md) for what is still being confirmed.
 - **Query privacy.** Largely unchanged. The system does not protect which addresses a wallet looks up (transaction-detail lookups by txid are now served by the hub's indexer, but address-level queries still pass through). This is the honesty anchor; the sections below cover it.
 
 ## Naive vs Nym-aware wallets
@@ -104,10 +100,8 @@ So the protection is for **ZIP-318-like wallets whose users have opted out of To
 The near-term system does not hide query *content*. The following reach the operator's existing backend in the clear, exactly as today:
 
 - **Most queries.** Which addresses or block ranges a wallet looks up still goes straight to the operator's backend. The one exception: transaction-detail lookups (`GetTransaction`) are answered by the hub's indexer, not the operator's. The broader ZIP 307 query-content leak (address-level lookups) is not closed near-term; it is the deferred vision (see [the roadmap](./roadmap.md)).
-- **Shields, and deshields that do not spend Orchard.** Crossings the classifier detects but does not batch (a shield is already privacy-positive because the transparent side is public; a deshield out of Ironwood or Sapling is time-sensitive commerce that reveals nothing about legacy Orchard funds), so their broadcast metadata leaks as today. A deshield **from Orchard** is batched, as above.
+- **Shields, and deshields that do not spend Orchard.** Crossings the classifier detects but does not batch, so their broadcast metadata leaks as today. A deshield **from Orchard** is batched.
 - **All other broadcasts.** Transparent-to-transparent and pure intra-pool shielded payments are not crossings at all; they pass through instantly.
-
-The classifier is general, so the batched set is a policy knob that can widen later; near-term the batched set is exactly the transactions that touch Orchard (see [the shim](./components.md) for the classifier).
 
 ## What the attested edge protects
 

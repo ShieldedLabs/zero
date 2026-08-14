@@ -47,23 +47,11 @@ flowchart TB
 
 ## The cast
 
-- **The wallet user.** The person whose IP address is what is at stake. They install nothing, change no setting, and point their wallet at the same endpoint URL as before.
-- **The wallet software** (zingo, Zashi, ywallet, and the rest). Needs no reconfiguration and no new endpoint, but must choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. That is the one thing asked of wallets, and it is a hard requirement, not a nicety ([the problem](./problem.md) explains why a latest-anchor wallet re-links itself).
-- **The light-wallet operator.** One of the roughly five to ten organizations running a public indexer today. Each deploys Zeronym's front-end behind its own existing URL, in front of its own unmodified indexer. An operator is **untrusted** for the contents of an Orchard-touching transaction, and still sees the contents of ordinary queries (block sync and address lookups; a wallet's `GetTransaction` is now answered by the hub, not the operator).
-- **The hub operator, also the Trusted Organization.** Runs the central batching service (Caution at launch), and separately performs the **detection** role: verifying the front-end's attestation, monitoring Certificate Transparency, and **publicly announcing** that it has detected signs of an attack. Untrusted for contents; relied on for liveness and for detection.
-- **The auditor.** Any independent third party, in practice often a wallet developer auditing once on behalf of all its users. Verifies the attestation and the CT logs and reproduces the build, **without trusting the operator** ([trust](./trust.md) has the steps).
-- **The key consortium.** Caution, Nym, Shielded Labs, and the Zcash Foundation, holding the long-lived keys as an M-of-N quorum so that no single party, not even the hub operator, controls them.
-
-Five outside systems carry the rest: the **Zcash network**, where transactions are finally published; the **Nym mixnet**, the internal transport; **AWS Nitro**, the attested execution environment and hardware root of trust; **Let's Encrypt and the Certificate Transparency logs**, which give a wallet an ordinary certificate and give an auditor a public record if a second one ever appears; and **Caution's platform**, which hosts the attested services.
-
-## How to read this book
-
-Roughly in order, the chapters move from the outside in.
-
-- [The problem and threat model](./problem.md): the leak, the migration event, the adversaries, what the attested edge protects, and what stays out of scope.
-- [Architecture](./architecture.md): the deployable pieces and why they are shaped this way, the data-flow and trust diagrams, and the three encryption layers.
-- [The shim and the hub](./components.md): what is inside each piece, down to the classifier predicate and the code it lives in.
-- [Trust and honest limits](./trust.md): the deep dive on Nitro attestation, the STEVE handshake, and the key quorum, and what the system does not do.
-- [Roadmap](./roadmap.md) and [Open questions and review](./review.md) look forward; the [Glossary and references](./glossary.md) collects the terms and sources.
-
-Written in the Zcash design-book tradition: clean, direct, and honest about its limits. Where the near-term system stops short of the vision, it says so.
+| Actor | Role | Trusted for |
+|---|---|---|
+| **Wallet user** | The person whose IP is at stake. Installs nothing, changes no setting | n/a |
+| **Wallet software** | zingo, Zashi, ywallet and the rest. No reconfiguration, but must choose **aligned anchors and expiry heights** within a migration epoch ([ZIP 318](https://zips.z.cash/zip-0318)). The one hard requirement asked of wallets, and [the problem](./problem.md) explains why a latest-anchor wallet re-links itself | n/a |
+| **Light-wallet operator** | One of roughly five to ten organizations running a public indexer. Deploys the front-end behind its own URL, in front of its own unmodified indexer | **Untrusted** for Orchard-touching contents. Still sees ordinary query contents |
+| **Hub operator / Trusted Organization** | Runs the central batching service (Caution at launch) and performs **detection**: verifying attestation, monitoring CT, and **publicly announcing** signs of an attack | Untrusted for contents; relied on for liveness and detection |
+| **Auditor** | Any independent party, in practice often a wallet developer auditing once for all its users ([trust](./trust.md) has the steps) | Verifies **without trusting the operator** |
+| **Key consortium** | Caution, Nym, Shielded Labs, the Zcash Foundation | Hold the long-lived keys as an M-of-N quorum, so no single party controls them |

@@ -28,25 +28,7 @@ The shipped shim is transparent to the wallet by design and deliberately **not**
 
 ### Topology and process model
 
-```
-                     AWS Nitro enclave (attested, diskless)
-                    +--------------------------------------------------+
-  wallet            |  zero-indexer-shim                               |
-  --TLS/h2-->       |   1. TLS terminate (enclave-born key + cert)     |
-  https://<puburl>  |   2. route by HTTP/2 :path                       |
-       :443         |                                                  |
-                    |     SendTransaction, Orchard-touching  --------->  hub (ZIH)
-                    |     GetTransaction  ---------------------------->  hub (ZIH)
-                    |     SendTransaction, non-Orchard  ---------.      |
-                    |     any other method / stream  ------------|      |
-                    |                                            v      |
-                    |                       proxy to backing indexer    |
-                    +-------------------------|------------------------+
-                                              v
-                                    operator's existing indexer (unmodified)
-
-  shim->hub hop: plain TLS to a pinned address as deployed; the Nym path is built but not yet deployed.
-```
+The shim terminates the wallet's TLS on an enclave-born key, routes by HTTP/2 `:path`, and sends an Orchard-touching `SendTransaction` and every `GetTransaction` to the hub while everything else proxies to the operator's unmodified indexer. [The architecture](./architecture.md) has the data-flow diagram; the shim-to-hub hop is plain TLS to a pinned address as deployed.
 
 - **Enclave contents (the TCB):** the ZIS binary + rustls, plus `nym-sdk` in the mixnet build, which is linked in-process rather than run as a sidecar and is therefore inside the TCB ([trust](./trust.md) states what that costs).
 - **The backing lwd is untrusted for migrations** (it never sees them) and for `GetTransaction` (also hub-served), and trusted for the rest, which it already serves today. From its perspective the ZIS is a single gRPC client.
@@ -192,20 +174,7 @@ The ZIH (earlier called `zero-broadcaster`) is an attested-TEE service that rece
 
 ### Topology and process model
 
-```
-   shim A ---.                        AWS Nitro enclave (attested, diskless)
-   shim B ----\   TLS today  +--------------------------------------------------+
-   shim C -----+------------>|  zero-indexer-hub                                |
-              /  (Nym        |    decrypt -> re-parse (telemetry only) -> queue |
-   shim N ---'   designed)   |    flush every N blocks -> shuffle -> publish ----+--.
-                             |    (hub key + keymaker quorum: designed)         |  |
-                             +--------------------------------------------------+  | TLS gRPC (h2)
-                                                                                   v
-                                          the hub's indexer  (CompactTxStreamer, over TLS)
-                                            GetLightdInfo   -> tip / height
-                                            SendTransaction -> broadcast the batch
-                                            GetTransaction  -> detail lookups forwarded by shims
-```
+Many shims submit inward; the hub re-parses for telemetry, queues, and flushes every N blocks, shuffled, outward through its own indexer. It speaks three RPCs to that indexer, all over TLS: `GetLightdInfo` for the tip, `SendTransaction` to broadcast a batch, and `GetTransaction` for the detail lookups shims forward.
 
 - **Enclave contents (TCB):** the hub binary + rustls. It is **lightweight**, like the shim: it does NOT run a validator in-enclave (that is the 400-500 GB problem). It connects OUT to an existing **indexer** (`CompactTxStreamer` over TLS) for chain tip and for broadcasting, not a node's JSON-RPC.
 - **Egress:** TLS gRPC out to the hub's indexer(s) for tip + broadcast. The mixnet build adds an in-process `nym-sdk` listener (no sidecar) and needs Nyx-RPC egress for ecash. Egress to the keymaker quorum is designed.
@@ -247,9 +216,7 @@ In-RAM (diskless enclave), keyed by the **payload hash** `sha256(tx_bytes)` for 
 
 ### Key management (hub key, STEVE, keymaker quorum)
 
-- **The hub key** (that shims encrypt migrations to) is generated in-enclave and **persisted via the keymaker/locksmith M-of-N quorum across 3-4 orgs** (Caution / Nym / Shielded Labs / ZF), reconstituted across cold boots and upgrades (better than KMS-seal-to-PCR, which breaks on upgrade). The consortium governs it.
-- **Decision: a single shared hub key across all hub instances**, provisioned to each attested hub by the quorum. This is what makes failover clean: a shim encrypts to "the hub key" and any hub instance can decrypt, dedup, and publish. (Per-hub keys would force the shim to re-encrypt on failover and would strand a migration if its hub died mid-flight.)
-- **STEVE** is the handshake by which a shim verifies a hub's attestation (which binds the hub's public key) and derives a session key. The hub's role: present its attestation and complete the handshake. The exact STEVE wire form over Nym, and whether it is mutual, are cross-party items in [review](./review.md).
+The hub key is generated in-enclave and persisted by the keymaker quorum. **Decision: a single shared hub key across all hub instances**, which is what makes failover clean: a shim encrypts to "the hub key" and any attested hub can decrypt, dedup and publish, where per-hub keys would force re-encryption on failover and could strand a migration whose hub died mid-flight. Governance of that key, and the STEVE handshake the hub answers, are in [trust](./trust.md).
 
 ### Failover and multiple hubs
 
@@ -300,7 +267,7 @@ There is no `keys.rs` and no `attest.rs`: the STEVE handshake, the encrypt-to-hu
 
 Both services share the same enclave idioms: a static-musl Rust binary, a reproducible **StageX** build, running in an AWS Nitro enclave (attested, diskless). Both generate and hold keys **in-enclave** and bind a public key into the **NSM attestation**; neither writes secrets to disk. Reproducibility lets the consortium and third parties confirm the running binary is the reviewed binary.
 
-**Attestation binding.** Bind the relevant **public key** into the attestation (shim: the **TLS public key**, not the Nym address; hub: the hub public key), so an auditor (and, later, RA-TLS-aware clients) can check cert-pubkey == attested key. Three feasible mechanisms from the V2 sync: the STEVE handshake, `metadata.json -> user_data` (build-time, implies a persisted key), or a runtime `arbitrary_data` field Caution would add. The same in-enclave-keygen + NSM path Zaino/V2 use applies to both. The shim's STEVE handshake **is** the shim auditing the hub before trusting it with migrations; independent auditors run the same steps. See [trust](./trust.md) for STEVE, the Auditor Role, PCRs, and Certificate Transparency.
+**Attestation binding.** Each enclave binds the relevant **public key** into its attestation (shim: the TLS public key, not the Nym address; hub: the hub public key), so an auditor can check that cert-pubkey equals attested key. The candidate mechanisms and their status are in [trust](./trust.md).
 
 **Shim boot sequence.** (1) Key material: reconstitute the TLS keypair from the keymaker M-of-N quorum if one exists, else generate in-enclave and register with the quorum (persists across cold boots/upgrades; the private key never leaves the enclave). (2) Certificate: ensure a valid CA cert for the public domain via ACME, keyed to the enclave-born key. (3) Attestation: bind the TLS public key into the Nitro attestation; serve `/attestation` (or expose over Nym). (4) Hub session: STEVE-handshake each configured hub; cache the shared keys. (5) Backing lwd: open the upstream h2 connection(s); health-check. (6) Listen: bind `:443`, serve.
 
