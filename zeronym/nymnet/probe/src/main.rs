@@ -74,7 +74,14 @@ async fn main() -> Result<()> {
                 PathBuf::from(args.get(2).context("usage: e2e-driver <network.json>")?);
             cmd_e2e_driver(&network).await
         }
-        _ => bail!("usage: probe topology|smoke|lookup|wire|e2e|e2e-driver ..."),
+        Some("hub-address-across-rebuild") => {
+            let network =
+                PathBuf::from(args.get(2).context("usage: hub-address-across-rebuild <network.json>")?);
+            cmd_hub_address_across_rebuild(&network).await
+        }
+        _ => bail!(
+            "usage: probe topology|smoke|lookup|wire|e2e|e2e-driver|hub-address-across-rebuild ..."
+        ),
     }
 }
 
@@ -741,8 +748,33 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     let transport = HubTransport::from(shim_nym::NymHandle::new(
         req_tx,
         shim_nym::REQUEST_TIMEOUT,
-        targets,
+        targets.clone(),
     ));
+
+    // Wait for the driver to publish its address count before submitting.
+    //
+    // `NymHandle::each_target` reads `targets` SYNCHRONOUSLY and returns
+    // TransportGone when it is still 0, while `run_driver` sets it as its first
+    // statement — from a task that was only just spawned. Nothing between the
+    // spawn above and the submit below awaits, so whether the driver has been
+    // polled yet is a scheduler race, and losing it fails the whole probe with
+    // "the mixnet transport is not running" before a single packet is sent.
+    //
+    // The shipped shim has the same shape (shim/src/main.rs), but there the
+    // window is closed in practice by everything that happens between the spawn
+    // and the first wallet request: binding the listener, and an ACME order if
+    // TLS is configured. Only this harness submits instantly, so the wait
+    // belongs here rather than in the driver.
+    for _ in 0..100 {
+        if targets.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::ensure!(
+        targets.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the shim driver never published its target count"
+    );
 
     // ---- The same three assertions as cmd_e2e.
     let t0 = Instant::now();
@@ -864,4 +896,83 @@ async fn cmd_lookup(network: &Path, surbs: u32) -> Result<()> {
     println!("  - compare across surb counts: a jump in elapsed time marks the");
     println!("    re-request threshold (the number M4's lookup constant must clear)");
     Ok(())
+}
+
+/// Does the hub's Nym address survive a client rebuild?
+///
+/// This is the question `hub/src/nym_driver.rs` was changed to answer yes to,
+/// and the only place it can be asked honestly. The address is
+/// `identity.encryption@gateway`: the key halves can be checked in a unit test,
+/// but the gateway half only exists once a client has REGISTERED with one, so
+/// proving the whole address is stable needs a real gateway that can be killed
+/// on command. The public mixnet cannot be killed on command; this localnet can.
+///
+/// The shape is a handshake with the shell wrapper: print the first address,
+/// print READY, and block. The wrapper then kills the gateway process (the
+/// client's sends start failing, and after the SDK's D12 threshold it stops for
+/// good, which the driver sees as a death), restarts it, and this waits for the
+/// driver's next publication. Equal addresses mean the rebuild reused the stored
+/// identity and registration rather than minting a new one, which is what keeps
+/// every shim's baked `--hub-nym` valid across a gateway blip.
+async fn cmd_hub_address_across_rebuild(network: &Path) -> Result<()> {
+    use std::io::Write;
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::chain::ChainClient;
+    use zero_indexer_hub::nym as hub_nym;
+    use zero_indexer_hub::nym_driver as hub_driver;
+    use zero_indexer_hub::queue::Queue;
+    use zero_indexer_hub::server::Hub;
+
+    let tip = Arc::new(TipTracker::new());
+    tip.observe(100);
+    let hub = Hub {
+        queue: Arc::new(Queue::new()),
+        tip,
+        params: BatchParams::default(),
+        // Never dialled here: nothing in this probe admits or looks up.
+        chain: Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap()),
+    };
+    let (hub_in_tx, hub_in_rx) = mpsc::channel::<hub_nym::Received>(64);
+    let (hub_out_tx, hub_out_rx) = mpsc::channel::<hub_nym::Reply>(64);
+    let (hub_addr_tx, mut hub_addr_rx) = mpsc::channel(4);
+    let (_hub_stop_tx, hub_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
+    tokio::spawn(hub_driver::run_driver(
+        hub_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        hub_in_tx,
+        hub_out_rx,
+        hub_addr_tx,
+        async move {
+            let _ = hub_stop_rx.await;
+        },
+    ));
+
+    let first = hub_addr_rx
+        .recv()
+        .await
+        .context("the hub driver reported no address at all")?;
+    println!("[rebuild] address before: {first}");
+    println!("[rebuild] READY");
+    std::io::stdout().flush().ok();
+
+    // Generous: the SDK only declares a client dead after repeated send
+    // failures, and the rebuild then waits out the driver's backoff.
+    let second = tokio::time::timeout(Duration::from_secs(300), hub_addr_rx.recv())
+        .await
+        .context("no address was published within 300s of the gateway bounce")?
+        .context("the address channel closed before a rebuild was reported")?;
+    println!("[rebuild] address after:  {second}");
+
+    if first == second {
+        println!("\nhub-address-across-rebuild: PASS");
+        println!("  - the client rebuilt and came back on the SAME address");
+        println!("  - every shim's baked --hub-nym stays valid across a gateway blip");
+        Ok(())
+    } else {
+        bail!("the address CHANGED across the rebuild:\n  before {first}\n  after  {second}")
+    }
 }
