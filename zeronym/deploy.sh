@@ -4,8 +4,14 @@
 # Reads a config file (default ./deploy.env, or the path in $1), assembles the
 # shim or hub Caution deploy repo, creates + pushes the app, then points a Vultr
 # DNS record at whatever the deploy tells it to (managed-DNS CNAME, or an A
-# record). Collapses the old "assemble -> apps create -> push -> read target ->
-# set DNS by hand" dance, with its ordering foot-guns, into one command.
+# record). Collapses the old "assemble -> apps create -> set DNS by hand -> push"
+# dance, with its ordering foot-guns, into one command.
+#
+# The DNS record is set BETWEEN `apps create` and the push, which is the ordering
+# managed DNS requires: the push boots the enclave and orders the certificate, and
+# ACME can only validate a name that already resolves (5 issuances per name per
+# week, so a push into missing DNS burns one). The target is derivable from the app
+# id alone, so nothing has to be scraped out of the push output first.
 #
 # Requires: git, curl, jq, the `caution` CLI (LOGGED IN), and VULTR_API_KEY in the
 # environment. POSIX sh; assemble scripts build from `git archive HEAD`, so commit
@@ -44,6 +50,34 @@ case "$TLS_DOMAIN" in
   "$DNS_DOMAIN")   RECORD_NAME="" ;;   # apex
   *) die "TLS_DOMAIN ($TLS_DOMAIN) is not under DNS_DOMAIN ($DNS_DOMAIN)" ;;
 esac
+
+vultr() {  # vultr METHOD /path   (body, if any, on stdin)
+  _m=$1; _p=$2
+  case "$_m" in
+    POST|PATCH) curl -fsS -X "$_m" -H "Authorization: Bearer $VULTR_API_KEY" \
+                  -H "Content-Type: application/json" --data @- "https://api.vultr.com/v2$_p" ;;
+    *)          curl -fsS -X "$_m" -H "Authorization: Bearer $VULTR_API_KEY" \
+                  "https://api.vultr.com/v2$_p" ;;
+  esac
+}
+
+# set_dns_record TYPE DATA — replace every record for this name in the zone.
+set_dns_record() {
+  _type=$1; _data=$2
+  log "DNS: ${RECORD_NAME:-@}.$DNS_DOMAIN  $_type  ->  $_data"
+  log "removing existing '${RECORD_NAME:-@}' records in $DNS_DOMAIN ..."
+  vultr GET "/domains/$DNS_DOMAIN/records?per_page=500" \
+    | jq -r --arg n "$RECORD_NAME" '.records[] | select(.name==$n) | .id' \
+    | while IFS= read -r rid; do
+        [ -n "$rid" ] || continue
+        log "  delete $rid"
+        vultr DELETE "/domains/$DNS_DOMAIN/records/$rid" >/dev/null
+      done
+  jq -nc --arg name "$RECORD_NAME" --arg type "$_type" --arg data "$_data" --argjson ttl "$DNS_TTL" \
+    '{name:$name, type:$type, data:$data, ttl:$ttl}' \
+    | vultr POST "/domains/$DNS_DOMAIN/records" >/dev/null
+  log "DNS record set."
+}
 
 ROOT=$(git rev-parse --show-toplevel)
 ASSEMBLE="$ROOT/zeronym/$COMPONENT/deploy/caution/assemble-caution.sh"
@@ -104,11 +138,40 @@ APP_ID=$(printf '%s\n' "$CREATE_OUT" | sed -n 's/^[[:space:]]*ID:[[:space:]]*\([
 [ -n "$APP_ID" ] || die "could not parse the new app ID from 'caution apps create' (is the session alive?)"
 log "app id: $APP_ID"
 
+# ---------- DNS, BEFORE the push ----------
+# Ordering is load-bearing and used to be wrong here (DNS was set after the push).
+# The push boots the enclave AND orders the certificate, and ACME can only validate
+# a name that already resolves — against a budget of 5 issuances per name per week,
+# so a push into missing DNS burns one. Caution's managed record is always a CNAME
+# to <app-id>.apps.caution.sh, and `apps create` above already told us the id, so
+# nothing has to be parsed out of the push output to know the target.
+REC_TYPE=CNAME
+REC_DATA="$APP_ID.apps.caution.sh"
+[ "$DNS_CNAME_TRAILING_DOT" = 1 ] && REC_DATA="$REC_DATA."   # absolute; Vultr never appends the zone
+set_dns_record "$REC_TYPE" "$REC_DATA"
+
 log "pushing (build + boot + health check; ~15-20 min cold, faster cached) ..."
 PUSH_OUT=$(cd "$DEST" && git push caution main 2>&1)
 printf '%s\n' "$PUSH_OUT" >&2
 printf '%s\n' "$PUSH_OUT" | grep -qi "Deployment successful" || \
-  die "deploy did not report success — not touching DNS. Check the push output above."
+  die "deploy did not report success. DNS for ${RECORD_NAME:-@}.$DNS_DOMAIN was already \
+pointed at $REC_DATA; leaving it in place (harmless, and correct if you redeploy this \
+same app id). Check the push output above."
+
+# If the platform names a DIFFERENT target than the app-id CNAME we assumed, correct
+# it. Expected to be a no-op; it exists so a platform change cannot silently leave a
+# deployment pointing at the wrong host.
+ANNOUNCED=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*[Pp]ointing to \([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
+[ -n "$ANNOUNCED" ] || ANNOUNCED=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*DNS target:[[:space:]]*\([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
+if [ -n "$ANNOUNCED" ]; then
+  ANNOUNCED=${ANNOUNCED%.}
+  if [ "$ANNOUNCED" != "${REC_DATA%.}" ]; then
+    warn "the deploy announced '$ANNOUNCED', not the '$APP_ID.apps.caution.sh' we set; correcting the record"
+    REC_DATA="$ANNOUNCED"
+    [ "$DNS_CNAME_TRAILING_DOT" = 1 ] && REC_DATA="$REC_DATA."
+    set_dns_record "$REC_TYPE" "$REC_DATA"
+  fi
+fi
 
 # ---------- publish the app-source (attested deploys only) ----------
 # `caution verify` clones the --app-source URL and rebuilds from it; Caution's own
@@ -136,50 +199,6 @@ independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
   log "verify with: caution verify (expect PCR0/1 FAILED on Caution's floating framework; PCR2 is the check that matters)"
 fi
 
-# ---------- work out the DNS record to set ----------
-REC_DATA=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*[Pp]ointing to \([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
-[ -n "$REC_DATA" ] || REC_DATA=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*DNS target:[[:space:]]*\([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
-[ -n "$REC_DATA" ] || die "could not find a DNS target in the push output"
-
-if printf '%s\n' "$PUSH_OUT" | grep -qi "CNAME"; then
-  REC_TYPE=CNAME
-elif printf '%s\n' "$PUSH_OUT" | grep -qi "A record"; then
-  REC_TYPE=A
-else
-  # Managed DNS with a *.apps.caution.sh style target is a CNAME.
-  REC_TYPE=CNAME
-fi
-REC_DATA=${REC_DATA%.}                        # normalise
-if [ "$REC_TYPE" = CNAME ] && [ "$DNS_CNAME_TRAILING_DOT" = 1 ]; then
-  REC_DATA="$REC_DATA."                       # absolute, so Vultr never appends the zone
-fi
-log "DNS: ${RECORD_NAME:-@}.$DNS_DOMAIN  $REC_TYPE  ->  $REC_DATA"
-
-# ---------- set the Vultr record (replace any existing for this name) ----------
-vultr() {  # vultr METHOD /path   (body, if any, on stdin)
-  _m=$1; _p=$2
-  case "$_m" in
-    POST|PATCH) curl -fsS -X "$_m" -H "Authorization: Bearer $VULTR_API_KEY" \
-                  -H "Content-Type: application/json" --data @- "https://api.vultr.com/v2$_p" ;;
-    *)          curl -fsS -X "$_m" -H "Authorization: Bearer $VULTR_API_KEY" \
-                  "https://api.vultr.com/v2$_p" ;;
-  esac
-}
-
-log "removing existing '${RECORD_NAME:-@}' records in $DNS_DOMAIN ..."
-vultr GET "/domains/$DNS_DOMAIN/records?per_page=500" \
-  | jq -r --arg n "$RECORD_NAME" '.records[] | select(.name==$n) | .id' \
-  | while IFS= read -r rid; do
-      [ -n "$rid" ] || continue
-      log "  delete $rid"
-      vultr DELETE "/domains/$DNS_DOMAIN/records/$rid" >/dev/null
-    done
-
-log "creating $REC_TYPE record ..."
-jq -nc --arg name "$RECORD_NAME" --arg type "$REC_TYPE" --arg data "$REC_DATA" --argjson ttl "$DNS_TTL" \
-  '{name:$name, type:$type, data:$data, ttl:$ttl}' \
-  | vultr POST "/domains/$DNS_DOMAIN/records" >/dev/null
-log "DNS record set."
 
 cat >&2 <<EOF
 
