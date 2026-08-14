@@ -49,6 +49,15 @@ use crate::wire::{self, AckKind, LookupReply, Nonce, WireError};
 /// succeeds and a dead one fails closed before the wallet gives up.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// Ceiling on handing ONE submission to the transport, for the best-effort submit
+/// path (see [`NymHandle::submit`]). Not a round trip: this only bounds the wait
+/// to be ACCEPTED into the transport channel, which is sub-millisecond until the
+/// channel fills and then blocks under mixnet backpressure. Short so a wallet is
+/// never held long: on a healthy mixnet the submit answers success almost at
+/// once, and a chronically backpressured transport fails closed quickly so the
+/// wallet retries rather than hanging.
+pub const SUBMIT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Reply SURBs attached to a `SubmitV1` (D3). The ack is a single 64-byte
 /// frame, so a small fixed count carries it with no re-request round trip;
 /// measured in the nymnet harness, where 13 acked with no re-request at all.
@@ -254,7 +263,11 @@ impl std::error::Error for NymError {}
 #[derive(Clone)]
 pub struct NymHandle {
     requests: mpsc::Sender<Request>,
+    /// The round-trip budget for a LOOKUP: dispatch plus the hub's reply (D5).
     timeout: Duration,
+    /// The much shorter budget for a best-effort SUBMIT, which only waits to be
+    /// accepted by the transport, never for the hub's reply (see [`Self::submit`]).
+    dispatch_timeout: Duration,
     targets: TargetCount,
     /// Where the next request starts its sweep of the address list, so load is
     /// spread across a multi-homed hub's gateways instead of always leaning on
@@ -263,34 +276,88 @@ pub struct NymHandle {
 }
 
 impl NymHandle {
-    pub fn new(requests: mpsc::Sender<Request>, timeout: Duration, targets: TargetCount) -> Self {
+    pub fn new(
+        requests: mpsc::Sender<Request>,
+        timeout: Duration,
+        dispatch_timeout: Duration,
+        targets: TargetCount,
+    ) -> Self {
         NymHandle {
             requests,
             timeout,
+            dispatch_timeout,
             targets,
             cursor: Default::default(),
         }
     }
 
     /// Frame `tx_bytes` and submit it, trying each configured hub address in
-    /// turn until one acknowledges.
-    pub async fn submit(&self, tx_bytes: &[u8]) -> Result<AckKind, NymError> {
-        self.each_target(|target| {
-            let nonce = fresh_nonce();
-            let frame = wire::encode_submit(&nonce, tx_bytes)?;
-            let (tx, rx) = oneshot::channel();
-            Ok((
-                Request {
-                    nonce,
-                    frame,
-                    reply_surbs: SUBMIT_REPLY_SURBS,
-                    waiter: Waiter::Ack(tx),
-                    target,
-                },
-                rx,
-            ))
-        })
-        .await
+    /// Divert a transaction to the hub, BEST-EFFORT: answer success as soon as the
+    /// frame is dispatched to the mixnet, without waiting for the hub's end-to-end
+    /// ack.
+    ///
+    /// The ack is a full mixnet round trip (~10 s even healthy, minutes under the
+    /// gateway backpressure that caps our send rate) and, since neither the shim
+    /// nor the hub runs a validator (`hub/src/chain.rs`), it only ever confirmed
+    /// the hub QUEUED the frame — never that the transaction is valid or in a
+    /// mempool. A `SendTransaction` success has likewise never promised block
+    /// inclusion. So the diverted path already relies on the wallet's own
+    /// confirmation-via-sync for both validity and delivery, and blocking it on
+    /// the round trip only adds the very latency this system is fighting. We
+    /// therefore treat a successful hand-off to the transport as the answer.
+    ///
+    /// A waiter is registered so the frame carries a nonce the hub CAN ack against
+    /// (the frame still carries reply SURBs, M6), but its receiver is dropped and
+    /// the reply is never awaited; the correlator sweeps the unclaimed waiter, and
+    /// an unmatched ack is discarded. Emission does not depend on a live waiter:
+    /// `run_transport` sends the `OutFrame` before it records the waiter.
+    ///
+    /// Fail closed ONLY when the frame cannot be handed off at all: no hub address
+    /// configured, the transport is gone, or it stays backpressured past
+    /// [`SUBMIT_DISPATCH_TIMEOUT`] (the wallet then retries, safe by D6 dedup). A
+    /// too-large frame stays a typed `Encode` error the wallet hears as its own
+    /// size failure. The txid the caller returns is computed locally (D5); the ack
+    /// carried none anyway.
+    ///
+    /// Returns `Ok(())` for a dispatch, not an `AckKind`: since the ack is never
+    /// awaited there is no hub verdict to return, and claiming an `Accepted` we
+    /// never received would be a lie. The caller maps `Ok(())` to the wallet's
+    /// success.
+    pub async fn submit(&self, tx_bytes: &[u8]) -> Result<(), NymError> {
+        use std::sync::atomic::Ordering;
+
+        let targets = self.targets.load(Ordering::Relaxed);
+        if targets == 0 {
+            // No hub address to send to: nothing was dispatched. Fail closed.
+            return Err(NymError::TransportGone);
+        }
+        // Rotate which hub address this submit targets, so load and the retry of a
+        // dead address spread across a multi-homed hub over successive sends (D10).
+        let target = self.cursor.fetch_add(1, Ordering::Relaxed) % targets;
+
+        let nonce = fresh_nonce();
+        let frame = wire::encode_submit(&nonce, tx_bytes).map_err(NymError::Encode)?;
+        let (ack_tx, _drop_receiver) = oneshot::channel();
+        let request = Request {
+            nonce,
+            frame,
+            reply_surbs: SUBMIT_REPLY_SURBS,
+            waiter: Waiter::Ack(ack_tx),
+            target,
+        };
+
+        let deadline = tokio::time::Instant::now() + self.dispatch_timeout;
+        match tokio::time::timeout_at(deadline, self.requests.send(request)).await {
+            // Handed to the transport: the migration is on its way over the mixnet.
+            // Best-effort success; the caller fills in the locally-computed txid.
+            Ok(Ok(())) => Ok(()),
+            // The transport loop is gone; nothing can be sent.
+            Ok(Err(_)) => Err(NymError::TransportGone),
+            // The transport stayed backpressured for the whole window: we could not
+            // hand the frame off. Report it as unsendable so the wallet retries,
+            // rather than claim a success we did not achieve.
+            Err(_) => Err(NymError::TransportGone),
+        }
     }
 
     /// Look a transaction up, trying each configured hub address in turn. The
@@ -694,27 +761,37 @@ mod tests {
         assert!(pending.contains_key(&[3u8; 16]));
     }
 
-    /// M1': the wait to be ACCEPTED by the transport must be inside the request
-    /// timeout, not outside it. A requests channel whose one slot is held blocks
-    /// the accept `send`; the submit must still fail closed with `Timeout` within
-    /// the budget, rather than hang unbounded above it (which is what falsified
-    /// the plan's `timeout * addresses` latency claim before this fix).
+    /// A best-effort submit must stay BOUNDED under backpressure, not hang. A full
+    /// requests channel (the transport draining slower than the wallet submits)
+    /// blocks the hand-off; submit must fail closed within the dispatch budget so
+    /// the wallet retries, rather than block on a hand-off that is not happening.
     #[tokio::test]
-    async fn a_backpressured_transport_times_out_within_the_budget() {
+    async fn a_backpressured_submit_fails_closed_within_the_dispatch_budget() {
         let (tx, _rx) = mpsc::channel::<Request>(1);
         // Hold the one slot so the handle's send has nowhere to go, and keep the
         // receiver alive so the channel is full-but-open rather than closed.
         let _permit = tx.reserve().await.expect("channel open");
         let targets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
-        let handle = NymHandle::new(tx.clone(), Duration::from_millis(150), targets);
+        // A short dispatch budget keeps the test fast; the round-trip timeout is
+        // irrelevant to submit, which never awaits a reply.
+        let handle = NymHandle::new(
+            tx.clone(),
+            Duration::from_secs(25),
+            Duration::from_millis(150),
+            targets,
+        );
 
         let started = std::time::Instant::now();
         let result = handle.submit(&[0u8; 8]).await;
 
-        assert_eq!(result, Err(NymError::Timeout));
+        assert_eq!(
+            result,
+            Err(NymError::TransportGone),
+            "a frame that cannot be handed off is unsendable, so the wallet retries"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "the accept wait must be bounded by the request timeout"
+            "the dispatch wait must be bounded by the dispatch budget"
         );
     }
 

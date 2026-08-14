@@ -36,7 +36,7 @@ use tokio::net::TcpStream;
 
 use crate::nym::{NymError, NymHandle};
 use crate::tls::BackendTls;
-use crate::wire::{AckKind, LookupReply, WireError};
+use crate::wire::{LookupReply, WireError};
 use crate::BoxError;
 
 /// The hub's lookup path.
@@ -229,25 +229,15 @@ impl HubTransport {
         match self {
             HubTransport::Http(client) => client.submit(tx_bytes).await,
             HubTransport::Nym(handle) => match handle.submit(tx_bytes).await {
-                // Accepted covers both a fresh admission and a duplicate (the
-                // ack does not distinguish them, matching the HTTP path's
-                // wallet-visible behaviour). The txid is computed locally: the
-                // ack never carries one (D5).
-                Ok(AckKind::Accepted) => Ok(Submit::Accepted {
+                // Best-effort dispatch: a successful hand-off to the mixnet is the
+                // wallet's success, carrying the locally-computed txid (the ack
+                // never carried one, D5, and is no longer awaited). There is no
+                // Refused arm: the hub's verdict is a full round trip away and is
+                // deliberately not waited for (see `NymHandle::submit`), so a
+                // refusal is never surfaced here.
+                Ok(()) => Ok(Submit::Accepted {
                     txid: crate::nym::local_txid(tx_bytes),
                 }),
-                Ok(AckKind::Refused(refusal)) => {
-                    // Safe to log, and only here: an `AckRefusal` is a closed
-                    // vocabulary of hub-side reasons, so it carries nothing
-                    // about the entry. The HTTP arm's `reason` is free text
-                    // from the hub and is NEVER logged: in an enclave the log
-                    // reaches the parent host, so a hostile hub could otherwise
-                    // use it to write a txid into the operator's view.
-                    tracing::warn!(reason = refusal.as_str(), "the hub refused a submission");
-                    Ok(Submit::Rejected {
-                        reason: refusal.as_str().to_string(),
-                    })
-                }
                 // A transaction that cannot be framed is a typed outcome, not
                 // an error: `?` here would flatten it into the same opaque
                 // failure a dead mixnet produces, and the caller would tell

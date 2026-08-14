@@ -245,7 +245,9 @@ fn build_nym_transport(
     use tokio::sync::mpsc;
 
     use zero_indexer_shim::hub::HubTransport;
-    use zero_indexer_shim::nym::{self, NymHandle, RotationPolicy, REQUEST_TIMEOUT};
+    use zero_indexer_shim::nym::{
+        self, NymHandle, RotationPolicy, REQUEST_TIMEOUT, SUBMIT_DISPATCH_TIMEOUT,
+    };
     use zero_indexer_shim::nym_driver::{self, MixnetNetwork};
 
     // The SDK's authoritative parse; config only did a shallow structural check
@@ -309,6 +311,7 @@ fn build_nym_transport(
     Ok(HubTransport::from(NymHandle::new(
         req_tx,
         REQUEST_TIMEOUT,
+        SUBMIT_DISPATCH_TIMEOUT,
         targets,
     )))
 }

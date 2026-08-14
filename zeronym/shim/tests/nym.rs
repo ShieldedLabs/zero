@@ -54,7 +54,7 @@ fn start_full(timeout: Duration, targets: usize, driver_capacity: usize) -> (Dri
     tokio::spawn(run_transport(req_rx, out_tx, in_rx, inflight.clone()));
     (
         Driver {
-            handle: NymHandle::new(req_tx, timeout, Arc::new(AtomicUsize::new(targets))),
+            handle: NymHandle::new(req_tx, timeout, timeout, Arc::new(AtomicUsize::new(targets))),
             from_transport: out_rx,
             to_transport: in_tx,
         },
@@ -100,25 +100,26 @@ async fn next_lookup(driver: &mut Driver) -> ([u8; 16], Vec<u8>) {
 }
 
 #[tokio::test]
-async fn a_submit_is_framed_sent_and_acked() {
+async fn a_submit_is_framed_and_dispatched() {
     let mut driver = start(Duration::from_secs(5));
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx bytes").await });
 
-    let (nonce, tx) = next_frame(&mut driver).await;
+    // Best-effort dispatch: the submit answers as soon as the frame is on the
+    // mixnet, so the outbound frame is what we assert, not a hub ack (which is
+    // never awaited). The frame still carries the exact bytes.
+    let (_nonce, tx) = next_frame(&mut driver).await;
     assert_eq!(tx, b"tx bytes");
-    driver
-        .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
-        .await
-        .unwrap();
-
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(submit.await.unwrap(), Ok(()));
 }
 
-#[tokio::test]
-async fn every_refusal_comes_back_typed() {
-    let mut driver = start(Duration::from_secs(5));
+#[test]
+fn every_refusal_round_trips_through_the_ack_codec() {
+    // Dispatch-only submit no longer surfaces the hub's typed refusals (they are
+    // a round trip away and not awaited), but the ack wire codec still carries
+    // them -- an unmatched ack is decoded before it is dropped -- and the
+    // vocabulary must stay stable. Tested at the codec rather than through submit.
+    let nonce = [0x5a; 16];
     for refusal in [
         AckRefusal::ExpiryTooTight,
         AckRefusal::TooLarge,
@@ -126,71 +127,89 @@ async fn every_refusal_comes_back_typed() {
         AckRefusal::TipStale,
         AckRefusal::BadFrame,
     ] {
-        let handle = driver.handle.clone();
-        let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-        let (nonce, _) = next_frame(&mut driver).await;
-        driver
-            .to_transport
-            .send(Zeroizing::new(
-                wire::encode_ack(&nonce, AckKind::Refused(refusal)).to_vec(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(submit.await.unwrap(), Ok(AckKind::Refused(refusal)));
+        let frame = wire::encode_ack(&nonce, AckKind::Refused(refusal));
+        let (got_nonce, got_kind) = wire::decode_ack(&frame).expect("an ack decodes");
+        assert_eq!(got_nonce, nonce);
+        assert_eq!(got_kind, AckKind::Refused(refusal));
     }
 }
 
 #[tokio::test]
-async fn no_ack_times_out() {
+async fn a_submit_needs_no_ack_to_succeed() {
     let mut driver = start(Duration::from_millis(50));
     let handle = driver.handle.clone();
     let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    // The frame goes out, but nothing comes back.
+    // The frame goes out; nothing ever comes back -- the common case under mixnet
+    // latency. Best-effort still answers success: the migration is on its way.
     let _ = next_frame(&mut driver).await;
-    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    assert_eq!(submit.await.unwrap(), Ok(()));
 }
 
 #[tokio::test]
-async fn an_unknown_nonce_is_dropped_and_the_real_ack_still_lands() {
+async fn an_unknown_nonce_is_dropped_and_the_real_lookup_reply_still_lands() {
+    // The correlation machinery (shared by submit and lookup) is now exercised
+    // through the lookup path, which still awaits its reply.
     let mut driver = start(Duration::from_secs(5));
-    let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let (nonce, _) = next_frame(&mut driver).await;
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x42; 32]).await });
+    let (nonce, _) = next_lookup(&mut driver).await;
 
+    // A reply under the wrong nonce must not satisfy the waiter; the real one does.
     let mut wrong = nonce;
     wrong[0] ^= 0xff;
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&wrong, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&wrong, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(
+                &nonce,
+                &LookupReply::Found {
+                    height: 5,
+                    tx: Zeroizing::new(V6_MIGRATION.to_vec()),
+                },
+            )
+            .unwrap()
+            .to_vec(),
+        ))
         .await
         .unwrap();
 
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    match lookup.await.unwrap().unwrap() {
+        Lookup::Found { height, .. } => assert_eq!(height, 5),
+        other => panic!("expected Found, got {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn empty_and_undecodable_inbound_messages_are_filtered() {
+async fn empty_and_undecodable_inbound_messages_do_not_disturb_a_lookup() {
     let mut driver = start(Duration::from_secs(5));
-    let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let (nonce, _) = next_frame(&mut driver).await;
+    let transport = HubTransport::from(driver.handle.clone());
+    let lookup = tokio::spawn(async move { transport.get_transaction(&[0x43; 32]).await });
+    let (nonce, _) = next_lookup(&mut driver).await;
 
     // An empty message (SURB replenishment artifact) and garbage bytes, then
-    // the real ack: the first two must not disturb the correlation.
+    // the real reply: the first two must not disturb the correlation.
     driver.to_transport.send(Zeroizing::new(Vec::new())).await.unwrap();
     driver.to_transport.send(Zeroizing::new(vec![0x77; 30])).await.unwrap();
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
 
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(lookup.await.unwrap().unwrap(), Lookup::NotFound);
 }
 
 #[tokio::test]
@@ -205,67 +224,77 @@ async fn an_oversized_transaction_is_refused_before_anything_is_sent() {
 }
 
 #[tokio::test]
-async fn concurrent_submits_correlate_independently() {
+async fn concurrent_lookups_correlate_independently() {
+    // The concurrent-correlation machinery, exercised through the lookup path
+    // (submit no longer awaits a reply, so it cannot drive this).
     let mut driver = start(Duration::from_secs(5));
-    let first_handle = driver.handle.clone();
-    let first = tokio::spawn(async move { first_handle.submit(b"first").await });
-    let (first_nonce, first_tx) = next_frame(&mut driver).await;
-    assert_eq!(first_tx, b"first");
+    let first_transport = HubTransport::from(driver.handle.clone());
+    let first = tokio::spawn(async move { first_transport.get_transaction(&[0x44; 32]).await });
+    let (first_nonce, _) = next_lookup(&mut driver).await;
 
-    let second_handle = driver.handle.clone();
-    let second = tokio::spawn(async move { second_handle.submit(b"second").await });
-    let (second_nonce, second_tx) = next_frame(&mut driver).await;
-    assert_eq!(second_tx, b"second");
+    let second_transport = HubTransport::from(driver.handle.clone());
+    let second = tokio::spawn(async move { second_transport.get_transaction(&[0x45; 32]).await });
+    let (second_nonce, _) = next_lookup(&mut driver).await;
 
-    // Answer in reverse order; each waiter gets its own verdict.
+    // Answer in reverse order; each waiter gets its own reply, matched by nonce.
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&second_nonce, AckKind::Refused(AckRefusal::TipStale)).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&second_nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(
+                &first_nonce,
+                &LookupReply::Found {
+                    height: 7,
+                    tx: Zeroizing::new(V6_MIGRATION.to_vec()),
+                },
+            )
+            .unwrap()
+            .to_vec(),
+        ))
         .await
         .unwrap();
 
-    assert_eq!(first.await.unwrap(), Ok(AckKind::Accepted));
-    assert_eq!(
-        second.await.unwrap(),
-        Ok(AckKind::Refused(AckRefusal::TipStale))
-    );
+    match first.await.unwrap().unwrap() {
+        Lookup::Found { height, .. } => assert_eq!(height, 7),
+        other => panic!("expected Found, got {other:?}"),
+    }
+    assert_eq!(second.await.unwrap().unwrap(), Lookup::NotFound);
 }
 
 #[tokio::test]
-async fn a_gone_driver_fails_the_waiter_closed() {
+async fn a_gone_driver_fails_a_pending_lookup_closed() {
     let mut driver = start(Duration::from_secs(5));
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let _ = next_frame(&mut driver).await;
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x46; 32]).await });
+    let _ = next_lookup(&mut driver).await;
 
-    // The driver dies: both of its channel ends drop. The pending waiter is
+    // The driver dies: both of its channel ends drop. The pending lookup waiter is
     // released immediately with TransportGone, not left to the timeout.
     drop(driver.from_transport);
     drop(driver.to_transport);
-    assert_eq!(submit.await.unwrap(), Err(NymError::TransportGone));
+    assert_eq!(lookup.await.unwrap(), Err(NymError::TransportGone));
 }
 
 #[tokio::test]
-async fn the_transport_arm_maps_verdicts_for_the_wallet() {
+async fn the_transport_arm_maps_a_dispatch_to_the_wallet() {
     let mut driver = start(Duration::from_secs(5));
     let transport = HubTransport::from(driver.handle.clone());
 
-    // Accepted: the wallet's txid is computed locally from the bytes (the ack
-    // carries none), with the same computation the hub applies, so a real
-    // parseable transaction yields a real display-order txid.
+    // A dispatch answers Submit::Accepted with the txid computed locally from the
+    // bytes (the ack carries none and is not awaited), with the same computation
+    // the hub applies, so a real parseable transaction yields a real display-order
+    // txid. There is no Refused mapping: dispatch-only never returns a hub verdict.
     let submit = tokio::spawn(async move { transport.submit(V6_MIGRATION).await });
-    let (nonce, tx) = next_frame(&mut driver).await;
+    let (_nonce, tx) = next_frame(&mut driver).await;
     assert_eq!(tx, V6_MIGRATION);
-    driver
-        .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
-        .await
-        .unwrap();
     match submit.await.unwrap().unwrap() {
         Submit::Accepted { txid } => {
             assert_eq!(txid.len(), 64, "display-order txid hex");
@@ -273,38 +302,16 @@ async fn the_transport_arm_maps_verdicts_for_the_wallet() {
         }
         other => panic!("expected Accepted, got {other:?}"),
     }
-
-    // Refused: the wallet hears the typed reason string, exactly as the HTTP
-    // path surfaces a hub rejection.
-    let transport = HubTransport::from(driver.handle.clone());
-    let submit = tokio::spawn(async move { transport.submit(b"unparseable").await });
-    let (nonce, _) = next_frame(&mut driver).await;
-    driver
-        .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
-        .await
-        .unwrap();
-    assert_eq!(
-        submit.await.unwrap().unwrap(),
-        Submit::Rejected {
-            reason: "queue_full".to_string()
-        }
-    );
 }
 
 #[tokio::test]
-async fn an_unparseable_accepted_divert_has_an_empty_txid() {
-    // The fail-safe divert: bytes the shim could not parse are still diverted
-    // and admitted; there is no txid to show, matching today's behaviour.
+async fn an_unparseable_dispatch_has_an_empty_txid() {
+    // The fail-safe divert: bytes the shim could not parse are still dispatched;
+    // there is no txid to show, matching the HTTP path.
     let mut driver = start(Duration::from_secs(5));
     let transport = HubTransport::from(driver.handle.clone());
     let submit = tokio::spawn(async move { transport.submit(b"not a transaction").await });
-    let (nonce, _) = next_frame(&mut driver).await;
-    driver
-        .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
-        .await
-        .unwrap();
+    let _ = next_frame(&mut driver).await;
     assert_eq!(
         submit.await.unwrap().unwrap(),
         Submit::Accepted {
@@ -445,8 +452,8 @@ async fn an_oversized_lookup_hash_is_refused_before_anything_is_sent() {
 #[tokio::test]
 async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
     // A confused or hostile hub must not be able to answer a lookup with an
-    // ack (or vice versa): the waiter stays pending and its caller fails
-    // closed on the timeout, rather than the wrong verdict reaching a wallet.
+    // ack: the waiter stays pending and its caller fails closed on the timeout,
+    // rather than the wrong verdict reaching a wallet.
     let mut driver = start(Duration::from_millis(150));
 
     let lookup_handle = driver.handle.clone();
@@ -458,34 +465,21 @@ async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
         .await
         .unwrap();
     assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
-
-    let submit_handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { submit_handle.submit(b"tx").await });
-    let (submit_nonce, _) = next_frame(&mut driver).await;
-    driver
-        .to_transport
-        .send(Zeroizing::new(
-            wire::encode_lookup_reply(&submit_nonce, &LookupReply::NotFound)
-                .unwrap()
-                .to_vec(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
 }
 
 #[tokio::test]
-async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
+async fn a_submit_and_a_lookup_in_flight_do_not_interfere() {
     let mut driver = start(Duration::from_secs(5));
     let submit_handle = driver.handle.clone();
     let submit = tokio::spawn(async move { submit_handle.submit(b"tx").await });
-    let (submit_nonce, _) = next_frame(&mut driver).await;
+    let (_submit_nonce, _) = next_frame(&mut driver).await;
 
     let lookup_handle = driver.handle.clone();
     let lookup = tokio::spawn(async move { lookup_handle.get_transaction(&[0x42; 32]).await });
     let (lookup_nonce, _) = next_lookup(&mut driver).await;
 
-    // Answer the lookup first: each waiter takes its own reply.
+    // The submit dispatched (best-effort success); the lookup gets its own reply,
+    // matched by nonce, undisturbed by the submit's frame or its dropped waiter.
     driver
         .to_transport
         .send(Zeroizing::new(
@@ -495,23 +489,20 @@ async fn a_submit_and_a_lookup_in_flight_correlate_independently() {
         ))
         .await
         .unwrap();
-    driver
-        .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&submit_nonce, AckKind::Accepted).to_vec()))
-        .await
-        .unwrap();
 
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(submit.await.unwrap(), Ok(()));
     assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
 }
 
 #[tokio::test]
 async fn a_timed_out_address_fails_over_to_the_next() {
-    // A Nym address dies with its gateway (D10), so a hub is hosted at several
-    // and a silent one must not take the shim's hub path down.
+    // A Nym address dies with its gateway (D10), so a hub is hosted at several and
+    // a silent one must not take the shim's hub path down. Exercised through the
+    // lookup path, which still sweeps addresses on timeout; dispatch-only submit
+    // sends to one address and does not sweep.
     let (mut driver, _inflight) = start_with_targets(Duration::from_millis(60), 3);
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x50; 32]).await });
 
     // The first two addresses stay silent; the third answers.
     let first = driver.from_transport.recv().await.expect("first attempt");
@@ -522,14 +513,18 @@ async fn a_timed_out_address_fails_over_to_the_next() {
         "a retry must go to a different address"
     );
     assert_ne!(second.target, third.target);
-    let (nonce, _) = wire::decode_submit(&third.frame).unwrap();
+    let (nonce, _) = wire::decode_lookup(&third.frame).unwrap();
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
 
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
 }
 
 #[tokio::test]
@@ -538,44 +533,50 @@ async fn every_attempt_carries_its_own_nonce() {
     // for the answer of the one that followed it.
     let (mut driver, _inflight) = start_with_targets(Duration::from_millis(40), 2);
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x51; 32]).await });
 
     let first = driver.from_transport.recv().await.expect("first attempt");
     let second = driver.from_transport.recv().await.expect("second attempt");
-    let (first_nonce, _) = wire::decode_submit(&first.frame).unwrap();
-    let (second_nonce, _) = wire::decode_submit(&second.frame).unwrap();
+    let (first_nonce, _) = wire::decode_lookup(&first.frame).unwrap();
+    let (second_nonce, _) = wire::decode_lookup(&second.frame).unwrap();
     assert_ne!(first_nonce, second_nonce);
 
-    // The abandoned attempt's ack arrives late: it correlates to nothing.
+    // The abandoned attempt's reply arrives late, under the OLD nonce: it
+    // correlates to nothing, so the still-pending second attempt fails closed.
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&first_nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&first_nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
-    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
 }
 
 #[tokio::test]
-async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
-    // A refusal comes from a live hub. Asking another address would not change
-    // the answer, and every extra attempt is another mixnet round trip inside
-    // a wallet's call.
+async fn a_final_verdict_is_not_retried_elsewhere() {
+    // A NotFound comes from a live hub (only a TIMEOUT means a dead address and
+    // moves on). Asking another address would not change the answer, and every
+    // extra attempt is another mixnet round trip inside a wallet's call.
     let (mut driver, _inflight) = start_with_targets(Duration::from_secs(5), 3);
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x52; 32]).await });
 
     let first = driver.from_transport.recv().await.expect("first attempt");
-    let (nonce, _) = wire::decode_submit(&first.frame).unwrap();
+    let (nonce, _) = wire::decode_lookup(&first.frame).unwrap();
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::QueueFull)).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
 
-    assert_eq!(
-        submit.await.unwrap(),
-        Ok(AckKind::Refused(AckRefusal::QueueFull))
-    );
+    assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
     assert!(
         driver.from_transport.try_recv().is_err(),
         "no second address was tried"
@@ -586,7 +587,7 @@ async fn a_refusal_is_a_verdict_and_is_not_retried_elsewhere() {
 async fn a_silent_hub_fails_closed_only_after_every_address() {
     let (mut driver, _inflight) = start_with_targets(Duration::from_millis(40), 3);
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x53; 32]).await });
 
     let mut targets = Vec::new();
     for _ in 0..3 {
@@ -599,7 +600,7 @@ async fn a_silent_hub_fails_closed_only_after_every_address() {
                 .target,
         );
     }
-    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
 
     targets.sort_unstable();
     assert_eq!(targets, vec![0, 1, 2], "every address was tried exactly once");
@@ -686,33 +687,38 @@ async fn a_backed_up_driver_does_not_stall_replies_already_in_flight() {
     // Handing a frame over used to be an awaited step inside the select loop,
     // so a driver mid-emission (the design budgets ~1 s to emit a 64 KiB frame,
     // more under backpressure) stopped inbound processing entirely: a request
-    // whose ack had ALREADY arrived timed out anyway, the divert failed closed,
-    // and the wallet retried a transaction the hub had admitted.
+    // whose reply had ALREADY arrived timed out anyway and failed closed.
+    // Exercised through the lookup path, which awaits its reply (dispatch-only
+    // submit does not).
     let (mut driver, _inflight) = start_full(Duration::from_millis(400), 1, 1);
 
     // A is in flight, and its frame is off the channel, so the driver is idle.
     let a = driver.handle.clone();
-    let a = tokio::spawn(async move { a.submit(b"a").await });
-    let (a_nonce, _) = next_frame(&mut driver).await;
+    let a = tokio::spawn(async move { a.get_transaction(&[0x60; 32]).await });
+    let (a_nonce, _) = next_lookup(&mut driver).await;
 
     // B fills the driver's capacity, C has nowhere to go: the transport is now
     // holding a request it cannot hand over.
     let b = driver.handle.clone();
-    let _b = tokio::spawn(async move { b.submit(b"b").await });
+    let _b = tokio::spawn(async move { b.get_transaction(&[0x61; 32]).await });
     let c = driver.handle.clone();
-    let _c = tokio::spawn(async move { c.submit(b"c").await });
+    let _c = tokio::spawn(async move { c.get_transaction(&[0x62; 32]).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // A's ack arrives while the driver is still backed up. It must be
+    // A's reply arrives while the driver is still backed up. It must be
     // delivered, not left in the channel until A's budget expires.
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&a_nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&a_nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
     assert_eq!(
         a.await.unwrap(),
-        Ok(AckKind::Accepted),
+        Ok(LookupReply::NotFound),
         "a reply must land even while the driver cannot take more frames"
     );
 }
@@ -727,16 +733,20 @@ async fn the_inflight_count_tracks_requests_the_caller_still_wants() {
     assert_eq!(inflight.load(Ordering::Relaxed), 0);
 
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let (nonce, _) = next_frame(&mut driver).await;
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x63; 32]).await });
+    let (nonce, _) = next_lookup(&mut driver).await;
     assert_eq!(inflight.load(Ordering::Relaxed), 1, "a request is in flight");
 
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
     assert_eq!(
         inflight.load(Ordering::Relaxed),
         0,
@@ -747,9 +757,9 @@ async fn the_inflight_count_tracks_requests_the_caller_still_wants() {
     // ever answered it and no further traffic arrives to prompt a sweep: the
     // transport's own sweep tick is what clears it.
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let _ = next_frame(&mut driver).await;
-    assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x64; 32]).await });
+    let _ = next_lookup(&mut driver).await;
+    assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
     let cleared = tokio::time::timeout(Duration::from_secs(3), async {
         while inflight.load(Ordering::Relaxed) != 0 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -771,18 +781,22 @@ async fn abandoned_waiters_do_not_accumulate() {
     let mut driver = start(Duration::from_millis(30));
     for _ in 0..5 {
         let handle = driver.handle.clone();
-        let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-        let _ = next_frame(&mut driver).await;
-        assert_eq!(submit.await.unwrap(), Err(NymError::Timeout));
+        let lookup = tokio::spawn(async move { handle.get_transaction(&[0x65; 32]).await });
+        let _ = next_lookup(&mut driver).await;
+        assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
     }
 
     let handle = driver.handle.clone();
-    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
-    let (nonce, _) = next_frame(&mut driver).await;
+    let lookup = tokio::spawn(async move { handle.get_transaction(&[0x66; 32]).await });
+    let (nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                .unwrap()
+                .to_vec(),
+        ))
         .await
         .unwrap();
-    assert_eq!(submit.await.unwrap(), Ok(AckKind::Accepted));
+    assert_eq!(lookup.await.unwrap(), Ok(LookupReply::NotFound));
 }

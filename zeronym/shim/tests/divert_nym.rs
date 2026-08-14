@@ -140,7 +140,7 @@ async fn spawn_nym_shim(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let diversion = Some(Arc::new(Diversion {
-        hub: NymHandle::new(req_tx, TIMEOUT, Arc::new(AtomicUsize::new(1))).into(),
+        hub: NymHandle::new(req_tx, TIMEOUT, TIMEOUT, Arc::new(AtomicUsize::new(1))).into(),
     }));
     tokio::spawn(async move {
         let _ = zero_indexer_shim::serve_with_shutdown(
@@ -154,6 +154,21 @@ async fn spawn_nym_shim(
         .await;
     });
     (addr, seen)
+}
+
+/// Poll `cond` until true or a short deadline. The submit path is best-effort: the
+/// wallet is answered the moment the frame is dispatched to the mixnet, so the hub
+/// records it a beat later. A test that asserts the hub's view must wait for it,
+/// where the old ack-waiting path had already observed it by the time submit
+/// returned.
+async fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..200 {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    cond()
 }
 
 #[tokio::test]
@@ -174,6 +189,12 @@ async fn a_migration_is_diverted_over_the_mixnet_and_the_operator_is_never_conne
     assert_eq!(resp.error_message, expected_txid(V6_MIGRATION));
 
     // The hub received the exact migration bytes, unpadded out of the frame.
+    // Best-effort: the wallet was answered on dispatch, so wait for the frame to
+    // land at the hub rather than expecting it already recorded.
+    assert!(
+        eventually(|| !seen.submits.lock().unwrap().is_empty()).await,
+        "the hub received the migration"
+    );
     assert_eq!(
         seen.submits.lock().unwrap().as_slice(),
         &[V6_MIGRATION.to_vec()]
@@ -211,10 +232,16 @@ async fn a_pass_through_still_reaches_the_operator_and_never_the_mixnet() {
 }
 
 #[tokio::test]
-async fn a_refused_submission_reaches_the_wallet_as_the_typed_reason() {
+async fn a_hub_refusal_is_not_surfaced_under_best_effort() {
+    // Dispatch-only: the shim answers success once the frame is on the mixnet and
+    // does NOT await the hub's verdict, which is a full round trip away. A hub that
+    // would refuse (queue full) therefore does not surface that refusal to the
+    // wallet -- a deliberate trade for never blocking on the round trip. The
+    // migration still went ONLY to the hub, and the wallet learns the true outcome
+    // by confirmation; a resend is safe (D6 dedup at the hub).
     let backend_conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_counting_backend(backend_conns.clone()).await;
-    let (shim, _) = spawn_nym_shim(
+    let (shim, seen) = spawn_nym_shim(
         backend,
         OnSubmit::Refuse(AckRefusal::QueueFull),
         OnLookup::NotFound,
@@ -224,40 +251,48 @@ async fn a_refused_submission_reaches_the_wallet_as_the_typed_reason() {
     let mut sender = connect_h2(shim).await;
     let resp = decode_send_response(&send_tx(&mut sender, shim, V6_MIGRATION).await);
 
-    assert_eq!(resp.error_code, -1, "a refusal is an error to the wallet");
-    assert_eq!(resp.error_message, "queue_full");
+    assert_eq!(
+        resp.error_code, 0,
+        "best-effort: the wallet is answered success on dispatch, not the refusal"
+    );
+    assert_eq!(resp.error_message, expected_txid(V6_MIGRATION));
+    assert!(
+        eventually(|| !seen.submits.lock().unwrap().is_empty()).await,
+        "the migration still reached the hub"
+    );
     assert_eq!(
         backend_conns.load(Ordering::SeqCst),
         0,
-        "a refusal is not a reason to hand the migration to the operator"
+        "still never handed to the operator"
     );
 }
 
 #[tokio::test]
-async fn a_silent_hub_fails_the_divert_closed() {
-    // The most important property on this path: no ack means the wallet is
-    // told UNAVAILABLE and retries. It must NEVER mean the operator gets the
-    // migration instead.
+async fn a_silent_hub_answers_best_effort_success_and_never_the_operator() {
+    // A hub that never acks is the COMMON case under mixnet latency, so it must not
+    // fail the wallet: dispatch-only answers success as soon as the frame is on its
+    // way, and confirmation comes via the wallet's own sync. The invariant that
+    // survives unchanged: best-effort is NEVER a fallback to the operator's indexer.
     let backend_conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_counting_backend(backend_conns.clone()).await;
     let (shim, seen) = spawn_nym_shim(backend, OnSubmit::Silent, OnLookup::NotFound).await;
 
     let mut sender = connect_h2(shim).await;
-    let reply = send_tx_reply(&mut sender, shim, V6_MIGRATION).await;
+    let resp = decode_send_response(&send_tx(&mut sender, shim, V6_MIGRATION).await);
 
-    // A gRPC status error, not a SendResponse carrying a code: the wallet is
-    // told UNAVAILABLE, which is what makes it retry rather than treat the
-    // migration as rejected.
-    assert_eq!(reply.status, 14, "a silent hub maps to gRPC UNAVAILABLE");
-    assert!(
-        reply.body.is_empty(),
-        "a status error carries no message body"
+    assert_eq!(
+        resp.error_code, 0,
+        "best-effort success on dispatch, despite the hub's silence"
     );
-    assert_eq!(seen.submits.lock().unwrap().len(), 1, "the hub was tried");
+    assert_eq!(resp.error_message, expected_txid(V6_MIGRATION));
+    assert!(
+        eventually(|| !seen.submits.lock().unwrap().is_empty()).await,
+        "the hub was still sent the migration"
+    );
     assert_eq!(
         backend_conns.load(Ordering::SeqCst),
         0,
-        "failing closed means the operator is never dialled"
+        "best-effort is never a fallback to the operator"
     );
 }
 

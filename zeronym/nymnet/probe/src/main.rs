@@ -597,6 +597,7 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let transport = HubTransport::from(shim_nym::NymHandle::new(
         req_tx,
         Duration::from_secs(60),
+        Duration::from_secs(60),
         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
     ));
 
@@ -763,6 +764,7 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     let transport = HubTransport::from(shim_nym::NymHandle::new(
         req_tx,
         shim_nym::REQUEST_TIMEOUT,
+        shim_nym::SUBMIT_DISPATCH_TIMEOUT,
         targets.clone(),
     ));
 
