@@ -128,8 +128,31 @@ async fn main() -> Result<(), BoxError> {
         }
     };
 
-    zero_indexer_shim::serve_with_shutdown(listener, backend, server_tls, diversion, shutdown())
-        .await
+    // Whether the shim owns Caution's in-enclave control-plane paths. On managed
+    // Caution under h2c this MUST be on or the attestation health check is proxied
+    // to the indexer and the enclave never boots; off makes the shim a pure proxy
+    // (BYOC, non-h2c, or once Caution serves these itself).
+    let caution = zero_indexer_shim::proxy::CautionRelay {
+        enabled: config.caution_attestation,
+        bootproofd_addr: config.caution_bootproofd_addr.clone().into(),
+    };
+    if caution.enabled {
+        tracing::info!(
+            bootproofd = %caution.bootproofd_addr,
+            "Caution control-plane paths owned by the shim (/attestation relayed, /health local)"
+        );
+    } else {
+        tracing::warn!(
+            "Caution attestation relay DISABLED: /attestation and \
+             /.well-known/caution/health pass through to the backend. Correct only off managed \
+             Caution/h2c, or once the platform serves them itself."
+        );
+    }
+
+    zero_indexer_shim::serve_with_shutdown(
+        listener, backend, server_tls, diversion, caution, shutdown(),
+    )
+    .await
 }
 
 /// Resolves on ctrl-c or (on unix) SIGTERM, which stops the accept loop and

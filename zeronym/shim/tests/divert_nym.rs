@@ -148,6 +148,7 @@ async fn spawn_nym_shim(
             backend,
             None,
             diversion,
+            zero_indexer_shim::CautionRelay::default(),
             std::future::pending::<()>(),
         )
         .await;

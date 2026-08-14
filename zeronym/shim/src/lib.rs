@@ -55,4 +55,4 @@ pub mod wire;
 /// Boxed error type shared by the proxy paths.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-pub use proxy::{serve, serve_with_shutdown};
+pub use proxy::{serve, serve_with_shutdown, CautionRelay};

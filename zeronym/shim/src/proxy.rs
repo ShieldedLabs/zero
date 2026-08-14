@@ -76,15 +76,42 @@ pub const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/Sen
 pub const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
 
 /// Caution platform control-plane paths, served on the SAME host the shim serves.
-/// Normally the in-enclave proxy answers these before our process, but we own them
-/// defensively so a transparent proxy can never forward Caution's own endpoints to
-/// the Zcash indexer. `/.well-known/caution/health` is answered locally; the
-/// attestation POST is relayed to bootproofd, the platform's real NSM source
-/// (INTERNAL_BOOTPROOFD_PORT). TEST: the bootproofd port is a Caution internal;
-/// revisit if this turns out to be the fix for the h2c attestation-health failure.
+/// Normally the in-enclave proxy answers these before our process, but under h2c
+/// the platform routes them to the app, so we own them defensively: a transparent
+/// proxy that forwarded Caution's own endpoints to the Zcash indexer failed the
+/// attestation health check (the h2c blocker, `a6063ef`). `/.well-known/caution/health`
+/// is answered locally; the attestation POST is relayed to bootproofd, the
+/// platform's real NSM source. Whether the shim owns these at all, and where the
+/// relay dials, are governed by [`CautionRelay`] — off makes the shim a pure proxy.
 pub const CAUTION_HEALTH: &str = "/.well-known/caution/health";
 pub const CAUTION_ATTESTATION: &str = "/attestation";
-const BOOTPROOFD_ADDR: &str = "127.0.0.1:49502";
+
+/// Whether, and how, the shim owns Caution's in-enclave control-plane paths
+/// ([`CAUTION_HEALTH`], [`CAUTION_ATTESTATION`]).
+///
+/// This is a workaround for the platform routing `/attestation` to the app under
+/// h2c; it is scoped behind a flag so it can be turned off for BYOC or non-h2c
+/// deployments, or removed entirely once Caution serves these paths itself. When
+/// `enabled` is false, both paths route as [`Route::PassThrough`] and the
+/// `bootproofd_addr` is never dialled. `bootproofd_addr` is configurable so the
+/// platform's internal port is not hardcoded here.
+#[derive(Debug, Clone)]
+pub struct CautionRelay {
+    pub enabled: bool,
+    pub bootproofd_addr: Arc<str>,
+}
+
+impl Default for CautionRelay {
+    /// On by default, matching the managed-Caution-under-h2c deployment where the
+    /// shim MUST answer these paths to boot. Off-Caution the paths are simply
+    /// never requested, so owning them is harmless.
+    fn default() -> Self {
+        CautionRelay {
+            enabled: true,
+            bootproofd_addr: Arc::from(crate::config::DEFAULT_BOOTPROOFD_ADDR),
+        }
+    }
+}
 
 /// gRPC status code 14, UNAVAILABLE.
 pub const GRPC_UNAVAILABLE: u16 = 14;
@@ -339,7 +366,15 @@ impl UpstreamPool {
 /// Serve until the listener errors. Equivalent to [`serve_with_shutdown`] with
 /// a shutdown signal that never fires.
 pub async fn serve(listener: TcpListener, backend: impl Into<Backend>) -> Result<(), BoxError> {
-    serve_with_shutdown(listener, backend, None, None, std::future::pending::<()>()).await
+    serve_with_shutdown(
+        listener,
+        backend,
+        None,
+        None,
+        CautionRelay::default(),
+        std::future::pending::<()>(),
+    )
+    .await
 }
 
 /// Serve until `shutdown` resolves, then stop accepting and drain.
@@ -356,6 +391,7 @@ pub async fn serve_with_shutdown<S>(
     backend: impl Into<Backend>,
     tls: Option<Arc<ServerTls>>,
     diversion: Option<Arc<crate::intercept::Diversion>>,
+    caution: CautionRelay,
     shutdown: S,
 ) -> Result<(), BoxError>
 where
@@ -395,16 +431,17 @@ where
                 let backend = backend.clone();
                 let tls = tls.clone();
                 let diversion = diversion.clone();
+                let caution = caution.clone();
                 tokio::spawn(async move {
                     let _live = live;
                     match tls {
-                        None => serve_connection(stream, peer, backend, diversion).await,
+                        None => serve_connection(stream, peer, backend, diversion, caution).await,
                         Some(tls) => match tls.accept(stream).await {
                             // A TLS-ALPN-01 validation, already answered and
                             // closed by the acceptor. Not wallet traffic.
                             Ok(None) => {}
                             Ok(Some(stream)) => {
-                                serve_connection(stream, peer, backend, diversion).await
+                                serve_connection(stream, peer, backend, diversion, caution).await
                             }
                             // Handshake failures are ordinary on a public
                             // listener (scanners, a wallet that gave up, or a
@@ -455,6 +492,7 @@ async fn serve_connection<IO>(
     peer: SocketAddr,
     backend: Backend,
     diversion: Option<Arc<intercept::Diversion>>,
+    caution: CautionRelay,
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -470,7 +508,8 @@ async fn serve_connection<IO>(
     let service = service_fn(move |req: Request<Incoming>| {
         let pool = pool.clone();
         let diversion = diversion.clone();
-        async move { handle(req, pool, diversion).await }
+        let caution = caution.clone();
+        async move { handle(req, pool, diversion, caution).await }
     });
 
     if let Err(err) = server_h2::Builder::new(TokioExecutor::new())
@@ -489,6 +528,7 @@ async fn handle(
     req: Request<Incoming>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<intercept::Diversion>>,
+    caution: CautionRelay,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
@@ -500,11 +540,17 @@ async fn handle(
     // connection to the operator: the reason the pool is lazy and the dial lives
     // here rather than at accept time.
     let result = match route_for(&path) {
-        // Caution's control-plane paths. Owned here so they are NEVER proxied to
-        // the indexer: health answered locally, attestation relayed to bootproofd.
-        Route::CautionHealth => Ok(caution_health_ok()),
-        Route::CautionAttestation => forward_to_bootproofd(req).await,
-        Route::PassThrough => pass_through(req, pool).await,
+        // Caution's control-plane paths. Owned here (NEVER proxied to the indexer:
+        // health answered locally, attestation relayed to bootproofd) ONLY when
+        // the relay is enabled; see `CautionRelay`. With it disabled the shim is a
+        // pure proxy and these fall through to `pass_through` below.
+        Route::CautionHealth if caution.enabled => Ok(caution_health_ok()),
+        Route::CautionAttestation if caution.enabled => {
+            forward_to_bootproofd(req, &caution.bootproofd_addr).await
+        }
+        Route::PassThrough | Route::CautionHealth | Route::CautionAttestation => {
+            pass_through(req, pool).await
+        }
         // GetTransaction may name a diverted migration; the interceptor decides,
         // and forwards (dialling the operator) only when it does not.
         Route::GetTransaction => intercept::get_transaction(req, pool, diversion).await,
@@ -761,14 +807,19 @@ fn caution_health_ok() -> Response<ProxyBody> {
         .expect("static health response builds")
 }
 
-/// Relay Caution's `/attestation` POST to bootproofd over the enclave loopback,
-/// so the attestation stays genuine (bootproofd is the platform's NSM source)
-/// rather than being handed to the Zcash indexer. bootproofd speaks HTTP/1.1.
+/// Relay Caution's `/attestation` POST to bootproofd at `addr` over the enclave
+/// loopback, so the attestation stays genuine (bootproofd is the platform's NSM
+/// source) rather than being handed to the Zcash indexer. bootproofd speaks
+/// HTTP/1.1. Reached only when [`CautionRelay::enabled`] is set; `addr` is that
+/// relay's `bootproofd_addr`.
 ///
-/// TEST/WORKAROUND: this exists to check whether the platform routes `/attestation`
-/// to the app under h2c (see [`BOOTPROOFD_ADDR`]). If it is not the fix, remove it.
-async fn forward_to_bootproofd(req: Request<Incoming>) -> Result<Response<ProxyBody>, BoxError> {
-    let stream = TcpStream::connect(BOOTPROOFD_ADDR).await?;
+/// WORKAROUND: this exists because the platform routes `/attestation` to the app
+/// under h2c. If Caution serves it itself, disable the relay and remove this.
+async fn forward_to_bootproofd(
+    req: Request<Incoming>,
+    addr: &str,
+) -> Result<Response<ProxyBody>, BoxError> {
+    let stream = TcpStream::connect(addr).await?;
     let (mut sender, conn) = client_h1::handshake(TokioIo::new(stream)).await?;
     spawn_connection_driver(conn);
 
@@ -785,7 +836,7 @@ async fn forward_to_bootproofd(req: Request<Incoming>) -> Result<Response<ProxyB
     parts.headers.remove(http::header::HOST);
     parts
         .headers
-        .insert(http::header::HOST, HeaderValue::from_static(BOOTPROOFD_ADDR));
+        .insert(http::header::HOST, HeaderValue::from_str(addr)?);
 
     let body = body.map_err(BoxError::from).boxed();
     let resp = sender.send_request(Request::from_parts(parts, body)).await?;

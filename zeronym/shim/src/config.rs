@@ -16,6 +16,11 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:9068";
 /// the shim takes the new one.
 pub const DEFAULT_BACKEND: &str = "127.0.0.1:9067";
 
+/// Where the `/attestation` relay dials bootproofd, Caution's in-enclave NSM
+/// source (INTERNAL_BOOTPROOFD_PORT). A platform internal, exposed as a default
+/// only so it is not hardcoded in the proxy and can move if the platform does.
+pub const DEFAULT_BOOTPROOFD_ADDR: &str = "127.0.0.1:49502";
+
 /// Command line and environment configuration.
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -120,6 +125,32 @@ pub struct Config {
         default_value_t = false
     )]
     pub tls_production: bool,
+
+    /// Own Caution's in-enclave control-plane paths (`/attestation` and
+    /// `/.well-known/caution/health`) instead of proxying them to the indexer.
+    ///
+    /// Default TRUE, because on managed Caution under h2c the platform routes
+    /// these to the app: a shim that did not answer them would forward the
+    /// attestation health check to the Zcash indexer and fail to boot (the h2c
+    /// blocker, `a6063ef`). Set FALSE for BYOC, non-h2c, or once Caution serves
+    /// these itself — the shim then behaves as a pure proxy and these paths pass
+    /// through untouched. Explicit `true`/`false` for the same reason as
+    /// `--tls-production`: it is usually set from the environment, where a bare
+    /// flag would read as "on" merely by existing.
+    #[arg(
+        long,
+        env = "ZIS_CAUTION_ATTESTATION",
+        action = clap::ArgAction::Set,
+        default_value_t = true
+    )]
+    pub caution_attestation: bool,
+
+    /// Address the `/attestation` relay dials when `--caution-attestation` is on.
+    /// Defaults to bootproofd's fixed enclave loopback port; overridable only so
+    /// the internal port is not hardcoded in the proxy. Ignored when the relay
+    /// is off.
+    #[arg(long, env = "ZIS_CAUTION_BOOTPROOFD_ADDR", default_value = DEFAULT_BOOTPROOFD_ADDR)]
+    pub caution_bootproofd_addr: String,
 }
 
 /// Which transport carries diversions, decided once at startup.

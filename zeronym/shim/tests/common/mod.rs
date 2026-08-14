@@ -124,6 +124,7 @@ pub async fn spawn_forward_only_shim(backend: SocketAddr) -> SocketAddr {
             backend,
             None,
             None,
+            zero_indexer_shim::CautionRelay::default(),
             std::future::pending::<()>(),
         )
         .await;

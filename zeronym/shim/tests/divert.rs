@@ -148,6 +148,7 @@ async fn spawn_diverting_shim(backend: SocketAddr, hub: SocketAddr) -> SocketAdd
             backend,
             None,
             diversion,
+            zero_indexer_shim::CautionRelay::default(),
             std::future::pending::<()>(),
         )
         .await;
