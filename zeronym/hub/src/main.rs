@@ -196,6 +196,7 @@ fn spawn_nym_listener(
         in_tx,
         out_rx,
         addr_tx,
+        nym_address.clone(),
         shutdown_signal(),
     ));
     // The driver logs its address, but surfacing it here too keeps it in the

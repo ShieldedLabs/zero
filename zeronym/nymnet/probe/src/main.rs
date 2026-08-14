@@ -731,6 +731,7 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
         hub_in_tx,
         hub_out_rx,
         hub_addr_tx,
+        zero_indexer_hub::server::NymAddress::unknown(),
         async move {
             let _ = hub_stop_rx.await;
         },
@@ -991,6 +992,7 @@ async fn cmd_hub_address_across_rebuild(network: &Path, expect_same: bool) -> Re
         hub_in_tx,
         hub_out_rx,
         hub_addr_tx,
+        zero_indexer_hub::server::NymAddress::unknown(),
         async move {
             let _ = hub_stop_rx.await;
         },

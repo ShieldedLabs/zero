@@ -153,6 +153,7 @@ pub async fn run_driver(
     incoming: mpsc::Sender<Received>,
     mut outgoing: mpsc::Receiver<Reply>,
     address_out: mpsc::Sender<Recipient>,
+    status: crate::server::NymAddress,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
     tokio::pin!(shutdown);
@@ -179,6 +180,7 @@ pub async fn run_driver(
             }
             Err(err) => {
                 failed_rebuilds += 1;
+                status.set_rebuild_failed();
                 tracing::error!(
                     error = %err,
                     consecutive_failures = failed_rebuilds,
@@ -274,6 +276,12 @@ pub async fn run_driver(
                 // outer loop rebuilds from the SAME storage, so the address the
                 // shims hold keeps working.
                 tracing::warn!("hub mixnet client died; rebuilding with the same address");
+                // Make the death VISIBLE. The address stays published (shims are
+                // baked against it and it returns on rebuild), so without this the
+                // hub goes on answering /nym-address and /healthz with 200 while
+                // carrying no mixnet traffic at all — which is exactly how an
+                // afternoon went into suspecting the mixnet on 2026-08-14.
+                status.set_died();
                 tokio::select! {
                     _ = &mut shutdown => return,
                     _ = tokio::time::sleep(REBUILD_BACKOFF) => {}

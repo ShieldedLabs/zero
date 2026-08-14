@@ -73,6 +73,15 @@ const NYM_ADDRESS_PATH: &str = "/nym-address";
 /// `/.well-known/caution/health`, which the platform serves itself.
 const HEALTH_PATH: &str = "/healthz";
 
+/// Live mixnet status: `GET /nym-status`.
+///
+/// Neither of the two endpoints above can answer "is this hub reachable over the
+/// mixnet right now". `/healthz` is process liveness, and `/nym-address` returns
+/// a value that OUTLIVES the client that published it, deliberately — so both
+/// answered 200 for hours on a hub that was answering no mixnet traffic at all
+/// (measured 2026-08-14). This is the endpoint that distinguishes them.
+const NYM_STATUS_PATH: &str = "/nym-status";
+
 /// Ceiling on a lookup body. A `TxFilter.hash` is 32 bytes; 64 leaves slack
 /// without letting the lookup path be used to buffer anything meaningful.
 const MAX_LOOKUP_BYTES: usize = 64;
@@ -94,7 +103,17 @@ const TX_HEIGHT_HEADER: &str = "x-tx-height";
 /// `--hub-nym` would get a config that fails at the first divert instead of at
 /// assemble time.
 #[derive(Clone, Default)]
-pub struct NymAddress(Arc<std::sync::RwLock<Option<String>>>);
+pub struct NymAddress(Arc<NymState>);
+
+#[derive(Default)]
+struct NymState {
+    address: std::sync::RwLock<Option<String>>,
+    /// Whether a client is connected RIGHT NOW, as opposed to whether one ever
+    /// was. See [`NymAddress::set_died`] for why the distinction is load-bearing.
+    connected: std::sync::atomic::AtomicBool,
+    deaths: std::sync::atomic::AtomicU64,
+    consecutive_failures: std::sync::atomic::AtomicU64,
+}
 
 impl NymAddress {
     /// A handle with no address yet.
@@ -102,12 +121,49 @@ impl NymAddress {
         Self::default()
     }
 
-    /// Record the address the driver just built. Called on every (re)build, so
-    /// it is idempotent for the common case where the address did not change.
+    /// Record the address the driver just built, and mark the client live.
+    /// Called on every (re)build, so it is idempotent for the common case where
+    /// the address did not change.
     pub fn set(&self, address: String) {
-        if let Ok(mut slot) = self.0.write() {
+        if let Ok(mut slot) = self.0.address.write() {
             *slot = Some(address);
         }
+        self.0
+            .connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .consecutive_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The client died. The address is deliberately KEPT — shims are baked
+    /// against it and it is still the right value to hand out once the client
+    /// comes back with the same identity — but the hub is no longer reachable
+    /// over the mixnet until it does.
+    ///
+    /// This distinction is why the endpoint below exists. Measured 2026-08-14:
+    /// the attested hub answered `/nym-address` 200 and `/healthz` 200 for hours
+    /// while answering no mixnet traffic at all, because a published address
+    /// survives the client that published it. "It has an address" was mistaken
+    /// for "it is working", and a whole afternoon went into suspecting the
+    /// mixnet, which a local pair then round-tripped in 5.6 s.
+    pub fn set_died(&self) {
+        self.0
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .deaths
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A rebuild attempt failed: still down, and the run of failures grows.
+    pub fn set_rebuild_failed(&self) {
+        self.0
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .consecutive_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The current address, if the mixnet client has connected at least once.
@@ -115,7 +171,22 @@ impl NymAddress {
     /// A poisoned lock reads as `None`: the endpoint then reports "not yet
     /// known", which is the honest answer and cannot mislead a shim's config.
     pub fn get(&self) -> Option<String> {
-        self.0.read().ok().and_then(|slot| slot.clone())
+        self.0.address.read().ok().and_then(|slot| slot.clone())
+    }
+
+    /// The live mixnet status, as [`NYM_STATUS_PATH`] serves it.
+    ///
+    /// Same discipline as the address endpoint: this is CLIENT LIFECYCLE only.
+    /// No queue depth, no admission counts, no txids — those would be an oracle
+    /// for how many migrations are in flight, which is the anonymity-set size.
+    pub fn status_json(&self) -> serde_json::Value {
+        use std::sync::atomic::Ordering;
+        serde_json::json!({
+            "mixnet_connected": self.0.connected.load(Ordering::Relaxed),
+            "address_published": self.get().is_some(),
+            "client_deaths": self.0.deaths.load(Ordering::Relaxed),
+            "consecutive_rebuild_failures": self.0.consecutive_failures.load(Ordering::Relaxed),
+        })
     }
 }
 
@@ -326,6 +397,10 @@ async fn handle(
         },
         HEALTH_PATH => match method {
             Method::GET => Ok(text(StatusCode::OK, "ok")),
+            _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "GET only")),
+        },
+        NYM_STATUS_PATH => match method {
+            Method::GET => Ok(json(StatusCode::OK, &options.nym_address.status_json())),
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "GET only")),
         },
         _ => Ok(text(StatusCode::NOT_FOUND, "unknown path")),

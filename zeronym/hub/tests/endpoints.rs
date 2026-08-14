@@ -222,3 +222,56 @@ async fn a_gated_submit_path_looks_like_no_path_at_all() {
     let (unknown, _) = get(&addr, "/nonsense").await;
     assert_eq!(status, unknown, "the two must be indistinguishable");
 }
+
+/// A dead mixnet client must be VISIBLE, even though its address is kept.
+///
+/// This is the regression this endpoint exists for. Measured 2026-08-14: the
+/// attested hub answered `/nym-address` 200 and `/healthz` 200 for hours while
+/// answering no mixnet traffic at all, because `NymAddress` had no way to say
+/// "connected" separately from "has ever connected". An afternoon went into
+/// suspecting the mixnet, the gateways and the send rate; a local shim and hub
+/// then round-tripped a lookup over the real public mixnet in 5.6 s, which is
+/// what finally pointed back here.
+#[tokio::test]
+async fn nym_status_distinguishes_a_dead_client_from_a_live_one() {
+    let nym_address = NymAddress::unknown();
+    let addr = spawn(ServeOptions {
+        nym_address: nym_address.clone(),
+        ..Default::default()
+    })
+    .await;
+
+    // Before any client has connected: nothing published, nothing connected.
+    let (status, body) = get(&addr, "/nym-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("\"mixnet_connected\":false"), "{body}");
+    assert!(body.contains("\"address_published\":false"), "{body}");
+
+    // Connected: the address is published and the client is live.
+    nym_address.set("ident.enc@gateway".to_owned());
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(body.contains("\"mixnet_connected\":true"), "{body}");
+    assert!(body.contains("\"address_published\":true"), "{body}");
+
+    // THE CASE THAT WAS INVISIBLE. The client dies: the address is deliberately
+    // KEPT (shims are baked against it and it returns on rebuild), so
+    // /nym-address still answers 200 with the same value...
+    nym_address.set_died();
+    let (status, address_body) = get(&addr, "/nym-address").await;
+    assert_eq!(status, StatusCode::OK, "the address survives the client");
+    assert_eq!(address_body.trim(), "ident.enc@gateway");
+
+    // ...but the hub is no longer reachable over the mixnet, and now says so.
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(
+        body.contains("\"mixnet_connected\":false"),
+        "a dead client must not read as healthy: {body}"
+    );
+    assert!(body.contains("\"address_published\":true"), "{body}");
+    assert!(body.contains("\"client_deaths\":1"), "{body}");
+
+    // Never an oracle for how much is in flight: that is the anonymity-set size.
+    for forbidden in ["queue", "depth", "pending", "batch", "txid", "admitted"] {
+        assert!(!body.contains(forbidden), "must not expose '{forbidden}': {body}");
+    }
+}

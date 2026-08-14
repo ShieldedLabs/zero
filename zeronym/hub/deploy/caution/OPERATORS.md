@@ -147,6 +147,33 @@ simplification of the one-hub design.
 `/healthz` answers `200 ok` for liveness. Nothing exposes queue depth, batch size,
 or counts: those would be an oracle for the anonymity-set size.
 
+### Is the hub actually reachable? Check `/nym-status`, not the other two
+
+```
+curl https://<hub-domain>/nym-status
+{"mixnet_connected":true,"address_published":true,"client_deaths":0,"consecutive_rebuild_failures":0}
+```
+
+**`/nym-address` and `/healthz` cannot tell you this, by design.** The address is
+deliberately KEPT when the mixnet client dies — shims are baked against it, and it
+comes back on rebuild — so `/nym-address` answers 200 whether or not the hub can
+currently receive anything, and `/healthz` only says the process is alive.
+
+That combination is not hypothetical. On 2026-08-14 an attested hub answered both
+with 200 for hours while carrying no mixnet traffic at all; a shim and hub run
+locally against the same public mixnet round-tripped a lookup in 5.6 s, which is
+what identified the deployed hub rather than the network.
+
+| field | alert when |
+|---|---|
+| `mixnet_connected` | `false` — **the hub is receiving nothing**; every shim's diverts are failing closed |
+| `address_published` | `false` after startup — the client has never connected |
+| `client_deaths` | climbing: gateway churn |
+| `consecutive_rebuild_failures` | growing — it is down and not recovering; at 60 it takes a NEW identity and every shim needs re-pointing |
+
+Poll `mixnet_connected`. It is the single field that says whether the system is
+carrying migrations.
+
 ## Known failure modes
 
 **1. A restart changes your address and silently breaks every shim.** The identity
