@@ -1,0 +1,115 @@
+name: zeronym-book
+
+# Renders zeronym/book/ (mdBook) and publishes it to GitHub Pages at
+# https://shieldedlabs.github.io/zero/zeronym/.
+#
+# The book is staged into a zeronym/ subdirectory of the Pages artifact rather
+# than at the artifact root, because a repo gets exactly one Pages site and this
+# one should not be spent entirely on the Zeronym book. The site root gets a
+# redirect into the book; replace it with a real index the moment there is a
+# second thing to link to. zeronym/book/book.toml carries a matching `site-url`,
+# and the two have to move together: 404.html is the one page that builds
+# absolute links, so a mismatch sends every not-found visitor nowhere.
+#
+# mdbook-mermaid is not optional. book.toml declares mermaid.min.js and
+# mermaid-init.js in additional-js, both are generated files that .gitignore
+# excludes, and a build without `mdbook-mermaid install` therefore emits pages
+# that reference two scripts that do not exist and renders the architecture
+# diagrams as raw code blocks. Nothing fails; it just quietly looks broken.
+#
+# Tool versions are pinned to what the book was written against. Bump them here
+# and in the local toolchain together, so a build here and a `mdbook serve` on a
+# laptop cannot disagree about what the book looks like.
+#
+# Pull requests build but do not deploy, so a book that no longer compiles
+# blocks the merge instead of the publish.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/zeronym-book.yml"
+      - "zeronym/book/**"
+  pull_request:
+    paths:
+      - ".github/workflows/zeronym-book.yml"
+      - "zeronym/book/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pages allows one deployment at a time. Never cancel one in flight: a
+  # half-published site is worse than a slow one, and the build is seconds.
+  group: pages
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: 0.5.4
+  MDBOOK_MERMAID_VERSION: 0.17.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install mdbook and mdbook-mermaid
+        run: |
+          set -eu
+          cd "$(mktemp -d)"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          curl -fsSL "https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          install -m 0755 mdbook mdbook-mermaid /usr/local/bin/
+
+      - name: Build the book
+        working-directory: zeronym/book
+        run: |
+          set -eu
+          # Writes the gitignored mermaid.min.js and mermaid-init.js that
+          # book.toml's additional-js already points at. Idempotent against a
+          # book.toml that is already configured, which this one is.
+          mdbook-mermaid install .
+          mdbook build
+
+      - name: Stage the Pages site
+        run: |
+          set -eu
+          mkdir -p _site/zeronym
+          cp -R zeronym/book/book/. _site/zeronym/
+          # Placeholder root: the book is the only thing published today, so a
+          # bare 404 for anyone who trims the URL would be gratuitous. Swap this
+          # for a real docs index when Zero publishes a second book.
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Zero docs</title>
+          <meta http-equiv="refresh" content="0; url=./zeronym/">
+          <link rel="canonical" href="https://shieldedlabs.github.io/zero/zeronym/">
+          <p><a href="./zeronym/">The Zeronym Book</a></p>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    # Only main publishes. This also bounds workflow_dispatch, which would
+    # otherwise let any branch overwrite the live site.
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
