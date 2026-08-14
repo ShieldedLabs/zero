@@ -1,6 +1,6 @@
 # Trust and honest limits
 
-Zeronym's migration-privacy guarantee is designed as a chain of mechanisms, documented here end to end. Their status differs, and each is marked:
+zero-indexer's migration-privacy guarantee is designed as a chain of mechanisms, documented here end to end. Their status differs, and each is marked:
 
 - the **Nym 5-hop mixnet** that unlinks a shim from the hub, so the hub cannot tell which operator or region a migration came from (**deployed**: an attested shim and hub pair has run on the public mixnet since 2026-08-14);
 - **AWS Nitro attestation** over a **reproducible StageX build**, making the exact software in each enclave checkable rather than asserted (**built**: both shim and hub run as attested enclaves today, and a real mainnet Orchard-touching transaction has crossed the whole stack);
@@ -82,7 +82,7 @@ STEVE runs as a **reverse proxy on `:8080`**: on the hub side the STEVE server d
 
 *Status: design. The quorum is not built. At launch a single trusted entity (Caution) stands up the hub, and today a shim dials one hub with one key. What follows is the design.*
 
-Enclaves are diskless and ephemeral: a key generated in-enclave at boot is lost on every restart, and a software upgrade changes the measurement so a KMS-seal-to-PCR scheme would refuse to unseal the old key. Zeronym needs long-lived keys anyway (a stable TLS key and address for the shim, one hub key every hub instance shares), so it uses a **keymaker / locksmith M-of-N quorum**.
+Enclaves are diskless and ephemeral: a key generated in-enclave at boot is lost on every restart, and a software upgrade changes the measurement so a KMS-seal-to-PCR scheme would refuse to unseal the old key. zero-indexer needs long-lived keys anyway (a stable TLS key and address for the shim, one hub key every hub instance shares), so it uses a **keymaker / locksmith M-of-N quorum**.
 
 **What it is.** An M-of-N key-custody mechanism spread across **3 to 4 organizations**: the proposed consortium of Caution, Nym, Shielded Labs, and the Zcash Foundation. It reconstitutes a key inside a fresh, attested enclave across both **cold boots and software upgrades** (strictly better than sealing to PCRs, which breaks on upgrade). Private key material is only ever reassembled inside an attested enclave; no single org holds it.
 

@@ -1,5 +1,5 @@
 [book]
-title = "The Zeronym Book"
+title = "The zero-indexer Book"
 authors = ["Shielded Labs"]
 description = "Privacy-preserving Zcash light-wallet indexing: the turnstile-privacy shim and hub, and the road to indexer + Nym + TEE + PIR."
 language = "en"

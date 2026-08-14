@@ -1,6 +1,6 @@
 # The problem and threat model
 
-Zcash's shielded pools hide the sender, receiver, and amount of a transaction on-chain. They do not hide the network metadata a light wallet exposes when it talks to the server that indexes the chain for it: the wallet's source IP address and the timing of its requests. For most traffic that is a background privacy cost. For a transaction that crosses a value-pool boundary, and above all for the mandatory Orchard to Ironwood migration, it is enough to link a real-world network identity to an on-chain balance. Zeronym's near-term system (the [zero-indexer-shim and zero-indexer-hub](./components.md), with Nym between them) targets exactly one half of that leak: the migration **broadcast**.
+Zcash's shielded pools hide the sender, receiver, and amount of a transaction on-chain. They do not hide the network metadata a light wallet exposes when it talks to the server that indexes the chain for it: the wallet's source IP address and the timing of its requests. For most traffic that is a background privacy cost. For a transaction that crosses a value-pool boundary, and above all for the mandatory Orchard to Ironwood migration, it is enough to link a real-world network identity to an on-chain balance. zero-indexer's near-term system (the [zero-indexer-shim and zero-indexer-hub](./components.md), with Nym between them) targets exactly one half of that leak: the migration **broadcast**.
 
 This chapter describes the system in the present tense. The shim and hub are deployed as attested enclaves, a real migration ran the full stack on mainnet on 2026-08-11, and the shim-to-hub hop has run over the Nym mixnet since 2026-08-14. Per-mechanism status, including what is not yet independently verifiable, is the table in [the roadmap](./roadmap.md).
 
@@ -55,7 +55,7 @@ Against the migration broadcast as it works today (clearnet), three adversaries 
 
 This model is deliberately narrow: the **migration broadcast path**, and explicit about everything that passes through unprotected. **Verifiable** means the wallet can check the property cryptographically via attestation, not merely trust that it holds. See [architecture](./architecture.md) for the encryption layers and [trust](./trust.md) for how attestation works.
 
-| Property (migration broadcast) | Today (clearnet) | Zeronym (shim + hub) |
+| Property (migration broadcast) | Today (clearnet) | zero-indexer (shim + hub) |
 |---|---|---|
 | Migration tx contents hidden from the **operator** | No | Yes (encrypted; the TEE shim keeps the operator blind) |
 | Migration broadcast **linkable to source IP** | Yes, linkable | No: the hub publishes, so the on-chain tx carries no wallet IP. The Nym hop additionally hides *which operator* a migration came from, and is built but not deployed |
@@ -66,7 +66,7 @@ This model is deliberately narrow: the **migration broadcast path**, and explici
 
 Two rows need more than a cell.
 
-- **Timing correlatable.** Today the broadcast arrives at a moment the operator records, matching the on-chain appearance. Under Zeronym the hub accumulates migrations from every shim and publishes them together on a block cadence, so the on-chain publish time no longer matches any one wallet's submission time. **This row is conditional, and the condition is not currently met.** The protection is the batch, so it is worth exactly what the batch contains: at a batch of one there is nothing to hide among, and the shuffle, the simultaneous publish, Nym and the TEE all do nothing for that transaction's timing. An earlier draft of this table answered "No" flat, which overclaimed. At the migration volume measured on mainnet the modal batch is expected to be zero or one; [honest limits](./trust.md) gives the arithmetic and the adoption threshold at which the row becomes true.
+- **Timing correlatable.** Today the broadcast arrives at a moment the operator records, matching the on-chain appearance. Under zero-indexer the hub accumulates migrations from every shim and publishes them together on a block cadence, so the on-chain publish time no longer matches any one wallet's submission time. **This row is conditional, and the condition is not currently met.** The protection is the batch, so it is worth exactly what the batch contains: at a batch of one there is nothing to hide among, and the shuffle, the simultaneous publish, Nym and the TEE all do nothing for that transaction's timing. An earlier draft of this table answered "No" flat, which overclaimed. At the migration volume measured on mainnet the modal batch is expected to be zero or one; [honest limits](./trust.md) gives the arithmetic and the adoption threshold at which the row becomes true.
 - **Query privacy.** Largely unchanged. The system does not protect which addresses a wallet looks up (transaction-detail lookups by txid are now served by the hub's indexer, but address-level queries still pass through). This is the honesty anchor; the sections below cover it.
 
 ## Naive vs Nym-aware wallets

@@ -120,9 +120,9 @@ Any transaction moving value across a value-pool boundary: a deshield, a shield,
 
 The signed net value leaving a shielded pool (positive when value leaves that pool). It is **evidence, not the predicate**: the shim diverts on the mere presence of Orchard actions, so the Orchard, Ironwood and Sapling balances are all logged to show where value went while gating nothing. See [the shim](./components.md).
 
-### Zeronym
+### zero-indexer
 
-The Shielded Labs privacy product for Zcash light wallets (name: zero + nym, a play on "pseudonym"). Two pillars: zero-leak indexing and the Nym mixnet. See [the introduction](./introduction.md).
+The Shielded Labs privacy product for Zcash light wallets, formerly named Zeronym. Two pillars: zero-leak indexing and the Nym mixnet. See [the introduction](./introduction.md).
 
 ### zero-indexer-hub (ZIH)
 

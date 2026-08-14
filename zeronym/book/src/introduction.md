@@ -1,9 +1,9 @@
 # Introduction
 
-Zeronym is privacy for Zcash light wallets, a Shielded Labs product named by Jason McGee Stramaglia: a play on "pseudonym," zero + nym. The name encodes two pillars:
+zero-indexer is privacy for Zcash light wallets, a Shielded Labs product. It stands on two pillars:
 
-- **zero**: zero-leak indexing. A light wallet should sync and transact without handing an indexer the raw material to deanonymize it.
-- **nym**: the [Nym](./glossary.md#nym) mixnet, the transport that unlinks a wallet's traffic from its source IP and region.
+- **zero-leak indexing**: a light wallet should sync and transact without handing an indexer the raw material to deanonymize it.
+- **the [Nym](./glossary.md#nym) mixnet**: the transport that unlinks a wallet's traffic from its source IP and region.
 
 Today a Zcash light wallet leaks. Under the ZIP 307 light-client protocol it talks to an indexer over clearnet, so the operator sees the wallet's source IP and the timing of everything it does. [The problem and threat model](./problem.md) lays out that leak and its worst instance, the Orchard to Ironwood migration, which Zooko called the worst privacy-loss event in Zcash history.
 
@@ -17,28 +17,28 @@ Two efforts share a name and a direction but not a scope.
 
 ## The system in its world
 
-Seen from outside, Zeronym is one thing: an attested front-end that a wallet talks to exactly as it talks to an indexer today, and that publishes the transactions most at risk on someone else's schedule rather than the sender's. Who touches it, and what it touches:
+Seen from outside, zero-indexer is one thing: an attested front-end that a wallet talks to exactly as it talks to an indexer today, and that publishes the transactions most at risk on someone else's schedule rather than the sender's. Who touches it, and what it touches:
 
 ```mermaid
 flowchart TB
   USER["Wallet user (the IP at stake)"] -->|"runs"| WAL["Wallet software (zingo, Zashi, ywallet)"]
-  WAL -->|"queries + broadcasts, same endpoint URL as today"| ZN["ZERONYM"]
-  OPR["Light-wallet operator"] -->|"deploys the front-end; untrusted for Orchard-touching contents"| ZN
-  TO["Hub operator / Trusted Organization"] -->|"operates the batcher; announces a detected attack"| ZN
-  AUD["Auditor (any independent party)"] -->|"verifies attestation + CT, without trusting an operator"| ZN
-  KC["Key consortium (Caution / Nym / SL / ZF)"] -->|"governs the long-lived keys"| ZN
-  ZN -->|"publishes transactions, reads the chain tip"| ZEC["Zcash network"]
-  ZN -->|"unlinkable internal transport"| NYM["Nym mixnet"]
-  ZN -->|"attested execution, hardware root of trust"| NITRO["AWS Nitro"]
-  ZN -->|"ordinary CA certificate, publicly logged"| CT["Let's Encrypt + Certificate Transparency"]
-  ZN -->|"hosted on"| CAU["Caution's enclave platform"]
+  WAL -->|"queries + broadcasts, same endpoint URL as today"| ZI["ZERO-INDEXER"]
+  OPR["Light-wallet operator"] -->|"deploys the front-end; untrusted for Orchard-touching contents"| ZI
+  TO["Hub operator / Trusted Organization"] -->|"operates the batcher; announces a detected attack"| ZI
+  AUD["Auditor (any independent party)"] -->|"verifies attestation + CT, without trusting an operator"| ZI
+  KC["Key consortium (Caution / Nym / SL / ZF)"] -->|"governs the long-lived keys"| ZI
+  ZI -->|"publishes transactions, reads the chain tip"| ZEC["Zcash network"]
+  ZI -->|"unlinkable internal transport"| NYM["Nym mixnet"]
+  ZI -->|"attested execution, hardware root of trust"| NITRO["AWS Nitro"]
+  ZI -->|"ordinary CA certificate, publicly logged"| CT["Let's Encrypt + Certificate Transparency"]
+  ZI -->|"hosted on"| CAU["Caution's enclave platform"]
 
   classDef enclave fill:#1b7f4d,color:#fff,stroke:#0d5233;
   classDef client fill:#2563eb,color:#fff,stroke:#1e40af;
   classDef actor fill:#d97706,color:#fff,stroke:#92400e;
   classDef keyinfra fill:#7c3aed,color:#fff,stroke:#5b21b6;
   classDef external fill:#6b7280,color:#fff,stroke:#4b5563;
-  class ZN enclave;
+  class ZI enclave;
   class USER,WAL client;
   class OPR,TO,AUD actor;
   class KC keyinfra;

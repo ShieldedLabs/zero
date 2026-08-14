@@ -70,7 +70,7 @@ The PIR building blocks under consideration (SimplePIR/DoublePIR, FrodoPIR, YPIR
 
 ## Deferred items
 
-Real parts of the vision, held back so they never landed on the launch critical path. One documentation item belongs here too: a concern-by-concern coverage matrix against Taylor's wallet app threat model, showing which entries Zeronym closes and which stay the wallet's ([review](./review.md) states the claimed boundary).
+Real parts of the vision, held back so they never landed on the launch critical path. One documentation item belongs here too: a concern-by-concern coverage matrix against Taylor's wallet app threat model, showing which entries zero-indexer closes and which stay the wallet's ([review](./review.md) states the claimed boundary).
 
 **The query-only / broadcast-only binary split.** Taylor's proposal: one attested instance proves it only answers queries and refuses broadcasts, a separate flavor only accepts broadcasts and refuses queries, so neither can correlate a client's reads with its writes. The near-term shim already realizes a scoped version for turnstile crossings. The general split is deferred because wallets today assume a single endpoint, so requiring two is an adoption cost with no near-term payoff.
 
