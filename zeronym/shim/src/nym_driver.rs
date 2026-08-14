@@ -192,6 +192,9 @@ pub async fn run_driver(
     let mut client = match build_client(&network, gateways.take()).await {
         Ok(client) => {
             status.set_connected();
+            // The `@gateway` half names the entry gateway the SDK actually
+            // picked, which an attested enclave has no console to reveal.
+            status.set_address(client.nym_address().to_string());
             client
         }
         Err(err) => {
@@ -225,6 +228,7 @@ pub async fn run_driver(
             frame = out_frames.recv() => match frame {
                 Some(out) => {
                     send_frame(&sender, &hub_addresses, out).await;
+                    status.record_send();
                     Step::Ferried
                 }
                 // The transport loop is gone; there is nothing to carry.
@@ -233,6 +237,11 @@ pub async fn run_driver(
             messages = client.wait_for_messages() => match messages {
                 Some(messages) => {
                     for message in messages {
+                        // Counted BEFORE the empty-filter below, so the diagnostic
+                        // can tell "no inbound traffic at all" from "inbound
+                        // traffic, but never a reply frame" — the distinction the
+                        // enclave lookup failure turns on.
+                        status.record_inbound(message.message.is_empty());
                         // Empty inbound messages are SURB-replenishment artifacts,
                         // not replies (D12); the correlator would drop them anyway,
                         // but keeping them out of the channel keeps it for frames.

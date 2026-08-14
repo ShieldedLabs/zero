@@ -116,6 +116,15 @@ pub const LOOKUP_REPLY_SURBS: u32 = 60;
 #[derive(Clone, Default)]
 pub struct MixnetStatus(std::sync::Arc<MixnetStatusInner>);
 
+/// Wall-clock seconds since the epoch, saturating to 0 if the clock is before
+/// it. Only used by the temporary diagnostic block.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 struct MixnetStatusInner {
     /// Diversion over the mixnet is configured at all (`--hub-nym` was set).
@@ -128,6 +137,36 @@ struct MixnetStatusInner {
     /// Consecutive failed rebuilds. Non-zero means we are currently down and
     /// retrying, which is the state that silently swallows migrations.
     consecutive_failures: AtomicU64,
+
+    // ---- TEMPORARY DIAGNOSTIC STATE (see `diag_json`) --------------------
+    //
+    // These fields exist ONLY to answer one question an attested enclave
+    // otherwise cannot: do inbound SURB replies arrive at all? They are
+    // deliberately NOT part of `to_json`, because the doc comment above this
+    // type is a promise about `/nym-status` that still holds: counts of sends
+    // ARE a divert oracle. They are served on a separate path that is closed
+    // unless `ZIS_DIAG` is set, and the whole block should be deleted once the
+    // question is answered.
+    /// Whether the diagnostic endpoint answers at all. Off unless `ZIS_DIAG`.
+    diag_enabled: AtomicBool,
+    /// Non-empty inbound mixnet messages the driver has taken off the client.
+    /// THE number that matters: zero here with sends climbing means replies are
+    /// not arriving, rather than arriving and going unread.
+    replies_received: AtomicU64,
+    /// Empty inbound messages — the SDK's SURB-replenishment artifacts (D12).
+    /// Counted separately because they prove the inbound path is alive even
+    /// when no reply has been reassembled.
+    empty_inbound: AtomicU64,
+    /// Frames handed to the SDK sender.
+    sends_dispatched: AtomicU64,
+    /// Unix seconds of the last non-empty inbound message; 0 = never.
+    last_reply_unix: AtomicU64,
+    /// Unix seconds at which the driver first reported in.
+    started_unix: AtomicU64,
+    /// Our own Nym address, whose `@gateway` half names the entry gateway the
+    /// client actually registered with — unreadable on an attested enclave, and
+    /// the value every gateway hypothesis has needed.
+    address: std::sync::Mutex<Option<String>>,
 }
 
 impl MixnetStatus {
@@ -135,6 +174,7 @@ impl MixnetStatus {
     /// first build, so a shim that never connects still reports honestly.
     pub fn set_configured(&self) {
         self.0.configured.store(true, Ordering::Relaxed);
+        self.0.started_unix.store(unix_now(), Ordering::Relaxed);
     }
 
     /// A client is up. Clears the consecutive-failure run.
@@ -161,6 +201,77 @@ impl MixnetStatus {
         format!(
             "{{\"diversion_configured\":{},\"mixnet_connected\":{},\"client_deaths\":{},\"consecutive_rebuild_failures\":{}}}",
             self.0.configured.load(Ordering::Relaxed),
+            self.0.connected.load(Ordering::Relaxed),
+            self.0.deaths.load(Ordering::Relaxed),
+            self.0.consecutive_failures.load(Ordering::Relaxed),
+        )
+    }
+
+    // ---- TEMPORARY DIAGNOSTIC API (delete with the fields above) ----------
+
+    /// Open the diagnostic endpoint. Called once at startup iff `ZIS_DIAG` is
+    /// set; left off, the path proxies through like any unknown path.
+    pub fn enable_diag(&self) {
+        self.0.diag_enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the diagnostic endpoint should answer.
+    pub fn diag_enabled(&self) -> bool {
+        self.0.diag_enabled.load(Ordering::Relaxed)
+    }
+
+    /// One frame handed to the SDK sender.
+    pub fn record_send(&self) {
+        self.0.sends_dispatched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One inbound mixnet message. `empty` distinguishes a SURB-replenishment
+    /// artifact from a real reply frame.
+    pub fn record_inbound(&self, empty: bool) {
+        if empty {
+            self.0.empty_inbound.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.0.replies_received.fetch_add(1, Ordering::Relaxed);
+        self.0.last_reply_unix.store(unix_now(), Ordering::Relaxed);
+    }
+
+    /// Publish the client's own Nym address after a (re)build.
+    pub fn set_address(&self, address: String) {
+        if let Ok(mut slot) = self.0.address.lock() {
+            *slot = Some(address);
+        }
+    }
+
+    /// The diagnostic payload. Served only when [`Self::diag_enabled`].
+    ///
+    /// Deliberately NOT merged into [`Self::to_json`]: `sends_dispatched` and
+    /// `last_reply_unix` are exactly the divert oracle that endpoint promises
+    /// not to be. This one is closed by default and temporary.
+    pub fn diag_json(&self) -> String {
+        let started = self.0.started_unix.load(Ordering::Relaxed);
+        let address = self
+            .0
+            .address
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default();
+        // The gateway half of `identity.encryption@gateway`.
+        let gateway = address.rsplit('@').next().unwrap_or("").to_owned();
+        format!(
+            "{{\"replies_received\":{},\"empty_inbound\":{},\"sends_dispatched\":{},\
+             \"last_reply_unix\":{},\"started_unix\":{},\"uptime_secs\":{},\
+             \"gateway\":\"{}\",\"nym_address\":\"{}\",\
+             \"mixnet_connected\":{},\"client_deaths\":{},\"consecutive_rebuild_failures\":{}}}",
+            self.0.replies_received.load(Ordering::Relaxed),
+            self.0.empty_inbound.load(Ordering::Relaxed),
+            self.0.sends_dispatched.load(Ordering::Relaxed),
+            self.0.last_reply_unix.load(Ordering::Relaxed),
+            started,
+            unix_now().saturating_sub(started),
+            gateway,
+            address,
             self.0.connected.load(Ordering::Relaxed),
             self.0.deaths.load(Ordering::Relaxed),
             self.0.consecutive_failures.load(Ordering::Relaxed),

@@ -100,6 +100,16 @@ pub const CAUTION_ATTESTATION: &str = "/attestation";
 pub const SHIM_HEALTH: &str = "/healthz";
 pub const SHIM_NYM_STATUS: &str = "/nym-status";
 
+/// TEMPORARY diagnostic endpoint. Closed unless `ZIS_DIAG` is set, and when
+/// closed it is proxied through exactly like an unknown path, so a scanner
+/// cannot tell a shim that has it from one that does not.
+///
+/// It exists because an attested enclave has no console, and three separate
+/// theories about why enclave lookups fail have each died for want of one
+/// number: whether inbound SURB replies arrive at all. Delete it, and the
+/// diagnostic block in [`crate::nym::MixnetStatus`], once that is settled.
+pub const SHIM_NYM_DIAG: &str = "/nym-diag";
+
 /// Whether, and how, the shim owns Caution's in-enclave control-plane paths
 /// ([`CAUTION_HEALTH`], [`CAUTION_ATTESTATION`]).
 ///
@@ -576,6 +586,15 @@ async fn handle(
         // an attested shim has no other way to say whether it is working.
         Route::ShimHealth => Ok(text_response(200, "ok")),
         Route::ShimNymStatus => Ok(json_response(&status.to_json())),
+        // Gated: open, it answers; closed, it is indistinguishable from any
+        // other unknown path because it takes the identical pass-through arm.
+        Route::ShimNymDiag => {
+            if status.diag_enabled() {
+                Ok(json_response(&status.diag_json()))
+            } else {
+                pass_through(req, pool).await
+            }
+        }
         Route::PassThrough | Route::CautionHealth | Route::CautionAttestation => {
             pass_through(req, pool).await
         }
@@ -640,6 +659,9 @@ pub enum Route {
     ShimHealth,
     /// [`SHIM_NYM_STATUS`]: the mixnet client's lifecycle, answered locally.
     ShimNymStatus,
+    /// [`SHIM_NYM_DIAG`]: TEMPORARY. Answered locally when `ZIS_DIAG` is set,
+    /// proxied through like an unknown path when it is not.
+    ShimNymDiag,
     /// Opaque. Relayed without being read.
     PassThrough,
 }
@@ -672,6 +694,12 @@ pub fn route_for(path: &str) -> Route {
     }
     if path == SHIM_NYM_STATUS {
         return Route::ShimNymStatus;
+    }
+    // Routed unconditionally so `route_for` stays a pure function of the path;
+    // the ZIS_DIAG gate is applied at the handler, which falls back to
+    // pass-through when closed.
+    if path == SHIM_NYM_DIAG {
+        return Route::ShimNymDiag;
     }
 
     // Trailing slashes are tolerated here, not because tonic accepts them (it

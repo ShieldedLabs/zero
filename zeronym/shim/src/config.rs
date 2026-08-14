@@ -115,6 +115,19 @@ pub struct Config {
     #[arg(long, env = "ZIS_LOOKUP_TIMEOUT_SECS")]
     pub lookup_timeout_secs: Option<u64>,
 
+    /// TEMPORARY: open `/nym-diag`, which reports whether inbound SURB replies
+    /// are arriving. Off by default, and closed it is proxied through exactly
+    /// like an unknown path.
+    ///
+    /// Not something to leave on. It publishes `sends_dispatched` and a
+    /// last-reply timestamp, which together are the divert oracle `/nym-status`
+    /// deliberately refuses to be: a poller could time migrations against the
+    /// chain. It exists because an attested enclave has no console and three
+    /// hypotheses about the enclave lookup failure have each died for want of
+    /// this one number. Remove it with the block it feeds.
+    #[arg(long, env = "ZIS_DIAG", default_value_t = false)]
+    pub diag: bool,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///

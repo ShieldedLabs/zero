@@ -99,6 +99,15 @@ async fn main() -> Result<(), BoxError> {
     // serving path holds the same handle the driver writes to; on a forward-only or
     // clearnet shim nothing ever writes, and it honestly reports "not configured".
     let mixnet_status = zero_indexer_shim::nym::MixnetStatus::default();
+    if config.diag {
+        // Loud, because leaving it on in production turns /nym-diag into a
+        // timing oracle for diverted migrations.
+        tracing::warn!(
+            "ZIS_DIAG is set: /nym-diag is OPEN. Diagnostic only — it exposes send counts \
+             and a last-reply timestamp, which together can time migrations. Turn it off."
+        );
+        mixnet_status.enable_diag();
+    }
 
     let selection = config.hub_selection().map_err(|err| err.to_string())?;
     let diversion = match selection {
