@@ -91,6 +91,18 @@ pub struct Config {
     #[arg(long, env = "ZIS_NYM_TOPOLOGY")]
     pub nym_topology: Option<std::path::PathBuf>,
 
+    /// Pin the mixnet client's ENTRY gateway to one of these instead of letting
+    /// the SDK pick at random. A repeatable LIST (comma-separated in the env):
+    /// each client (re)build rotates to the next, so a gateway that dies OR
+    /// backpressures is escaped on the next rebuild. That backpressure is what
+    /// caps the send rate (the `SendingDelayController` ceiling), so rotating off
+    /// a bad gateway is the throughput lever, not just resilience. Each entry is a
+    /// gateway IDENTITY key; the enclave's egress rule must ALSO allow that
+    /// gateway's IP, and a mismatch fails closed with no console. Empty = the SDK
+    /// chooses. Only meaningful with `--hub-nym`.
+    #[arg(long, env = "ZIS_NYM_GATEWAY", value_delimiter = ',')]
+    pub nym_gateway: Vec<String>,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///

@@ -62,12 +62,54 @@ pub fn parse_address(addr: &str) -> Result<Recipient, String> {
         .map_err(|err| format!("invalid hub Nym address {addr:?}: {err}"))
 }
 
+/// A rotating chooser over the operator-configured entry gateways.
+///
+/// Empty means the SDK picks a gateway at random, the original behaviour. A
+/// non-empty list pins the ENTRY gateway to one of them and advances on every
+/// build, so a gateway that dies OR backpressures is escaped on the next rebuild.
+/// The latter is why this is the throughput lever and not just resilience: the
+/// client's send rate is capped by its gateway's backpressure
+/// (`SendingDelayController`), so landing on a healthier gateway is what lifts the
+/// ceiling. Rotation is free here (D11): a rebuild already mints a fresh identity,
+/// so changing gateway costs no extra linkability.
+struct GatewaySelector {
+    gateways: Vec<String>,
+    next: usize,
+}
+
+impl GatewaySelector {
+    fn new(gateways: Vec<String>) -> Self {
+        GatewaySelector { gateways, next: 0 }
+    }
+
+    /// The gateway IDENTITY to pin for the next build, advancing the rotation.
+    /// `None` when none are configured, meaning "let the SDK choose".
+    fn take(&mut self) -> Option<String> {
+        if self.gateways.is_empty() {
+            return None;
+        }
+        let gateway = self.gateways[self.next % self.gateways.len()].clone();
+        self.next = self.next.wrapping_add(1);
+        Some(gateway)
+    }
+}
+
 /// Build (or rebuild) a mixnet client. Ephemeral by construction (D11): a fresh
 /// build is a fresh identity, a fresh gateway registration, and therefore a
 /// fresh `AnonymousSenderTag`, which is the only lever that bounds how long a
 /// hub can link one shim's submissions.
-async fn build_client(network: &MixnetNetwork) -> Result<MixnetClient, String> {
+///
+/// `gateway`, when set, pins the entry gateway by identity key
+/// (`MixnetClientBuilder::request_gateway`); `None` lets the SDK pick at random.
+async fn build_client(
+    network: &MixnetNetwork,
+    gateway: Option<String>,
+) -> Result<MixnetClient, String> {
     let builder = MixnetClientBuilder::new_ephemeral();
+    let builder = match gateway {
+        Some(gateway) => builder.request_gateway(gateway),
+        None => builder,
+    };
     let builder = match network {
         MixnetNetwork::Default => builder,
         #[cfg(feature = "mixnet-localnet")]
@@ -95,6 +137,7 @@ async fn build_client(network: &MixnetNetwork) -> Result<MixnetClient, String> {
 /// handle so a caller never indexes an empty list.
 pub async fn run_driver(
     network: MixnetNetwork,
+    gateways: Vec<String>,
     hub_addresses: Vec<Recipient>,
     targets: TargetCount,
     mut out_frames: mpsc::Receiver<OutFrame>,
@@ -106,15 +149,18 @@ pub async fn run_driver(
 
     targets.store(hub_addresses.len(), Ordering::Relaxed);
 
+    // Rotates the pinned entry gateway across (re)builds; empty = the SDK picks.
+    let mut gateways = GatewaySelector::new(gateways);
+
     // The first client is the driver's own; the supervisor only ever asks for a
     // REbuild (rotation, or recovery after a reported death). A failed initial
     // connect enters the same wait-to-be-rebuilt path as a mid-run failure.
-    let mut client = match build_client(&network).await {
+    let mut client = match build_client(&network, gateways.take()).await {
         Ok(client) => client,
         Err(err) => {
             tracing::error!(error = %err, "initial mixnet connect failed; awaiting rebuild");
             let _ = events.send(ClientEvent::Died).await;
-            match build_when_told(&mut commands, &network, &events).await {
+            match build_when_told(&mut commands, &network, &events, &mut gateways).await {
                 Some(client) => client,
                 None => return,
             }
@@ -175,12 +221,12 @@ pub async fn run_driver(
                 // A live rotation: disconnect the current identity to completion
                 // (D12: disconnect is not cancel-safe), then mint a fresh one.
                 client.disconnect().await;
-                client = match build_client(&network).await {
+                client = match build_client(&network, gateways.take()).await {
                     Ok(client) => client,
                     Err(err) => {
                         tracing::error!(error = %err, "rebuild failed; awaiting retry");
                         let _ = events.send(ClientEvent::Died).await;
-                        match build_when_told(&mut commands, &network, &events).await {
+                        match build_when_told(&mut commands, &network, &events, &mut gateways).await {
                             Some(client) => client,
                             None => return,
                         }
@@ -193,7 +239,7 @@ pub async fn run_driver(
                 // (by the reassignment below), not disconnected. Report and wait
                 // for the supervisor to ask for a rebuild.
                 let _ = events.send(ClientEvent::Died).await;
-                client = match build_when_told(&mut commands, &network, &events).await {
+                client = match build_when_told(&mut commands, &network, &events, &mut gateways).await {
                     Some(client) => client,
                     None => return,
                 };
@@ -252,10 +298,11 @@ async fn build_when_told(
     commands: &mut mpsc::Receiver<ClientCommand>,
     network: &MixnetNetwork,
     events: &mpsc::Sender<ClientEvent>,
+    gateways: &mut GatewaySelector,
 ) -> Option<MixnetClient> {
     loop {
         match commands.recv().await {
-            Some(ClientCommand::Rebuild) => match build_client(network).await {
+            Some(ClientCommand::Rebuild) => match build_client(network, gateways.take()).await {
                 Ok(client) => return Some(client),
                 Err(err) => {
                     tracing::error!(error = %err, "rebuild failed; awaiting the next");
@@ -264,5 +311,34 @@ async fn build_when_told(
             },
             Some(ClientCommand::Disconnect) | None => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_gateways_lets_the_sdk_choose() {
+        let mut selector = GatewaySelector::new(Vec::new());
+        assert_eq!(selector.take(), None);
+        assert_eq!(selector.take(), None, "still None on every build");
+    }
+
+    #[test]
+    fn one_gateway_is_pinned_on_every_build() {
+        let mut selector = GatewaySelector::new(vec!["gw-a".to_owned()]);
+        assert_eq!(selector.take().as_deref(), Some("gw-a"));
+        assert_eq!(selector.take().as_deref(), Some("gw-a"), "no other to rotate to");
+    }
+
+    #[test]
+    fn several_gateways_rotate_and_wrap() {
+        let mut selector =
+            GatewaySelector::new(vec!["gw-a".to_owned(), "gw-b".to_owned(), "gw-c".to_owned()]);
+        // Each build advances, so a rebuild after a bad gateway lands elsewhere;
+        // the sequence wraps rather than running off the end.
+        let seen: Vec<_> = (0..4).filter_map(|_| selector.take()).collect();
+        assert_eq!(seen, ["gw-a", "gw-b", "gw-c", "gw-a"]);
     }
 }

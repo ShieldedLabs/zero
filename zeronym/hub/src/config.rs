@@ -70,6 +70,15 @@ pub struct Config {
     #[arg(long, env = "ZIH_NYM_TOPOLOGY")]
     pub nym_topology: Option<std::path::PathBuf>,
 
+    /// Pin the hub's ENTRY gateway by identity key. A SINGLE value, not a list
+    /// like the shim's: the hub's Nym address embeds its gateway and must stay
+    /// stable (D10), so it holds ONE gateway and does not rotate. Unset = the SDK
+    /// picks (and the address is then whatever gateway it lands on). The enclave's
+    /// egress rule must allow this gateway's IP, or connect fails closed with no
+    /// console. Only meaningful with `--nym`.
+    #[arg(long, env = "ZIH_NYM_GATEWAY")]
+    pub nym_gateway: Option<String>,
+
     /// Accept clearnet submissions on `POST /`, the transitional shim-to-hub
     /// hop. **Off by default** (NYM_PLAN M7): once the mixnet path works,
     /// nothing legitimate posts there, while the enclave declares an

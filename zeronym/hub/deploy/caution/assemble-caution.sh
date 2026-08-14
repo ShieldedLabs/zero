@@ -59,6 +59,7 @@ TLS_DOMAIN=""
 APP_SOURCE=""
 NYM="false"
 NYM_EGRESS=""
+NYM_GATEWAY=""
 DEBUG="false"
 SSH_KEYS=""
 DEST=""
@@ -81,6 +82,11 @@ while [ $# -gt 0 ]; do
 		# One mixnet egress allowlist entry, repeatable: cidr:port[:proto]. The host
 		# operator supplies these (gateway(s), nym-api set, optionally DNS/Nyx).
 		--nym-egress)    NYM_EGRESS="$NYM_EGRESS $2"; shift 2 ;;
+		# Pin the hub's ENTRY gateway by identity key. SINGLE value (unlike the
+		# shim's list): the hub's address embeds its gateway and must stay stable,
+		# so it does not rotate. Needs a matching --nym-egress <gateway-ip>/32 rule
+		# (request_gateway takes the IDENTITY, egress takes the IP). Unset = SDK picks.
+		--nym-gateway)   NYM_GATEWAY=$2; shift 2 ;;
 		--debug)         DEBUG="true"; shift ;;
 		# One authorized debug-console SSH public key, repeatable. Required with
 		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
@@ -233,8 +239,10 @@ if [ "$NYM" = true ]; then
 		printf '\n      # Also accept submissions over the Nym mixnet (M5). The hub logs its\n'
 		printf '      # own Nym address at startup; publish it to shims as --hub-nym.\n'
 		printf '      ZIH_NYM = "true"\n'
+		[ -n "$NYM_GATEWAY" ] && printf '      ZIH_NYM_GATEWAY = "%s"\n' "$NYM_GATEWAY"
 	} > "$NYM_ENV_FILE"
 	echo "==> MIXNET RECEPTION ON: the hub also runs a mixnet client. egress allowlist:$NYM_EGRESS"
+	[ -n "$NYM_GATEWAY" ] && echo "    entry gateway pinned: $NYM_GATEWAY (stable address)" || echo "    entry gateway: SDK-selected (no --nym-gateway)"
 fi
 
 # The debug-console SSH key list, rendered into the debug{} block by awk below. One

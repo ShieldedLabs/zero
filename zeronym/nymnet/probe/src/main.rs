@@ -712,6 +712,8 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
     tokio::spawn(hub_driver::run_driver(
         hub_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        // Localnet pins the gateway through the topology file, not request_gateway.
+        None,
         hub_in_tx,
         hub_out_rx,
         hub_addr_tx,
@@ -749,6 +751,8 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     ));
     tokio::spawn(shim_driver::run_driver(
         shim_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        // Localnet pins the gateway through the topology file, not request_gateway.
+        Vec::new(),
         vec![hub_addr],
         targets.clone(),
         out_rx,
@@ -954,6 +958,8 @@ async fn cmd_hub_address_across_rebuild(network: &Path, expect_same: bool) -> Re
     tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
     tokio::spawn(hub_driver::run_driver(
         hub_driver::MixnetNetwork::TopologyFile(network.to_path_buf()),
+        // Localnet pins the gateway through the topology file, not request_gateway.
+        None,
         hub_in_tx,
         hub_out_rx,
         hub_addr_tx,

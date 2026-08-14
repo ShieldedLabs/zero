@@ -297,6 +297,7 @@ fn build_nym_transport(
     tokio::spawn(nym::run_supervisor(rotation, evt_rx, cmd_tx, inflight, shutdown()));
     tokio::spawn(nym_driver::run_driver(
         network,
+        config.nym_gateway.clone(),
         recipients,
         targets.clone(),
         out_rx,

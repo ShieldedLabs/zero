@@ -53,6 +53,7 @@ HUB=""
 HUB_TLS=""
 HUB_NYM=""
 NYM_EGRESS=""
+NYM_GATEWAY=""
 NYM_ROTATION=""
 TLS_DOMAIN=""
 APP_SOURCE=""
@@ -76,6 +77,13 @@ while [ $# -gt 0 ]; do
 		# see the long note in the Nym transport block for what they cover and why
 		# a plain /32 is not enough this time.
 		--nym-egress)       NYM_EGRESS="$NYM_EGRESS $2"; shift 2 ;;
+		# Pin the ENTRY gateway by identity key, repeatable for a list the driver
+		# rotates across rebuilds (escaping a dead or backpressuring gateway; the
+		# latter is the throughput lever). Each --nym-gateway <identity> needs a
+		# matching --nym-egress <gateway-ip>/32:9000:tcp rule: request_gateway takes
+		# the IDENTITY, the egress rule takes the IP, and a mismatch fails closed
+		# with no console. Unset lets the SDK pick a random gateway.
+		--nym-gateway)      NYM_GATEWAY="$NYM_GATEWAY${NYM_GATEWAY:+,}$2"; shift 2 ;;
 		# Rotate the shim's mixnet identity every N seconds (D11: the sender-tag
 		# linkage window). Unset never rotates. A deployment decision.
 		--nym-rotation-secs) NYM_ROTATION=$2; shift 2 ;;
@@ -261,10 +269,12 @@ if [ -n "$HUB_NYM" ]; then
 		printf '      # addresses. The mixnet is the confidentiality boundary; there is no TLS\n'
 		printf '      # name to verify on this hop. The driver tries each address until one acks.\n'
 		printf '      ZIS_HUB_NYM = "%s"\n' "$HUB_NYM"
+		[ -n "$NYM_GATEWAY" ] && printf '      ZIS_NYM_GATEWAY = "%s"\n' "$NYM_GATEWAY"
 		[ -n "$NYM_ROTATION" ] && printf '      ZIS_NYM_ROTATION_SECS = "%s"\n' "$NYM_ROTATION"
 	} >> "$HUB_ENV"
 	echo "==> DIVERSION ON over the Nym mixnet to: $HUB_NYM"
 	echo "    egress allowlist:$NYM_EGRESS"
+	[ -n "$NYM_GATEWAY" ] && echo "    entry gateway(s) pinned: $NYM_GATEWAY" || echo "    entry gateway: SDK-selected (no --nym-gateway)"
 	[ -n "$NYM_ROTATION" ] && echo "    identity rotation: every ${NYM_ROTATION}s" || echo "    identity rotation: never (--nym-rotation-secs unset; linkage window = process uptime)"
 elif [ -n "$HUB" ]; then
 	# ZIS_HUB parses as a Rust SocketAddr and the enclave resolves no DNS (there

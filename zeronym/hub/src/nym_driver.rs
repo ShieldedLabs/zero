@@ -110,8 +110,19 @@ pub enum MixnetNetwork {
 async fn build_client(
     network: &MixnetNetwork,
     storage: &Ephemeral,
+    gateway: Option<&str>,
 ) -> Result<MixnetClient, String> {
     let builder = MixnetClientBuilder::new_with_storage(storage.clone());
+    // A SINGLE pinned entry gateway, unlike the shim's rotating list: the hub's
+    // address embeds its gateway and must stay stable (D10), so it holds one. Once
+    // the storage carries a registration a rebuild loads it, so this only bites on
+    // the FIRST registration and on the fresh-identity fallback; applying it every
+    // build is harmless and keeps the choice in one place. The egress rule must
+    // allow this gateway's IP or connect fails closed with no console.
+    let builder = match gateway {
+        Some(gateway) => builder.request_gateway(gateway.to_owned()),
+        None => builder,
+    };
     let builder = match network {
         MixnetNetwork::Default => builder,
         #[cfg(feature = "mixnet-localnet")]
@@ -138,6 +149,7 @@ async fn build_client(
 /// disconnect cleanly and return.
 pub async fn run_driver(
     network: MixnetNetwork,
+    gateway: Option<String>,
     incoming: mpsc::Sender<Received>,
     mut outgoing: mpsc::Receiver<Reply>,
     address_out: mpsc::Sender<Recipient>,
@@ -160,7 +172,7 @@ pub async fn run_driver(
     // Outer loop: (re)build the client. Each pass holds one identity for as long
     // as it lives; a death falls out of the inner loop and comes back here.
     loop {
-        let mut client = match build_client(&network, &storage).await {
+        let mut client = match build_client(&network, &storage, gateway.as_deref()).await {
             Ok(client) => {
                 failed_rebuilds = 0;
                 client
