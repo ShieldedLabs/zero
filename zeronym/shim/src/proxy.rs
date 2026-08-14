@@ -49,7 +49,7 @@ use bytes::Bytes;
 use http::uri::{Authority, PathAndQuery, Scheme};
 use http::{HeaderMap, HeaderValue, Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as client_h1;
 use hyper::client::conn::http2 as client_h2;
@@ -85,6 +85,20 @@ pub const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetT
 /// relay dials, are governed by [`CautionRelay`] — off makes the shim a pure proxy.
 pub const CAUTION_HEALTH: &str = "/.well-known/caution/health";
 pub const CAUTION_ATTESTATION: &str = "/attestation";
+
+/// The shim's OWN operator-facing endpoints, answered locally and never proxied.
+///
+/// An attested shim has no SSH, and dispatch-only submit answers the wallet the
+/// moment a migration enters the in-process transport, so without these a shim
+/// whose mixnet client is dead looks exactly like a healthy one while dropping
+/// every migration. `/healthz` is process liveness; `/nym-status` reports the
+/// mixnet client's lifecycle (see [`crate::nym::MixnetStatus`] for what is
+/// deliberately NOT in it).
+///
+/// Neither collides with a wallet call: every CompactTxStreamer method lives
+/// under `/cash.z.wallet.sdk.rpc.CompactTxStreamer/`.
+pub const SHIM_HEALTH: &str = "/healthz";
+pub const SHIM_NYM_STATUS: &str = "/nym-status";
 
 /// Whether, and how, the shim owns Caution's in-enclave control-plane paths
 /// ([`CAUTION_HEALTH`], [`CAUTION_ATTESTATION`]).
@@ -372,6 +386,7 @@ pub async fn serve(listener: TcpListener, backend: impl Into<Backend>) -> Result
         None,
         None,
         CautionRelay::default(),
+        crate::nym::MixnetStatus::default(),
         std::future::pending::<()>(),
     )
     .await
@@ -392,6 +407,7 @@ pub async fn serve_with_shutdown<S>(
     tls: Option<Arc<ServerTls>>,
     diversion: Option<Arc<crate::intercept::Diversion>>,
     caution: CautionRelay,
+    status: crate::nym::MixnetStatus,
     shutdown: S,
 ) -> Result<(), BoxError>
 where
@@ -432,16 +448,21 @@ where
                 let tls = tls.clone();
                 let diversion = diversion.clone();
                 let caution = caution.clone();
+                let status = status.clone();
                 tokio::spawn(async move {
                     let _live = live;
                     match tls {
-                        None => serve_connection(stream, peer, backend, diversion, caution).await,
+                        None => {
+                            serve_connection(stream, peer, backend, diversion, caution, status)
+                                .await
+                        }
                         Some(tls) => match tls.accept(stream).await {
                             // A TLS-ALPN-01 validation, already answered and
                             // closed by the acceptor. Not wallet traffic.
                             Ok(None) => {}
                             Ok(Some(stream)) => {
-                                serve_connection(stream, peer, backend, diversion, caution).await
+                                serve_connection(stream, peer, backend, diversion, caution, status)
+                                    .await
                             }
                             // Handshake failures are ordinary on a public
                             // listener (scanners, a wallet that gave up, or a
@@ -493,6 +514,7 @@ async fn serve_connection<IO>(
     backend: Backend,
     diversion: Option<Arc<intercept::Diversion>>,
     caution: CautionRelay,
+    status: crate::nym::MixnetStatus,
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -509,7 +531,8 @@ async fn serve_connection<IO>(
         let pool = pool.clone();
         let diversion = diversion.clone();
         let caution = caution.clone();
-        async move { handle(req, pool, diversion, caution).await }
+        let status = status.clone();
+        async move { handle(req, pool, diversion, caution, status).await }
     });
 
     if let Err(err) = server_h2::Builder::new(TokioExecutor::new())
@@ -529,6 +552,7 @@ async fn handle(
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<intercept::Diversion>>,
     caution: CautionRelay,
+    status: crate::nym::MixnetStatus,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
@@ -548,6 +572,10 @@ async fn handle(
         Route::CautionAttestation if caution.enabled => {
             forward_to_bootproofd(req, &caution.bootproofd_addr).await
         }
+        // The shim's own operator endpoints. Answered locally and never proxied:
+        // an attested shim has no other way to say whether it is working.
+        Route::ShimHealth => Ok(text_response(200, "ok")),
+        Route::ShimNymStatus => Ok(json_response(&status.to_json())),
         Route::PassThrough | Route::CautionHealth | Route::CautionAttestation => {
             pass_through(req, pool).await
         }
@@ -608,6 +636,10 @@ pub enum Route {
     /// bootproofd (the platform's NSM source) and never proxied to the indexer;
     /// when it is disabled this falls through to `PassThrough`.
     CautionAttestation,
+    /// [`SHIM_HEALTH`]: the shim's own liveness, answered locally.
+    ShimHealth,
+    /// [`SHIM_NYM_STATUS`]: the mixnet client's lifecycle, answered locally.
+    ShimNymStatus,
     /// Opaque. Relayed without being read.
     PassThrough,
 }
@@ -633,6 +665,13 @@ pub fn route_for(path: &str) -> Route {
     }
     if path == CAUTION_ATTESTATION {
         return Route::CautionAttestation;
+    }
+    // The shim's own operator endpoints.
+    if path == SHIM_HEALTH {
+        return Route::ShimHealth;
+    }
+    if path == SHIM_NYM_STATUS {
+        return Route::ShimNymStatus;
     }
 
     // Trailing slashes are tolerated here, not because tonic accepts them (it
@@ -801,6 +840,30 @@ fn sanitize_grpc_message(message: &str) -> String {
 /// Caution's `/.well-known/caution/health`, answered locally with HTTP 200 so it
 /// is never proxied to the indexer. The platform normally serves this itself; we
 /// own it defensively (and in case the platform routes it to us under h2c).
+/// A small `text/plain` reply, for the shim's own endpoints.
+fn text_response(status: u16, body: &str) -> Response<ProxyBody> {
+    let body = Full::new(Bytes::from(body.to_owned()))
+        .map_err(BoxError::from)
+        .boxed();
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(body)
+        .expect("static text response builds")
+}
+
+/// A small `application/json` reply, for [`SHIM_NYM_STATUS`].
+fn json_response(body: &str) -> Response<ProxyBody> {
+    let body = Full::new(Bytes::from(body.to_owned()))
+        .map_err(BoxError::from)
+        .boxed();
+    Response::builder()
+        .status(200)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .expect("static json response builds")
+}
+
 fn caution_health_ok() -> Response<ProxyBody> {
     let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed();
     Response::builder()

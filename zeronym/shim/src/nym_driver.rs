@@ -37,7 +37,7 @@ use nym_sdk::mixnet::{
     IncludedSurbs, MixnetClient, MixnetClientBuilder, MixnetMessageSender, Recipient,
 };
 
-use crate::nym::{ClientCommand, ClientEvent, OutFrame, TargetCount};
+use crate::nym::{ClientCommand, ClientEvent, MixnetStatus, OutFrame, TargetCount};
 
 /// Which Nym network the driver connects to.
 ///
@@ -110,6 +110,35 @@ async fn build_client(
         Some(gateway) => builder.request_gateway(gateway),
         None => builder,
     };
+    // LOCALNET FIDELITY ONLY. A loopback mixnet with one tenant never gives the
+    // client any backpressure, so its `SendingDelayController` sits at multiplier
+    // 1 (~50 packets/s) while a real shared gateway pegs it at MAX_DELAY_MULTIPLIER
+    // = 6 (~8 packets/s). That 6x is the entire difference between a localnet
+    // lookup answering in ~1.3 s and a production one exceeding the 25 s budget,
+    // so a localnet run at the default rate certifies a latency the public network
+    // cannot deliver. `ZIS_LOCALNET_SEND_DELAY_MS` lets the harness emulate the
+    // throttled rate and measure against it.
+    //
+    // Gated on `mixnet-localnet` so a PRODUCTION binary cannot read it at all: a
+    // non-default send rate would make this client's traffic distinguishable from
+    // every other Nym client, which is a fingerprint, and the shaping is what
+    // hides the divert in the first place.
+    #[cfg(feature = "mixnet-localnet")]
+    let builder = match std::env::var("ZIS_LOCALNET_SEND_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(ms) => {
+            let mut debug = nym_sdk::DebugConfig::default();
+            debug.traffic.message_sending_average_delay = std::time::Duration::from_millis(ms);
+            tracing::warn!(
+                send_delay_ms = ms,
+                "LOCALNET: emulating a throttled send rate; this is a test knob, never production"
+            );
+            builder.debug_config(debug)
+        }
+        None => builder,
+    };
     let builder = match network {
         MixnetNetwork::Default => builder,
         #[cfg(feature = "mixnet-localnet")]
@@ -140,6 +169,7 @@ pub async fn run_driver(
     gateways: Vec<String>,
     hub_addresses: Vec<Recipient>,
     targets: TargetCount,
+    status: MixnetStatus,
     mut out_frames: mpsc::Receiver<OutFrame>,
     inbound: mpsc::Sender<Zeroizing<Vec<u8>>>,
     mut commands: mpsc::Receiver<ClientCommand>,
@@ -148,6 +178,10 @@ pub async fn run_driver(
     use std::sync::atomic::Ordering;
 
     targets.store(hub_addresses.len(), Ordering::Relaxed);
+    // Published before the first build attempt, so a shim that NEVER connects
+    // still reports "configured but not connected" rather than looking
+    // forward-only, which is the case an operator most needs to see.
+    status.set_configured();
 
     // Rotates the pinned entry gateway across (re)builds; empty = the SDK picks.
     let mut gateways = GatewaySelector::new(gateways);
@@ -156,11 +190,15 @@ pub async fn run_driver(
     // REbuild (rotation, or recovery after a reported death). A failed initial
     // connect enters the same wait-to-be-rebuilt path as a mid-run failure.
     let mut client = match build_client(&network, gateways.take()).await {
-        Ok(client) => client,
+        Ok(client) => {
+            status.set_connected();
+            client
+        }
         Err(err) => {
             tracing::error!(error = %err, "initial mixnet connect failed; awaiting rebuild");
+            status.set_rebuild_failed();
             let _ = events.send(ClientEvent::Died).await;
-            match build_when_told(&mut commands, &network, &events, &mut gateways).await {
+            match build_when_told(&mut commands, &network, &events, &mut gateways, &status).await {
                 Some(client) => client,
                 None => return,
             }
@@ -221,12 +259,17 @@ pub async fn run_driver(
                 // A live rotation: disconnect the current identity to completion
                 // (D12: disconnect is not cancel-safe), then mint a fresh one.
                 client.disconnect().await;
+                status.set_died();
                 client = match build_client(&network, gateways.take()).await {
-                    Ok(client) => client,
+                    Ok(client) => {
+                        status.set_connected();
+                        client
+                    }
                     Err(err) => {
                         tracing::error!(error = %err, "rebuild failed; awaiting retry");
+                        status.set_rebuild_failed();
                         let _ = events.send(ClientEvent::Died).await;
-                        match build_when_told(&mut commands, &network, &events, &mut gateways).await {
+                        match build_when_told(&mut commands, &network, &events, &mut gateways, &status).await {
                             Some(client) => client,
                             None => return,
                         }
@@ -238,8 +281,9 @@ pub async fn run_driver(
                 // The dead client's tasks have already stopped, so it is dropped
                 // (by the reassignment below), not disconnected. Report and wait
                 // for the supervisor to ask for a rebuild.
+                status.set_died();
                 let _ = events.send(ClientEvent::Died).await;
-                client = match build_when_told(&mut commands, &network, &events, &mut gateways).await {
+                client = match build_when_told(&mut commands, &network, &events, &mut gateways, &status).await {
                     Some(client) => client,
                     None => return,
                 };
@@ -302,13 +346,18 @@ async fn build_when_told(
     network: &MixnetNetwork,
     events: &mpsc::Sender<ClientEvent>,
     gateways: &mut GatewaySelector,
+    status: &MixnetStatus,
 ) -> Option<MixnetClient> {
     loop {
         match commands.recv().await {
             Some(ClientCommand::Rebuild) => match build_client(network, gateways.take()).await {
-                Ok(client) => return Some(client),
+                Ok(client) => {
+                    status.set_connected();
+                    return Some(client);
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "rebuild failed; awaiting the next");
+                    status.set_rebuild_failed();
                     let _ = events.send(ClientEvent::Died).await;
                 }
             },

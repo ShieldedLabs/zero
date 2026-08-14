@@ -95,6 +95,11 @@ async fn main() -> Result<(), BoxError> {
     // `to_string`, not `?` on the typed error: main renders a BoxError with
     // Debug, and this message is the whole reason the check runs at startup
     // rather than at the first divert.
+    // Published by the mixnet driver, read by GET /nym-status. Created here so the
+    // serving path holds the same handle the driver writes to; on a forward-only or
+    // clearnet shim nothing ever writes, and it honestly reports "not configured".
+    let mixnet_status = zero_indexer_shim::nym::MixnetStatus::default();
+
     let selection = config.hub_selection().map_err(|err| err.to_string())?;
     let diversion = match selection {
         HubSelection::Http(hub_addr) => {
@@ -118,7 +123,7 @@ async fn main() -> Result<(), BoxError> {
                 hub: HubClient::new(hub_addr, hub_tls).into(),
             }))
         }
-        HubSelection::Nym(addresses) => nym_diversion(&config, addresses)?,
+        HubSelection::Nym(addresses) => nym_diversion(&config, addresses, &mixnet_status)?,
         HubSelection::ForwardOnly => {
             tracing::warn!(
                 "no --hub: FORWARD-ONLY. Migrations are classified and logged but forwarded to \
@@ -150,7 +155,13 @@ async fn main() -> Result<(), BoxError> {
     }
 
     zero_indexer_shim::serve_with_shutdown(
-        listener, backend, server_tls, diversion, caution, shutdown(),
+        listener,
+        backend,
+        server_tls,
+        diversion,
+        caution,
+        mixnet_status,
+        shutdown(),
     )
     .await
 }
@@ -208,8 +219,9 @@ async fn shutdown() {
 fn nym_diversion(
     config: &Config,
     addresses: Vec<String>,
+    status: &zero_indexer_shim::nym::MixnetStatus,
 ) -> Result<Option<Arc<Diversion>>, BoxError> {
-    let transport = build_nym_transport(config, addresses)?;
+    let transport = build_nym_transport(config, addresses, status)?;
     tracing::info!(
         "diversion ENABLED over the Nym mixnet: Orchard-touching sends and all GetTransaction \
          go to the hub, not the operator"
@@ -221,7 +233,11 @@ fn nym_diversion(
 /// honest response is to refuse: forwarding migrations to the operator or
 /// falling back to clearnet are both exactly what setting `--hub-nym` rejected.
 #[cfg(not(feature = "mixnet-driver"))]
-fn nym_diversion(_config: &Config, addresses: Vec<String>) -> Result<Option<Arc<Diversion>>, BoxError> {
+fn nym_diversion(
+    _config: &Config,
+    addresses: Vec<String>,
+    _status: &zero_indexer_shim::nym::MixnetStatus,
+) -> Result<Option<Arc<Diversion>>, BoxError> {
     Err(format!(
         "--hub-nym is set ({} address(es)) but this binary was built WITHOUT the mixnet-driver \
          feature; rebuild with --features mixnet-driver, or use --hub for the transitional \
@@ -238,6 +254,7 @@ fn nym_diversion(_config: &Config, addresses: Vec<String>) -> Result<Option<Arc<
 fn build_nym_transport(
     config: &Config,
     addresses: Vec<String>,
+    status: &zero_indexer_shim::nym::MixnetStatus,
 ) -> Result<zero_indexer_shim::hub::HubTransport, BoxError> {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -302,15 +319,29 @@ fn build_nym_transport(
         config.nym_gateway.clone(),
         recipients,
         targets.clone(),
+        status.clone(),
         out_rx,
         in_tx,
         cmd_rx,
         evt_tx,
     ));
 
+    // The lookup budget is a deployment property (see the config docs), so an
+    // operator can retune it against the mixnet of the day without moving the
+    // binary hash. Submits are unaffected either way: they never wait for the hub.
+    let lookup_timeout = config
+        .lookup_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(REQUEST_TIMEOUT);
+    tracing::info!(
+        lookup_timeout_secs = lookup_timeout.as_secs(),
+        submit_dispatch_timeout_secs = SUBMIT_DISPATCH_TIMEOUT.as_secs(),
+        "mixnet transport timeouts"
+    );
+
     Ok(HubTransport::from(NymHandle::new(
         req_tx,
-        REQUEST_TIMEOUT,
+        lookup_timeout,
         SUBMIT_DISPATCH_TIMEOUT,
         targets,
     )))

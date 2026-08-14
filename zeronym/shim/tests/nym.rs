@@ -611,14 +611,15 @@ async fn a_silent_hub_fails_closed_only_after_every_address() {
 }
 
 #[tokio::test]
-async fn requests_start_at_rotating_addresses() {
+async fn lookups_start_at_rotating_addresses() {
     // Always starting at the first address would lean the whole shim's load on
-    // one of a multi-homed hub's gateways.
+    // one of a multi-homed hub's gateways. (Submits no longer rotate: they go to
+    // every address, see `a_submit_goes_to_every_hub_address`.)
     let (mut driver, _inflight) = start_with_targets(Duration::from_millis(30), 3);
     let mut starts = Vec::new();
     for _ in 0..3 {
         let handle = driver.handle.clone();
-        let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+        let lookup = tokio::spawn(async move { handle.get_transaction(&[0x70; 32]).await });
         starts.push(
             driver
                 .from_transport
@@ -628,13 +629,54 @@ async fn requests_start_at_rotating_addresses() {
                 .target,
         );
         // Drain this request's remaining attempts before the next request.
-        let _ = submit.await.unwrap();
+        let _ = lookup.await.unwrap();
         while driver.from_transport.try_recv().is_ok() {}
     }
     assert_eq!(
         starts,
         vec![0, 1, 2],
         "consecutive requests begin at successive addresses"
+    );
+}
+
+#[tokio::test]
+async fn a_submit_goes_to_every_hub_address() {
+    // The deployment is many shims to ONE hub, and that hub FAILS OVER, so
+    // `--hub-nym` lists the addresses it may currently be at. Dispatch-only submit
+    // awaits no ack, so it cannot discover that an address is dead and move on:
+    // sending to only one would silently drop every migration that happened to
+    // pick the address that is down, while the wallet had already been told
+    // success. So it sends to all of them, and the hub deduplicates (D6).
+    let (mut driver, _inflight) = start_with_targets(Duration::from_secs(5), 3);
+    let handle = driver.handle.clone();
+    let submit = tokio::spawn(async move { handle.submit(b"tx").await });
+
+    let mut targets = Vec::new();
+    let mut nonces = Vec::new();
+    for _ in 0..3 {
+        let out = driver
+            .from_transport
+            .recv()
+            .await
+            .expect("one frame per hub address");
+        let (nonce, _) = wire::decode_submit(&out.frame).unwrap();
+        targets.push(out.target);
+        nonces.push(nonce);
+    }
+    assert_eq!(submit.await.unwrap(), Ok(()));
+
+    targets.sort_unstable();
+    assert_eq!(targets, vec![0, 1, 2], "every configured address was sent to");
+    nonces.sort_unstable();
+    nonces.dedup();
+    assert_eq!(
+        nonces.len(),
+        3,
+        "each address gets its own nonce, so two hubs answering cannot collide"
+    );
+    assert!(
+        driver.from_transport.try_recv().is_err(),
+        "and no more than one frame per address"
     );
 }
 

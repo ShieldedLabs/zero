@@ -103,6 +103,18 @@ pub struct Config {
     #[arg(long, env = "ZIS_NYM_GATEWAY", value_delimiter = ',')]
     pub nym_gateway: Vec<String>,
 
+    /// Seconds to wait for the hub's answer to a `GetTransaction` lookup, before
+    /// failing closed with UNAVAILABLE. Unset uses the shipped default (90 s).
+    ///
+    /// Exposed because the right value is a property of the mixnet on the day, not
+    /// of the code: a lookup is ~101 Sphinx packets and the client's send rate
+    /// swings 6x with gateway backpressure. Tuning it here changes the enclave
+    /// config, NOT the binary, so `EXPECTED_SHA256` and the reproducibility trail
+    /// stay put. Note it multiplies by the number of `--hub-nym` addresses, since
+    /// a timeout sweeps to the next one.
+    #[arg(long, env = "ZIS_LOOKUP_TIMEOUT_SECS")]
+    pub lookup_timeout_secs: Option<u64>,
+
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
     /// domain. Unset means serve plaintext h2c.
     ///

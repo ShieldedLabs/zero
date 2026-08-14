@@ -149,6 +149,7 @@ async fn spawn_nym_shim(
             None,
             diversion,
             zero_indexer_shim::CautionRelay::default(),
+            zero_indexer_shim::nym::MixnetStatus::default(),
             std::future::pending::<()>(),
         )
         .await;

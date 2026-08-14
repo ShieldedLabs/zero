@@ -313,6 +313,7 @@ understanding what they mean.
 | `ZIS_NYM_GATEWAY` | pin the entry gateway by IDENTITY key (repeatable; rotates across rebuilds) | **leave unset for now** — untested against public Nym |
 | `ZIS_NYM_ROTATION_SECS` | rotate the shim's mixnet identity every N seconds, bounding how long the hub can link your submissions | a deployment decision; unset = never |
 | `ZIS_CAUTION_ATTESTATION` | let the shim answer Caution's own `/attestation` and health paths | **`true` on managed Caution** (the default). Under h2c the platform routes these to the app, and a shim that proxied them to your indexer would fail its health check and never boot |
+| `ZIS_LOOKUP_TIMEOUT_SECS` | how long a `GetTransaction` waits for the hub before failing closed | default **90 s** (raised from 25 s against measurement). Tuning it changes the enclave config, not the binary, so your `EXPECTED_SHA256` and reproducibility trail stay put. It **multiplies** by the number of `--hub-nym` addresses |
 | `ZIS_HUB` / `ZIS_HUB_TLS` | **legacy** clearnet hop | unset — the current hub refuses clearnet submissions |
 
 `ZIS_BACKEND_TLS` does double duty: the name the backend's certificate must
@@ -397,30 +398,40 @@ allowance is exhausted the mixnet client stops working and every divert fails
 closed. There is **no ticketbook (paid credential) mechanism wired up yet**, so
 today the recovery is manual.
 
-- **Detect:** ⚠ **there is currently no reliable way, and you should know that
-  before you deploy.** The shim's own reachability proves nothing: the clearnet
-  proxy path keeps answering normally while the mixnet hop is dead. Nor does the
-  wallet's reply — the shim answers success as soon as a migration is handed to
-  its internal transport, so a dead mixnet client still looks like a successful
-  send. And an end-to-end divert test does not close it either: the
-  `GetTransaction` lookup that would confirm arrival is itself a mixnet round trip
-  and times out under current latency (measured 2026-08-14: 12 consecutive
-  failures over 10 minutes on a healthy attested pair).
-- **Consequence:** an attested shim (no SSH) whose mixnet client has died is
-  **externally indistinguishable** from one working perfectly, while every
-  migration is silently dropped. A shim status endpoint reporting mixnet-client
-  health is the fix and is not built yet. Until it is, treat a debug-mode shim
-  with console access as the only way to confirm the mixnet hop is alive, and
-  raise this with Shielded Labs before relying on an attested shim in production.
+- **Detect: poll `GET /nym-status`.** Nothing else works, and it is worth
+  understanding why. The shim's reachability proves nothing (the clearnet proxy
+  answers normally while the mixnet hop is dead); the wallet's reply proves
+  nothing (the shim answers success as soon as a migration reaches its internal
+  transport); and an end-to-end divert test proves nothing either, because the
+  `GetTransaction` that would confirm arrival is itself a mixnet round trip.
 
-**Related, and currently the case: `GetTransaction` for a just-diverted migration
-does not work.** The mixnet is slow — a migration can take minutes to reach the
-hub, which is fine, because a migration is time-insensitive by design. But the
-lookup path *waits* for a hub round trip against a 25-second budget, and measured
-2026-08-14 it did not complete once in 14 attempts across two independently
-deployed pairs. Expect the wallet to be told `UNAVAILABLE` (failing closed, never
-falling back to your indexer) and to see its transaction only once it is mined
-and ordinary sync picks it up.
+  ```
+  curl https://<tls-domain>/nym-status
+  {"diversion_configured":true,"mixnet_connected":true,"client_deaths":0,"consecutive_rebuild_failures":0}
+  ```
+
+  | field | alert when |
+  |---|---|
+  | `diversion_configured` | `false` on a shim you built with `--hub-nym` — it is forward-only and hiding nothing |
+  | `mixnet_connected` | `false` — **migrations are being silently dropped right now** |
+  | `client_deaths` | climbing steadily: gateway churn |
+  | `consecutive_rebuild_failures` | non-zero and growing: it is down and not recovering |
+
+  `GET /healthz` is process liveness. Neither endpoint exposes send counts,
+  timestamps, or txids — a "last diverted at" field would tell any passer-by
+  exactly when a migration went out, which is the timing correlation this system
+  exists to prevent.
+
+**Related: `GetTransaction` for a just-diverted migration is slow, and may not
+answer at all.** The mixnet is slow — a migration can take minutes to reach the
+hub, which is fine, because a migration is time-insensitive by design. The lookup
+path, though, *waits* for a full hub round trip: measured 2026-08-14 it did not
+complete once in 14 attempts across two independently deployed pairs, against
+what was then a 25-second budget. The budget is now **90 s**
+(`ZIS_LOOKUP_TIMEOUT_SECS`), sized so the ~12.6 s of pure packet emission at the
+throttled send rate has real headroom for queueing. If it still times out the
+wallet is told `UNAVAILABLE` — failing closed, never falling back to your indexer
+— and sees its transaction once it is mined and ordinary sync picks it up.
 
 Worth knowing for diagnosis: **the timing tells you which failure you have.** A
 lookup that fails after the full ~25 s means the shim sent and got no reply (the

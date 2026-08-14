@@ -33,6 +33,7 @@
 //! the measured numbers next to the frames they were measured for.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rand::RngCore;
@@ -41,13 +42,28 @@ use zeroize::Zeroizing;
 
 use crate::wire::{self, AckKind, LookupReply, Nonce, WireError};
 
-/// Ceiling on one request, submit or lookup. A frame takes about a second to
-/// emit at the client's Poisson rate (more under backpressure) plus a measured
-/// ~10 s mixnet round trip; a lookup that misses the hub's queue additionally
-/// waits on the hub's own 10 s indexer timeout. 25 s covers both with margin
-/// and sits under typical wallet gRPC deadlines, so a slow-but-alive mixnet
-/// succeeds and a dead one fails closed before the wallet gives up.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+/// Ceiling on one LOOKUP round trip. (Submits no longer wait for the hub at all;
+/// they are bounded by [`SUBMIT_DISPATCH_TIMEOUT`] instead.)
+///
+/// Raised from 25 s to 90 s on 2026-08-14, against measurement. The old value was
+/// sized for a ~10 s round trip, which is what an unthrottled client gives; a real
+/// gateway's backpressure pegs the client at ~8 packets/s, and a lookup is ~101
+/// packets (60 reply SURBs out, a full 64 KiB reply back) — **~12.6 s of pure
+/// emission before any mix delay or queueing**. Measured against the live pair,
+/// 25 s produced 14 consecutive UNAVAILABLE answers across two independent
+/// deployments; see the `throughput_budget` tests, which pin this arithmetic.
+///
+/// Raising it is only cheap because submits stopped waiting: before dispatch-only
+/// this constant also bounded every send, so a bigger value meant slower wallets.
+/// Now it costs nothing until a wallet actually looks up a just-diverted
+/// transaction, which is the one case that is failing today.
+///
+/// **It multiplies.** `each_target` sweeps the hub address list on timeout, so a
+/// fully dead mixnet costs `timeout * addresses` before the wallet hears
+/// UNAVAILABLE — 90 s is deliberate for the one-hub deployment and wants
+/// revisiting if the list grows. Override per deployment with
+/// `ZIS_LOOKUP_TIMEOUT_SECS`; the default is what ships.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Ceiling on handing ONE submission to the transport, for the best-effort submit
 /// path (see [`NymHandle::submit`]). Not a round trip: this only bounds the wait
@@ -81,6 +97,82 @@ pub const SUBMIT_REPLY_SURBS: u32 = 13;
 /// costing a full mixnet round trip per lookup (measured). 60 clears the
 /// threshold with margin while staying a fixed, bounded count.
 pub const LOOKUP_REPLY_SURBS: u32 = 60;
+
+/// Externally observable health of the shim's mixnet client.
+///
+/// An attested shim has no SSH, and dispatch-only submit answers the wallet as
+/// soon as a migration enters the in-process transport — so without this, a shim
+/// whose mixnet client is dead is INDISTINGUISHABLE from a healthy one while it
+/// silently drops every migration (measured 2026-08-14). This is the minimum an
+/// operator needs to tell those apart.
+///
+/// **What it deliberately does NOT expose.** Nothing about user traffic: no send
+/// counts, no timestamps of sends, no txids, no queue depth. A "last diverted at"
+/// field would be an oracle telling any poller exactly when a migration went out,
+/// which is the timing correlation the whole system exists to prevent. Everything
+/// here is a property of the CLIENT LIFECYCLE — which turns over on gateway churn
+/// and network events, not on whether a user sent anything — and the cover-traffic
+/// stream runs continuously either way, so none of it is a divert oracle.
+#[derive(Clone, Default)]
+pub struct MixnetStatus(std::sync::Arc<MixnetStatusInner>);
+
+#[derive(Default)]
+struct MixnetStatusInner {
+    /// Diversion over the mixnet is configured at all (`--hub-nym` was set).
+    configured: AtomicBool,
+    /// A client is currently built and connected to its gateway.
+    connected: AtomicBool,
+    /// How many times the client has died since start. Climbing means gateway
+    /// churn; historically this reached 6,305.
+    deaths: AtomicU64,
+    /// Consecutive failed rebuilds. Non-zero means we are currently down and
+    /// retrying, which is the state that silently swallows migrations.
+    consecutive_failures: AtomicU64,
+}
+
+impl MixnetStatus {
+    /// Mark that diversion is configured. Called once at startup, before the
+    /// first build, so a shim that never connects still reports honestly.
+    pub fn set_configured(&self) {
+        self.0.configured.store(true, Ordering::Relaxed);
+    }
+
+    /// A client is up. Clears the consecutive-failure run.
+    pub fn set_connected(&self) {
+        self.0.connected.store(true, Ordering::Relaxed);
+        self.0.consecutive_failures.store(0, Ordering::Relaxed);
+    }
+
+    /// The client died: no longer connected, and one more death on the counter.
+    pub fn set_died(&self) {
+        self.0.connected.store(false, Ordering::Relaxed);
+        self.0.deaths.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A rebuild attempt failed. Still down; the run of failures grows.
+    pub fn set_rebuild_failed(&self) {
+        self.0.connected.store(false, Ordering::Relaxed);
+        self.0.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The status as the JSON the endpoint serves. Hand-rolled rather than
+    /// pulling in serde_json for four scalars.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"diversion_configured\":{},\"mixnet_connected\":{},\"client_deaths\":{},\"consecutive_rebuild_failures\":{}}}",
+            self.0.configured.load(Ordering::Relaxed),
+            self.0.connected.load(Ordering::Relaxed),
+            self.0.deaths.load(Ordering::Relaxed),
+            self.0.consecutive_failures.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Whether the shim can currently carry a migration: either diversion is not
+    /// configured at all (forward-only, nothing to be down), or the client is up.
+    pub fn is_healthy(&self) -> bool {
+        !self.0.configured.load(Ordering::Relaxed) || self.0.connected.load(Ordering::Relaxed)
+    }
+}
 
 /// What a pending request is waiting for. The variants mirror the two reply
 /// frames the hub can send, so a reply that decodes as the wrong kind for its
@@ -333,39 +425,85 @@ impl NymHandle {
     /// never received would be a lie. The caller maps `Ok(())` to the wallet's
     /// success.
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<(), NymError> {
-        use std::sync::atomic::Ordering;
-
         let targets = self.targets.load(Ordering::Relaxed);
         if targets == 0 {
             // No hub address to send to: nothing was dispatched. Fail closed.
             return Err(NymError::TransportGone);
         }
-        // Rotate which hub address this submit targets, so load and the retry of a
-        // dead address spread across a multi-homed hub over successive sends (D10).
-        let target = self.cursor.fetch_add(1, Ordering::Relaxed) % targets;
 
-        let nonce = fresh_nonce();
-        let frame = wire::encode_submit(&nonce, tx_bytes).map_err(NymError::Encode)?;
-        let (ack_tx, _drop_receiver) = oneshot::channel();
-        let request = Request {
-            nonce,
-            frame,
-            reply_surbs: SUBMIT_REPLY_SURBS,
-            waiter: Waiter::Ack(ack_tx),
-            target,
-        };
-
+        // Send to EVERY configured hub address, not one (REVIEW #6).
+        //
+        // The deployment is many shims to ONE hub -- which is what makes the batch,
+        // and so the anonymity set, the union of every operator's migrations -- but
+        // that hub FAILS OVER, and `--hub-nym` is the list of addresses it may be
+        // at (D10: the current one and the just-rotated one, since a diskless hub
+        // mints a new address on restart).
+        //
+        // Picking a single address per submit would be wrong here in a way that is
+        // invisible: no ack is awaited, so a frame sent to the address that is
+        // currently down is dropped by the driver while the wallet has ALREADY been
+        // told success. With a two-address failover list that silently loses about
+        // half of all migrations. The old ack-waiting path swept to the next
+        // address on timeout and so recovered; dispatch-only cannot, and must
+        // instead not choose.
+        //
+        // WHAT MAKES THE DUPLICATES SAFE, precisely. Each hub deduplicates its OWN
+        // queue on the payload hash (D6), which collapses a resend to the same hub.
+        // It does NOT deduplicate across hubs: the hub has no notion of being
+        // active or standby, so any hub that RECEIVES a migration will queue and
+        // broadcast it. Sending to every address is therefore safe only while the
+        // other addresses are DEAD -- which is the failover model this list was
+        // built for (D10): a diskless hub mints a new address when it restarts, so
+        // the list is "the current address, and the one it just rotated away from",
+        // and nothing is listening at the stale one.
+        //
+        // If two hubs were ever live at once, both would broadcast the same
+        // transaction. On-chain that is harmless (the second is a known txid), but
+        // it would publish the migration in two different batches at two different
+        // moments, which is strictly worse for the batching this design exists to
+        // provide, and it doubles the number of enclaves holding the plaintext.
+        // Running a hot standby therefore needs an explicit passive mode in the
+        // hub, which does not exist today.
+        //
+        // The cost is N frames of packets on a path that carries a migration
+        // roughly 0.77 times per block, against a cover-traffic stream running
+        // continuously anyway -- and, because nothing is awaited, no wallet latency.
         let deadline = tokio::time::Instant::now() + self.dispatch_timeout;
-        match tokio::time::timeout_at(deadline, self.requests.send(request)).await {
-            // Handed to the transport: the migration is on its way over the mixnet.
-            // Best-effort success; the caller fills in the locally-computed txid.
-            Ok(Ok(())) => Ok(()),
-            // The transport loop is gone; nothing can be sent.
-            Ok(Err(_)) => Err(NymError::TransportGone),
-            // The transport stayed backpressured for the whole window: we could not
-            // hand the frame off. Report it as unsendable so the wallet retries,
-            // rather than claim a success we did not achieve.
-            Err(_) => Err(NymError::TransportGone),
+        let mut dispatched = 0usize;
+        let mut last_err = NymError::TransportGone;
+
+        for target in 0..targets {
+            // A FRESH nonce per address: two hubs answering the same nonce would be
+            // indistinguishable to the correlator, and the ack is unread anyway.
+            let nonce = fresh_nonce();
+            let frame = wire::encode_submit(&nonce, tx_bytes).map_err(NymError::Encode)?;
+            let (ack_tx, _drop_receiver) = oneshot::channel();
+            let request = Request {
+                nonce,
+                frame,
+                reply_surbs: SUBMIT_REPLY_SURBS,
+                waiter: Waiter::Ack(ack_tx),
+                target,
+            };
+            match tokio::time::timeout_at(deadline, self.requests.send(request)).await {
+                Ok(Ok(())) => dispatched += 1,
+                // The transport loop is gone; no address is reachable.
+                Ok(Err(_)) => return Err(NymError::TransportGone),
+                // Backpressured past the shared budget. Stop rather than hold the
+                // wallet longer; whatever already went out still stands.
+                Err(_) => {
+                    last_err = NymError::TransportGone;
+                    break;
+                }
+            }
+        }
+
+        // One successful hand-off is enough: the migration is on the mixnet, bound
+        // for at least one address the hub may be at.
+        if dispatched > 0 {
+            Ok(())
+        } else {
+            Err(last_err)
         }
     }
 
@@ -735,6 +873,95 @@ fn deliver(pending: &mut HashMap<Nonce, Waiter>, bytes: &[u8]) {
             ),
         },
         other => tracing::warn!(bytes = other, "inbound message is not a reply frame size"),
+    }
+}
+
+#[cfg(test)]
+mod throughput_budget {
+    //! Does a request still FIT its timeout at the send rate the public mixnet
+    //! actually gives us?
+    //!
+    //! This exists because the localnet said yes while production said no. A
+    //! loopback mixnet with a single tenant never backpressures its client, so
+    //! `SendingDelayController` stays at multiplier 1 and `e2e-driver` measured a
+    //! 1.3 s lookup — while the same code against a shared public gateway pegged
+    //! at multiplier 6 and could not answer inside 25 s (measured 2026-08-14, 14
+    //! consecutive failures across two independently deployed pairs). The
+    //! end-to-end test was green about a latency the network cannot deliver.
+    //!
+    //! So the budget is asserted from the constants instead, where it is
+    //! deterministic and needs no mixnet: packets on the wire are a function of
+    //! frame size and attached-SURB count (D4), and time is packets over the
+    //! throttled rate. A change to `FRAME_BYTES`, either SURB count, or
+    //! `REQUEST_TIMEOUT` that breaks the budget fails HERE, at review time,
+    //! instead of silently in production.
+    use super::*;
+
+    /// Sphinx payload per packet, approximately. Nym's regular packet carries
+    /// ~2 KB; used only to turn frame bytes into a packet count.
+    const PACKET_BYTES: usize = 2 * 1024;
+
+    /// The client's own floor on sending, `MAX_DELAY_MULTIPLIER` (6) times the
+    /// 20 ms default `message_sending_average_delay`. This is the rate a real
+    /// gateway's backpressure drives us to, and the one the localnet never sees.
+    const THROTTLED_PACKETS_PER_SEC: f64 = 1000.0 / 120.0;
+
+    fn packets(bytes: usize) -> usize {
+        bytes.div_ceil(PACKET_BYTES)
+    }
+
+    fn seconds_to_emit(packets: usize) -> f64 {
+        packets as f64 / THROTTLED_PACKETS_PER_SEC
+    }
+
+    #[test]
+    fn a_submit_fits_its_dispatch_budget_at_the_throttled_rate() {
+        // Dispatch-only submit only has to hand the frame to the transport, so
+        // this is really a sanity check that a full frame plus its SURBs is not
+        // absurd at the throttled rate.
+        let on_wire = packets(wire::FRAME_BYTES) + SUBMIT_REPLY_SURBS as usize;
+        let secs = seconds_to_emit(on_wire);
+        assert!(
+            secs < 30.0,
+            "a submit is {on_wire} packets = {secs:.1}s to emit at the throttled rate"
+        );
+    }
+
+    /// The one that matters: the lookup that was failing in production.
+    #[test]
+    fn a_lookup_round_trip_fits_the_request_timeout_with_margin() {
+        // Out: a tiny request carrying the reply SURBs. Back: a FULL frame, since
+        // the reply carries a transaction padded to hide its length.
+        let out = packets(wire::LOOKUP_BYTES) + LOOKUP_REPLY_SURBS as usize;
+        let back = packets(wire::FRAME_BYTES);
+        let secs = seconds_to_emit(out + back);
+        let budget = REQUEST_TIMEOUT.as_secs_f64();
+
+        // At 25 s this assertion was inverted: the emission alone (~12.6 s) left
+        // nothing for mix delay or gateway queueing, and production answered
+        // UNAVAILABLE 14 times running. 90 s leaves roughly 6x the emission cost
+        // as headroom for the queueing we cannot compute from constants.
+        assert!(
+            secs * 3.0 < budget,
+            "a lookup is {} packets = {secs:.1}s of pure emission at the throttled rate; \
+             REQUEST_TIMEOUT is {budget:.0}s, which leaves under 3x headroom for mix delay \
+             and gateway queueing. Raise the timeout, or cut packets (frame size / SURBs).",
+            out + back
+        );
+    }
+
+    #[test]
+    fn the_localnet_rate_is_what_makes_the_localnet_pass() {
+        // Same packets, unthrottled: comfortably inside the budget, which is
+        // exactly why e2e-driver is green and production is not. Documents the
+        // discrepancy rather than leaving it to be rediscovered.
+        let on_wire =
+            packets(wire::LOOKUP_BYTES) + LOOKUP_REPLY_SURBS as usize + packets(wire::FRAME_BYTES);
+        let unthrottled = on_wire as f64 / (1000.0 / 20.0);
+        assert!(
+            unthrottled < REQUEST_TIMEOUT.as_secs_f64(),
+            "unthrottled the same {on_wire} packets take {unthrottled:.1}s"
+        );
     }
 }
 

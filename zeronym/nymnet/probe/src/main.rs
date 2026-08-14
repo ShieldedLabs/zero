@@ -769,6 +769,7 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
         Vec::new(),
         vec![hub_addr],
         targets.clone(),
+        shim_nym::MixnetStatus::default(),
         out_rx,
         in_tx,
         cmd_rx,

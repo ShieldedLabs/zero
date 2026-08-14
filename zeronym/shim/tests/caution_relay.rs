@@ -38,6 +38,7 @@ async fn spawn_shim(backend: SocketAddr, caution: CautionRelay) -> SocketAddr {
             None,
             None,
             caution,
+            zero_indexer_shim::nym::MixnetStatus::default(),
             std::future::pending::<()>(),
         )
         .await;
@@ -62,6 +63,101 @@ async fn request_path(
     let status = response.status();
     let _ = bounded(response.into_body().collect()).await;
     status
+}
+
+/// Send one request and return its body as a string.
+async fn body_of(
+    sender: &mut client_h2::SendRequest<BoxBody<Bytes, Infallible>>,
+    shim: SocketAddr,
+    method: &str,
+    path: &str,
+) -> String {
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("http://{shim}{path}"))
+        .body(Full::new(Bytes::new()).boxed())
+        .unwrap();
+    sender.ready().await.unwrap();
+    let response = bounded(sender.send_request(request)).await.unwrap();
+    let body = bounded(response.into_body().collect()).await.unwrap();
+    String::from_utf8_lossy(&body.to_bytes()).into_owned()
+}
+
+/// The shim's own operator endpoints are answered LOCALLY and never proxied.
+///
+/// The point is observability on an attested shim, which has no SSH: without
+/// these, a shim whose mixnet client is dead is indistinguishable from a healthy
+/// one, because dispatch-only submit answers the wallet before the mixnet is
+/// involved. The operator's indexer staying at zero connections is what proves
+/// these are ours and not forwarded.
+#[tokio::test]
+async fn the_shim_serves_its_own_status_and_never_proxies_it() {
+    use zero_indexer_shim::nym::MixnetStatus;
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(connections.clone()).await;
+
+    let status = MixnetStatus::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let shim = listener.local_addr().unwrap();
+    let served = status.clone();
+    tokio::spawn(async move {
+        let _ = zero_indexer_shim::serve_with_shutdown(
+            listener,
+            backend,
+            None,
+            None,
+            CautionRelay::default(),
+            served,
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+
+    let mut client = connect_h2(shim).await;
+
+    // Liveness.
+    assert_eq!(
+        request_path(&mut client, shim, "GET", "/healthz").await,
+        StatusCode::OK
+    );
+
+    // A forward-only shim reports honestly that diversion is not configured,
+    // rather than claiming health it cannot have.
+    let body = body_of(&mut client, shim, "GET", "/nym-status").await;
+    assert!(
+        body.contains("\"diversion_configured\":false"),
+        "forward-only shim should not claim diversion: {body}"
+    );
+
+    // Once the driver has published its lifecycle, the endpoint reflects it.
+    status.set_configured();
+    status.set_connected();
+    let body = body_of(&mut client, shim, "GET", "/nym-status").await;
+    assert!(body.contains("\"diversion_configured\":true"), "{body}");
+    assert!(body.contains("\"mixnet_connected\":true"), "{body}");
+
+    // A death is visible, which is the whole point: this is the state that
+    // silently swallows migrations.
+    status.set_died();
+    let body = body_of(&mut client, shim, "GET", "/nym-status").await;
+    assert!(body.contains("\"mixnet_connected\":false"), "{body}");
+    assert!(body.contains("\"client_deaths\":1"), "{body}");
+
+    // NEVER an oracle for user traffic: no send counts, no timestamps, no txids.
+    for forbidden in ["txid", "last", "sent", "diverted", "migration", "queue"] {
+        assert!(
+            !body.contains(forbidden),
+            "status must not expose '{forbidden}': {body}"
+        );
+    }
+
+    // And none of it was proxied to the operator's indexer.
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        0,
+        "the shim's own endpoints must be answered locally"
+    );
 }
 
 /// With the relay OFF, `/attestation` is not special: it dials the operator like
