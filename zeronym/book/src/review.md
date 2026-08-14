@@ -18,14 +18,9 @@ Most of these concern the boundary between our software and Caution's managed en
 
 ### 2. STEVE wire form over Nym
 
-[STEVE](./trust.md) is used only on the shim-to-hub channel. The `SubmitMigration { ciphertext, txid, expiry_height }` request and `Ack { txid }` reply are a fixed shape (see [components](./components.md)). Open is the **transport** that carries that shape over the Nym TCP tunnel:
+[STEVE](./trust.md) is used only on the shim-to-hub channel. The transport question this section used to ask is now answered by the shipped code: there is no TCP tunnel and no h2 session over the mixnet. Each side's linked `nym-sdk` client sends fixed-size `SubmitV1` / `AckV1` frames as anonymous messages with reply SURBs (see [components](./components.md)). What remains open is only whether STEVE wraps those frames, and how.
 
-- **gRPC / HTTP/2 over the tunnel** (RA-TLS or STEVE terminating an h2 session), reusing familiar framing.
-- **A raw framed byte stream** we frame ourselves over the Nym TCP tunnel, with the STEVE-derived session key applied to our own records.
-
-This blocks the exact `SubmitMigration` transport but not its message shape, so the rest of the shim and hub can be built against the settled shape while it resolves.
-
-**The question for Anton:** what does a STEVE session carry over Nym, gRPC/h2 or a raw byte stream we frame ourselves?
+**The question for Anton:** does a STEVE session wrap our fixed-size frames as records under the session key, or does STEVE expect to own the transport itself?
 
 ### 3. STEVE: mutual or one-way?
 
@@ -33,15 +28,18 @@ STEVE is **one-way** by default: the shim verifies the enclave (the hub), extrac
 
 **The question for Anton:** should the hub also verify the shim (mutual STEVE, to gate abuse), or accept from anyone with rate-limiting (one-way)?
 
-### 4. nym-proxy-server placement on managed Caution
+### 4. Deploying the mixnet transport in an attested enclave
 
-The hub's inbound side is fronted by `nym-proxy-server`; the shim's outbound side uses `nym-proxy-client`. Because the migration is already encrypted to the hub key before it reaches the Nym client (the inner encryption layer in [architecture](./architecture.md)), these sidecars only ever move ciphertext, so on confidentiality grounds they can run **parent-side, untrusted**. The open item is a platform constraint, not a security one: on managed Caution we do not control the parent, so whether a parent-side sidecar is permitted next to a managed enclave is Caution's call. This mirrors on the shim side, where `nym-proxy-client` runs in-enclave on managed Caution but parent-side on bring-your-own-cloud.
+The sidecar-placement question this section used to ask is moot: there are no sidecars to place, because both sides link `nym-sdk` and run it in-process. Two concrete platform blockers replaced it, and together they are why the mixnet transport is built but not deployed.
 
-**The question for Anton:** can `nym-proxy-server` (and the shim's `nym-proxy-client`) run parent-side alongside a managed enclave, or must the Nym proxy run in-enclave?
+- **Address publication.** The hub's Nym address is minted per client build and written only to a log. An attested enclave does not expose that log, so a shim has no supported way to learn the address of the hub it is meant to reach.
+- **Gateway pinning.** Egress from an enclave is locked to a `/32` allowlist, but a Nym client chooses its gateway dynamically and that choice cannot currently be pinned to the allowlisted address.
+
+**The question for Anton:** what is the supported way for an attested enclave to publish a value minted at boot (here, its Nym address), and can gateway selection be pinned so a mixnet client works under a locked egress allowlist?
 
 ### 5. Zero-ingress and attestation delivery
 
-Today the `/attestation` endpoint is public and platform-served on both shim and hub. That is what the [Auditor Role](./trust.md) fetches over HTTPS to verify an endpoint. But a hub ideally wants to be **zero-ingress**: nothing listening on the public internet, reachable only over Nym, presenting no public attack surface and leaking nothing about its location. Those goals collide: a true zero-inbound service cannot also serve a public `/attestation` behind a platform Caddy. So either the platform suppresses its public `/attestation` and Caddy, or the attestation is **delivered inline over Nym** (as part of, or alongside, the STEVE handshake). If it moves to Nym, the auditor and the shim's own STEVE check need that alternate delivery path defined.
+Today the `/attestation` endpoint is public on both shim and hub. On the shim it is now shim-served: the router claims the path and relays to the platform's `bootproofd` rather than forwarding it to the operator's indexer. That is what the [Auditor Role](./trust.md) fetches over HTTPS to verify an endpoint. But a hub ideally wants to be **zero-ingress**: nothing listening on the public internet, reachable only over Nym, presenting no public attack surface and leaking nothing about its location. Those goals collide: a true zero-inbound service cannot also serve a public `/attestation` behind a platform Caddy. So either the platform suppresses its public `/attestation` and Caddy, or the attestation is **delivered inline over Nym** (as part of, or alongside, the STEVE handshake). If it moves to Nym, the auditor and the shim's own STEVE check need that alternate delivery path defined.
 
 **The question for Anton:** can the platform suppress the public `/attestation` and Caddy for a true zero-inbound service, and if so, what is the supported way to deliver the attestation (inline over Nym) to the shim and to independent auditors?
 
@@ -68,7 +66,7 @@ Design confirmations rather than platform unknowns; they live with the component
 - **Publish path:** the hub broadcasts through an **indexer's `CompactTxStreamer` over TLS** (not node JSON-RPC). Open: the fan-out breadth (one indexer versus several, or direct Zcash P2P `tx` to many peers for a larger relay set) and clearnet versus over Nym for the hub's own egress (see [components](./components.md)).
 - **Batch density versus failover:** confirm primary-hub preference (converge for density, fail over only on outage) over spreading shims across hubs (see [trust](./trust.md)).
 - **Hub re-validation (resolved to telemetry-only).** The hub re-parses and re-classifies each tx so any disagreement with the shim is *visible*, but never drops on that basis: the earlier design (reject anything that is not an Orchard-touching transaction before batching) was reversed, since the txs most likely to fail the hub's parse are exactly the ones the shim fail-safed into the batch, so rejecting them would turn the shim's fail-safe into a leak. Refusals are narrow and structural only (auth, malformed frame, byte budget, expiry admission); final validity is decided at broadcast, not by the hub (see [components](./components.md)).
-- **Flush cadence and safety margin:** confirm the roughly ten-block flush and the safety margin against real wallet expiry windows aligned in ZIP 318 (see [trust](./trust.md) and [glossary](./glossary.md)).
+- **Flush cadence and safety margin:** confirm the twenty-block flush and the four-block mining margin against real wallet expiry windows aligned in ZIP 318 (see [the hub](./components.md)).
 - **JSON-RPC front-ends:** the shim intercepts only gRPC `SendTransaction`, so a migration submitted through a JSON-RPC `sendrawtransaction` front-end would bypass classification and leak. Wallets use gRPC, so this is out of near-term scope; confirm no operator front-ends migrations via JSON-RPC (see [components](./components.md)).
 
 ### Hosting and funding
