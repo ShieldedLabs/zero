@@ -69,6 +69,23 @@ pub struct Config {
     /// build with the `mixnet-localnet` feature.
     #[arg(long, env = "ZIH_NYM_TOPOLOGY")]
     pub nym_topology: Option<std::path::PathBuf>,
+
+    /// Accept clearnet submissions on `POST /`, the transitional shim-to-hub
+    /// hop. **Off by default** (NYM_PLAN M7): once the mixnet path works,
+    /// nothing legitimate posts there, while the enclave declares an
+    /// `0.0.0.0/0` ingress and the hub has no submitter ACL by design — the
+    /// mixnet address IS the credential. Leaving it on ships an open,
+    /// unauthenticated submit endpoint.
+    ///
+    /// Turn it on for a transitional clearnet shim, a local demo, or a test.
+    /// The lookup path (`POST /transaction`) is unaffected; so are
+    /// `/nym-address` and `/healthz`, which are read-only.
+    ///
+    /// Takes an explicit `true`/`false` for the same reason `--nym` does: it is
+    /// usually set from the environment, where a bare flag would read as set
+    /// whenever the variable merely exists.
+    #[arg(long = "http-submit", env = "ZIH_HTTP_SUBMIT", action = clap::ArgAction::Set, default_value_t = false)]
+    pub http_submit: bool,
 }
 
 impl Config {

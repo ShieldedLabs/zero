@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::queue::Queue;
-use zero_indexer_hub::server::{self, Hub};
+use zero_indexer_hub::server::{self, Hub, ServeOptions};
 
 mod common;
 use common::{spawn_mock_indexer, spawn_mock_indexer_full, GetTx};
@@ -67,6 +67,13 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
             tip,
             params: BatchParams::default(),
             chain: chain.clone(),
+        },
+        // This file exercises the CLEARNET submit path, which is off by default
+        // now that the mixnet carries submissions. Opting in explicitly here
+        // keeps these tests honest about which transport they cover.
+        ServeOptions {
+            http_submit: true,
+            ..Default::default()
         },
     ));
 
@@ -288,6 +295,10 @@ async fn a_no_expiry_transaction_is_admissible_at_any_height() {
             // needs one. Constructed, not connected.
             chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
         },
+        ServeOptions {
+            http_submit: true,
+            ..Default::default()
+        },
     ));
 
     let bytes = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
@@ -317,6 +328,10 @@ async fn a_stale_tip_stops_admission_rather_than_forcing_a_flush() {
             // Never reached in this test (no flush, no lookup), but the type
             // needs one. Constructed, not connected.
             chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
+        },
+        ServeOptions {
+            http_submit: true,
+            ..Default::default()
         },
     ));
 

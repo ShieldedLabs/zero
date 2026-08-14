@@ -69,6 +69,12 @@ async fn main() -> Result<(), BoxError> {
 
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
 
+    // Shared with the mixnet driver, which fills it in on every (re)build, and
+    // read by `GET /nym-address`. Stays empty on a clearnet-only build, where
+    // the endpoint then reports that there is no address rather than inventing
+    // one.
+    let nym_address = server::NymAddress::unknown();
+
     let cadence = tokio::spawn(batcher::run(
         queue.clone(),
         chain.clone(),
@@ -81,13 +87,24 @@ async fn main() -> Result<(), BoxError> {
     // same queue, tip and chain as the clearnet serving path below, so the two
     // ingress paths admit into one queue and cannot drift.
     #[cfg(feature = "mixnet-driver")]
-    spawn_nym_listener(&config, &queue, &tip, params, &chain)?;
+    spawn_nym_listener(&config, &queue, &tip, params, &chain, &nym_address)?;
     #[cfg(not(feature = "mixnet-driver"))]
     if config.nym || config.nym_topology.is_some() {
         return Err(
             "--nym is set but this binary was built WITHOUT the mixnet-driver feature; \
              rebuild with --features mixnet-driver"
                 .into(),
+        );
+    }
+
+    // The clearnet submit path is off unless asked for. Say so at startup: a
+    // hub reachable only over the mixnet is the intended shape, and an operator
+    // who expected to curl a transaction in should learn that here rather than
+    // from a 404.
+    if config.http_submit {
+        tracing::warn!(
+            "--http-submit: accepting UNAUTHENTICATED clearnet submissions on POST /. \
+             Intended for a transitional shim or a local demo, not a mixnet deployment"
         );
     }
 
@@ -98,6 +115,10 @@ async fn main() -> Result<(), BoxError> {
             tip,
             params,
             chain,
+        },
+        server::ServeOptions {
+            nym_address,
+            http_submit: config.http_submit,
         },
     );
 
@@ -124,6 +145,7 @@ fn spawn_nym_listener(
     tip: &Arc<TipTracker>,
     params: BatchParams,
     chain: &Arc<ChainClient>,
+    nym_address: &server::NymAddress,
 ) -> Result<(), BoxError> {
     use tokio::sync::mpsc;
 
@@ -170,13 +192,17 @@ fn spawn_nym_listener(
     // and a dropped live client leaks its background tasks).
     tokio::spawn(nym_driver::run_driver(network, in_tx, out_rx, addr_tx, shutdown_signal()));
     // The driver logs its address, but surfacing it here too keeps it in the
-    // startup log the operator reads to configure shims.
+    // startup log the operator reads to configure shims — and, more importantly
+    // now, parks it where `GET /nym-address` can answer with it. An ATTESTED
+    // enclave has no console, so the endpoint is the only way to read this.
+    let nym_address = nym_address.clone();
     tokio::spawn(async move {
         while let Some(address) = addr_rx.recv().await {
             tracing::info!(
                 %address,
                 "hub reachable over the Nym mixnet; publish this to shims as --hub-nym"
             );
+            nym_address.set(address.to_string());
         }
     });
     Ok(())

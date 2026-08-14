@@ -49,12 +49,29 @@ use crate::BoxError;
 /// wallet's request into a shim and is unrelated.
 const MAX_TX_BYTES: usize = 64 * 1024;
 
-/// The submission path: `POST /` with a raw transaction body. The default so
-/// that an older shim, which knows only this path, keeps working unchanged.
+/// The submission path: `POST /` with a raw transaction body. The transitional
+/// clearnet hop, and OFF unless [`ServeOptions::http_submit`] turns it on: with
+/// the mixnet path working, nothing legitimate posts here, while the enclave
+/// declares `ingress 0.0.0.0/0` and the hub has no submitter ACL by design. Kept
+/// reachable by explicit config for tests and local demos (NYM_PLAN M7).
 const SUBMIT_PATH: &str = "/";
 
 /// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
 const TRANSACTION_PATH: &str = "/transaction";
+
+/// The hub's current Nym address: `GET /nym-address`.
+///
+/// Exists because an ATTESTED enclave has no console. The address is minted
+/// inside the enclave and was previously written only to a log the operator
+/// cannot read without debug mode — which disables attestation, so reading it
+/// and proving it were mutually exclusive. Publishing it costs nothing: it is
+/// the one value in this system that is meant to be public, since every shim
+/// must know it to submit at all.
+const NYM_ADDRESS_PATH: &str = "/nym-address";
+
+/// Liveness: `GET /healthz`. Distinct from Caution's own
+/// `/.well-known/caution/health`, which the platform serves itself.
+const HEALTH_PATH: &str = "/healthz";
 
 /// Ceiling on a lookup body. A `TxFilter.hash` is 32 bytes; 64 leaves slack
 /// without letting the lookup path be used to buffer anything meaningful.
@@ -63,6 +80,56 @@ const MAX_LOOKUP_BYTES: usize = 64;
 /// Header carrying the transaction's height on a `200` lookup reply. `0` means
 /// mempool (a queued, unflushed transaction), matching lightwalletd's sentinel.
 const TX_HEIGHT_HEADER: &str = "x-tx-height";
+
+/// The hub's current Nym address, shared between the mixnet driver (which mints
+/// it) and the serving path (which publishes it at [`NYM_ADDRESS_PATH`]).
+///
+/// Deliberately NOT a field on [`Hub`]: that type is constructed in both ingress
+/// paths, in four test files and in the localnet probe, and none of those care
+/// about a clearnet endpoint. Threading it through [`serve`] keeps the blast
+/// radius to the one caller that serves HTTP.
+///
+/// `None` until the driver's first successful connect, and answered as such
+/// rather than as an empty string — an operator pasting `""` into a shim's
+/// `--hub-nym` would get a config that fails at the first divert instead of at
+/// assemble time.
+#[derive(Clone, Default)]
+pub struct NymAddress(Arc<std::sync::RwLock<Option<String>>>);
+
+impl NymAddress {
+    /// A handle with no address yet.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Record the address the driver just built. Called on every (re)build, so
+    /// it is idempotent for the common case where the address did not change.
+    pub fn set(&self, address: String) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = Some(address);
+        }
+    }
+
+    /// The current address, if the mixnet client has connected at least once.
+    ///
+    /// A poisoned lock reads as `None`: the endpoint then reports "not yet
+    /// known", which is the honest answer and cannot mislead a shim's config.
+    pub fn get(&self) -> Option<String> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+}
+
+/// Serving-path configuration that is not part of the batching core.
+#[derive(Clone, Default)]
+pub struct ServeOptions {
+    /// The hub's Nym address, published at [`NYM_ADDRESS_PATH`].
+    pub nym_address: NymAddress,
+    /// Accept clearnet submissions at [`SUBMIT_PATH`]. **Off by default**: the
+    /// mixnet is the submit path now, and an open unauthenticated `POST /` on a
+    /// `0.0.0.0/0` ingress is attack surface with no legitimate user. Turn it on
+    /// only for a transitional clearnet shim, a local demo, or a test.
+    pub http_submit: bool,
+}
 
 /// Everything the serving path needs.
 ///
@@ -187,20 +254,29 @@ impl Hub {
 /// Accept and serve submissions on an already-bound listener until it errors.
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
-pub async fn serve(listener: TcpListener, hub: Hub) -> Result<(), BoxError> {
+pub async fn serve(
+    listener: TcpListener,
+    hub: Hub,
+    options: ServeOptions,
+) -> Result<(), BoxError> {
     tracing::info!(
         local = ?listener.local_addr().ok(),
         flush_interval = hub.params.flush_interval,
+        http_submit = options.http_submit,
         "hub listening: submissions are queued and published on the flush cadence"
     );
 
     loop {
         let (stream, _peer) = listener.accept().await?;
         let hub = hub.clone();
+        let options = options.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
             if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(move |req| handle(req, hub.clone())))
+                .serve_connection(
+                    io,
+                    service_fn(move |req| handle(req, hub.clone(), options.clone())),
+                )
                 .await
             {
                 tracing::debug!(%err, "connection closed with error");
@@ -212,18 +288,66 @@ pub async fn serve(listener: TcpListener, hub: Hub) -> Result<(), BoxError> {
 /// Route one request. Never returns `Err`: a bad request is a response, not a
 /// connection fault.
 ///
-/// Two paths, both POST: `/` submits a transaction into the batch, `/transaction`
-/// looks one up by txid. Any other path is `404`, a deliberate narrowing: the
+/// Dispatch on the PATH first, then the method within it, which keeps the two
+/// answers distinct: a path that exists but was asked with the wrong verb is
+/// `405`, and a path that does not exist is `404`. The write paths stay `POST`;
+/// the two read-only endpoints are `GET`, because their callers are a human with
+/// `curl` and an uptime monitor, and a POST-only health check is one most
+/// checkers cannot be pointed at.
+///
+/// An unknown path is `404`, a deliberate narrowing kept from the original: the
 /// old hub treated EVERY POST as a submission, so a path typo (or a shim posting
-/// a lookup to the wrong URL) silently queued garbage. Now it fails loudly.
-async fn handle(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
-    if req.method() != Method::POST {
-        return Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only"));
-    }
+/// a lookup to the wrong URL) silently queued garbage.
+///
+/// `SUBMIT_PATH` falls through to that `404` arm unless
+/// [`ServeOptions::http_submit`] is set — so a disabled submit path is
+/// indistinguishable from one that never existed, and a scanner learns nothing
+/// about whether this hub could have accepted a submission.
+async fn handle(
+    req: Request<Incoming>,
+    hub: Hub,
+    options: ServeOptions,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Cloned up front: the handlers below consume `req`, so the method cannot
+    // be borrowed from it at the same time. `Method` is cheap to clone.
+    let method = req.method().clone();
     match req.uri().path() {
-        SUBMIT_PATH => submit(req, hub).await,
-        TRANSACTION_PATH => lookup(req, hub).await,
+        SUBMIT_PATH if options.http_submit => match method {
+            Method::POST => submit(req, hub).await,
+            _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
+        },
+        TRANSACTION_PATH => match method {
+            Method::POST => lookup(req, hub).await,
+            _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
+        },
+        NYM_ADDRESS_PATH => match method {
+            Method::GET => Ok(nym_address(&options.nym_address)),
+            _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "GET only")),
+        },
+        HEALTH_PATH => match method {
+            Method::GET => Ok(text(StatusCode::OK, "ok")),
+            _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "GET only")),
+        },
         _ => Ok(text(StatusCode::NOT_FOUND, "unknown path")),
+    }
+}
+
+/// Publish the hub's Nym address, and nothing else.
+///
+/// The response body is the bare address so `curl` output can be pasted
+/// straight into a shim's `--hub-nym`. It carries no queue depth, no batch
+/// size, no counts: those would be a live anonymity-set-size oracle for anyone
+/// who can reach the hub (see this module's header), and this endpoint is
+/// reachable by everyone.
+fn nym_address(address: &NymAddress) -> Response<Full<Bytes>> {
+    match address.get() {
+        Some(address) => text(StatusCode::OK, &address),
+        // Not an empty 200: an operator pasting "" into a shim config would get
+        // a deployment that fails at the first divert rather than at assemble.
+        None => text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the mixnet client has not connected yet; no address to publish",
+        ),
     }
 }
 
