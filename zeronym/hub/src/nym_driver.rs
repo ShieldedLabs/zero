@@ -16,18 +16,31 @@
 //!
 //! Unlike the shim's driver there is no rotation and no supervisor: the hub's
 //! address is what every shim sends to (D10), so it holds ONE identity for the
-//! life of the process. It still handles the client dying (D12: after 20 send
-//! failures the SDK stops for good) by rebuilding and logging the NEW address it
-//! mints. Be honest about the limit (D10): a diskless hub's address changes on
-//! every restart or rebuild regardless, and existing shims hold the OLD one, so
-//! this recovery restores the shim->hub path ONLY for shims that then learn the
-//! new address through whatever address distribution the deployment uses — an
-//! open humans decision, not something this rebuild fixes on its own. It rebuilds
-//! rather than exiting so the hub's clearnet serving and batcher stay up, but for
-//! the mixnet path a rebuild without republication is a moved address, not a
-//! recovered one. Shutdown disconnects the client cleanly (D12: `disconnect()` is
-//! not cancel-safe and a dropped LIVE client leaks its background tasks); a
-//! client that already died is dropped, its tasks having already stopped.
+//! life of the process — and, since the storage below outlives the rebuild loop,
+//! ACROSS rebuilds too.
+//!
+//! **The address survives a client death.** One [`Ephemeral`] store is built
+//! once and cloned into every (re)build, and the SDK's initialisation loads
+//! existing keys before it generates any, so a rebuild comes back with the same
+//! identity key, the same encryption key, and the same gateway registration —
+//! hence the same Nym address. That matters because the address is baked into
+//! every shim's enclave config and a Caution managed app is immutable, so an
+//! address change costs every operator a re-assemble and redeploy. Before this,
+//! the client minted a fresh identity on every rebuild and the shim fleet was
+//! stale the moment a gateway blipped.
+//!
+//! What still changes the address: a real process restart (the store is in RAM,
+//! and a diskless enclave has nowhere to persist it), and the deliberate
+//! fallback below when the stored gateway registration is beyond saving. Both
+//! are loud, and both leave existing shims holding the OLD address until they
+//! are re-pointed — the address-distribution problem is not solved here, only
+//! made rare. `/nym-address` on the serving path is how an attested hub's
+//! operator reads the current value without a console.
+//!
+//! It rebuilds rather than exiting so the hub's clearnet serving and batcher stay
+//! up. Shutdown disconnects the client cleanly (D12: `disconnect()` is not
+//! cancel-safe and a dropped LIVE client leaks its background tasks); a client
+//! that already died is dropped, its tasks having already stopped.
 
 #![cfg(feature = "mixnet-driver")]
 
@@ -37,7 +50,8 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 use nym_sdk::mixnet::{
-    AnonymousSenderTag, MixnetClient, MixnetClientBuilder, MixnetMessageSender, Recipient,
+    AnonymousSenderTag, Ephemeral, MixnetClient, MixnetClientBuilder, MixnetMessageSender,
+    Recipient,
 };
 
 use crate::nym::{Received, Reply, SenderTag};
@@ -46,6 +60,23 @@ use crate::nym::{Received, Reply, SenderTag};
 /// gateway that rejects every connection is retried steadily rather than in a
 /// hot loop.
 const REBUILD_BACKOFF: Duration = Duration::from_secs(5);
+
+/// How many CONSECUTIVE failed rebuilds before the driver abandons the stored
+/// gateway registration and takes a fresh identity.
+///
+/// Deliberately patient. Reusing the storage is exactly what keeps the address
+/// stable, and it also pins the client to one gateway — so if that gateway is
+/// genuinely gone, retrying it forever would keep the hub off the mixnet. This
+/// is the escape hatch, and it is costly to take: a new identity is a new
+/// address, which every shim has baked into an immutable enclave config.
+///
+/// Staying down a while is therefore cheaper than rotating early, and a hub
+/// restart would change the address anyway, so this only automates by hand what
+/// an operator would otherwise do by hand. At [`REBUILD_BACKOFF`] that is
+/// roughly five minutes of unbroken failure. Validate the number against the
+/// localnet harness, where the gateway is a process you can kill on demand
+/// (`nymnet/README.md`).
+const REBUILDS_BEFORE_NEW_IDENTITY: u32 = 60;
 
 /// Which Nym network the driver connects to. Plain data, not a trait: production
 /// is the default network baked into the SDK; the localnet variant (compiled
@@ -60,10 +91,20 @@ pub enum MixnetNetwork {
     TopologyFile(std::path::PathBuf),
 }
 
-/// Build (or rebuild) a mixnet client. Ephemeral by construction: the hub keeps
-/// no on-disk identity, so a rebuild after a death is a fresh registration.
-async fn build_client(network: &MixnetNetwork) -> Result<MixnetClient, String> {
-    let builder = MixnetClientBuilder::new_ephemeral();
+/// Build (or rebuild) a mixnet client against the caller's storage.
+///
+/// Taking the store by reference and cloning it is the whole trick behind a
+/// stable address: `MixnetClientBuilder::new_ephemeral()` would mint a fresh
+/// [`Ephemeral`] (and therefore fresh keys) on every call, whereas the SDK's
+/// initialisation loads existing keys before generating any, so handing it the
+/// SAME store returns the SAME identity, encryption key, and gateway
+/// registration. Still ephemeral in the sense that matters for a diskless
+/// enclave: the store is in RAM and dies with the process.
+async fn build_client(
+    network: &MixnetNetwork,
+    storage: &Ephemeral,
+) -> Result<MixnetClient, String> {
+    let builder = MixnetClientBuilder::new_with_storage(storage.clone());
     let builder = match network {
         MixnetNetwork::Default => builder,
         #[cfg(feature = "mixnet-localnet")]
@@ -97,13 +138,47 @@ pub async fn run_driver(
 ) {
     tokio::pin!(shutdown);
 
+    // Built ONCE, outside the loop, and cloned into every (re)build: this is what
+    // carries the identity (and so the address) across a client death. Replaced
+    // only by the fallback below, when the gateway it is registered with stops
+    // accepting us for good.
+    let mut storage = Ephemeral::default();
+    let mut failed_rebuilds: u32 = 0;
+    // What was last handed to `address_out`, so an unchanged address is not
+    // re-announced on every rebuild. With a stable identity that is the normal
+    // case, and re-announcing would turn a healthy reconnect into a log line
+    // that reads like a migration-breaking change.
+    let mut announced: Option<Recipient> = None;
+
     // Outer loop: (re)build the client. Each pass holds one identity for as long
     // as it lives; a death falls out of the inner loop and comes back here.
     loop {
-        let mut client = match build_client(&network).await {
-            Ok(client) => client,
+        let mut client = match build_client(&network, &storage).await {
+            Ok(client) => {
+                failed_rebuilds = 0;
+                client
+            }
             Err(err) => {
-                tracing::error!(error = %err, "hub mixnet connect failed; retrying");
+                failed_rebuilds += 1;
+                tracing::error!(
+                    error = %err,
+                    consecutive_failures = failed_rebuilds,
+                    "hub mixnet connect failed; retrying"
+                );
+                // The stored registration is not coming back. Give up on it and
+                // mint a new identity, which is the only way back onto the
+                // mixnet — at the cost of an address every shim must be
+                // re-pointed to, hence the volume of this warning.
+                if failed_rebuilds >= REBUILDS_BEFORE_NEW_IDENTITY {
+                    storage = Ephemeral::default();
+                    failed_rebuilds = 0;
+                    tracing::warn!(
+                        after_failures = REBUILDS_BEFORE_NEW_IDENTITY,
+                        "the hub's gateway registration is unrecoverable; taking a FRESH \
+                         identity. The hub's Nym address WILL change: read the new one from \
+                         /nym-address and re-point every shim, or migrations keep failing closed"
+                    );
+                }
                 tokio::select! {
                     _ = &mut shutdown => return,
                     _ = tokio::time::sleep(REBUILD_BACKOFF) => continue,
@@ -111,8 +186,15 @@ pub async fn run_driver(
             }
         };
         let address = *client.nym_address();
-        tracing::info!(%address, "hub mixnet client connected; publish this to shims");
-        // Best-effort: the operator also has it in the log above.
+        if announced != Some(address) {
+            tracing::info!(%address, "hub mixnet client connected; publish this to shims");
+            announced = Some(address);
+        } else {
+            tracing::info!("hub mixnet client reconnected; address unchanged");
+        }
+        // Best-effort, and sent on EVERY build even when unchanged: `/nym-address`
+        // reads the value this publishes, and a receiver that restarted or missed
+        // the first send must still be able to answer.
         let _ = address_out.send(address).await;
         // An owned sender, so the reply arm below touches `sender` while the
         // receive arm touches `client`: two disjoint borrows in one `select!`.
@@ -160,8 +242,9 @@ pub async fn run_driver(
             Step::Died => {
                 // The dead client's tasks have already stopped, so it is dropped
                 // (at the end of this scope), not disconnected. Back off, then the
-                // outer loop rebuilds with a fresh address.
-                tracing::warn!("hub mixnet client died; rebuilding with a fresh address");
+                // outer loop rebuilds from the SAME storage, so the address the
+                // shims hold keeps working.
+                tracing::warn!("hub mixnet client died; rebuilding with the same address");
                 tokio::select! {
                     _ = &mut shutdown => return,
                     _ = tokio::time::sleep(REBUILD_BACKOFF) => {}
