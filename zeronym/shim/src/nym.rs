@@ -138,15 +138,17 @@ struct MixnetStatusInner {
     /// retrying, which is the state that silently swallows migrations.
     consecutive_failures: AtomicU64,
 
-    // ---- TEMPORARY DIAGNOSTIC STATE (see `diag_json`) --------------------
+    // ---- INBOUND LIVENESS COUNTERS: PERMANENT, NOT the diagnostic block ---
     //
-    // These fields exist ONLY to answer one question an attested enclave
-    // otherwise cannot: do inbound SURB replies arrive at all? They are
-    // deliberately NOT part of `to_json`, because the doc comment above this
-    // type is a promise about `/nym-status` that still holds: counts of sends
-    // ARE a divert oracle. They are served on a separate path that is closed
-    // unless `ZIS_DIAG` is set, and the whole block should be deleted once the
-    // question is answered.
+    // `replies_received` and `empty_inbound` are load-bearing: the driver's
+    // liveness probe reads them through `inbound_total` to decide whether the
+    // client is receiving anything at all, and rebuilds it when it is not.
+    // KEEP THEM when the `ZIS_DIAG` endpoint below is deleted — removing them
+    // silently removes the self-heal.
+    //
+    // They are still deliberately absent from `to_json`: the doc comment above
+    // this type is a promise about `/nym-status`, and send counts with
+    // timestamps ARE a divert oracle. They are exposed only on the gated path.
     /// Whether the diagnostic endpoint answers at all. Off unless `ZIS_DIAG`.
     diag_enabled: AtomicBool,
     /// Non-empty inbound mixnet messages the driver has taken off the client.
@@ -234,6 +236,16 @@ impl MixnetStatus {
         }
         self.0.replies_received.fetch_add(1, Ordering::Relaxed);
         self.0.last_reply_unix.store(unix_now(), Ordering::Relaxed);
+    }
+
+    /// Every inbound mixnet message seen, reply frames and SURB-replenishment
+    /// artifacts alike. The liveness probe watches this rather than
+    /// `replies_received`, because ANY inbound traffic proves the gateway is
+    /// delivering to us — which is the property that fails — while a reply frame
+    /// additionally requires the hub to be up and answering.
+    pub fn inbound_total(&self) -> u64 {
+        self.0.replies_received.load(Ordering::Relaxed)
+            + self.0.empty_inbound.load(Ordering::Relaxed)
     }
 
     /// Publish the client's own Nym address after a (re)build.

@@ -214,11 +214,83 @@ pub async fn run_driver(
     // client that just went away.
     let mut sender = client.split_sender();
 
+    // INBOUND LIVENESS. A client can register with a gateway, report itself
+    // connected, send successfully — and never receive a single inbound message
+    // for its whole life. Measured 2026-08-14: of four deployed shims on
+    // identical config, two answered lookups and two never did, one of them
+    // broken three minutes after boot and still broken hours later. Nothing
+    // recovered them, because the SDK only reports a death when it gives up on
+    // its gateway, and a gateway that accepts sends is never given up on. So
+    // `client_deaths` stayed 0, no rebuild was ever requested, and the shim sat
+    // there healthy-looking and useless. On an immutable enclave that is
+    // terminal: no restart, no in-place update, a 25-minute redeploy to recover.
+    //
+    // The probe is a message to our OWN address. That exercises the half that
+    // fails — gateway delivering INTO this client — without depending on the hub
+    // being up, so a hub outage cannot drive an endless rebuild loop. Its payload
+    // is empty on purpose: the receive arm already filters empty messages out as
+    // SURB-replenishment artifacts, so the probe is counted for liveness and
+    // never reaches the correlator to be puzzled over.
+    //
+    // Which half of the unlucky draw is at fault — the gateway, or this client's
+    // registration with it — is still unknown, and deliberately does not matter:
+    // a rebuild rerolls BOTH.
+    let mut own = *client.nym_address();
+    let mut probe = tokio::time::interval(PROBE_INTERVAL);
+    // The first tick is immediate; that is wanted, since a bad draw is bad from
+    // boot and the point is to catch it before any wallet does. Delay, rather
+    // than Burst, so a stalled loop does not fire a backlog of probes at once.
+    probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Inbound count when the outstanding probe was sent, and how many probe
+    // rounds in a row have seen no inbound traffic at all.
+    let mut inbound_at_probe: Option<u64> = None;
+    let mut silent_rounds: u32 = 0;
+
     // The select decides WHAT happened; the client lifecycle (which consumes the
     // client to disconnect, or replaces it on rebuild) is handled AFTER the
     // select, where none of its futures still borrow the client.
     loop {
         let step = tokio::select! {
+            // Inbound liveness. Cheap to keep in the select: the tick itself does
+            // no I/O, and the probe send is a single empty message.
+            _ = probe.tick() => {
+                let seen = status.inbound_total();
+                match inbound_at_probe {
+                    // A probe was outstanding and nothing at all has arrived since.
+                    Some(mark) if seen == mark => {
+                        silent_rounds += 1;
+                        if silent_rounds >= SILENT_ROUNDS_BEFORE_REBUILD {
+                            tracing::error!(
+                                silent_rounds,
+                                gateway = %own.gateway(),
+                                "no inbound mixnet traffic across consecutive probes; the client \
+                                 registered but is not being delivered to. Rebuilding, which \
+                                 rerolls the gateway and the registration together."
+                            );
+                            silent_rounds = 0;
+                            inbound_at_probe = None;
+                            Step::Rebuild
+                        } else {
+                            tracing::warn!(
+                                silent_rounds,
+                                "no inbound mixnet traffic since the last probe; watching"
+                            );
+                            send_probe(&sender, own).await;
+                            inbound_at_probe = Some(status.inbound_total());
+                            Step::Ferried
+                        }
+                    }
+                    // Either the first round, or traffic HAS arrived since the
+                    // last probe — which is all the liveness we need, whether it
+                    // came from the probe or from real wallet lookups.
+                    _ => {
+                        silent_rounds = 0;
+                        send_probe(&sender, own).await;
+                        inbound_at_probe = Some(status.inbound_total());
+                        Step::Ferried
+                    }
+                }
+            },
             command = commands.recv() => match command {
                 Some(ClientCommand::Rebuild) => Step::Rebuild,
                 // A dropped commands channel is the supervisor gone: nothing left
@@ -285,6 +357,15 @@ pub async fn run_driver(
                     }
                 };
                 sender = client.split_sender();
+                // A rebuild mints a new identity at a possibly different
+                // gateway, so the probe target moves with it. Reset the probe
+                // state too: the old mark belongs to a client that no longer
+                // exists, and carrying it over would charge the fresh client
+                // with the dead one's silence.
+                own = *client.nym_address();
+                status.set_address(own.to_string());
+                inbound_at_probe = None;
+                silent_rounds = 0;
             }
             Step::Died => {
                 // The dead client's tasks have already stopped, so it is dropped
@@ -297,6 +378,15 @@ pub async fn run_driver(
                     None => return,
                 };
                 sender = client.split_sender();
+                // A rebuild mints a new identity at a possibly different
+                // gateway, so the probe target moves with it. Reset the probe
+                // state too: the old mark belongs to a client that no longer
+                // exists, and carrying it over would charge the fresh client
+                // with the dead one's silence.
+                own = *client.nym_address();
+                status.set_address(own.to_string());
+                inbound_at_probe = None;
+                silent_rounds = 0;
             }
         }
     }
@@ -314,6 +404,37 @@ enum Step {
     Died,
     /// Shut down cleanly and stop.
     Stop,
+}
+
+/// How often to check that inbound traffic is still arriving.
+///
+/// Not tuned aggressively: a rebuild costs a fresh gateway registration and a new
+/// sender tag, so reacting to one quiet minute would trade a rare permanent
+/// failure for frequent self-inflicted churn. Two rounds of silence is ~2 minutes
+/// to self-heal, against a failure whose current alternative is a 25-minute
+/// redeploy by a human who has not noticed yet.
+const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Consecutive probe rounds with NO inbound traffic before the client is torn
+/// down and rebuilt. Two, not one, so a single dropped probe cannot trigger a
+/// rebuild on an otherwise healthy client.
+const SILENT_ROUNDS_BEFORE_REBUILD: u32 = 2;
+
+/// A liveness probe: an empty message to our own address.
+///
+/// Empty because the receive arm already discards empty inbound messages as
+/// SURB-replenishment artifacts, so this is counted for liveness and never
+/// reaches the correlator. Zero attached SURBs: nothing has to reply to it, the
+/// arrival is the whole signal.
+async fn send_probe(sender: &nym_sdk::mixnet::MixnetClientSender, own: Recipient) {
+    if let Err(err) = sender
+        .send_message(own, Vec::new(), IncludedSurbs::new(0))
+        .await
+    {
+        // Not fatal on its own: the next round either sees inbound traffic or
+        // counts another silent round and rebuilds.
+        tracing::warn!(error = %err, "inbound liveness probe could not be sent");
+    }
 }
 
 /// Send one outbound frame to the hub address its `target` names, anonymously,
