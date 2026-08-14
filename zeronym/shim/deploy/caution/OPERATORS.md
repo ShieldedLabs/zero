@@ -413,13 +413,20 @@ today the recovery is manual.
   with console access as the only way to confirm the mixnet hop is alive, and
   raise this with Shielded Labs before relying on an attested shim in production.
 
-**Related, and not a failure:** the mixnet is **slow**. A migration can take
-minutes to reach the hub. That is expected and acceptable for a migration, which
-is time-insensitive by design. What it does affect is `GetTransaction` for a
-just-diverted migration: that path *does* wait for a hub round trip, and under
-mixnet backpressure it can time out and answer `UNAVAILABLE` rather than showing
-the wallet its own pending transaction. It resolves itself once the transaction
-is mined and the wallet sees it through ordinary sync.
+**Related, and currently the case: `GetTransaction` for a just-diverted migration
+does not work.** The mixnet is slow — a migration can take minutes to reach the
+hub, which is fine, because a migration is time-insensitive by design. But the
+lookup path *waits* for a hub round trip against a 25-second budget, and measured
+2026-08-14 it did not complete once in 14 attempts across two independently
+deployed pairs. Expect the wallet to be told `UNAVAILABLE` (failing closed, never
+falling back to your indexer) and to see its transaction only once it is mined
+and ordinary sync picks it up.
+
+Worth knowing for diagnosis: **the timing tells you which failure you have.** A
+lookup that fails after the full ~25 s means the shim sent and got no reply (the
+mixnet). A lookup that fails *instantly* means the shim had no transport to send
+on at all (a configuration or client-lifecycle problem). A healthy pass-through
+call like `GetLightdInfo` answers in about 2 s and is your control.
 
 ## Forward-only caveat
 
