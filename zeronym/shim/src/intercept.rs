@@ -187,6 +187,7 @@ async fn divert(
             tracing::info!(
                 target: "zis::classify",
                 accepted = error_code == 0,
+                txid = %message,
                 "migration diverted to the hub"
             );
             Ok(grpc_send_response(error_code, &message))
