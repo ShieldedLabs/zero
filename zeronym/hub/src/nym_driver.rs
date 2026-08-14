@@ -71,11 +71,18 @@ const REBUILD_BACKOFF: Duration = Duration::from_secs(5);
 /// address, which every shim has baked into an immutable enclave config.
 ///
 /// Staying down a while is therefore cheaper than rotating early, and a hub
-/// restart would change the address anyway, so this only automates by hand what
-/// an operator would otherwise do by hand. At [`REBUILD_BACKOFF`] that is
-/// roughly five minutes of unbroken failure. Validate the number against the
-/// localnet harness, where the gateway is a process you can kill on demand
-/// (`nymnet/README.md`).
+/// restart would change the address anyway, so this only automates what an
+/// operator would otherwise do by hand.
+///
+/// **About six minutes of unbroken failure, not the five you get by dividing.**
+/// Measured on the localnet harness with the gateway killed: 60 failures took
+/// ~370 s, because each cycle costs [`REBUILD_BACKOFF`] PLUS however long the
+/// connect attempt itself takes to fail — ~1 s against a locally refused port,
+/// and longer against a remote gateway that times out rather than refusing. The
+/// wall-clock threshold is therefore a floor, not a fixed value; anything
+/// tuning this number should re-measure rather than divide by the backoff.
+/// `nymnet/localnet.sh` plus the probe's `hub-address-across-rebuild changed`
+/// arm is how that measurement is taken.
 const REBUILDS_BEFORE_NEW_IDENTITY: u32 = 60;
 
 /// Which Nym network the driver connects to. Plain data, not a trait: production

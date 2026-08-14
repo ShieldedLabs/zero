@@ -75,9 +75,20 @@ async fn main() -> Result<()> {
             cmd_e2e_driver(&network).await
         }
         Some("hub-address-across-rebuild") => {
-            let network =
-                PathBuf::from(args.get(2).context("usage: hub-address-across-rebuild <network.json>")?);
-            cmd_hub_address_across_rebuild(&network).await
+            let network = PathBuf::from(
+                args.get(2)
+                    .context("usage: hub-address-across-rebuild <network.json> [same|changed]")?,
+            );
+            // Two arms, two expectations. `same` is the reconnect arm (bounce
+            // the gateway and bring it back); `changed` is the fallback arm
+            // (leave it down past REBUILDS_BEFORE_NEW_IDENTITY, so the driver
+            // abandons the registration and mints a new identity).
+            let expect_same = match args.get(3).map(String::as_str) {
+                None | Some("same") => true,
+                Some("changed") => false,
+                Some(other) => bail!("expected 'same' or 'changed', got {other:?}"),
+            };
+            cmd_hub_address_across_rebuild(&network, expect_same).await
         }
         _ => bail!(
             "usage: probe topology|smoke|lookup|wire|e2e|e2e-driver|hub-address-across-rebuild ..."
@@ -914,7 +925,7 @@ async fn cmd_lookup(network: &Path, surbs: u32) -> Result<()> {
 /// driver's next publication. Equal addresses mean the rebuild reused the stored
 /// identity and registration rather than minting a new one, which is what keeps
 /// every shim's baked `--hub-nym` valid across a gateway blip.
-async fn cmd_hub_address_across_rebuild(network: &Path) -> Result<()> {
+async fn cmd_hub_address_across_rebuild(network: &Path, expect_same: bool) -> Result<()> {
     use std::io::Write;
     use std::sync::Arc;
 
@@ -961,18 +972,36 @@ async fn cmd_hub_address_across_rebuild(network: &Path) -> Result<()> {
 
     // Generous: the SDK only declares a client dead after repeated send
     // failures, and the rebuild then waits out the driver's backoff.
-    let second = tokio::time::timeout(Duration::from_secs(300), hub_addr_rx.recv())
+    // Long enough to cover the fallback arm, not just the reconnect arm. A
+    // reconnect publishes within seconds; the fresh-identity fallback only fires
+    // after REBUILDS_BEFORE_NEW_IDENTITY cycles, and a cycle costs the driver's
+    // backoff PLUS however long a connect attempt takes to fail (~8 s locally,
+    // so ~8 minutes at 60). Measured, not divided.
+    let second = tokio::time::timeout(Duration::from_secs(900), hub_addr_rx.recv())
         .await
-        .context("no address was published within 300s of the gateway bounce")?
+        .context("no address was published within 900s of the gateway bounce")?
         .context("the address channel closed before a rebuild was reported")?;
     println!("[rebuild] address after:  {second}");
 
-    if first == second {
-        println!("\nhub-address-across-rebuild: PASS");
-        println!("  - the client rebuilt and came back on the SAME address");
-        println!("  - every shim's baked --hub-nym stays valid across a gateway blip");
-        Ok(())
-    } else {
-        bail!("the address CHANGED across the rebuild:\n  before {first}\n  after  {second}")
+    match (expect_same, first == second) {
+        (true, true) => {
+            println!("\nhub-address-across-rebuild: PASS");
+            println!("  - the client rebuilt and came back on the SAME address");
+            println!("  - every shim's baked --hub-nym stays valid across a gateway blip");
+            Ok(())
+        }
+        (false, false) => {
+            println!("\nhub-address-across-rebuild: PASS");
+            println!("  - the fallback abandoned an unrecoverable registration");
+            println!("  - it minted a FRESH identity, so the address changed as intended");
+            println!("  - operators must re-point every shim after this; the driver says so");
+            Ok(())
+        }
+        (true, false) => bail!(
+            "the address CHANGED when it should have been reused:\n  before {first}\n  after  {second}"
+        ),
+        (false, true) => bail!(
+            "the address was REUSED when the fallback should have replaced it: {first}"
+        ),
     }
 }
