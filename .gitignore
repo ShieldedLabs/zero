@@ -4,3 +4,11 @@
 # Deployment bundle local files (never commit wallet secrets)
 /deploy/*/.env
 /deploy/z3-stack/encryption-identity.txt
+
+*.DS_Store
+
+# Local adversarial review output and scratch state (.githooks/pre-push).
+# .githooks/review.conf is deliberately NOT ignored: it is the shared config.
+/REVIEW.md
+/REVIEW-*.md
+/.githooks/.review-state/
