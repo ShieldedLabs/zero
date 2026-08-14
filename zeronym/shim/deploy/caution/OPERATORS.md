@@ -188,11 +188,27 @@ Caveats:
   image runs in a genuine enclave.
 - Older copies of this guide warned that verify reports PCR0/1 FAILED on a
   healthy enclave, because Caution's builder fetched its framework from a
-  floating `main.tar.gz`. **That is fixed**: on the attested hub deployed
+  floating `main.tar.gz`. **That is fixed**: on the attested pair deployed
   2026-08-14 the manifest pinned both the enclave and framework sources to
-  commits, and **all three PCRs reproduced**, with the TLS certificate binding
-  verified as well. Expect a clean `✓ Attestation verification PASSED`. If PCR0/1
-  do mismatch, suspect a moved framework pin rather than your application.
+  commits, and **all three PCRs reproduced** on both, with the TLS certificate
+  binding verified. Expect a clean `✓ Attestation verification PASSED`.
+- **Do not fall back to "PCR2 is the one that matters".** That advice circulated
+  while PCR0/1 were failing, and it is wrong on this platform. Measured
+  2026-08-14 across the attested shim and hub — two entirely different binaries:
+
+  | | shim | hub |
+  |---|---|---|
+  | PCR0 | `accb679a…` | `218d1f64…` |
+  | PCR1 | `accb679a…` | `218d1f64…` |
+  | PCR2 | `21b9efbc…` | `21b9efbc…` **(identical)** |
+
+  **PCR2 does not distinguish the application.** PCR0/PCR1 are what change with
+  it. So an attestation accepted on a PCR2 match alone would prove only that
+  *some* Caution enclave is running, not that it is running your reviewed code —
+  which is the entire claim. Require **all three** to reproduce, and treat a
+  PCR0/1 mismatch as a real finding about the application until proven otherwise.
+  (The observation is empirical; we have not confirmed with Caution which layer
+  each index measures on their EIF layout.)
 
 For `reproduce.sh`, the result that counts is a match on independent hardware:
 two builds on one machine share CPU, kernel, and Docker. On an arm64 Mac it runs

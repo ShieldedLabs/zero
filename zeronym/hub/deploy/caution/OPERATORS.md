@@ -109,6 +109,18 @@ the TLS certificate binding verified. Measured on the first attested hub
 (2026-08-14): all of PCR0/1/2 matched, and the manifest correctly recorded the
 published app source and commit.
 
+**Require all three PCRs. Do not accept a PCR2 match alone.** Advice circulated,
+while PCR0/1 were failing for an unrelated reason, that "PCR2 is the application
+layer and the check that matters". That is wrong on this platform: measured
+2026-08-14, the attested hub and the attested shim — two entirely different
+binaries — produced **byte-identical PCR2** (`21b9efbc…`), while PCR0/PCR1
+differed per application (`218d1f64…` hub, `accb679a…` shim). PCR2 does not
+distinguish the application, so an attestation accepted on PCR2 alone would prove
+only that *some* Caution enclave is running, not that it is running the reviewed
+hub — which for the component holding plaintext migrations is the whole point.
+(Empirical observation; not confirmed with Caution which layer each index
+measures.)
+
 Publish the assembled tree to the `--app-source` repo — `main`, plus a tag on the
 deployed commit, since the manifest pins branch **and** commit and a branch tip
 moves. Caution's own git remote is push-only, so this published repo is the only
