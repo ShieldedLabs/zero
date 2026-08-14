@@ -110,6 +110,32 @@ printf '%s\n' "$PUSH_OUT" >&2
 printf '%s\n' "$PUSH_OUT" | grep -qi "Deployment successful" || \
   die "deploy did not report success — not touching DNS. Check the push output above."
 
+# ---------- publish the app-source (attested deploys only) ----------
+# `caution verify` clones the --app-source URL and rebuilds from it; Caution's own
+# remote is push-only, so the assembled tree must ALSO live at a public, clonable
+# repo, or the attestation is not independently verifiable. Push the EXACT deployed
+# commit and tag it: the manifest pins branch AND commit, and a branch tip moves
+# and can be garbage-collected. Push over APP_SOURCE_PUSH if set (e.g. an ssh URL),
+# else the https APP_SOURCE the manifest records. Nothing secret is published:
+# backend IP, hub address and egress are public by design, the only key is an SSH
+# *public* key.
+if [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ]; then
+  APP_SOURCE_PUSH=${APP_SOURCE_PUSH:-$APP_SOURCE}
+  APP_SOURCE_TAG=${APP_SOURCE_TAG:-deploy-$APP_ID}
+  log "publishing the app-source to $APP_SOURCE_PUSH (tag $APP_SOURCE_TAG) ..."
+  ( cd "$DEST" &&
+    { git remote remove app-source 2>/dev/null || true; } &&
+    git remote add app-source "$APP_SOURCE_PUSH" &&
+    git push app-source HEAD:main &&
+    git tag -f "$APP_SOURCE_TAG" &&
+    git push -f app-source "refs/tags/$APP_SOURCE_TAG"
+  ) >&2 || die "app-source publish FAILED. The enclave is up, but it is not \
+independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
+(gh/ssh) and push by hand, or re-run."
+  log "app-source published: $APP_SOURCE @ $APP_SOURCE_TAG"
+  log "verify with: caution verify (expect PCR0/1 FAILED on Caution's floating framework; PCR2 is the check that matters)"
+fi
+
 # ---------- work out the DNS record to set ----------
 REC_DATA=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*[Pp]ointing to \([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
 [ -n "$REC_DATA" ] || REC_DATA=$(printf '%s\n' "$PUSH_OUT" | sed -n 's/.*DNS target:[[:space:]]*\([A-Za-z0-9._-]\{1,\}\).*/\1/p' | tail -1)
@@ -162,6 +188,7 @@ component  : $COMPONENT
 app id     : $APP_ID
 deploy dir : $DEST
 serves     : https://$TLS_DOMAIN
+verify     : $( [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ] && printf '%s @ %s — run: caution verify' "$APP_SOURCE" "${APP_SOURCE_TAG:-}" || printf 'n/a (debug deploy, not attested; no app-source published)' )
 DNS set    : ${RECORD_NAME:-@}.$DNS_DOMAIN  $REC_TYPE  $REC_DATA  (ttl ${DNS_TTL}s, Vultr)
 next       : allow a minute for DNS + the managed cert, then point the wallet at
              $TLS_DOMAIN:443 (or read the Nym address if this was a hub).
