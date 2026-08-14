@@ -226,16 +226,23 @@ precisely how a dead hub went unnoticed for hours on 2026-08-14.
 **Recover:**
 
 1. Redeploy the hub (destroy → create → CNAME → push; managed apps are
-   immutable, so the app id and CNAME both change). **~20 min.**
+   immutable, so the app id and CNAME both change). **~25 min**, measured twice:
+   the push alone is 20–23 min, of which **15–17 min is the builder downloading
+   dependencies** — remote, and nothing local speeds it up. Note the CNAME step
+   sits in the middle and blocks, so if DNS is someone else's job, wake them
+   first.
 2. Confirm `mixnet_connected: true` — do not skip this; a hub can boot, serve TLS,
    and answer `/healthz` while receiving nothing.
 3. Read the new address from `/nym-address`.
 4. **Send it to every shim operator.** There is no discovery mechanism; the
    handoff is a human message.
 5. Each shim operator re-assembles with the new `--hub-nym` and redeploys
-   (**~20 min each**, and their app id and CNAME change too).
+   (**~25 min each**, and their app id and CNAME change too). These can run in
+   parallel across operators; nothing serialises them once they have the address.
 
-Budget over an hour end to end, during which migrations are failing.
+Budget **well over an hour** end to end, during which migrations are failing.
+`caution verify` is a further ~7 min but does NOT belong on the critical path —
+restore service first, verify after.
 
 **Why it cannot currently be better.** A standby cannot be pre-baked into shims,
 because a diskless hub has no address until it runs — and if it runs, it is *hot*,
