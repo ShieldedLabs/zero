@@ -12,7 +12,7 @@
     <style>
 
 .canvas {
-    fill: #fbfcfe;
+    fill: none;
 }
 
 
@@ -115,8 +115,7 @@
 }
 
 .organization {
-    fill: #f7f9fc;
-    fill-opacity: 0.72;
+    fill: none;
     stroke: #a9b2c2;
     stroke-width: 1.8;
     stroke-dasharray: 8 6;
@@ -179,6 +178,27 @@
 
 .highlight {
     fill: #ffffff;
+}
+
+/* Transparent canvas, so the title and the auditor label are the only text
+   sitting on the page's own background. Everything else is on a filled shape
+   and keeps its contrast. Placed last on purpose: at equal specificity the
+   later rule wins. */
+@media (prefers-color-scheme: dark) {
+    .title {
+        fill: #e6edf3;
+    }
+
+    .auditor-label {
+        fill: #d9b75f;
+    }
+
+    /* The organisation boundary has no fill, so its label is on the canvas
+       too. The TEE label is NOT here on purpose: it sits on the enclave's
+       light green panel and has to stay dark. */
+    .boundary-label {
+        fill: #9aa7b8;
+    }
 }
 
     </style>
