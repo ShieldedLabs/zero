@@ -466,6 +466,15 @@ where
                     }
                     Err(err) => return Err(err.into()),
                 };
+                // Set here, on the raw TcpStream, because once the stream may be
+                // a TLS wrapper there is nothing further down to set it on. This
+                // is the wallet leg, and it is streamed gRPC: GetBlockRange
+                // sends many small h2 frames (DATA, WINDOW_UPDATE, PING,
+                // trailers), and with Nagle on each burst can sit ~40 ms behind
+                // delayed-ACK. Across a long block sync that reads as a shim
+                // performance bug rather than the kernel default it is. Best
+                // effort: a failure here is not worth refusing the connection.
+                let _ = stream.set_nodelay(true);
                 let live = live_tx.clone();
                 let backend = backend.clone();
                 let tls = tls.clone();
@@ -541,8 +550,8 @@ async fn serve_connection<IO>(
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // set_nodelay moved to the accept site: once the stream may be a TLS
-    // wrapper there is no TcpStream here to set it on.
+    // set_nodelay is applied at the accept site, on the raw TcpStream: once the
+    // stream may be a TLS wrapper there is nothing here to set it on.
 
     // One upstream connection per inbound connection, dialled lazily and
     // redialled when it dies. If the backing indexer is down we still serve the
