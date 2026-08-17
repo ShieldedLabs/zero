@@ -276,9 +276,38 @@ impl ChainClient {
         Req: Message,
         Resp: Message + Default,
     {
-        let stream = tokio::time::timeout(RPC_TIMEOUT, TcpStream::connect(addr))
+        // ONE deadline over the whole call -- connect, TLS handshake, h2
+        // handshake, request, and body -- not a timer on the connect alone.
+        // Before this only TcpStream::connect was inside RPC_TIMEOUT; the TLS
+        // handshake (a bare tokio-rustls await with no timeout of its own) and
+        // the h2 handshake were not, so an endpoint that ACKed the TCP connect
+        // and then went silent before ServerHello hung this future forever. And
+        // this future is awaited INLINE by the flush cadence and by tip_height,
+        // so one such endpoint stopped every future flush; fifteen minutes later
+        // is_stale() refused every submission as TipStale. Worse after the
+        // requeue-on-transport-failure change: a hung flush never returns, so
+        // nothing requeues either. The whole call now fails closed inside the
+        // budget, which is what "per-call budget" was always meant to mean.
+        tokio::time::timeout(RPC_TIMEOUT, self.unary_inner(addr, path, message))
             .await
-            .map_err(|_| -> BoxError { format!("connect to {addr} timed out").into() })??;
+            .map_err(|_| -> BoxError {
+                format!("{path} to {addr} exceeded the {RPC_TIMEOUT:?} call budget").into()
+            })?
+    }
+
+    /// The body of [`Self::unary`], without the deadline; kept separate so the
+    /// deadline wraps EVERY await below, including the handshakes.
+    async fn unary_inner<Req, Resp>(
+        &self,
+        addr: SocketAddr,
+        path: &str,
+        message: Req,
+    ) -> Result<Resp, BoxError>
+    where
+        Req: Message,
+        Resp: Message + Default,
+    {
+        let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
 
         // The :authority is the VERIFIED NAME, not the dialled address. Any
