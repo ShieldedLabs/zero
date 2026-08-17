@@ -39,7 +39,7 @@ This is written to be checked, not taken on faith. If you are here to review the
 
 - The application binary reproduces (the attestation's PCR2), but the EnclaveOS base image and kernel (PCR0, PCR1) do not, so `caution verify` reports FAILED on healthy enclaves.
 - The reproduce jobs run on pull requests and manual dispatch, **not on every push**, so a change landed directly on `main` outruns them.
-- As of 2026-08-17 both published hashes are stale against the tip of `main` and both jobs report DOES NOT REPRODUCE.
+- Both reproduce jobs last ran on 2026-08-17 against commit `e91170ed`, and both reported DOES NOT REPRODUCE. Re-baseline commits have landed since and no job has run against them, so the current state is unverified rather than known good.
 - The live pair's published provenance does not check out: the shim's cites a source commit that is not public, and the hub's quotes a hash its own cited commit does not produce.
 
 **Where this sits against the wallet threat model.** zero-indexer targets the server-side and network-metadata concerns in Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), specifically the surveilling-lightwalletd and compromised-lightwalletd adversaries. It does **not** address the wallet-app-local concerns that model lists as the wallet's own: key and seed storage, memo integrity, dust resilience, wallet fingerprinting, and supply chain.
