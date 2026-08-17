@@ -231,22 +231,52 @@ pub async fn run_driver(
         // receive arm touches `client`: two disjoint borrows in one `select!`.
         let sender = client.split_sender();
 
+        // THE ONE REPLY IN FLIGHT, driven by its own arm instead of awaited inside
+        // the arm that starts it.
+        //
+        // Handing a reply to the SDK must never be an awaited step inside a select
+        // arm. The SDK's input channel holds a single `InputMessage` and is drained
+        // at the client's throttled Poisson send rate, so the hand-off blocks for as
+        // long as that rate dictates, which under a real gateway's backpressure runs
+        // to whole seconds. For every one of those seconds an inline await
+        // would stop this loop polling `wait_for_messages`, so requests already
+        // delivered to our gateway would sit unread while we queued the answer to an
+        // earlier one, and every shim waiting on those would time out. The shim's
+        // `correlate` (in its `nym` module) documents the same hazard one channel
+        // upstream and avoids it with `reserve()`; here the send is held as a pinned
+        // future and driven by its own arm, so the receive arm keeps running for the
+        // whole of it.
+        //
+        // Backpressure comes from the guard rather than from an await: no reply is
+        // taken from `outgoing` while one is still outstanding, so the queue stays
+        // visible to the listener instead of being absorbed into spawned tasks.
+        let mut in_flight: Option<InFlight> = None;
+
         // Inner loop: serve until shutdown, the listener going away, or a death.
         // The select decides WHAT happened; consuming the client (disconnect)
         // happens after the loop, where no arm future still borrows it.
         let step = loop {
             let step = tokio::select! {
                 _ = &mut shutdown => Step::Stop,
-                reply = outgoing.recv() => match reply {
+                // Guarded so a reply is only taken once the previous one has been
+                // accepted by the SDK: one in flight at a time, the rest left in
+                // `outgoing` where the listener can see the queue.
+                reply = outgoing.recv(), if in_flight.is_none() => match reply {
                     Some(reply) => {
                         let tag = AnonymousSenderTag::from_bytes(reply.sender_tag.0);
-                        if let Err(err) = sender.send_reply(tag, reply.frame.to_vec()).await {
-                            tracing::warn!(error = %err, "mixnet reply send failed");
-                        }
+                        in_flight = Some(reply_send(sender.clone(), tag, reply.frame.to_vec()));
                         Step::Ferried
                     }
                     // The listener is gone; there is nothing left to answer.
                     None => Step::Stop,
+                },
+                // The outstanding reply, if there is one. Losing a turn here to an
+                // inbound request costs nothing: only `drive`'s own future is
+                // dropped, never the boxed send behind the `&mut`, so it resumes
+                // from where it stopped.
+                _ = drive(&mut in_flight), if in_flight.is_some() => {
+                    in_flight = None;
+                    Step::Ferried
                 },
                 messages = client.wait_for_messages() => match messages {
                     Some(messages) => {
@@ -264,6 +294,15 @@ pub async fn run_driver(
                 stop_or_died => break stop_or_died,
             }
         };
+        // Whatever was still in flight belongs to the client that has just stopped
+        // serving, so it goes with it rather than lingering across the backoff
+        // below. Nothing is left half-written by that: the SDK's send is cancel-safe
+        // (the message is either fully queued or not sent at all), and a reply
+        // queued into a client about to be disconnected would not have reached the
+        // mixnet either. It also bounds the plaintext copy of the reply frame to the
+        // life of the client that was going to send it, rather than letting it sit
+        // through the backoff.
+        drop(in_flight);
 
         match step {
             Step::Stop => {
@@ -301,6 +340,44 @@ enum Step {
     Died,
     /// Shut down cleanly and stop.
     Stop,
+}
+
+/// One reply handed to the SDK and not yet accepted by it.
+///
+/// Boxed and pinned so the driver can hold it across select turns and poll it
+/// from a dedicated arm; owned rather than borrowing the sender, so a client that
+/// dies mid-send leaves nothing borrowing the sender it took with it.
+type InFlight = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Poll the outstanding reply, if there is one.
+///
+/// Taking the `Option` by reference is what makes this arm cancel-safe: when
+/// another arm wins the turn, only this future is dropped and the send behind the
+/// reference is untouched. The `None` case parks forever rather than returning,
+/// since a select arm that resolved instantly would spin the loop; in practice it
+/// is unreachable behind the arm's `is_some()` guard.
+async fn drive(in_flight: &mut Option<InFlight>) {
+    match in_flight {
+        Some(send) => send.await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The in-flight future for one outbound reply.
+///
+/// It owns its sender and frame because it outlives the select turn that started
+/// it; the sender is a cheap handle over the client's input channel, so cloning
+/// one per reply costs nothing.
+fn reply_send(
+    sender: nym_sdk::mixnet::MixnetClientSender,
+    tag: AnonymousSenderTag,
+    frame: Vec<u8>,
+) -> InFlight {
+    Box::pin(async move {
+        if let Err(err) = sender.send_reply(tag, frame).await {
+            tracing::warn!(error = %err, "mixnet reply send failed");
+        }
+    })
 }
 
 /// Hand one inbound reconstructed message to the listener as a [`Received`],

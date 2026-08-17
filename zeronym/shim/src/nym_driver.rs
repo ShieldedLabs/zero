@@ -178,6 +178,10 @@ pub async fn run_driver(
     use std::sync::atomic::Ordering;
 
     targets.store(hub_addresses.len(), Ordering::Relaxed);
+    // Shared into each in-flight send below rather than borrowed by it: a send is
+    // not awaited inside the select arm that starts it, so it outlives that arm and
+    // must own everything it reads.
+    let hub_addresses = std::sync::Arc::new(hub_addresses);
     // Published before the first build attempt, so a shim that NEVER connects
     // still reports "configured but not connected" rather than looking
     // forward-only, which is the case an operator most needs to see.
@@ -246,14 +250,38 @@ pub async fn run_driver(
     let mut inbound_at_probe: Option<u64> = None;
     let mut silent_rounds: u32 = 0;
 
+    // THE ONE SEND IN FLIGHT, driven by its own arm instead of awaited inside the
+    // arm that starts it.
+    //
+    // Handing a message to the SDK must never be an awaited step inside a select
+    // arm. The SDK's input channel holds a single `InputMessage` and is drained at
+    // the client's throttled Poisson send rate, so the hand-off blocks for as long
+    // as that rate dictates: seconds, under the backpressure a real shared gateway
+    // applies. For every one of those seconds an inline await would stop this loop
+    // polling `wait_for_messages`, leaving reply SURBs already waiting at the
+    // gateway unread until their round trip had timed out. That is the same hazard
+    // `correlate` in `crate::nym` documents one channel upstream and avoids with
+    // `reserve()`; here the send is held as a pinned future and driven by its own
+    // arm, so the receive arm keeps running for the whole of it.
+    //
+    // Backpressure comes from the guards rather than from an await: neither a frame
+    // nor a probe is started while one send is still outstanding, so the pressure
+    // lands on `out_frames` and therefore on the transport's `reserve()`, which is
+    // where the caller is meant to feel it. Nothing is spawned, so there is no
+    // second queue growing out of sight.
+    let mut in_flight: Option<InFlight> = None;
+
     // The select decides WHAT happened; the client lifecycle (which consumes the
     // client to disconnect, or replaces it on rebuild) is handled AFTER the
     // select, where none of its futures still borrow the client.
     loop {
         let step = tokio::select! {
             // Inbound liveness. Cheap to keep in the select: the tick itself does
-            // no I/O, and the probe send is a single empty message.
-            _ = probe.tick() => {
+            // no I/O, and the probe send is a single empty message. Guarded on
+            // nothing being in flight because the probe IS a send and the SDK takes
+            // them one at a time; a tick that falls during a send is served on the
+            // next turn, which is what MissedTickBehavior::Delay is already set for.
+            _ = probe.tick(), if in_flight.is_none() => {
                 let seen = status.inbound_total();
                 match inbound_at_probe {
                     // A probe was outstanding and nothing at all has arrived since.
@@ -275,8 +303,7 @@ pub async fn run_driver(
                                 silent_rounds,
                                 "no inbound mixnet traffic since the last probe; watching"
                             );
-                            send_probe(&sender, own).await;
-                            inbound_at_probe = Some(status.inbound_total());
+                            in_flight = Some(probe_send(sender.clone(), own));
                             Step::Ferried
                         }
                     }
@@ -285,8 +312,7 @@ pub async fn run_driver(
                     // came from the probe or from real wallet lookups.
                     _ => {
                         silent_rounds = 0;
-                        send_probe(&sender, own).await;
-                        inbound_at_probe = Some(status.inbound_total());
+                        in_flight = Some(probe_send(sender.clone(), own));
                         Step::Ferried
                     }
                 }
@@ -297,14 +323,32 @@ pub async fn run_driver(
                 // to obey, so shut the client down cleanly like an explicit stop.
                 Some(ClientCommand::Disconnect) | None => Step::Stop,
             },
-            frame = out_frames.recv() => match frame {
+            // Guarded so a frame is only taken once the previous one has been
+            // accepted by the SDK: one in flight at a time, the rest left in
+            // `out_frames` where the transport can see the queue and slow down.
+            frame = out_frames.recv(), if in_flight.is_none() => match frame {
                 Some(out) => {
-                    send_frame(&sender, &hub_addresses, out).await;
-                    status.record_send();
+                    in_flight = Some(frame_send(sender.clone(), hub_addresses.clone(), out));
                     Step::Ferried
                 }
                 // The transport loop is gone; there is nothing to carry.
                 None => Step::Stop,
+            },
+            // The outstanding send, if there is one. Losing a turn here to inbound
+            // traffic costs nothing: only `drive`'s own future is dropped, never the
+            // boxed send behind the `&mut`, so it resumes from where it stopped.
+            sent = drive(&mut in_flight), if in_flight.is_some() => {
+                in_flight = None;
+                match sent {
+                    // Counted at acceptance by the SDK, not at the moment the frame
+                    // was taken off the channel: the count means "handed to the
+                    // mixnet", and only this future completing says that.
+                    Sent::Frame => status.record_send(),
+                    // The mark means "inbound seen as of the probe going out", so it
+                    // is read here and not when the probe was queued.
+                    Sent::Probe => inbound_at_probe = Some(status.inbound_total()),
+                }
+                Step::Ferried
             },
             messages = client.wait_for_messages() => match messages {
                 Some(messages) => {
@@ -337,6 +381,12 @@ pub async fn run_driver(
                 return;
             }
             Step::Rebuild => {
+                // Any outstanding send belongs to the client about to go away, so
+                // it goes with it. Nothing is left half-written by that: the SDK's
+                // send is cancel-safe (the message is either fully queued or not
+                // sent at all), and a message queued into a client one line from
+                // being disconnected would not have reached the mixnet either.
+                in_flight = None;
                 // A live rotation: disconnect the current identity to completion
                 // (D12: disconnect is not cancel-safe), then mint a fresh one.
                 client.disconnect().await;
@@ -368,6 +418,9 @@ pub async fn run_driver(
                 silent_rounds = 0;
             }
             Step::Died => {
+                // Dropped with the client it was addressed to, for the same reason
+                // as the rebuild path above.
+                in_flight = None;
                 // The dead client's tasks have already stopped, so it is dropped
                 // (by the reassignment below), not disconnected. Report and wait
                 // for the supervisor to ask for a rebuild.
@@ -404,6 +457,63 @@ enum Step {
     Died,
     /// Shut down cleanly and stop.
     Stop,
+}
+
+/// One message handed to the SDK and not yet accepted by it.
+///
+/// Boxed and pinned so the driver can hold it across select turns and poll it
+/// from a dedicated arm; owned rather than borrowing the sender, so that a
+/// rebuild can replace the sender without the outstanding send pinning a borrow
+/// on it.
+type InFlight = std::pin::Pin<Box<dyn std::future::Future<Output = Sent> + Send>>;
+
+/// Which send just completed, so the loop can run the bookkeeping that belongs
+/// after a send even though the send no longer finishes inside the arm that
+/// started it.
+enum Sent {
+    /// An outbound frame for a hub.
+    Frame,
+    /// An inbound-liveness probe to our own address.
+    Probe,
+}
+
+/// Poll the outstanding send, if there is one.
+///
+/// Taking the `Option` by reference is what makes this arm cancel-safe: when
+/// another arm wins the turn, only this future is dropped and the send behind the
+/// reference is untouched. The `None` case parks forever rather than returning,
+/// since a select arm that resolved instantly would spin the loop; in practice it
+/// is unreachable behind the arm's `is_some()` guard.
+async fn drive(in_flight: &mut Option<InFlight>) -> Sent {
+    match in_flight {
+        Some(send) => send.await,
+        None => std::future::pending::<Sent>().await,
+    }
+}
+
+/// The in-flight future for one outbound frame.
+///
+/// It owns its sender and address list because it outlives the select turn that
+/// started it; the sender is a cheap handle over the client's input channel, so
+/// cloning one per send costs nothing.
+fn frame_send(
+    sender: nym_sdk::mixnet::MixnetClientSender,
+    hub_addresses: std::sync::Arc<Vec<Recipient>>,
+    out: OutFrame,
+) -> InFlight {
+    Box::pin(async move {
+        send_frame(&sender, &hub_addresses, out).await;
+        Sent::Frame
+    })
+}
+
+/// The in-flight future for one liveness probe, owned for the same reason as
+/// [`frame_send`]'s.
+fn probe_send(sender: nym_sdk::mixnet::MixnetClientSender, own: Recipient) -> InFlight {
+    Box::pin(async move {
+        send_probe(&sender, own).await;
+        Sent::Probe
+    })
 }
 
 /// How often to check that inbound traffic is still arriving.
