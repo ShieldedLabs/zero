@@ -36,7 +36,16 @@ __APP_SOURCE__
     # restart drops whatever was held and the shims re-submit; persisting it
     # would mean writing plaintext migrations somewhere the operator could read,
     # which is the one thing this component exists to prevent.
-    cpu       = 2
+    #
+    # Four vCPUs, not two. Measured 2026-08-17 with the same hub binary in a
+    # container pinned to 2 vCPU: an idle lookup was as fast as unconstrained
+    # (2-5 s, ~7 % CPU), but a wallet-sync burst of 8 concurrent lookups was
+    # ~2.4x slower than unconstrained (batch 24 s vs 10 s, tail 19-23 s) at only
+    # 19 % of the two cores -- so not CPU-bound, but enough packet-processing
+    # latency to lengthen the reply leg under contention. Two more cores are
+    # cheap and help the burst case; they do NOT explain the enclave's 10x
+    # slowdown at idle, which is a separate, open question.
+    cpu       = 4
     memory_mb = 2048
   }
 
