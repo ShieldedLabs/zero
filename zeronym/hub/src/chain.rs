@@ -67,9 +67,10 @@ pub enum TxLookup {
 }
 
 /// A non-zero gRPC status from an endpoint, carried as a typed error so a caller
-/// can tell NOT_FOUND (a real answer) from a transport failure. Its `Display` is
-/// byte-for-byte the string `round_trip` used to format, so `broadcast` and
-/// `tip_height`, which only stringify errors, are unchanged.
+/// can tell a real answer (NOT_FOUND on a lookup, INVALID_ARGUMENT on a publish)
+/// from a transport failure. Its `Display` is byte-for-byte the string
+/// `round_trip` used to format, so `tip_height`, which only stringifies errors,
+/// is unchanged.
 #[derive(Debug)]
 pub(crate) struct GrpcStatusError {
     pub code: String,
@@ -95,12 +96,29 @@ impl std::error::Error for GrpcStatusError {}
 /// duplicate by construction. Treating that as an error would make normal
 /// operation look like a fault and could drive a re-submission loop, and
 /// re-submissions are a fresh timing signal tied to one transaction.
+///
+/// `Rejected` and `Retryable` are both failures, and the split between them is
+/// what the batcher acts on. `Rejected` is a VERDICT: the indexer took the
+/// request and said the transaction is not acceptable, so offering it again
+/// would only buy the same answer. `Retryable` means nothing judged the
+/// transaction at all: the connection was refused or reset, TLS or the gRPC
+/// call timed out, the endpoint said it was unavailable or overloaded, or it
+/// answered something this client could not read. Those are the failures a
+/// later flush can recover from, and the batcher holds the entry for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Publish {
     Accepted { txid: String },
     AlreadyKnown,
     Rejected { reason: String },
+    Retryable { reason: String },
 }
+
+/// gRPC INVALID_ARGUMENT and FAILED_PRECONDITION: the two statuses under which
+/// a non-OK gRPC reply is still a verdict on the transaction rather than a
+/// failure to reach one. Every other status is treated as transport (see
+/// [`classify_publish_failure`]).
+const GRPC_INVALID_ARGUMENT: &str = "3";
+const GRPC_FAILED_PRECONDITION: &str = "9";
 
 /// A client over one or more indexer endpoints.
 pub struct ChainClient {
@@ -171,32 +189,12 @@ impl ChainClient {
                     .await
                 {
                     Ok(resp) => classify_send_response(&resp),
-                    Err(err) => Publish::Rejected {
-                        reason: err.to_string(),
-                    },
+                    Err(err) => classify_publish_failure(&err),
                 }
             }
         });
 
-        join_all(calls)
-            .await
-            .into_iter()
-            .fold(None, |best: Option<Publish>, outcome| {
-                Some(match (best, outcome) {
-                    // Any acceptance wins: one endpoint taking it is enough for
-                    // the transaction to reach the network.
-                    (Some(Publish::Accepted { txid }), _) => Publish::Accepted { txid },
-                    (_, Publish::Accepted { txid }) => Publish::Accepted { txid },
-                    // Already-known beats a rejection: the network has it.
-                    (Some(Publish::AlreadyKnown), _) | (_, Publish::AlreadyKnown) => {
-                        Publish::AlreadyKnown
-                    }
-                    (_, other) => other,
-                })
-            })
-            .unwrap_or(Publish::Rejected {
-                reason: "no endpoints configured".into(),
-            })
+        best_of(join_all(calls).await)
     }
 
     /// Publish a whole flushed batch, every transaction to every endpoint, all
@@ -417,13 +415,72 @@ fn classify_send_response(resp: &SendResponse) -> Publish {
     classify_publish_error(&resp.error_message)
 }
 
+/// Fold one verdict per endpoint into the verdict for the transaction.
+///
+/// Any acceptance wins: one endpoint taking it is enough for the transaction to
+/// reach the network. Already-known beats everything else: the network has it.
+/// A rejection beats a transport failure, and that ordering is deliberate
+/// rather than a tie-break. The batcher holds a `Retryable` entry for the next
+/// flush, so if an unreachable endpoint could outvote a live one's verdict, a
+/// single dead endpoint in the list would keep every doomed transaction resident
+/// until it expired, and an unparseable payload never expires (queue.rs, REVIEW
+/// #5): junk plus one dead endpoint would fill the byte budget for everyone. A
+/// verdict from any endpoint that answered is final, exactly as it is today
+/// with one endpoint.
+fn best_of(outcomes: Vec<Publish>) -> Publish {
+    fn rank(outcome: &Publish) -> u8 {
+        match outcome {
+            Publish::Accepted { .. } => 3,
+            Publish::AlreadyKnown => 2,
+            Publish::Rejected { .. } => 1,
+            Publish::Retryable { .. } => 0,
+        }
+    }
+    outcomes
+        .into_iter()
+        .max_by_key(rank)
+        .unwrap_or(Publish::Rejected {
+            reason: "no endpoints configured".into(),
+        })
+}
+
+/// Map a failed `SendTransaction` call (no `SendResponse` came back) onto
+/// [`Publish`].
+///
+/// This is the seam between "the indexer judged the transaction" and "the
+/// indexer was never really asked", and the batcher's requeue depends on it
+/// being drawn honestly. Only INVALID_ARGUMENT and FAILED_PRECONDITION are
+/// verdicts here: they are what a gRPC service returns when it read the request
+/// and refuses its content. Everything else, a refused or reset connection, a
+/// TLS failure, any of the three timeouts, UNAVAILABLE, DEADLINE_EXCEEDED,
+/// RESOURCE_EXHAUSTED, an unframeable reply, is a failure to obtain a verdict,
+/// and is classed retryable on purpose even where it might be permanent (an
+/// UNIMPLEMENTED or UNAUTHENTICATED endpoint): re-offering an entry costs one
+/// call per flush and stops at its expiry, while dropping a valid migration on
+/// a misread error is unrecoverable, because the shim has already told the
+/// wallet it was sent.
+fn classify_publish_failure(err: &BoxError) -> Publish {
+    let reason = err.to_string();
+    match err.downcast_ref::<GrpcStatusError>() {
+        Some(status)
+            if status.code == GRPC_INVALID_ARGUMENT || status.code == GRPC_FAILED_PRECONDITION =>
+        {
+            Publish::Rejected { reason }
+        }
+        _ => Publish::Retryable { reason },
+    }
+}
+
 /// Map a node's rejection message onto [`Publish`].
 ///
 /// Matched on text because the error codes for these cases are not consistent
 /// between zebrad and zcashd, nor through an indexer that relays them. Kept in
 /// one place and deliberately conservative: anything unrecognised is a
-/// rejection, so a message we have not seen before is retried rather than
-/// silently dropping a migration.
+/// rejection, never a silent success. Note that a rejection here is a VERDICT
+/// and is dropped by the batcher, not retried: the indexer answered OK with a
+/// non-zero code, which is exactly how lightwalletd and zaino relay the node
+/// saying no, and offering the same bytes again would buy the same answer every
+/// flush until expiry (or forever, for an unparseable payload).
 fn classify_publish_error(message: &str) -> Publish {
     // Hyphens folded to spaces before matching. Bitcoin-derived nodes report
     // these as hyphenated reject reasons (`txn-already-known`) while the longer
@@ -489,11 +546,88 @@ mod tests {
     }
 
     #[test]
-    fn unrecognised_errors_are_rejections_so_the_hub_retries() {
+    fn an_unrecognised_node_error_is_a_verdict_not_a_success_and_not_a_retry() {
+        // The node answered and said no in words this client has not seen. That
+        // is still the node saying no: it must be neither counted as achieved
+        // nor held for the next flush.
         match classify_publish_error("some node we have never seen says no") {
             Publish::Rejected { .. } => {}
-            other => panic!("unrecognised errors must not be treated as success: {other:?}"),
+            other => panic!("unrecognised node errors must be rejections: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_failure_to_reach_a_verdict_is_retryable() {
+        // The shapes `unary` produces when nothing judged the transaction: the
+        // three timeouts and a raw I/O error carry no gRPC status at all, and
+        // UNAVAILABLE / DEADLINE_EXCEEDED are the transport-flavoured statuses.
+        let plain: BoxError = "connect to 127.0.0.1:9 timed out".into();
+        assert!(matches!(
+            classify_publish_failure(&plain),
+            Publish::Retryable { .. }
+        ));
+        for code in ["14", "4", "8", "2", "13"] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: code.into(),
+                message: None,
+            });
+            assert!(
+                matches!(classify_publish_failure(&status), Publish::Retryable { .. }),
+                "grpc-status {code} must be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_argument_and_failed_precondition_are_verdicts() {
+        for code in [GRPC_INVALID_ARGUMENT, GRPC_FAILED_PRECONDITION] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: code.into(),
+                message: Some("bad anchor".into()),
+            });
+            assert!(
+                matches!(classify_publish_failure(&status), Publish::Rejected { .. }),
+                "grpc-status {code} is the indexer refusing the transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verdict_from_one_endpoint_beats_a_transport_failure_from_another() {
+        // Otherwise one dead endpoint would keep every doomed transaction
+        // resident until expiry, and unparseable ones forever.
+        let outcomes = vec![
+            Publish::Retryable {
+                reason: "connection refused".into(),
+            },
+            Publish::Rejected {
+                reason: "bad-txns".into(),
+            },
+        ];
+        assert!(matches!(best_of(outcomes), Publish::Rejected { .. }));
+
+        // And any success beats both.
+        let outcomes = vec![
+            Publish::Retryable {
+                reason: "connection refused".into(),
+            },
+            Publish::AlreadyKnown,
+            Publish::Rejected {
+                reason: "bad-txns".into(),
+            },
+        ];
+        assert_eq!(best_of(outcomes), Publish::AlreadyKnown);
+
+        // Only transport failures means only transport failures.
+        let outcomes = vec![
+            Publish::Retryable {
+                reason: "connection refused".into(),
+            },
+            Publish::Retryable {
+                reason: "gRPC call timed out".into(),
+            },
+        ];
+        assert!(matches!(best_of(outcomes), Publish::Retryable { .. }));
     }
 
     #[test]

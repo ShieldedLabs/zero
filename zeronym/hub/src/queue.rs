@@ -263,6 +263,37 @@ impl Queue {
         batch
     }
 
+    /// Put back entries a flush drained but could not get a verdict on, so the
+    /// next flush offers them again. Returns how many were reinserted.
+    ///
+    /// The byte budget is charged again, and may be overrun: the queue refilled
+    /// while the batch was out, and these entries were admitted (and their
+    /// admission acknowledged) BEFORE anything now resident. An admission is a
+    /// promise and this honours the older one; `admit` refuses `Full` until the
+    /// next flush brings `bytes` back under the cap. Resident memory is not
+    /// made worse by this, because a drained batch is already held alongside a
+    /// refilling queue for the whole flush window.
+    ///
+    /// Same bytes already resident (a shim resent during the window) win, and
+    /// the returning copy is dropped, so no key is ever counted twice.
+    pub fn requeue(&self, entries: Vec<Entry>) -> usize {
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poison) => poison.into_inner(),
+        };
+
+        let mut reinserted = 0;
+        for entry in entries {
+            if inner.entries.contains_key(&entry.key) {
+                continue;
+            }
+            inner.bytes = inner.bytes.saturating_add(entry.tx_bytes.len());
+            inner.entries.insert(entry.key, entry);
+            reinserted += 1;
+        }
+        reinserted
+    }
+
     /// Number of entries currently held. For the hub operator's own metrics
     /// only: this is an anonymity-set-size oracle and must never be returned
     /// down a shim channel.
@@ -290,7 +321,7 @@ impl Queue {
     /// Linear scan on purpose: the modal queue is 0 to 1 entries, and the two
     /// hex strings are precomputed. If junk-stuffing ever makes the queue large
     /// enough for this to matter, add a `txid -> key` index maintained in
-    /// `admit`/`drain_shuffled`; deferred until measured.
+    /// `admit`/`drain_shuffled`/`requeue`; deferred until measured.
     ///
     /// The returned copy is `Zeroizing`, but note the response `hyper` builds
     /// from it downstream is an ordinary buffer that cannot be wiped.
@@ -632,6 +663,75 @@ mod tests {
         ));
         assert!(matches!(
             q.admit(&junk(5), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn requeued_entries_are_held_again_and_charged_to_the_budget_again() {
+        // The batch came back unpublished; it must be resident (a flush will
+        // offer it again) and it must occupy the bytes it did before, otherwise
+        // the budget silently doubles every time an indexer is down.
+        let q = Queue::with_capacity(200);
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let _ = q.admit(&junk(2), 100, N, MARGIN);
+        let _ = q.admit(&junk(3), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+        assert!(q.is_empty());
+
+        assert_eq!(q.requeue(batch), 3);
+        assert_eq!(q.len(), 3);
+        assert_eq!(
+            q.admit(&junk(4), 100, N, MARGIN),
+            Admission::Refused(Refusal::Full),
+            "requeued bytes count against the budget"
+        );
+
+        // And they come out again on the next drain, budget released.
+        assert_eq!(q.drain_shuffled().len(), 3);
+        assert!(matches!(
+            q.admit(&junk(4), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_requeue_never_double_counts_bytes_that_were_resent_meanwhile() {
+        // A shim that resent the same bytes during the flush window has an
+        // entry resident already; the returning copy is dropped, not stacked.
+        let q = Queue::with_capacity(200);
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        assert_eq!(q.requeue(batch), 0);
+        assert_eq!(q.len(), 1);
+        // 64 held, so two more 64-byte entries fit under 200 and a third does not.
+        let _ = q.admit(&junk(2), 100, N, MARGIN);
+        let _ = q.admit(&junk(3), 100, N, MARGIN);
+        assert_eq!(q.len(), 3, "only one copy of the resent bytes was charged");
+    }
+
+    #[test]
+    fn a_requeue_may_overrun_the_budget_and_admit_then_refuses_until_a_flush() {
+        // The queue refilled while the batch was out. Both sets were admitted,
+        // both admissions were promises; the older one is honoured by holding
+        // it, the door refuses until the next flush clears the overrun.
+        let q = Queue::with_capacity(200);
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let _ = q.admit(&junk(2), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+        let _ = q.admit(&junk(3), 100, N, MARGIN);
+        let _ = q.admit(&junk(4), 100, N, MARGIN);
+        let _ = q.admit(&junk(5), 100, N, MARGIN);
+        assert_eq!(q.requeue(batch), 2);
+        assert_eq!(q.len(), 5, "an admitted entry is never evicted, from either side");
+        assert_eq!(
+            q.admit(&junk(6), 100, N, MARGIN),
+            Admission::Refused(Refusal::Full)
+        );
+        assert_eq!(q.drain_shuffled().len(), 5);
+        assert!(matches!(
+            q.admit(&junk(6), 100, N, MARGIN),
             Admission::Admitted { .. }
         ));
     }
