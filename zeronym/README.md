@@ -21,26 +21,21 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 
 ## Security
 
-**What is protected.** The migration broadcast. Its contents are hidden from the operator, because the wallet's TLS terminates inside an attested enclave rather than at the operator's indexer. And the transaction that appears on-chain carries no link to the wallet's IP, because the hub publishes it rather than the wallet. That second property is robust and volume-independent: it does not depend on how many other people are migrating.
+**Protected.** An Orchard-touching broadcast is hidden from the operator, because the wallet's TLS terminates inside an attested enclave, and the on-chain transaction carries no link to the wallet's IP, because the hub publishes it. That second property is volume-independent.
 
-**What is not protected**, stated plainly because the credibility of everything above depends on it.
+**Not protected.**
 
-- **Query content.** Which addresses a wallet looks up still reaches the operator in the clear. One exception is closed: `GetTransaction` is answered by the hub, so a wallet's follow-up on its own migration does not reach the operator. Address-level queries do.
-- **The operator learns *that* a client migrated.** A diverted transaction is the one request the shim does not forward to the operator's own indexer, and that asymmetry is observable. It does not learn the amount, or which on-chain transaction. Shim-side batching and cover traffic were both considered and rejected: the fact is recoverable by traffic analysis regardless of padding, so the honest answer is to state the residual rather than pretend to hide it.
-- **Batch-timing anonymity is conditional, and the condition is not currently met.** What hides which on-chain migration belongs to a client is the batch the hub publishes in one flush. Sampling 144 blocks at mainnet tip 3,433,105 gives **0.77 Orchard-touching transactions per block network-wide**, roughly 37 an hour across every wallet in existence. With one to a few operators, arrivals into a 20-block window are Poisson with a mean well under one, so **the modal published batch is zero or one**. At a batch of one the anonymity set is the transaction itself, and the shuffle, the simultaneous publish, Nym and the TEE are all irrelevant to that transaction's timing. No code fixes this; the lever is adoption, plus wallet expiry defaults we do not control.
-- **The trust root is AWS and the hardware, not mathematics.** The guarantees are real and verifiable, but they rest on AWS Nitro's memory isolation and hardware root of trust. If you do not trust AWS, there is no mathematical fallback today. PIR is the step that removes that trust root, and it is deferred.
-- **The broadcast is delayed**, up to roughly 25 minutes, and the shim answers the wallet before the chain has seen anything. Submit is dispatch-only, so at the moment the wallet is told "accepted" the shim does not yet know the hub received the frame. An invalid migration, or one whose frame never arrived, gets a false success and fails silently.
+- **Query content.** Which addresses a wallet looks up still reaches the operator. Only `GetTransaction` is hub-served.
+- **The operator learns *that* a client migrated**, though not the amount or which transaction. A diverted request is the one thing it does not see, and that asymmetry survives padding, so shim-side batching and cover traffic were rejected rather than attempted.
+- **Batch-timing anonymity is conditional, and the condition is not met.** Mainnet carries **0.77 Orchard-touching transactions per block** (144 blocks at tip 3,433,105), so the modal batch is zero or one, where the anonymity set is the transaction itself. The lever is adoption, not code.
+- **The trust root is AWS and the hardware, not mathematics.** No mathematical fallback today; PIR removes it and is deferred.
+- **The broadcast is delayed** up to ~25 minutes, and submit is dispatch-only, so a wallet is told "accepted" before the shim knows the hub received the frame. A failed migration can fail silently.
 
-**What is not yet verifiable.** The enclaves are attested and running, but verifiability currently lags capability, and this is the gap to close before the system is described as independently auditable.
+**Not yet verifiable.** The enclaves are attested and running, but an auditor cannot yet tie either back to a public commit. PCR2 (the application binary) reproduces; PCR0 and PCR1 do not, so `caution verify` reports FAILED on healthy enclaves. The reproduce jobs run on pull requests and manual dispatch, **not on every push**; they last ran 2026-08-17 on `e91170ed` and both reported DOES NOT REPRODUCE, with re-baselines landed since and no run against them. The live pair's provenance also fails: the shim's cites a non-public commit, the hub's a hash its own cited commit does not produce.
 
-- The application binary reproduces (the attestation's PCR2), but the EnclaveOS base image and kernel (PCR0, PCR1) do not, so `caution verify` reports FAILED on healthy enclaves.
-- The reproduce jobs run on pull requests and manual dispatch, **not on every push**, so a change landed directly on `main` outruns them.
-- Both reproduce jobs last ran on 2026-08-17 against commit `e91170ed`, and both reported DOES NOT REPRODUCE. Re-baseline commits have landed since and no job has run against them, so the current state is unverified rather than known good.
-- The live pair's published provenance does not check out: the shim's cites a source commit that is not public, and the hub's quotes a hash its own cited commit does not produce.
+**Scope.** zero-indexer targets the server-side and network-metadata adversaries in Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), not the wallet-local concerns that model assigns to the wallet.
 
-**Where this sits against the wallet threat model.** zero-indexer targets the server-side and network-metadata concerns in Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), specifically the surveilling-lightwalletd and compromised-lightwalletd adversaries. It does **not** address the wallet-app-local concerns that model lists as the wallet's own: key and seed storage, memo integrity, dust resilience, wallet fingerprinting, and supply chain.
-
-Security issues in the code should go to Shielded Labs privately rather than into a public issue.
+Report security issues to Shielded Labs privately.
 
 ## Background
 
