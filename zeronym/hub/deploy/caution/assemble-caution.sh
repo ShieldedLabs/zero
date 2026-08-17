@@ -19,9 +19,19 @@
 #       --indexers <ip:port[,ip:port...]> --indexer-tls <indexer-cert-name> \
 #       --tls-domain <hub-domain> \
 #       [--app-source <public-git-url>] \
-#       [--nym --nym-egress <cidr:port[:proto]> ...] \
+#       [--nym --nym-egress <cidr:port[:proto]> ... [--nym-gateway <id>] [--ack-wait-ms <n>]] \
 #       [--debug --ssh-key "<ssh pubkey>" ...] \
 #       [dest-dir]
+#
+# --ack-wait-ms sets ZIH_ACK_WAIT_ADDITION_MS: how much longer the hub's mixnet
+# client waits for a packet's ack before RETRANSMITTING it. Measured 2026-08-17:
+# every enclave-hosted hub's replies reached the shim with 15-25 duplicate
+# fragments per lookup (a local hub's, ~1), because the SDK computes the ack
+# deadline from CONFIGURED mix delays and an enclave's real ack path is slower.
+# Each duplicate costs a send slot at the throttled rate and the SDK's rate
+# controller backs off further as they pile up, so lookups took 45-90 s. 6000 is
+# the value the local A/B showed removes the duplicates entirely. Set it on any
+# enclave hub; leave it unset locally.
 #
 # --app-source records, in the manifest's build block, the public git URL where
 # this assembled repository is published. `caution verify` clones that URL and
@@ -63,6 +73,7 @@ APP_SOURCE=""
 NYM="false"
 NYM_EGRESS=""
 NYM_GATEWAY=""
+ACK_WAIT_MS=""
 DEBUG="false"
 SSH_KEYS=""
 DEST=""
@@ -90,6 +101,7 @@ while [ $# -gt 0 ]; do
 		# so it does not rotate. Needs a matching --nym-egress <gateway-ip>/32 rule
 		# (request_gateway takes the IDENTITY, egress takes the IP). Unset = SDK picks.
 		--nym-gateway)   NYM_GATEWAY=$2; shift 2 ;;
+		--ack-wait-ms)   ACK_WAIT_MS=$2; shift 2 ;;
 		--debug)         DEBUG="true"; shift ;;
 		# One authorized debug-console SSH public key, repeatable. Required with
 		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
@@ -335,6 +347,7 @@ if [ "$NYM" = true ]; then
 		printf '      # own Nym address at startup; publish it to shims as --hub-nym.\n'
 		printf '      ZIH_NYM = "true"\n'
 		[ -n "$NYM_GATEWAY" ] && printf '      ZIH_NYM_GATEWAY = "%s"\n' "$NYM_GATEWAY"
+		[ -n "$ACK_WAIT_MS" ] && printf '      ZIH_ACK_WAIT_ADDITION_MS = "%s"\n' "$ACK_WAIT_MS"
 	} > "$NYM_ENV_FILE"
 	echo "==> MIXNET RECEPTION ON: the hub also runs a mixnet client. egress allowlist:$NYM_EGRESS"
 	[ -n "$NYM_GATEWAY" ] && echo "    entry gateway pinned: $NYM_GATEWAY (stable address)" || echo "    entry gateway: SDK-selected (no --nym-gateway)"
