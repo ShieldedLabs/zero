@@ -1,9 +1,21 @@
 # Running the zero-indexer-hub (operator guide)
 
+> **Status, 2026-08-17.** The live pair is **hub-6 + shim-9, in clearnet mode**
+> (`--http-submit`; the shim reaches the hub over HTTPS, not the mixnet). It is
+> attested, publicly verifiable, and fast: lookups 1.6–2.5 s, a diverted
+> migration retrievable from the hub's queue in ~1 s. Nym mode is built, tested,
+> and works end to end — but every hub run inside a Nitro enclave answers a
+> lookup in 30–90 s, and a debug console traced that to the enclave's networking
+> (a `socat` TAP-over-vsock relay that adds latency per frame; the nym-sdk's rate
+> controller correctly throttles to ~8 packets/s in response). Caution confirmed
+> the diagnosis and v2 enclaves with directly attached NICs are their fix. Until
+> then: clearnet. See "Clearnet mode" below for exactly what that keeps and gives
+> up. This block is the thing to update when Nym comes back.
+
 The hub is where diverted migrations land. Shims divert Orchard-touching
-`SendTransaction`s to it over the **Nym mixnet**; the hub holds them in a
-short-lived queue, then broadcasts them to the Zcash network through indexers you
-configure.
+`SendTransaction`s to it — over the **Nym mixnet** in Nym mode, or over HTTPS in
+clearnet mode; the hub holds them in a short-lived queue, then broadcasts them
+to the Zcash network through indexers you configure.
 
 **Read this first: of the two components, this is the one that sees plaintext.**
 The shim's enclave hides migrations *from the indexer operator*. The hub is where
@@ -52,7 +64,10 @@ DNS name you control. Additionally:
 
 ## Deploy
 
-Create the public repo for the assembled tree first (see "Verify"), then:
+Create the public repo for the assembled tree first (see "Verify"). Then pick
+the mode. **As of 2026-08-17 the deployed pair uses clearnet mode.**
+
+**Clearnet mode** (current):
 
 ```bash
 sh zeronym/hub/deploy/caution/assemble-caution.sh \
@@ -60,12 +75,37 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --indexers    <ipv4>:<port>[,<ipv4>:<port>...] \
   --indexer-tls <name-on-indexer-cert> \
   --tls-domain  <hub-domain> \
-  --app-source  <public-git-url> \
-  --nym \
+  --app-source  https://github.com/ShieldedLabs/zero-hub \
+  --http-submit
+```
+
+`--http-submit` opens `POST /` for shims to submit over HTTPS. There is no
+mixnet client, no `--nym-egress`, and `/nym-status` will (correctly) report
+`mixnet_connected: false`. Shims are assembled with `--hub <ip>:443 --hub-tls
+<hub-domain>` — the hub's IP is only known after deploy, so the hub goes first.
+
+**Nym mode** (built and tested; re-enable when the enclave network path
+supports it — see the status block at the top):
+
+```bash
+sh zeronym/hub/deploy/caution/assemble-caution.sh \
+  --name        <enclave-name> \
+  --indexers    <ipv4>:<port>[,<ipv4>:<port>...] \
+  --indexer-tls <name-on-indexer-cert> \
+  --tls-domain  <hub-domain> \
+  --app-source  https://github.com/ShieldedLabs/zero-hub \
+  --nym --ack-wait-ms 15000 \
   --nym-egress  92.39.63.14/32:443:tcp \
+  --nym-egress  172.104.178.252/32:443:tcp \
   --nym-egress  0.0.0.0/0:9000:tcp \
   --nym-egress  1.1.1.1/32:53:udp
 ```
+
+Or drive either mode with `deploy.sh` and a `deploy.env` (see
+`deploy.env.example`), which also publishes the app-source and polls the hub's
+address for you.
+
+Notes that apply to both:
 
 - `--indexers` are literal IPv4 addresses. The enclave resolves **no DNS** for
   them (there is no port 53 rule for that path), so a poisoned answer has nothing
@@ -74,13 +114,23 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   is plaintext and the enclave's parent host reads every batch in the clear
   moments before it is public — which would undo most of the reason this runs in
   an enclave.
-- `--nym` turns on mixnet reception; the `--nym-egress` rules are the enclave's
-  entire allowlist for reaching the mixnet (nym-api, a gateway, a DNS resolver).
-- **Do NOT use `--nym-gateway` yet.** It pins the entry gateway by IDENTITY key
-  while the egress rule needs its IP ADDRESS; a mismatch fails closed with no
-  console. Untested against public Nym.
-- **Never pass `--debug`.** Debug mode disables attestation. See the warning at
-  the top of this file.
+- The two `443` egress rules in Nym mode are **two of the SDK's three built-in
+  nym-api endpoints** (`validator.nymtech.net`, `cdn1.media-platform.net`). The
+  SDK shuffles them and an enclave allowlist DROPS blocked packets, so each
+  blocked attempt costs a 30 s timeout; with only one allowed, ~2/3 of client
+  builds started on a dead endpoint. The third (Fastly) is deliberately excluded:
+  shared CDN edges. Both IPs are DNS snapshots — re-derive on every redeploy.
+- `--nym-gateway <identity>` pins the entry gateway. It **works** (verified
+  against four public gateways, 2026-08-14) and the hub's address embeds its
+  gateway, so pinning keeps the address stable across rebuilds. It needs a
+  matching `--nym-egress <gateway-ip>/32` rule; a mismatch fails closed with no
+  console. Gateway choice is NOT a throughput lever (measured).
+- `--ack-wait-ms 15000` raises the SDK's ack-wait before retransmission. It is
+  harmless and slightly helpful; it is NOT the fix for enclave slowness (the
+  enclave hub never retransmits — the debug console showed zero).
+- **Never pass `--debug` on a hub wallets point at.** Debug mode disables
+  attestation. A debug hub is a diagnostic; `zeronym-hub-dbg` exists for exactly
+  that and is not in `zero-hub`.
 
 Then, from the directory it creates:
 
@@ -105,9 +155,34 @@ Pass `--attestation-url` explicitly: a fully-managed app writes no
 prints suggests `caution init`, which would wrongly provision an AWS stack.
 
 Expect `✓ Attestation verification PASSED` with all three PCRs reproducing and
-the TLS certificate binding verified. Measured on the first attested hub
-(2026-08-14): all of PCR0/1/2 matched, and the manifest correctly recorded the
-published app source and commit.
+the TLS certificate binding verified.
+
+**Do it the way an outsider would, or it proves less than you think.** `caution
+verify` builds from the directory you run it in. Run from your own assembled
+tree it proves "the enclave matches my laptop", which is only as trustworthy as
+your laptop. The claim that matters is that a **fresh clone of the public repo**
+reproduces the live enclave:
+
+```bash
+git clone https://github.com/ShieldedLabs/zero-hub && cd zero-hub
+caution verify --attestation-url https://<hub-domain>/attestation
+```
+
+That requires the public repo's `main` to be at the EXACT assembled commit the
+enclave was built from — the manifest names it, and verify rebuilds "at the
+manifest commit". Each assemble is a fresh git history, so the push is a
+force-push, and it must land BEFORE the enclave push: a verifier who arrives in
+the gap gets a PCR mismatch indistinguishable from a compromised enclave. This
+step was skipped by hand once (2026-08-17) and caught only by checking; put it in
+the same script as the enclave push, or use `deploy.sh`, which does it.
+
+**Measured, 2026-08-17, from fresh public clones with the build cache cleared:**
+hub-6 (`zero-hub` @ `a1e703a8`) and shim-9 (`zero-shim` @ `cc70e9af`) both
+`PASSED` — all three PCRs and the TLS binding — against the live enclaves. Both
+halves of the deployed pair are independently verifiable. Note PCR2 was
+identical across every build all week (`21b9efbc…`) while PCR0/1 tracked the
+application: PCR2 does not identify the code, which is why all three are
+required.
 
 **Require all three PCRs. Do not accept a PCR2 match alone.** Advice circulated,
 while PCR0/1 were failing for an unrelated reason, that "PCR2 is the application

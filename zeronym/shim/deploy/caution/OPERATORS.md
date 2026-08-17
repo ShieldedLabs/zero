@@ -15,10 +15,18 @@ hub over the **Nym mixnet** instead of to your indexer, which is where privacy
 begins. For you that is a redeploy, not a new integration. See "Diversion" below
 for what is proven and what is not.
 
-> **If you have read an older copy of this guide:** `--hub`/`--hub-tls` (the
-> transitional clearnet hop) is **legacy and no longer works against the current
-> hub**, which refuses clearnet submissions by default. Use `--hub-nym`. An
-> otherwise healthy shim built with `--hub` will fail every divert closed.
+> **Status, 2026-08-17: the live pair (shim-9 → hub-6) diverts over CLEARNET
+> HTTPS, using `--hub <ip>:443 --hub-tls <hub-domain>`, not `--hub-nym`.** An
+> older copy of this guide called that hop "legacy" and said the hub refuses it;
+> both were true for a week and are not true now — the hub is deployed with
+> `--http-submit` precisely so shims can reach it this way. Nym mode is built and
+> works end to end, but every hub inside a Nitro enclave answers a lookup in
+> 30–90 s (traced to the enclave's networking, confirmed with Caution; their v2
+> enclaves are the fix). Until then, clearnet: lookups 1.6–2.5 s. See "Diversion"
+> below for both recipes and exactly what clearnet keeps and gives up. **Which
+> flag you use must match the hub you point at** — a `--hub-nym` shim against a
+> clearnet hub, or a `--hub` shim against a Nym-only hub, fails every divert
+> closed.
 
 > **Read "What this does and does not hide" before you tell anyone what this
 > gives them.** At today's volumes the anonymity set is one transaction. Content
@@ -223,14 +231,33 @@ at a testnet indexer. A worked example, courtesy of zec.rocks:
 `--backend 199.170.132.107:443 --backend-tls na-jfk.testnet.metal.zec.rocks`,
 and `GetLightdInfo` through the shim answers `chainName: "test"`.
 
-## Diversion (Phase 2) — over the Nym mixnet
+## Diversion (Phase 2) — two transports, one hub
 
-The hub is live and diversion works end to end **over Nym**. Add to
-`assemble-caution.sh`:
+Diversion works end to end over both transports. **Which one you use must match
+the hub**: ask Shielded Labs which mode the hub you are pointing at runs, or read
+`https://<hub-domain>/nym-status` — `mixnet_connected: true` means Nym mode,
+`false` means clearnet. **As of 2026-08-17 the live hub (hub-6) is clearnet.**
+
+**Clearnet mode** (current) — add to `assemble-caution.sh`:
+
+```
+  --hub     <hub-ip>:443 \
+  --hub-tls <hub-domain>
+```
+
+The hub is dialled by IP and its certificate verified by name — the same pattern
+as `--backend`/`--backend-tls` for your indexer, so no DNS inside the enclave.
+Shielded Labs supply the IP (it is only known after the hub deploys, and it
+changes on every hub redeploy because managed apps are immutable). No
+`--nym-egress` rules; assemble emits a `/32` egress to the hub for you.
+
+**Nym mode** (built, tested, and how it will run once the enclave network path
+supports it):
 
 ```
   --hub-nym    <hub-nym-address> \
   --nym-egress 92.39.63.14/32:443:tcp \
+  --nym-egress 172.104.178.252/32:443:tcp \
   --nym-egress 0.0.0.0/0:9000:tcp \
   --nym-egress 1.1.1.1/32:53:udp
 ```
@@ -238,15 +265,21 @@ The hub is live and diversion works end to end **over Nym**. Add to
 Shielded Labs supply the hub address; it is also readable from the hub itself at
 `https://<hub-domain>/nym-address`, which is the authoritative copy (see
 "Operating" for why it can change). The `--nym-egress` rules are the enclave's
-entire allowlist for reaching the mixnet: the nym-api, a gateway, and a DNS
-resolver. Forward-only stays the default: no `--hub-nym`, no diversion.
+entire allowlist for reaching the mixnet: two of the SDK's three built-in
+nym-api endpoints (the third, Fastly, is deliberately excluded — shared CDN
+edges), a gateway, and a DNS resolver. Forward-only stays the default: no
+`--hub-nym` and no `--hub`, no diversion.
 
-`--hub`/`--hub-tls` is the **legacy** clearnet hop. The current hub refuses
-clearnet submissions by default, so do not use it.
+**What clearnet mode gives up.** Both modes keep batching, the operator's
+indexer never seeing the migration, and attestation. Clearnet mode loses
+shim↔hub *unlinkability*: the hub sees which shim sent each migration and when.
+With one shim that link is trivially known regardless; it matters as the fleet
+grows, which is exactly when Nym returns. Full table in the hub's operator
+guide, "Clearnet mode".
 
-**Do NOT use `--nym-gateway` yet.** The flag pins the entry gateway (and would let
-you narrow the `0.0.0.0/0:9000` rule to a `/32`), but it has not been exercised
-against the public Nym network. It takes the gateway's IDENTITY key while the
+`--nym-gateway <identity>` pins the entry gateway (and lets you narrow the
+`0.0.0.0/0:9000` rule to a `/32`). It **works** — verified against four public
+gateways on 2026-08-14 — but it takes the gateway's IDENTITY key while the
 egress rule takes its IP ADDRESS, and a mismatch fails closed with no console on
 an attested enclave.
 
