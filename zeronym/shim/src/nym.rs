@@ -63,6 +63,11 @@ use crate::wire::{self, AckKind, LookupReply, Nonce, WireError};
 /// UNAVAILABLE — 90 s is deliberate for the one-hub deployment and wants
 /// revisiting if the list grows. Override per deployment with
 /// `ZIS_LOOKUP_TIMEOUT_SECS`; the default is what ships.
+///
+/// Retuning this is safe from the rotation supervisor's side: a due rotation
+/// defers for at least this long ([`RotationPolicy::effective_defer_limit`]), so
+/// no value of it can leave a rotation destroying the client an in-flight lookup's
+/// reply is addressed to.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Ceiling on handing ONE submission to the transport, for the best-effort submit
@@ -269,12 +274,20 @@ impl MixnetStatus {
             .ok()
             .and_then(|slot| slot.clone())
             .unwrap_or_default();
-        // The gateway half of `identity.encryption@gateway`.
+        // The gateway half of `identity.encryption@gateway`, and ONLY that half.
+        //
+        // The full address is the sender identity every diverted migration goes
+        // out under, so publishing it on an unauthenticated wallet-facing
+        // listener would hand an observer the link between this shim and the
+        // submissions the hub receives -- the exact unlinkability the design is
+        // built to hold. The gateway is what the diagnostic ever needed (it says
+        // which entry point delivery is being tested through) and it is already
+        // public in the topology, so it costs nothing to expose.
         let gateway = address.rsplit('@').next().unwrap_or("").to_owned();
         format!(
             "{{\"replies_received\":{},\"empty_inbound\":{},\"sends_dispatched\":{},\
              \"last_reply_unix\":{},\"started_unix\":{},\"uptime_secs\":{},\
-             \"gateway\":\"{}\",\"nym_address\":\"{}\",\
+             \"gateway\":\"{}\",\
              \"mixnet_connected\":{},\"client_deaths\":{},\"consecutive_rebuild_failures\":{}}}",
             self.0.replies_received.load(Ordering::Relaxed),
             self.0.empty_inbound.load(Ordering::Relaxed),
@@ -283,7 +296,6 @@ impl MixnetStatus {
             started,
             unix_now().saturating_sub(started),
             gateway,
-            address,
             self.0.connected.load(Ordering::Relaxed),
             self.0.deaths.load(Ordering::Relaxed),
             self.0.consecutive_failures.load(Ordering::Relaxed),
@@ -406,6 +418,10 @@ pub struct RotationPolicy {
     /// timeout and the wallet pays a retry. Waiting forever is the opposite
     /// failure, where a busy shim never rotates and the linkage window is
     /// unbounded in practice. This bounds the compromise.
+    ///
+    /// Whatever is configured here, the supervisor applies at least
+    /// [`REQUEST_TIMEOUT`]; see [`RotationPolicy::effective_defer_limit`] for why
+    /// the floor is derived rather than trusted.
     pub defer_limit: Duration,
     /// How long to wait after asking for a rebuild before acting on anything
     /// else, so a client that cannot be rebuilt is retried steadily rather
@@ -427,9 +443,38 @@ impl RotationPolicy {
     pub fn never() -> Self {
         RotationPolicy {
             period: None,
-            defer_limit: Duration::from_secs(60),
+            // The lookup budget itself rather than a number of its own, for the
+            // reason `effective_defer_limit` gives, and stated here so the
+            // configured value and the applied one cannot read differently: a
+            // standalone 60 s default is precisely what outlived the budget's rise
+            // to 90 s without anyone noticing they had crossed.
+            defer_limit: REQUEST_TIMEOUT,
             rebuild_backoff: Duration::from_secs(5),
         }
+    }
+
+    /// The deferral a due rotation actually gets: never shorter than
+    /// [`REQUEST_TIMEOUT`].
+    ///
+    /// A rotation destroys the client that minted the SURBs an in-flight reply is
+    /// addressed to, so a deferral shorter than the lookup budget lets the
+    /// rotation fire under a request that still has time left on its clock. That
+    /// request can then never be answered: the reply has nowhere to land, and it
+    /// burns the rest of its budget before failing closed. The floor is derived
+    /// from the timeout rather than trusting the configured number because the two
+    /// were only ever safe by coincidence, and that coincidence broke silently
+    /// when the budget was raised from 25 s to 90 s against a 60 s limit; nobody
+    /// retuning the timeout should have to know this coupling exists.
+    ///
+    /// What it guarantees is bounded to the requests in flight when the rotation
+    /// came DUE. One that starts during the deferral can still be cut short, which
+    /// is the unavoidable price of bounding the deferral at all, and it is also
+    /// why the floor is exactly the budget and not a multiple of it. One residual:
+    /// a deployment that raises the lookup budget past this constant with
+    /// `ZIS_LOOKUP_TIMEOUT_SECS` reopens the gap by its excess, since the
+    /// supervisor is handed a policy and never sees that override.
+    pub fn effective_defer_limit(&self) -> Duration {
+        self.defer_limit.max(REQUEST_TIMEOUT)
     }
 }
 
@@ -593,12 +638,16 @@ impl NymHandle {
         // continuously anyway -- and, because nothing is awaited, no wallet latency.
         let deadline = tokio::time::Instant::now() + self.dispatch_timeout;
         let mut dispatched = 0usize;
-        let mut last_err = NymError::TransportGone;
 
         for target in 0..targets {
             // A FRESH nonce per address: two hubs answering the same nonce would be
             // indistinguishable to the correlator, and the ack is unread anyway.
             let nonce = fresh_nonce();
+            // The one early return left, and not the trap the failure arms below
+            // avoid: framing depends only on `tx_bytes` and a fixed-size nonce, so
+            // it fails identically for every address or for none, and it can only
+            // fire on the first pass with nothing dispatched yet. The wallet must
+            // hear that as its own size failure rather than as unavailability.
             let frame = wire::encode_submit(&nonce, tx_bytes).map_err(NymError::Encode)?;
             let (ack_tx, _drop_receiver) = oneshot::channel();
             let request = Request {
@@ -610,23 +659,33 @@ impl NymHandle {
             };
             match tokio::time::timeout_at(deadline, self.requests.send(request)).await {
                 Ok(Ok(())) => dispatched += 1,
-                // The transport loop is gone; no address is reachable.
-                Ok(Err(_)) => return Err(NymError::TransportGone),
-                // Backpressured past the shared budget. Stop rather than hold the
-                // wallet longer; whatever already went out still stands.
-                Err(_) => {
-                    last_err = NymError::TransportGone;
-                    break;
-                }
+                // Two ways to be unable to reach the REMAINING addresses: the
+                // transport loop is gone, or it stayed backpressured past the
+                // shared budget. Both stop the sweep rather than hold the wallet
+                // any longer, and neither says anything about the frames already
+                // handed over, so both break and let the count below decide.
+                //
+                // The gone-transport case used to return here, which reported
+                // failure for a migration that was ALREADY on the mixnet: with two
+                // addresses, target 0 accepted and the transport closing before
+                // target 1, the live hub still queues and broadcasts that frame
+                // while the wallet is told the send failed and resends. The hub's
+                // payload-hash dedup (D6) keeps that from being fatal, but the user
+                // is shown a false failure for a transaction that is spent.
+                Ok(Err(_)) | Err(_) => break,
             }
         }
 
         // One successful hand-off is enough: the migration is on the mixnet, bound
-        // for at least one address the hub may be at.
+        // for at least one address the hub may be at. This is the ONLY verdict the
+        // function reaches, which is what the failure arms above break for: a
+        // hand-off that has already happened cannot be undone by whatever went
+        // wrong on the address after it. Nothing dispatched is the one case that
+        // fails closed, so the wallet retries a frame that never left.
         if dispatched > 0 {
             Ok(())
         } else {
-            Err(last_err)
+            Err(NymError::TransportGone)
         }
     }
 
@@ -922,7 +981,7 @@ pub async fn run_supervisor(
             },
             _ = sleep_until_maybe(wake) => {
                 let deadline = *defer_deadline
-                    .get_or_insert_with(|| Instant::now() + policy.defer_limit);
+                    .get_or_insert_with(|| Instant::now() + policy.effective_defer_limit());
                 let idle = inflight.load(Ordering::Relaxed) == 0;
                 if !idle && Instant::now() < deadline {
                     // Something is still waiting for a reply its current SURBs
@@ -930,6 +989,11 @@ pub async fn run_supervisor(
                     continue;
                 }
                 if !idle {
+                    // Whatever is still waiting here started AFTER the rotation
+                    // came due: the deferral covers a whole lookup budget, so
+                    // anything in flight when it began has already run out its own
+                    // clock. That is the residual the floor cannot remove without
+                    // making a busy shim never rotate at all.
                     tracing::warn!(
                         "rotating the mixnet client with requests still in flight; \
                          they will fail closed and be retried"
@@ -1154,6 +1218,36 @@ mod tests {
         );
     }
 
+    /// Sending to every address means the sweep can fail PART WAY, and a frame
+    /// already accepted is already on its way to a hub that will queue and
+    /// broadcast it. Reporting failure for it tells the wallet to resend a
+    /// transaction that is spent, which is a false failure the user sees even
+    /// though the hub's dedup keeps it from being fatal.
+    #[tokio::test(start_paused = true)]
+    async fn a_submit_that_reached_one_address_before_the_transport_died_is_a_success() {
+        // Capacity one is what makes the interleaving deterministic rather than a
+        // race: target 0's frame takes the only slot and is dispatched, target 1
+        // then waits for capacity that nobody frees, and the transport goes away
+        // underneath it. Time is paused, so the wait costs nothing real.
+        let (tx, rx) = mpsc::channel::<Request>(1);
+        let targets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let handle = NymHandle::new(tx, Duration::from_secs(25), Duration::from_secs(5), targets);
+
+        let transport = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(rx);
+        });
+
+        let result = handle.submit(&[0u8; 8]).await;
+        transport.await.unwrap();
+
+        assert_eq!(
+            result,
+            Ok(()),
+            "one hand-off is enough; the migration is already on the mixnet"
+        );
+    }
+
     /// L1': a closed requests channel with a request still in flight must not
     /// hot-loop the select. On the current-thread runtime this test uses, a spin
     /// that never yields (the pre-fix behaviour, the request arm firing on
@@ -1233,6 +1327,35 @@ mod tests {
         assert!(
             rebuilds <= 1,
             "a zero rotation period must not hot-loop; got {rebuilds} rebuilds"
+        );
+    }
+
+    /// The floor that keeps a rotation from destroying the client an in-flight
+    /// lookup's reply is addressed to. Asserted against the constant rather than
+    /// against a number, so raising [`REQUEST_TIMEOUT`] carries the floor with it
+    /// instead of re-opening the window the way 25 s to 90 s did.
+    #[test]
+    fn a_due_rotation_never_defers_for_less_than_the_lookup_budget() {
+        let impatient = RotationPolicy {
+            period: Some(Duration::from_secs(3600)),
+            defer_limit: Duration::from_secs(1),
+            rebuild_backoff: Duration::from_secs(5),
+        };
+        assert_eq!(impatient.effective_defer_limit(), REQUEST_TIMEOUT);
+        assert!(RotationPolicy::never().effective_defer_limit() >= REQUEST_TIMEOUT);
+        assert!(
+            RotationPolicy::every(Duration::from_secs(3600)).effective_defer_limit()
+                >= REQUEST_TIMEOUT
+        );
+
+        // A floor, not a value: a policy asking for more patience keeps it.
+        let patient = RotationPolicy {
+            defer_limit: REQUEST_TIMEOUT + Duration::from_secs(30),
+            ..impatient
+        };
+        assert_eq!(
+            patient.effective_defer_limit(),
+            REQUEST_TIMEOUT + Duration::from_secs(30)
         );
     }
 }

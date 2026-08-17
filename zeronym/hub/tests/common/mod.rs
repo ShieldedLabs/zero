@@ -9,6 +9,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -161,6 +162,15 @@ fn grpc_raw_tx(data: &[u8], height: u64) -> Response<BoxBody<Bytes, Infallible>>
 /// the condition under which the listener must still admit migrations: a
 /// refused connection fails fast and proves nothing.
 pub async fn spawn_hanging_indexer() -> SocketAddr {
+    spawn_hanging_indexer_counting(Arc::new(AtomicUsize::new(0))).await
+}
+
+/// [`spawn_hanging_indexer`], plus a count of how many connections it has
+/// accepted. Because every accepted socket is HELD, that count is exactly how
+/// many lookups the hub currently has in flight against the indexer -- which
+/// makes the listener's concurrency bound observable from outside the crate
+/// without exposing the constant.
+pub async fn spawn_hanging_indexer_counting(accepted: Arc<AtomicUsize>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -168,6 +178,7 @@ pub async fn spawn_hanging_indexer() -> SocketAddr {
         // rather than a reset.
         let mut held = Vec::new();
         while let Ok((stream, _)) = listener.accept().await {
+            accepted.fetch_add(1, Ordering::SeqCst);
             held.push(stream);
         }
     });

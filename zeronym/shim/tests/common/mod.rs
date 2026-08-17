@@ -181,11 +181,66 @@ pub async fn send_tx(
 }
 
 /// A gRPC reply, distilled to what the tests assert: the status code (from the
-/// headers on a trailers-only error, or the trailers on a unary success) and the
-/// message body.
+/// headers on a trailers-only error, or the trailers on a unary success), the
+/// `grpc-message` that rode with it (if any), and the message body.
 pub struct GrpcReply {
     pub status: i32,
+    pub message: Option<String>,
     pub body: Bytes,
+}
+
+/// Send one gRPC request with an arbitrary, already-framed (or deliberately
+/// malformed, or streaming) body to `path`, and return the distilled reply.
+///
+/// This is the raw form the typed helpers below are built on. It exists for the
+/// tests that need to control the BODY itself rather than the message inside it:
+/// oversized bodies, bodies delivered in several DATA frames with a pause
+/// between them, and so on.
+pub async fn grpc_call(
+    sender: &mut client_h2::SendRequest<BoxBody<Bytes, Infallible>>,
+    shim: SocketAddr,
+    path: &str,
+    body: BoxBody<Bytes, Infallible>,
+) -> GrpcReply {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{shim}{path}"))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(body)
+        .unwrap();
+    sender.ready().await.unwrap();
+    let response = bounded(sender.send_request(request)).await.unwrap();
+    let header_status = response
+        .headers()
+        .get("grpc-status")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let header_message = response
+        .headers()
+        .get("grpc-message")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let collected = bounded(response.into_body().collect()).await.unwrap();
+    let trailer_status = collected
+        .trailers()
+        .and_then(|map| map.get("grpc-status"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let trailer_message = collected
+        .trailers()
+        .and_then(|map| map.get("grpc-message"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let status = trailer_status
+        .or(header_status)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    GrpcReply {
+        status,
+        message: trailer_message.or(header_message),
+        body: collected.to_bytes(),
+    }
 }
 
 /// Send one `SendTransaction` and return its status as well as its body.
@@ -204,34 +259,13 @@ pub async fn send_tx_reply(
         height: 0,
     }
     .encode_to_vec();
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://{shim}{SEND_TRANSACTION}"))
-        .header("content-type", "application/grpc")
-        .header("te", "trailers")
-        .body(Full::new(grpc_frame(&message)).boxed())
-        .unwrap();
-    sender.ready().await.unwrap();
-    let response = bounded(sender.send_request(request)).await.unwrap();
-    let header_status = response
-        .headers()
-        .get("grpc-status")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let collected = bounded(response.into_body().collect()).await.unwrap();
-    let trailer_status = collected
-        .trailers()
-        .and_then(|map| map.get("grpc-status"))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let status = trailer_status
-        .or(header_status)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    GrpcReply {
-        status,
-        body: collected.to_bytes(),
-    }
+    grpc_call(
+        sender,
+        shim,
+        SEND_TRANSACTION,
+        Full::new(grpc_frame(&message)).boxed(),
+    )
+    .await
 }
 
 /// Send one `GetTransaction` with the given `TxFilter` and return its reply.
@@ -240,34 +274,13 @@ pub async fn get_transaction_filter(
     shim: SocketAddr,
     filter: TxFilter,
 ) -> GrpcReply {
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://{shim}{GET_TRANSACTION}"))
-        .header("content-type", "application/grpc")
-        .header("te", "trailers")
-        .body(Full::new(grpc_frame(&filter.encode_to_vec())).boxed())
-        .unwrap();
-    sender.ready().await.unwrap();
-    let response = bounded(sender.send_request(request)).await.unwrap();
-    let header_status = response
-        .headers()
-        .get("grpc-status")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let collected = bounded(response.into_body().collect()).await.unwrap();
-    let trailer_status = collected
-        .trailers()
-        .and_then(|map| map.get("grpc-status"))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let status = trailer_status
-        .or(header_status)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    GrpcReply {
-        status,
-        body: collected.to_bytes(),
-    }
+    grpc_call(
+        sender,
+        shim,
+        GET_TRANSACTION,
+        Full::new(grpc_frame(&filter.encode_to_vec())).boxed(),
+    )
+    .await
 }
 
 /// Send one `GetTransaction` for a 32-byte txid hash (a hash-only `TxFilter`).

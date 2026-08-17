@@ -239,7 +239,8 @@ impl Default for TipTracker {
 /// Run the flush cadence until `shutdown` resolves.
 ///
 /// Polls the tip, and whenever the height crosses into a new flush epoch
-/// (`height / flush_interval`), publishes everything the queue holds.
+/// (`height / flush_interval`), publishes everything the queue holds. On
+/// shutdown, finishes any flush in progress, then flushes once more.
 pub async fn run(
     queue: Arc<Queue>,
     chain: Arc<ChainClient>,
@@ -247,58 +248,96 @@ pub async fn run(
     params: BatchParams,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
+    run_with_poll_interval(queue, chain, tip, params, shutdown, POLL_INTERVAL).await
+}
+
+/// [`run`] with the poll interval as a parameter, so a test can drive the loop
+/// through a real flush-then-shutdown sequence in milliseconds. Production has
+/// exactly one interval and never reaches for this directly.
+async fn run_with_poll_interval(
+    queue: Arc<Queue>,
+    chain: Arc<ChainClient>,
+    tip: Arc<TipTracker>,
+    params: BatchParams,
+    shutdown: impl std::future::Future<Output = ()>,
+    poll_interval: Duration,
+) {
     tracing::info!(
         flush_interval = params.flush_interval,
         mining_margin = params.mining_margin,
         "batching cadence started"
     );
 
+    let mut shutdown = std::pin::pin!(shutdown);
     let mut last_flush_epoch: Option<u32> = None;
-    let ticker = async {
-        loop {
-            match chain.tip_height().await {
-                Ok(height) => tip.observe(height),
-                Err(err) => {
-                    // Not an error condition on its own: staleness is decided by
-                    // elapsed time since the last advance, not by one failure.
-                    tracing::debug!(%err, "tip query failed on every node");
-                }
-            }
-
-            if tip.is_ready() {
-                let epoch = tip.cadence_height() / params.flush_interval.max(1);
-                match last_flush_epoch {
-                    // First observation: adopt the current epoch without
-                    // flushing, so a restart does not publish a partial batch
-                    // off-cadence.
-                    None => last_flush_epoch = Some(epoch),
-                    Some(previous) if epoch > previous => {
-                        flush(&queue, &chain).await;
-                        last_flush_epoch = Some(epoch);
-                    }
-                    _ => {}
-                }
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
+    let mut next_poll = tokio::time::Instant::now();
+    loop {
+        // The shutdown signal is observed here, between iterations, and nowhere
+        // else. It used to race the whole ticker in a `select!`, which meant a
+        // SIGTERM landing during a flush dropped the ticker future mid-await:
+        // the batch had already been drained out of the queue, so the shutdown
+        // flush that followed found nothing to publish and the batch was simply
+        // gone. Now a flush in progress always runs to its end, its transport
+        // failures go back into the queue, and only then is shutdown noticed.
+        // `biased` so the signal is polled (and its handler registered) before
+        // the sleep is looked at, on the very first pass.
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            _ = tokio::time::sleep_until(next_poll) => {}
         }
-    };
 
-    tokio::select! {
-        _ = ticker => {}
-        _ = shutdown => {
-            tracing::info!("cadence shutting down; publishing what is held rather than dropping it");
-            flush(&queue, &chain).await;
+        match chain.tip_height().await {
+            Ok(height) => tip.observe(height),
+            Err(err) => {
+                // Not an error condition on its own: staleness is decided by
+                // elapsed time since the last advance, not by one failure.
+                tracing::debug!(%err, "tip query failed on every node");
+            }
         }
+
+        if tip.is_ready() {
+            let epoch = tip.cadence_height() / params.flush_interval.max(1);
+            match last_flush_epoch {
+                // First observation: adopt the current epoch without
+                // flushing, so a restart does not publish a partial batch
+                // off-cadence.
+                None => last_flush_epoch = Some(epoch),
+                Some(previous) if epoch > previous => {
+                    flush(&queue, &chain).await;
+                    last_flush_epoch = Some(epoch);
+                }
+                _ => {}
+            }
+        }
+
+        next_poll = tokio::time::Instant::now() + poll_interval;
+    }
+
+    tracing::info!("cadence shutting down; publishing what is held rather than dropping it");
+    flush(&queue, &chain).await;
+
+    // What the shutdown flush could not place is still in the queue, and the
+    // queue is about to die with the process. The enclave is diskless by
+    // design, so there is nowhere to put it; the honest thing left is to say
+    // how much was lost, as a count and nothing more.
+    let unpublished = queue.len();
+    if unpublished > 0 {
+        tracing::error!(
+            unpublished,
+            "shutting down with migrations the indexer could not be reached for; they are lost"
+        );
     }
 }
 
 /// Publish everything held, all at once, in an unpredictable order.
 ///
 /// Returns the achieved batch size, which is the honest measure of the privacy
-/// the flush actually delivered. Public so the cadence is not the only thing
-/// that can exercise it: a flush is the security-critical operation here and it
-/// must be testable directly.
+/// the flush actually delivered. Entries the indexer could not be reached for
+/// are back in the queue when this returns; entries the indexer refused are
+/// gone. Public so the cadence is not the only thing that can exercise it: a
+/// flush is the security-critical operation here and it must be testable
+/// directly.
 pub async fn flush(queue: &Arc<Queue>, chain: &Arc<ChainClient>) -> usize {
     let batch = queue.drain_shuffled();
     let size = batch.len();
@@ -315,26 +354,60 @@ pub async fn flush(queue: &Arc<Queue>, chain: &Arc<ChainClient>) -> usize {
     let payloads: Vec<Vec<u8>> = batch.iter().map(|entry| entry.tx_bytes.to_vec()).collect();
     let outcomes = chain.broadcast_batch(&payloads).await;
 
-    // Counted as node-accepted OR already-known. With every shim submitting to
-    // every hub, the second hub's publish is already-known by construction, so
-    // counting only Accepted would report zero on one side of every honest
-    // batch.
-    let achieved = outcomes
-        .iter()
-        .filter(|outcome| matches!(outcome, Publish::Accepted { .. } | Publish::AlreadyKnown))
-        .count();
-    let rejected = size.saturating_sub(achieved);
+    // Verdicts are positional, one per input transaction. Achieved is counted as
+    // node-accepted OR already-known: with every shim submitting to every hub,
+    // the second hub's publish is already-known by construction, so counting
+    // only Accepted would report zero on one side of every honest batch.
+    let mut achieved = 0usize;
+    let mut rejected = 0usize;
+    let mut sample_failure: Option<String> = None;
+    let mut unplaced = Vec::new();
+    for (i, entry) in batch.into_iter().enumerate() {
+        match outcomes.get(i) {
+            Some(Publish::Accepted { .. }) | Some(Publish::AlreadyKnown) => achieved += 1,
+            Some(Publish::Rejected { .. }) => rejected += 1,
+            Some(Publish::Retryable { reason }) => {
+                sample_failure.get_or_insert_with(|| reason.clone());
+                unplaced.push(entry);
+            }
+            // No verdict at all for this position cannot happen (join_all is
+            // positional), but if it ever did, "nothing judged it" is the truthful
+            // reading and the safe one.
+            None => unplaced.push(entry),
+        }
+    }
+
+    // A transport failure goes back into the queue for the next cadence. This is
+    // the only place such a failure can be recovered: the shim answered the
+    // wallet error_code 0 the moment the frame reached the mixnet and keeps no
+    // record, so once the entry left this queue there is no other copy anywhere
+    // that anyone will retry. Dropping it because the indexer restarted during
+    // the flush window would lose the migration outright while the wallet
+    // believes it was sent. The entry keeps its original expiry; when the
+    // indexer answers again a stale one gets the node's verdict and leaves. A
+    // Rejected verdict is not put back: the node said no, and re-offering the
+    // same bytes buys the same answer every flush until expiry.
+    let requeued = queue.requeue(unplaced);
 
     // Aggregates only. Never a txid, never a body, never a per-entry
     // identifier: in a Nitro enclave the tracing output reaches the parent host,
-    // which is exactly who this system withholds the txid from.
+    // which is exactly who this system withholds the txid from. The sample
+    // reason names an endpoint and an error, not an entry.
     tracing::info!(
         flush_size = size,
         achieved_batch_size = achieved,
         rejected,
+        requeued,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "flush published"
     );
+    if requeued > 0 {
+        tracing::warn!(
+            requeued,
+            reason = sample_failure.as_deref().unwrap_or("no verdict"),
+            "indexer could not be reached for part of the batch; held for the next flush"
+        );
+    }
 
     if achieved <= 1 {
         // Honest telemetry, not an error. At batch size 1 the anonymity set is
@@ -449,5 +522,320 @@ mod tests {
         assert_eq!(1000 / n, 50);
         assert_eq!(1019 / n, 50, "still the same epoch nineteen blocks later");
         assert_eq!(1020 / n, 51, "a new epoch exactly at the multiple");
+    }
+
+    // ---- flush against a real ChainClient ------------------------------------
+    //
+    // `ChainClient` is not a trait, so it is faked the way the integration tests
+    // fake it: with an in-process gRPC responder on an ephemeral port. This one
+    // is smaller than `tests/common`: it answers `GetLightdInfo` from a shared
+    // height (so the cadence loop can be driven) and `SendTransaction` from a
+    // script, so a test can say "fail this call, then accept the next".
+
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+
+    use bytes::Bytes;
+    use http_body_util::combinators::BoxBody;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http2;
+    use hyper::service::service_fn;
+    use hyper::{HeaderMap, Request, Response};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use prost::Message;
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+    use zaino_proto::proto::service::{LightdInfo, RawTransaction, SendResponse};
+
+    const GET_LIGHTD_INFO_PATH: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
+    const TIP: u32 = 1000;
+    const N: u32 = FLUSH_INTERVAL_BLOCKS;
+    const MARGIN: u32 = MINING_MARGIN;
+
+    /// A payload that will not deserialize as a transaction, so it has no expiry
+    /// and is admissible at any tip.
+    fn junk(seed: u8) -> Vec<u8> {
+        vec![seed; 64]
+    }
+
+    /// How the mock answers one `SendTransaction`.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// gRPC OK carrying `SendResponse { code, message }`: the indexer's
+        /// verdict, in the shape lightwalletd and zaino relay a node's answer.
+        Send(i32, &'static str),
+        /// A trailers-only non-zero gRPC status with no `SendResponse` at all.
+        Status(&'static str),
+    }
+
+    struct MockIndexer {
+        addr: SocketAddr,
+        /// What `GetLightdInfo` reports; a test moves it to advance the epoch.
+        height: Arc<AtomicU32>,
+        /// Every raw transaction the mock was asked to broadcast, in arrival
+        /// order, whatever it answered.
+        sent: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// Fires once per `SendTransaction` received, before it is answered.
+        on_send: Arc<Notify>,
+    }
+
+    /// Answers `SendTransaction` from `script` in order, repeating the last entry
+    /// once the script is exhausted, after `answer_delay`.
+    async fn spawn_mock_indexer(script: Vec<Answer>, answer_delay: Duration) -> MockIndexer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let height = Arc::new(AtomicU32::new(TIP));
+        let sent: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let on_send = Arc::new(Notify::new());
+        let script = Arc::new(Mutex::new(VecDeque::from(script)));
+
+        let (height_s, sent_s, on_send_s) = (height.clone(), sent.clone(), on_send.clone());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (height, sent, on_send, script) = (
+                    height_s.clone(),
+                    sent_s.clone(),
+                    on_send_s.clone(),
+                    script.clone(),
+                );
+                tokio::spawn(async move {
+                    let _ = http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |req: Request<Incoming>| {
+                                let (height, sent, on_send, script) = (
+                                    height.clone(),
+                                    sent.clone(),
+                                    on_send.clone(),
+                                    script.clone(),
+                                );
+                                async move {
+                                    let path = req.uri().path().to_owned();
+                                    let body = req.into_body().collect().await.unwrap().to_bytes();
+                                    let message = if body.len() > 5 { &body[5..] } else { &[][..] };
+                                    if path == GET_LIGHTD_INFO_PATH {
+                                        let info = LightdInfo {
+                                            block_height: height.load(Ordering::SeqCst) as u64,
+                                            ..Default::default()
+                                        };
+                                        return Ok::<_, Infallible>(grpc_ok(info.encode_to_vec()));
+                                    }
+                                    if let Ok(raw) = RawTransaction::decode(message) {
+                                        sent.lock().unwrap().push(raw.data);
+                                    }
+                                    on_send.notify_one();
+                                    let answer = {
+                                        let mut script = script.lock().unwrap();
+                                        if script.len() > 1 {
+                                            script.pop_front().unwrap()
+                                        } else {
+                                            *script.front().expect("script must not be empty")
+                                        }
+                                    };
+                                    tokio::time::sleep(answer_delay).await;
+                                    Ok(match answer {
+                                        Answer::Send(code, text) => grpc_ok(
+                                            SendResponse {
+                                                error_code: code,
+                                                error_message: text.to_owned(),
+                                            }
+                                            .encode_to_vec(),
+                                        ),
+                                        Answer::Status(code) => grpc_status(code),
+                                    })
+                                }
+                            }),
+                        )
+                        .await;
+                });
+            }
+        });
+
+        MockIndexer {
+            addr,
+            height,
+            sent,
+            on_send,
+        }
+    }
+
+    /// Frame `payload` as a gRPC unary body with a `grpc-status: 0` trailer.
+    fn grpc_ok(payload: Vec<u8>) -> Response<BoxBody<Bytes, Infallible>> {
+        let mut framed = Vec::with_capacity(5 + payload.len());
+        framed.push(0);
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&payload);
+        let mut trailers = HeaderMap::new();
+        trailers.insert("grpc-status", "0".parse().unwrap());
+        Response::builder()
+            .status(200)
+            .header("content-type", "application/grpc")
+            .body(
+                Full::new(Bytes::from(framed))
+                    .with_trailers(async move { Some(Ok(trailers)) })
+                    .boxed(),
+            )
+            .unwrap()
+    }
+
+    /// A trailers-only gRPC error: status in the headers, empty body.
+    fn grpc_status(code: &str) -> Response<BoxBody<Bytes, Infallible>> {
+        Response::builder()
+            .status(200)
+            .header("content-type", "application/grpc")
+            .header("grpc-status", code)
+            .body(Full::new(Bytes::new()).boxed())
+            .unwrap()
+    }
+
+    /// An address nothing listens on: bound, read, released. A connection to it
+    /// is refused at once, which is the cheapest real transport failure there
+    /// is.
+    async fn unreachable_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    fn client(addr: SocketAddr) -> Arc<ChainClient> {
+        Arc::new(ChainClient::new(vec![addr], None).unwrap())
+    }
+
+    fn queue_holding(payloads: &[Vec<u8>]) -> Arc<Queue> {
+        let queue = Arc::new(Queue::new());
+        for payload in payloads {
+            assert!(matches!(
+                queue.admit(payload, TIP, N, MARGIN),
+                crate::queue::Admission::Admitted { .. }
+            ));
+        }
+        queue
+    }
+
+    #[tokio::test]
+    async fn a_transport_failed_publish_is_held_and_published_on_the_next_flush() {
+        // The property this whole change exists for. The shim has already told
+        // the wallet the migration was sent, so an entry that leaves the queue
+        // without a verdict must come back to it, and the next cadence must
+        // actually publish it.
+        let queue = queue_holding(&[junk(1), junk(2)]);
+
+        let dead = client(unreachable_addr().await);
+        assert_eq!(flush(&queue, &dead).await, 0);
+        assert_eq!(
+            queue.len(),
+            2,
+            "nothing judged these transactions, so both must still be held"
+        );
+
+        let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        let live = client(mock.addr);
+        assert_eq!(flush(&queue, &live).await, 2, "the held entries are the next batch");
+        assert!(queue.is_empty());
+        assert_eq!(mock.sent.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_indexer_verdict_is_dropped_not_requeued() {
+        // The indexer answered OK with a non-zero code: the node said no. Holding
+        // it would cost an indexer call every flush for the same answer.
+        let mock = spawn_mock_indexer(
+            vec![Answer::Send(-26, "16: bad-txns-sapling-binding-signature-invalid")],
+            Duration::ZERO,
+        )
+        .await;
+        let chain = client(mock.addr);
+        let queue = queue_holding(&[junk(1)]);
+
+        assert_eq!(flush(&queue, &chain).await, 0);
+        assert!(queue.is_empty(), "a rejected transaction is not held");
+        assert_eq!(flush(&queue, &chain).await, 0);
+        assert_eq!(
+            mock.sent.lock().unwrap().len(),
+            1,
+            "the second flush must not have offered it again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transport_flavoured_grpc_status_is_held_but_invalid_argument_is_not() {
+        // The same wire (a non-OK gRPC status) carries both kinds of failure;
+        // the split is by status code and this pins where it falls.
+        let unavailable = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
+        let queue = queue_holding(&[junk(1)]);
+        assert_eq!(flush(&queue, &client(unavailable.addr)).await, 0);
+        assert_eq!(queue.len(), 1, "UNAVAILABLE is no verdict; hold it");
+
+        let refusing = spawn_mock_indexer(vec![Answer::Status("3")], Duration::ZERO).await;
+        assert_eq!(flush(&queue, &client(refusing.addr)).await, 0);
+        assert!(queue.is_empty(), "INVALID_ARGUMENT is the indexer refusing it");
+    }
+
+    #[tokio::test]
+    async fn a_dead_endpoint_beside_a_live_one_does_not_hold_a_placed_batch() {
+        // Two entries, one endpoint that accepts and one that is unreachable.
+        // Any acceptance wins per transaction, so both are achieved and nothing
+        // is held; the dead endpoint must not turn a placed batch into a
+        // re-offered one.
+        let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        let chain = Arc::new(
+            ChainClient::new(vec![mock.addr, unreachable_addr().await], None).unwrap(),
+        );
+        let queue = queue_holding(&[junk(1), junk(2)]);
+        assert_eq!(flush(&queue, &chain).await, 2);
+        assert!(queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_during_an_in_flight_flush_does_not_drop_the_batch() {
+        // The mock fires the shutdown signal the moment the first publish
+        // reaches it, then answers UNAVAILABLE after a delay: shutdown lands
+        // squarely inside a flush whose batch has already left the queue. The
+        // old `select!` dropped the ticker there and the batch with it, and the
+        // shutdown flush then found an empty queue. Now the in-flight flush must
+        // finish, put the entry back, and the shutdown flush must publish it,
+        // which the mock sees as a SECOND SendTransaction that it accepts.
+        let mock = spawn_mock_indexer(
+            vec![Answer::Status("14"), Answer::Send(0, "txid")],
+            Duration::from_millis(200),
+        )
+        .await;
+        let chain = client(mock.addr);
+        let queue = queue_holding(&[junk(1)]);
+        let tip = Arc::new(TipTracker::new());
+
+        let signal = mock.on_send.clone();
+        let cadence = tokio::spawn(run_with_poll_interval(
+            queue.clone(),
+            chain,
+            tip.clone(),
+            BatchParams::default(),
+            async move { signal.notified().await },
+            Duration::from_millis(20),
+        ));
+
+        // First tick adopts the epoch at TIP without flushing; only then does
+        // moving the height into the next epoch make the following tick flush.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while tip.observed_height() != TIP {
+            assert!(Instant::now() < deadline, "the cadence never observed the tip");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        mock.height.store(TIP + N, Ordering::SeqCst);
+
+        tokio::time::timeout(Duration::from_secs(30), cadence)
+            .await
+            .expect("the cadence must exit once shutdown is observed")
+            .expect("the cadence must not panic");
+
+        assert_eq!(
+            mock.sent.lock().unwrap().len(),
+            2,
+            "the batch drained by the interrupted flush must be offered again by the shutdown flush"
+        );
+        assert!(queue.is_empty(), "and the shutdown flush placed it");
     }
 }

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use zero_indexer_shim::nym::{
-    run_supervisor, ClientCommand, ClientEvent, InflightCount, RotationPolicy,
+    run_supervisor, ClientCommand, ClientEvent, InflightCount, RotationPolicy, REQUEST_TIMEOUT,
 };
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -135,8 +135,14 @@ async fn a_busy_shim_still_rotates_at_the_defer_limit() {
     // The opposite failure to the one above: a shim that is never idle would
     // otherwise never rotate, and the linkage window would be unbounded in
     // practice however short the configured period is.
+    // Above `REQUEST_TIMEOUT`, because the deferral is floored at the lookup
+    // budget (a rotation landing inside a pending lookup destroys the client its
+    // reply is addressed to). A limit below the floor would still rotate here,
+    // but at the floor rather than at the configured value, so the test would
+    // pass while asserting something it had not actually exercised.
+    let defer_limit = REQUEST_TIMEOUT + Duration::from_secs(30);
     let policy = RotationPolicy {
-        defer_limit: Duration::from_secs(30),
+        defer_limit,
         ..RotationPolicy::every(HOUR)
     };
     let mut sup = supervise(policy);
@@ -146,7 +152,7 @@ async fn a_busy_shim_still_rotates_at_the_defer_limit() {
     settle().await;
     assert!(sup.commands.try_recv().is_err(), "it defers first");
 
-    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::advance(defer_limit).await;
     settle().await;
     assert_eq!(
         sup.commands.recv().await,

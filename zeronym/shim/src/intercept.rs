@@ -70,6 +70,16 @@ const GRPC_PREFIX_LEN: usize = 5;
 /// client cannot make the shim buffer unbounded memory.
 const MAX_SEND_TX_BYTES: usize = 4 * 1024 * 1024;
 
+/// Cap on a buffered `GetTransaction` body, which is a `TxFilter`: a block id, an
+/// index and a 32-byte hash, roughly 100 bytes at the very most. This used to
+/// share `MAX_SEND_TX_BYTES`, which was 4000x looser than the request can ever
+/// legitimately be, and the looseness had a price: hyper allows ~200 streams per
+/// connection and connections are uncapped, so a hostile client trickling
+/// near-4 MiB bodies on many streams could pin gigabytes in an enclave whose
+/// memory is mostly EnclaveOS. A kilobyte refuses nothing a wallet sends and
+/// takes that lever away.
+const MAX_TX_FILTER_BYTES: usize = 1024;
+
 /// How many leading bytes of the transaction to log on a fail-safe. The first
 /// eight carry the version and version group id, which is what distinguishes a
 /// truncated frame from a genuinely new transaction format. A V6 always begins
@@ -236,7 +246,7 @@ pub(crate) async fn get_transaction(
     };
 
     let (parts, body) = req.into_parts();
-    let collected = match Limited::new(body, MAX_SEND_TX_BYTES).collect().await {
+    let collected = match Limited::new(body, MAX_TX_FILTER_BYTES).collect().await {
         Ok(collected) => collected,
         Err(_) => {
             return Ok(grpc_error(

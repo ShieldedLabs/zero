@@ -302,8 +302,28 @@ fn build_nym_transport(
         }
     };
 
+    // Resolved BEFORE the rotation policy because the policy is derived from it.
+    // The lookup budget is a deployment property (see the config docs), so an
+    // operator can retune it against the mixnet of the day without moving the
+    // binary hash. Submits are unaffected either way: they never wait for the hub.
+    let lookup_timeout = config
+        .lookup_timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(REQUEST_TIMEOUT);
+
+    // The deferral floor tracks the RESOLVED budget, not the compile-time
+    // constant. `effective_defer_limit` already floors at `REQUEST_TIMEOUT`, but
+    // that constant is only the default: an operator who raises the budget with
+    // `ZIS_LOOKUP_TIMEOUT_SECS` would otherwise get a rotation firing mid-lookup
+    // again, destroying the client the pending reply's SURBs are addressed to.
+    // Passing the resolved value keeps the guarantee the floor exists for -- a
+    // rotation never lands inside a lookup that was already waiting -- at any
+    // budget, not just the shipped one.
     let rotation = match config.nym_rotation_secs {
-        Some(secs) => RotationPolicy::every(Duration::from_secs(secs)),
+        Some(secs) => RotationPolicy {
+            defer_limit: lookup_timeout,
+            ..RotationPolicy::every(Duration::from_secs(secs))
+        },
         None => RotationPolicy::never(),
     };
 
@@ -335,13 +355,6 @@ fn build_nym_transport(
         evt_tx,
     ));
 
-    // The lookup budget is a deployment property (see the config docs), so an
-    // operator can retune it against the mixnet of the day without moving the
-    // binary hash. Submits are unaffected either way: they never wait for the hub.
-    let lookup_timeout = config
-        .lookup_timeout_secs
-        .map(Duration::from_secs)
-        .unwrap_or(REQUEST_TIMEOUT);
     tracing::info!(
         lookup_timeout_secs = lookup_timeout.as_secs(),
         submit_dispatch_timeout_secs = SUBMIT_DISPATCH_TIMEOUT.as_secs(),

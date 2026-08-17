@@ -91,9 +91,13 @@ pub const CAUTION_ATTESTATION: &str = "/attestation";
 /// An attested shim has no SSH, and dispatch-only submit answers the wallet the
 /// moment a migration enters the in-process transport, so without these a shim
 /// whose mixnet client is dead looks exactly like a healthy one while dropping
-/// every migration. `/healthz` is process liveness; `/nym-status` reports the
-/// mixnet client's lifecycle (see [`crate::nym::MixnetStatus`] for what is
-/// deliberately NOT in it).
+/// every migration. `/healthz` answers 503 rather than 200 once the shim cannot
+/// carry one ([`crate::nym::MixnetStatus::is_healthy`]), because the status code
+/// is all an uptime monitor reads: while it meant only "the process is running",
+/// the dead-client case stayed invisible to every alert an operator would
+/// plausibly wire up, and only a poller that knew to parse `/nym-status` saw it.
+/// `/nym-status` still carries the detail behind that verdict (see
+/// [`crate::nym::MixnetStatus`] for what is deliberately NOT in it).
 ///
 /// Neither collides with a wallet call: every CompactTxStreamer method lives
 /// under `/cash.z.wallet.sdk.rpc.CompactTxStreamer/`.
@@ -108,6 +112,15 @@ pub const SHIM_NYM_STATUS: &str = "/nym-status";
 /// theories about why enclave lookups fail have each died for want of one
 /// number: whether inbound SURB replies arrive at all. Delete it, and the
 /// diagnostic block in [`crate::nym::MixnetStatus`], once that is settled.
+///
+/// The gate is fail-closed rather than merely quiet because the payload still
+/// names the shim's OWN Nym address, and that address is the sender identity
+/// every diverted migration goes out under: anyone who can read it here can tie
+/// this shim to the submissions the hub receives from it, which is precisely the
+/// link the mixnet hop exists to break, and this listener is wallet-facing and
+/// unauthenticated. The diagnostic itself only ever needed the `@gateway` half,
+/// which the payload reports separately, so opening this on a shim carrying real
+/// traffic buys nothing and costs the property the whole design is for.
 pub const SHIM_NYM_DIAG: &str = "/nym-diag";
 
 /// Whether, and how, the shim owns Caution's in-enclave control-plane paths
@@ -453,6 +466,15 @@ where
                     }
                     Err(err) => return Err(err.into()),
                 };
+                // Set here, on the raw TcpStream, because once the stream may be
+                // a TLS wrapper there is nothing further down to set it on. This
+                // is the wallet leg, and it is streamed gRPC: GetBlockRange
+                // sends many small h2 frames (DATA, WINDOW_UPDATE, PING,
+                // trailers), and with Nagle on each burst can sit ~40 ms behind
+                // delayed-ACK. Across a long block sync that reads as a shim
+                // performance bug rather than the kernel default it is. Best
+                // effort: a failure here is not worth refusing the connection.
+                let _ = stream.set_nodelay(true);
                 let live = live_tx.clone();
                 let backend = backend.clone();
                 let tls = tls.clone();
@@ -528,8 +550,8 @@ async fn serve_connection<IO>(
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // set_nodelay moved to the accept site: once the stream may be a TLS
-    // wrapper there is no TcpStream here to set it on.
+    // set_nodelay is applied at the accept site, on the raw TcpStream: once the
+    // stream may be a TLS wrapper there is nothing here to set it on.
 
     // One upstream connection per inbound connection, dialled lazily and
     // redialled when it dies. If the backing indexer is down we still serve the
@@ -584,7 +606,19 @@ async fn handle(
         }
         // The shim's own operator endpoints. Answered locally and never proxied:
         // an attested shim has no other way to say whether it is working.
-        Route::ShimHealth => Ok(text_response(200, "ok")),
+        //
+        // The verdict rides on the status code, not only in the body, because a
+        // monitor that checks for 200 and nothing else is the deployment we
+        // actually have. `is_healthy` is false only when diversion is CONFIGURED
+        // and the client is down: a forward-only shim has no mixnet client to
+        // lose and stays 200, so this cannot page an operator about a component
+        // that deployment never ran. Caution's own liveness path is separate
+        // (`caution_health_ok`), so a 503 here does not fail the platform check.
+        Route::ShimHealth => Ok(if status.is_healthy() {
+            text_response(200, "ok")
+        } else {
+            text_response(503, "mixnet client not connected")
+        }),
         Route::ShimNymStatus => Ok(json_response(&status.to_json())),
         // Gated: open, it answers; closed, it is indistinguishable from any
         // other unknown path because it takes the identical pass-through arm.
@@ -655,7 +689,8 @@ pub enum Route {
     /// bootproofd (the platform's NSM source) and never proxied to the indexer;
     /// when it is disabled this falls through to `PassThrough`.
     CautionAttestation,
-    /// [`SHIM_HEALTH`]: the shim's own liveness, answered locally.
+    /// [`SHIM_HEALTH`]: whether the shim can carry a migration, answered locally.
+    /// 200 while it can, 503 once a CONFIGURED mixnet client is down.
     ShimHealth,
     /// [`SHIM_NYM_STATUS`]: the mixnet client's lifecycle, answered locally.
     ShimNymStatus,
