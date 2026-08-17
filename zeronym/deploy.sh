@@ -115,6 +115,10 @@ elif [ "$COMPONENT" = hub ]; then
   : "${INDEXERS:?set INDEXERS for a hub}"; : "${INDEXER_TLS:?set INDEXER_TLS for a hub}"
   set -- "$@" --indexers "$INDEXERS" --indexer-tls "$INDEXER_TLS"
   [ "${NYM:-0}" = 1 ] && set -- "$@" --nym
+  # The hub's ack-wait-before-retransmit. Passed through only when set, so a
+  # local or non-enclave hub keeps the SDK default. See deploy.env.example for
+  # why 15000 is the value for an enclave hub.
+  [ -n "${HUB_ACK_WAIT_MS:-}" ] && set -- "$@" --ack-wait-ms "$HUB_ACK_WAIT_MS"
 else
   die "COMPONENT must be shim or hub (got: $COMPONENT)"
 fi

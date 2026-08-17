@@ -29,9 +29,12 @@
 # fragments per lookup (a local hub's, ~1), because the SDK computes the ack
 # deadline from CONFIGURED mix delays and an enclave's real ack path is slower.
 # Each duplicate costs a send slot at the throttled rate and the SDK's rate
-# controller backs off further as they pile up, so lookups took 45-90 s. 6000 is
-# the value the local A/B showed removes the duplicates entirely. Set it on any
-# enclave hub; leave it unset locally.
+# controller backs off further as they pile up, so lookups took 45-90 s. Use
+# 15000 on an enclave hub: 6000 was tried on hub-5 and still left two of four
+# replies retransmitted in their entirety, so the enclave's ack path is far
+# slower than that or lossy; 15000 trims the late-ack tail as far as is worth
+# trimming and costs nothing on a fast path. It does NOT fix lost acks. Leave it
+# unset locally, where the SDK default of 1500 produces zero retransmissions.
 #
 # --app-source records, in the manifest's build block, the public git URL where
 # this assembled repository is published. `caution verify` clones that URL and
