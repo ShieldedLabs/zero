@@ -2,11 +2,9 @@
 
 Privacy for Zcash light wallets: an attested front-end that stops pool-crossing transactions from leaking your IP.
 
-Today a Zcash light wallet leaks. Under the ZIP 307 light-client protocol it talks to an indexer over clearnet, so the operator sees the wallet's source IP and the timing of everything it does. zero-indexer is a Shielded Labs product built on two pillars: **zero-leak indexing**, so a wallet can sync and transact without handing an indexer the raw material to deanonymize it, and the **Nym mixnet**, the transport that unlinks a wallet's traffic from its source IP and region.
+Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet talks to an indexer over clearnet, so the operator sees its source IP and the timing of everything it does. zero-indexer is a Shielded Labs product built on two pillars: **zero-leak indexing**, so a wallet can sync and transact without handing an indexer the raw material to deanonymize it, and the **Nym mixnet**, the transport that unlinks a wallet's traffic from its source IP and region.
 
-Two efforts share the name. **The near-term system** is urgent and narrowly scoped: stop transactions that touch the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP. It is deliberately an 80% first step, honest about the 20% it does not cover, and it is deployed. **The long-term vision** is a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer.
-
-A note on names, since they do not match. The product is **zero-indexer**; the repository is [`ShieldedLabs/zero`](https://github.com/ShieldedLabs/zero) and this directory is `zeronym/`, both from the project's former name, Zeronym. The components keep the product name: `zero-indexer-shim` and `zero-indexer-hub`.
+What is deployed today stops transactions that touch the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP: deliberately an 80% first step, honest about the 20% it does not cover. **The long-term vision** is a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer.
 
 ## Table of Contents
 
@@ -22,8 +20,6 @@ A note on names, since they do not match. The product is **zero-indexer**; the r
 - [License](#license)
 
 ## Security
-
-This is written to be checked, not taken on faith. If you are here to review the architecture, this section is the point.
 
 **What is protected.** The migration broadcast. Its contents are hidden from the operator, because the wallet's TLS terminates inside an attested enclave rather than at the operator's indexer. And the transaction that appears on-chain carries no link to the wallet's IP, because the hub publishes it rather than the wallet. That second property is robust and volume-independent: it does not depend on how many other people are migrating.
 
@@ -104,7 +100,7 @@ The reproducibility gaps are in [Security](#security), and they are the near-ter
 
 ## Thanks
 
-The publication diagrams are by Zooko Wilcox-O'Hearn, from [zero-indexer-diagrams](https://github.com/zookoatshieldedlabs/zero-indexer-diagrams), regenerated here with the Nym hop. Caution builds the enclave platform, StageX and STEVE. Nym operates the mixnet.
+Diagrams by [@zooko](https://github.com/zookoatshieldedlabs/zero-indexer-diagrams), regenerated here with the Nym hop. Thanks to Caution and to Nym.
 
 ## Contributing
 
@@ -114,4 +110,13 @@ Review of the architecture itself is the contribution most wanted right now. [Se
 
 ## License
 
-**No license is currently declared.** The repository carries no `LICENSE` file, so default copyright applies and no reuse rights are granted. That is an oversight rather than a position, and it needs resolving before this is treated as open source.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](./LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+This covers `zeronym/`. The vendored upstreams elsewhere in this repository (`zebra/`, `zaino/`, `zcashd/` and the rest) keep their own licenses.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
