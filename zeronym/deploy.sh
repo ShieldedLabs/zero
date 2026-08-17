@@ -13,6 +13,14 @@
 # week, so a push into missing DNS burns one). The target is derivable from the app
 # id alone, so nothing has to be scraped out of the push output first.
 #
+# For a hub deployed with NYM=1 it then waits for that hub to publish its own Nym
+# address (`GET /nym-address`) AND to report that it is actually on the mixnet
+# (`GET /nym-status`), and writes the address to stdout, the only thing this
+# script puts there, so a caller can capture it directly. That read costs nothing
+# now, but it used to require the enclave console, which only --debug opens and
+# --debug turns attestation OFF: reading a hub's address and proving its binary
+# were mutually exclusive. DEBUG=1 here is now about the SSH console alone.
+#
 # Requires: git, curl, jq, the `caution` CLI (LOGGED IN), and VULTR_API_KEY in the
 # environment. POSIX sh; assemble scripts build from `git archive HEAD`, so commit
 # your code first.
@@ -20,6 +28,7 @@
 #   export VULTR_API_KEY=...          # never put this in deploy.env
 #   caution login --qr --username <name>
 #   ./zeronym/deploy.sh               # uses ./deploy.env
+#   HUB_NYM=$(./zeronym/deploy.sh hub.env)   # deploy a hub, keep its Nym address
 set -eu
 
 log()  { printf '==> %s\n' "$*" >&2; }
@@ -43,6 +52,14 @@ DNS_TTL=${DNS_TTL:-300}
 DEBUG=${DEBUG:-1}
 SSH_PUBKEY_FILE=${SSH_PUBKEY_FILE:-$HOME/.ssh/id_ed25519.pub}
 DNS_CNAME_TRAILING_DOT=${DNS_CNAME_TRAILING_DOT:-1}
+# How long to wait for a NYM=1 hub to come up ON THE MIXNET after the push has
+# already reported success. The two events are minutes apart: the push returns
+# once the enclave serves TLS and passes its health check, while the mixnet
+# client is still negotiating a gateway behind it.
+NYM_WAIT_SECS=${NYM_WAIT_SECS:-300}
+NYM_POLL_SECS=${NYM_POLL_SECS:-10}
+HUB_NYM_ADDR=""    # the hub's published address, once it is known and checked
+NYM_GAVE_UP=""     # why the wait above ended without one, if it did
 
 # The Vultr record NAME is the label under the zone (e.g. "test-shim-nym-1").
 case "$TLS_DOMAIN" in
@@ -199,6 +216,107 @@ independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
   log "verify with: caution verify (expect PCR0/1 FAILED on Caution's floating framework; PCR2 is the check that matters)"
 fi
 
+# ---------- the hub's Nym address ----------
+# Every shim is built against this string, and the hub mints it inside the
+# enclave, so it has to be read back out of a running deployment. It is read over
+# HTTP from the hub itself, which is what makes an ATTESTED hub deployable at
+# all: the enclave console is only open with --debug, and --debug disables
+# attestation, so an address that could only be read from the console could never
+# belong to a hub that had also been proven.
+#
+# The wait is not politeness, it is required. A push reports success once the
+# enclave serves TLS and answers its health check, and the mixnet client connects
+# some minutes after that; in between, the hub answers /nym-address with a 503
+# that says so. That is a normal state on a fresh deploy, not a failure, so the
+# only way to tell "not yet" from "never" is to keep asking until a deadline.
+#
+# A published address is NOT evidence that the hub can receive anything. The hub
+# deliberately KEEPS the last address it published even after its mixnet client
+# dies, because shims are baked against that string and it comes back on the next
+# rebuild. So /nym-address and /healthz both answered 200 for hours on
+# 2026-08-14 while the hub was carrying no mixnet traffic at all, and the whole
+# afternoon went into suspecting the mixnet. /nym-status is the endpoint that
+# separates "has an address" from "is reachable", so require mixnet_connected
+# there before treating an address as usable.
+if [ "$COMPONENT" = hub ] && [ "${NYM:-0}" = 1 ]; then
+
+  # hub_get PATH: GET one of the hub's own endpoints, leaving the HTTP status in
+  # $_code and the body in $_body. Deliberately no -f: a 503 from /nym-address is
+  # an ANSWER here, and only the status code tells that apart from a 404 (an
+  # image predating the endpoint, or DNS still pointing at some other host).
+  # curl appends the code as the last space-separated field; neither an address
+  # nor the status JSON contains a space, so the split cannot be ambiguous. A
+  # transport failure (DNS, TLS, timeout) yields the code 000 and an empty body,
+  # which is exactly how a name whose certificate has not been issued yet reads.
+  hub_get() {
+    _resp=$(curl -s --max-time 20 -w ' %{http_code}' "https://$TLS_DOMAIN$1") || true
+    _code=${_resp##* }
+    _body=${_resp% *}
+  }
+
+  # is_nym_address ADDR: the same structural check the shim applies to its own
+  # --hub-nym (identity.encryption@gateway; see is_nym_address in
+  # shim/src/config.rs), so this cannot reject a value the shim would accept. It
+  # additionally requires the base58 character set, which the shim's version has
+  # no reason to: this value arrives as an HTTP body rather than as an argv
+  # entry, and a truncated read or an error page must never be baked into a
+  # shim's config, where it would surface much later as lookups that time out
+  # against a hub that does not exist.
+  is_nym_address() {
+    case $1 in
+      ''|*[!0-9A-Za-z.@]*) return 1 ;;
+    esac
+    _keys=${1%%@*}; _gateway=${1#*@}
+    _identity=${_keys%%.*}; _encryption=${_keys#*.}
+    [ "$_keys" != "$1" ] || return 1            # there was an '@' at all
+    [ "$_encryption" != "$_keys" ] || return 1  # and a '.' in front of it
+    case $_gateway in *@*) return 1 ;; esac
+    case $_encryption in *.*) return 1 ;; esac
+    [ -n "$_identity" ] && [ -n "$_encryption" ] && [ -n "$_gateway" ]
+  }
+
+  log "waiting up to ${NYM_WAIT_SECS}s for the hub to publish its Nym address AND report mixnet_connected ..."
+  _deadline=$(( $(date +%s) + NYM_WAIT_SECS ))
+  while :; do
+    hub_get /nym-address
+    if [ "$_code" != 200 ]; then
+      _why="/nym-address answered $_code (503 until the mixnet client connects; 000 while DNS or the certificate is still settling; 404 from an image older than the endpoint)"
+    elif ! is_nym_address "$_body"; then
+      _why="/nym-address answered 200 with a body that is not an identity.encryption@gateway address: '$_body'"
+    else
+      _addr=$_body
+      hub_get /nym-status
+      if [ "$_code" != 200 ]; then
+        _why="/nym-address published an address but /nym-status answered $_code, so reachability is unconfirmed"
+      elif ! printf '%s' "$_body" | jq -e '.mixnet_connected == true' >/dev/null 2>&1; then
+        _why="the hub published an address but reports mixnet_connected=false, so it is receiving nothing: $_body"
+      else
+        HUB_NYM_ADDR=$_addr
+        break
+      fi
+    fi
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      NYM_GAVE_UP=$_why
+      break
+    fi
+    log "not ready: $_why"
+    sleep "$NYM_POLL_SECS"
+  done
+
+  if [ -n "$HUB_NYM_ADDR" ]; then
+    log "hub Nym address: $HUB_NYM_ADDR"
+    log "confirmed reachable: /nym-status reports mixnet_connected=true"
+    # The one value a caller wants back. Every other line this script prints goes
+    # to stderr, so stdout carries the address and nothing else, and it is empty
+    # when the checks above did not pass.
+    printf '%s\n' "$HUB_NYM_ADDR"
+  else
+    warn "gave up after ${NYM_WAIT_SECS}s: $NYM_GAVE_UP"
+  fi
+fi
+
+NYM_REPORT=$HUB_NYM_ADDR
+[ -n "$NYM_REPORT" ] || NYM_REPORT="n/a (not a NYM=1 hub, or never published; see above)"
 
 cat >&2 <<EOF
 
@@ -209,7 +327,19 @@ deploy dir : $DEST
 serves     : https://$TLS_DOMAIN
 verify     : $( [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ] && printf '%s @ %s — run: caution verify' "$APP_SOURCE" "${APP_SOURCE_TAG:-}" || printf 'n/a (debug deploy, not attested; no app-source published)' )
 DNS set    : ${RECORD_NAME:-@}.$DNS_DOMAIN  $REC_TYPE  $REC_DATA  (ttl ${DNS_TTL}s, Vultr)
+hub nym    : $NYM_REPORT
 next       : allow a minute for DNS + the managed cert, then point the wallet at
-             $TLS_DOMAIN:443 (or read the Nym address if this was a hub).
+             $TLS_DOMAIN:443. A shim diverting to this hub sets HUB_NYM to the
+             'hub nym' address above.
 =============================================
 EOF
+
+# Fatal, but only after the banner: the app id and deploy dir above are the
+# things an operator must not lose, and the enclave, DNS and app-source really
+# did succeed. What failed is the hub's purpose, since a hub that is not on the
+# mixnet receives nothing, and the non-zero exit is what stops a caller from
+# capturing an empty address and baking it into a shim.
+if [ -n "$NYM_GAVE_UP" ]; then
+  die "the hub is deployed and serving TLS, but never reported a usable Nym address: \
+$NYM_GAVE_UP. Do NOT point a shim at it yet. Re-check with: curl https://$TLS_DOMAIN/nym-status"
+fi
