@@ -1,6 +1,6 @@
 # The shim and the hub
 
-The concrete engineering designs for both TEE services, meant to be reviewed together by Anton (Caution) and Zooko. **Decision:** marks a committed choice. [Trust](./trust.md) has the STEVE and attestation deep-dive and the honest limits; [review](./review.md) collects the cross-party open forks.
+The concrete engineering designs for both TEE services. **Decision:** marks a committed choice. [Trust](./trust.md) has the STEVE and attestation deep-dive and the honest limits.
 
 ## The zero-indexer-shim (ZIS)
 
@@ -48,9 +48,9 @@ Rationale over a `tonic` server re-exporting all ~20 methods: this decodes only 
 
 **Classify before you connect (built).** A wallet whose migration is about to be diverted must not cause the operator's indexer to see a request, or even a connection. The PoC surfaced this and dialled too early (`handle()` obtained the upstream before it routed), which in a diverting shim would hand the operator a connection-level trace of a wallet that was never going to talk to them. The shipped shim implements the production order: buffer, classify, then connect only if the verdict is pass-through. The upstream pool is lazy and the dial happens after routing, so a diverted migration never opens even a TCP connection to the operator's indexer (`src/proxy.rs` states the property at the dial site).
 
-**Decision (parse-fail / uncertain classification): fail safe for privacy.** If a `SendTransaction` body cannot be parsed or classified, treat it as a **migration** (route to the hub) rather than forward it in the clear. A false positive only delays a normal tx (the hub still broadcasts it); a false negative would leak a real migration. The hub validates and broadcasts, so an unparseable/invalid tx is caught there. (Bounded exception if this proves to break a common well-formed shape; its soundness is a [review](./review.md) item.)
+**Decision (parse-fail / uncertain classification): fail safe for privacy.** If a `SendTransaction` body cannot be parsed or classified, treat it as a **migration** (route to the hub) rather than forward it in the clear. A false positive only delays a normal tx (the hub still broadcasts it); a false negative would leak a real migration. The hub validates and broadcasts, so an unparseable/invalid tx is caught there. (Bounded exception if this proves to break a common well-formed shape; its soundness is an open item.)
 
-**Compression must be controlled, not relayed.** gRPC compression is not supported on the intercept path: a compressed `SendTransaction` cannot be parsed, so it fails safe to migration. But compression is *negotiated*: the backing indexer advertises `grpc-accept-encoding` on responses, so an operator who enables compression pushes every migration into the fail-safe arm instead of genuine classification, an operator-controlled lever on the classifier in a component whose threat model is that the operator is the adversary. The shim therefore rewrites that header to `identity` on every relayed response, in one place, and leaves the request direction alone, where the header is the wallet's own statement **(built)**. Response compression (`grpc-encoding`) is relayed untouched, and the pass-through path stays opaque, so client compression there is fine. A wallet that compresses unprompted still lands in the fail-safe; whether that stays the shipped policy is a [review](./review.md) item.
+**Compression must be controlled, not relayed.** gRPC compression is not supported on the intercept path: a compressed `SendTransaction` cannot be parsed, so it fails safe to migration. But compression is *negotiated*: the backing indexer advertises `grpc-accept-encoding` on responses, so an operator who enables compression pushes every migration into the fail-safe arm instead of genuine classification, an operator-controlled lever on the classifier in a component whose threat model is that the operator is the adversary. The shim therefore rewrites that header to `identity` on every relayed response, in one place, and leaves the request direction alone, where the header is the wallet's own statement **(built)**. Response compression (`grpc-encoding`) is relayed untouched, and the pass-through path stays opaque, so client compression there is fine. A wallet that compresses unprompted still lands in the fail-safe; whether that stays the shipped policy is an open question.
 
 ### The classifier: detecting an Orchard-touching transaction
 
@@ -85,7 +85,7 @@ All three value-balance sub-cases carry Orchard actions, so all three divert:
 | `== 0` | same-receiver shuffle, fee from another pool: nullifiers published, nets to zero | divert |
 | `< 0` | value entering Orchard, consensus-invalid post-NU6.3 | divert (but unmineable; kept only as a directionality probe in tests) |
 
-Only a transaction with **no Orchard bundle** passes through. [review](./review.md) keeps the retracted `> 0` analysis visible. Each shape has its own test vector (including an Orchard withdrawal with no Ironwood bundle, and a V5 Orchard spend), so a regression toward the narrower predicate fails the suite rather than passing quietly.
+Only a transaction with **no Orchard bundle** passes through. Each shape has its own test vector (including an Orchard withdrawal with no Ironwood bundle, and a V5 Orchard spend), so a regression toward the narrower predicate fails the suite rather than passing quietly.
 
 **A naming note.** The diverted class is `Class::Migration` in the code and the routing helper is `treat_as_migration()`, but an Orchard deshield or a same-receiver shuffle is not literally a migration. The code's own accurate name is `is_orchard_touching`, so this book says **Orchard-touching transaction** for the class and keeps *migration* as the legacy label for the same thing.
 
@@ -112,7 +112,7 @@ A consequence worth stating: reply SURBs are still attached and still sized for 
 - **The wire frames (built).** `SubmitV1` is magic `ZNS1`, a 16-byte correlation nonce, a length, and the transaction, zero-padded to exactly 64 KiB; `AckV1` is magic `ZNA1`, the echoed nonce, and a disposition plus refusal code, exactly 64 bytes. `LookupV1` and `LookupReplyV1` carry `GetTransaction` the same way. **Decision: fixed-size frames**, so a passive observer learns nothing from the size of a submission, and every reply looks like every other.
 - **Decision: no txid and no expiry on the wire.** The hub derives both from the bytes it receives. An earlier design put them in the clear so the hub could dedup and schedule without parsing, but a txid handed across the transport is exactly a correlation handle, which is what the mixnet hop exists to destroy. Requests are correlated by the per-request nonce instead, which means nothing outside the pending-request table.
 - **Attested, encrypted channel (designed).** The ZIS would verify the hub's attestation and derive a shared key (STEVE), then encrypt each migration to the hub key regardless of channel, so a compromised path yields nothing. Neither layer exists yet: on both transports the only encryption is what carries the frame.
-- **Delivery guarantees.** The shim rotates which hub address each submit targets, so load and a dead address spread across a multi-homed hub over successive sends. That is the whole of failover today: it is not primary-preference, and whether shims should prefer a primary or submit to every hub is open ([review](./review.md)). What stays designed is holding a migration across requests: retrying on expiry slack, and a last-resort direct broadcast before expiry. The shim keeps no such state, so recovery rides on the wallet's own resend.
+- **Delivery guarantees.** The shim rotates which hub address each submit targets, so load and a dead address spread across a multi-homed hub over successive sends. That is the whole of failover today: it is not primary-preference, and whether shims should prefer a primary or submit to every hub is open. What stays designed is holding a migration across requests: retrying on expiry slack, and a last-resort direct broadcast before expiry. The shim keeps no such state, so recovery rides on the wallet's own resend.
 
 ### TLS and certificate model
 
@@ -135,6 +135,8 @@ ZIS_HUB                 # hub address for the clearnet transport (repeatable)
 ZIS_HUB_TLS             # the hub's expected TLS name
 ZIS_HUB_NYM             # hub Nym address(es) for the mixnet transport
 ZIS_NYM_GATEWAY         # entry gateway(s) to pin, repeatable; rotates on rebuild
+ZIS_LOOKUP_TIMEOUT_SECS # ceiling on a GetTransaction round trip
+ZIS_DIAG                # diagnostic logging
 ZIS_NYM_ROTATION_SECS   # sender-tag rotation interval
 ZIS_NYM_TOPOLOGY        # localnet only: the harness-written topology
 ZIS_CAUTION_ATTESTATION # own Caution's control-plane paths (default on)
@@ -193,7 +195,7 @@ Many shims submit inward; the hub re-parses for telemetry, queues, and flushes e
 
 The hub is the server end of the shim's channel. It binds an in-process mixnet listener and decodes the same fixed-size frames the shim sends. The clearnet `POST /` submit path is closed unless `ZIH_HTTP_SUBMIT` re-opens it, and when closed it falls through to the same 404 an unknown path gets, so a scanner cannot tell whether this hub would have accepted a submission at all. The `POST /transaction` lookup path is not gated.
 
-- **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision (see [review](./review.md)): one-way is enough for privacy, mutual would gate abuse.
+- **Channel + auth (STEVE).** The shim verifies the hub's attestation and derives a shared key (STEVE); migrations are encrypted to the hub. Whether the hub also authenticates the shim (mutual STEVE) is an open decision: one-way is enough for privacy, mutual would gate abuse.
 - **Decrypt in-enclave.** Only the attested hub software sees cleartext; the hub host operator (Caution) and the Nym path see ciphertext.
 - **Re-parse, but as telemetry only, never as a drop reason.** The hub parses with `zebra-chain` and re-runs `is_orchard_touching` so a disagreement with the shim is *visible*, and it stops there. This reverses an earlier reject-on-invalid rule, caught in `zeronym/hub/REVIEW.md`. The shim fail-safes for privacy: a body it cannot read cleanly routes to the migration arm precisely *because* it could not read it, so the transactions most likely to fail the hub's parse are exactly the ones the shim deliberately diverted, and a hub that rejects them converts the shim's fail-safe into a leak, handing an adversary who can characterise the parser skew an on-demand way to force a transaction back onto the direct-broadcast path. An unparseable payload is therefore queued and published; the indexer's `SendTransaction` (which relays to its node) is the only authority on validity, and the cost of being wrong is one wasted batch slot. The permitted refusals are narrow and structural: authentication failure, a malformed frame, byte-budget exhaustion, and the expiry admission rule. **Rate-limit** per channel to bound resource use.
 
@@ -259,7 +261,7 @@ The cadence is **not** configurable. `FLUSH_INTERVAL_BLOCKS = 20`, `MINING_MARGI
 - **Indexer(s) down:** cannot get tip or broadcast; with >=2 endpoints this is rare, but if all are down the hub cannot flush. Brief outages self-heal on the migrations' expiry slack; a sustained one is what the designed last-resort direct broadcast covers.
 - **Hub crash:** the in-RAM queue and awaiting-confirmation set are lost (diskless). Recovery is designed, not shipped: standby hubs plus a shim that resubmits across failover on expiry slack. Hub-crash durability rides on the wallet's own resend.
 - **Expiry pressure:** admission control refuses any migration that would not survive the next scheduled flush, so nothing urgent is ever queued. There is no early-flush escape hatch (that was retired as an attacker-operated flush clock).
-- **Garbage / abuse:** re-validate + rate-limit; optionally require shim attestation (see [review](./review.md)).
+- **Garbage / abuse:** re-validate + rate-limit; optionally require shim attestation.
 - **Fee too low to mine before expiry:** the fee is in the wallet-signed tx and the hub cannot change it; `safety_margin` gives mining headroom, but a badly-underpaid migration can still fail. That is the wallet's responsibility, not the hub's.
 
 ### Crate layout
@@ -291,7 +293,7 @@ Both services share the same enclave idioms: a static-musl Rust binary, a reprod
 
 **Hub boot sequence.** (1) Hub key from the keymaker quorum (reconstitute; private key stays in-enclave). (2) Attestation: bind the hub public key into the Nitro attestation; publish `/attestation` (or over Nym) for the shim's STEVE check + auditors. (3) Chain: connect to the hub's indexer(s) over TLS; sync `H` via `GetLightdInfo`; verify `SendTransaction` works. (4) Inbound: bind the in-process `nym-sdk` listener and publish the hub's Nym address. (5) Run the flush loop against `H`.
 
-The open forks are collected in [review](./review.md).
+Cross-party open forks are tracked [outside this book](https://github.com/ShieldedLabs/zero/blob/main/zeronym/OPEN-QUESTIONS.md).
 
 ### Build and test
 

@@ -86,7 +86,7 @@ Cryptographic query privacy: a client retrieves a record without the server lear
 
 ### RA-TLS
 
-Remote-attestation TLS, a fallback transport binding the enclave's attestation into the TLS handshake. An alternative to STEVE for the attested channel. See [open questions](./review.md).
+Remote-attestation TLS, a fallback transport binding the enclave's attestation into the TLS handshake. An alternative to STEVE for the attested channel.
 
 ### Shield
 

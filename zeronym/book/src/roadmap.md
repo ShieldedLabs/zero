@@ -30,7 +30,7 @@ It is already a partial down-payment. Transaction-detail lookups (`GetTransactio
 | Stateless shim | Deployed | No per-migration state, so a restart or a second instance loses nothing |
 | Hub queue, batch, flush on cadence | Deployed | |
 | `GetTransaction` served by the hub | Deployed | Address-level queries still reach the operator |
-| Reproducible StageX build, both binaries | Deployed, **currently drifted** | Checked on pull requests and manual dispatch, **not on every push**; as of 2026-08-14 both published hashes are stale against tip of main and both jobs report DOES NOT REPRODUCE. **PCR2 only**, see the gap below |
+| Reproducible StageX build, both binaries | Deployed, **currently drifted** | Checked on pull requests and manual dispatch, **not on every push**; as of 2026-08-17 both published hashes are stale against tip of main and both jobs report DOES NOT REPRODUCE. **PCR2 only**, see the gap below |
 | Attested Nitro enclaves | Deployed | Shielded Labs' own indexers since 2026-08-01; first third-party operator 2026-08-10 |
 | In-enclave TLS termination | Deployed | Landed 2026-08-05, so the TLS key is enclave-born |
 | Nym transport | Deployed | An attested shim and hub pair has run on the **public** mixnet since 2026-08-14; the hub publishes its address at `GET /nym-address`. The deployed pair's provenance does not yet reproduce, see below |
@@ -56,7 +56,7 @@ As of the 2026-07-30 V2 sync, the three hardest gates of the indexer + Nym + TEE
 
 **Transport-validated.** Rehearsed, not modeled: nym-proxy carried our actual `CompactTxStreamer` gRPC over the **live Nym mainnet mixnet** against the live testnet enclave, end to end, at roughly 10x slower than clearnet (unary calls ~9-10s, `GetBlockRange` ~19 blocks/s), which is fine for non-time-sensitive migrations. Nym mainnet uses ticketbook ecash credentials, so the client needs Nyx-RPC egress (`rpc.nymtech.net:443`). That rehearsal used a standalone proxy pair, so its numbers bound the mixnet's cost rather than the shipped code path, which links `nym-sdk` into each binary.
 
-The residual platform questions are the Caution agenda in [review](./review.md).
+The residual platform questions are tracked as a [cross-party agenda](https://github.com/ShieldedLabs/zero/blob/main/zeronym/OPEN-QUESTIONS.md) outside this book.
 
 ## V3 (PIR): not redundant with the TEE
 
@@ -70,7 +70,7 @@ The PIR building blocks under consideration (SimplePIR/DoublePIR, FrodoPIR, YPIR
 
 ## Deferred items
 
-Real parts of the vision, held back so they never landed on the launch critical path. One documentation item belongs here too: a concern-by-concern coverage matrix against Taylor's wallet app threat model, showing which entries zero-indexer closes and which stay the wallet's ([review](./review.md) states the claimed boundary).
+Real parts of the vision, held back so they never landed on the launch critical path. One documentation item belongs here too: a concern-by-concern coverage matrix against Taylor's wallet app threat model, showing which entries zero-indexer closes and which stay the wallet's ([trust](./trust.md) states the claimed boundary).
 
 **The query-only / broadcast-only binary split.** Taylor's proposal: one attested instance proves it only answers queries and refuses broadcasts, a separate flavor only accepts broadcasts and refuses queries, so neither can correlate a client's reads with its writes. The near-term shim already realizes a scoped version for turnstile crossings. The general split is deferred because wallets today assume a single endpoint, so requiring two is an adoption cost with no near-term payoff.
 

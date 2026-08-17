@@ -10,7 +10,13 @@ A light wallet delegates chain validation to an indexer (lightwalletd or Zaino) 
 
 The protocol gets one half right and the other half wrong. Note contents stay private, since trial decryption is client-side and the indexer never learns which notes are yours. Metadata does not: the indexer terminates the connection, so it sees the source IP, the timing of every request, and the addresses and block ranges queried (ECC and ZecSec have written this up, see [the glossary](./glossary.md)).
 
-The near-term system targets the **broadcast** half. When a wallet submits a transaction it calls SendTransaction on the indexer over clearnet TLS; the operator terminates that TLS and sees the raw transaction bytes, the source IP, and the arrival moment. The other half, which addresses a wallet looks up, is the **query** leak, still largely out of near-term scope, with one exception now closed: transaction-detail lookups (`GetTransaction`) are served by the hub's indexer rather than the operator's (see [the roadmap](./roadmap.md)).
+The near-term system targets the **broadcast** half. When a wallet submits a transaction it calls SendTransaction on the indexer over clearnet TLS; the operator terminates that TLS and sees the raw transaction bytes, the source IP, and the arrival moment.
+
+![Current Zcash transaction publication: wallets connect over TLS directly to one of a handful of indexers, each of which publishes to the mempool](./images/zcash_current_publication.svg)
+
+*Diagram by Zooko Wilcox-O'Hearn ([zero-indexer-diagrams](https://github.com/zookoatshieldedlabs/zero-indexer-diagrams)).*
+
+The TLS in that picture is doing less than it looks. It protects the transaction from everyone except the party that matters, because it terminates *at* the indexer, which is exactly the party positioned to log the source IP and join it to the chain. [Architecture](./architecture.md) redraws this with the shim and hub in place. The other half, which addresses a wallet looks up, is the **query** leak, still largely out of near-term scope, with one exception now closed: transaction-detail lookups (`GetTransaction`) are served by the hub's indexer rather than the operator's (see [the roadmap](./roadmap.md)).
 
 ## From metadata to balance: the correlation
 
@@ -84,7 +90,7 @@ The system needs no wallet reconfiguration and no new endpoint URL, but it does 
 
 The reason is an **anchor-linkage attack**. A migration transaction commits to an *anchor*, a note-commitment-tree root that was current when the wallet built it. A wallet that uses the *latest* anchor stamps its transaction with a timestamp: an attacker who sees the shuffled epoch batch revealed on-chain can match each transaction's anchor to the moment it was current, then match that moment to the time a given IP submitted a migration. The batching's timing protection evaporates. Aligning anchors and expiries across the epoch removes the per-transaction timestamp, so all migrations in a batch look alike.
 
-So the protection is for **ZIP-318-like wallets whose users have opted out of Tor or Nym**, not for completely unmodified wallets. Coordinating this requirement with wallet authors, and aligning the hub's batch granularity to the granularity at which wallets pick anchors and expiries, are open items (see [review](./review.md)).
+So the protection is for **ZIP-318-like wallets whose users have opted out of Tor or Nym**, not for completely unmodified wallets. Coordinating this requirement with wallet authors, and aligning the hub's batch granularity to the granularity at which wallets pick anchors and expiries, are open items.
 
 ## The query path: content passes through
 
@@ -120,7 +126,7 @@ A **Trusted Organization** (the party operating the hub) watches both. It verifi
 
 The honest cost of a detection design: an operator's own mistakes are indistinguishable from an attack. If an operator loses the TEE's state and must recreate it, or accidentally lets Let's Encrypt auto-renew the certificate, that trips the alarm as a false positive. Operators must therefore run carefully (disable certificate auto-renewal, guard the enclave state) and accept that operational slips get announced as possible attacks.
 
-The bar this clears is specific: the design aims to be secure against attacks that fall short of entering a new certificate into CT logs *and* fall short of fully compromising the TEE, including TEE attacks that rewind or replay enclave state, or that observe the enclave's memory-access patterns (both are open hardening items, see [review](./review.md)).
+The bar this clears is specific: the design aims to be secure against attacks that fall short of entering a new certificate into CT logs *and* fall short of fully compromising the TEE, including TEE attacks that rewind or replay enclave state, or that observe the enclave's memory-access patterns (both are open hardening items).
 
 ## What this does not defend against
 
@@ -129,4 +135,4 @@ Beyond the query leak (out of scope above) and the residual (above), two active 
 - **Active wallet-tagging.** An attacker who can feed a target wallet a false chain can force it to build migrations against uniquely identifiable anchors; those transactions will not be valid, but they become uniquely findable in the revealed batch. An attacker can also hold a target back on the legitimate chain so it uses identifiably old anchors; the only visible symptom is that the user's incoming funds confirm much more slowly than usual. These are active wallet-breaking attacks, not passive observation, and this design does not stop them.
 - **The transaction-size side channel.** An attacker can read a migration's size (its arity) from the TLS ciphertext length at submission time. If one migration in the revealed batch has a distinctive size, that IP is re-linked to it. So migration sizes must overlap across users; if they do not, the batching does not hide a large or unusual transaction.
 
-A near-term deployment blocker sits alongside these: the existing TLS certificate for `zec.rocks` is valid through **October**, so until it expires (or a fresh domain is used, or the key is revoked and wallets check revocation), an attacker holding that certificate could still see targeted users' migrations. See [review](./review.md).
+A near-term deployment blocker sits alongside these: the existing TLS certificate for `zec.rocks` is valid through **October**, so until it expires (or a fresh domain is used, or the key is revoked and wallets check revocation), an attacker holding that certificate could still see targeted users' migrations.

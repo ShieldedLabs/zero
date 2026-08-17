@@ -26,102 +26,13 @@ Everything else is post-launch: [roadmap](./roadmap.md) covers the deferred item
 
 ## 1. Data flow and trust boundaries
 
-```mermaid
-flowchart TB
-  subgraph WAL["Wallet (user device)"]
-    W["Light wallet (drop-in; not STEVE or Nym aware)"]
-  end
+![Zero-indexer transaction publication: wallets connect over TLS to a zero-indexer-shim inside a TEE at each organisation, the shims route Orchard-touching transactions over the Nym mixnet to a zero-indexer-hub inside its own TEE, and the hub publishes to the mempool](./images/zcash_zero_indexer_publication.svg)
 
-  subgraph OP["Operator host  (UNTRUSTED)"]
-    subgraph SHIM["zero-indexer-shim enclave  (attested TCB)"]
-      STLS["1 TLS terminate (enclave-born key)"]
-      SROUTE["2 HTTP/2 path router"]
-      SCLASS["3 is_orchard_touching classifier"]
-      SPROXY["4 pass-through proxy"]
-      SHUB["5 hub-channel client"]
-      SNYM["6 nym-sdk client (linked, in-process)"]
-    end
-    LWD["backing lwd (operator's, unmodified)"]
-  end
+*Diagram by Zooko Wilcox-O'Hearn ([zero-indexer-diagrams](https://github.com/zookoatshieldedlabs/zero-indexer-diagrams)), regenerated here with the Nym hop.*
 
-  OTHER["shims at other operators"]
+**Reading it.** Green boxes are attested enclaves, the only things that ever see migration cleartext. Each shim links its mixnet client **in-process**, so there is no separate Nym node inside the TEE to draw: the shim itself emits Sphinx traffic. The mixnet is drawn outside both enclaves because the mix nodes are untrusted; it is 5-hop, and wallets never speak it. The grey edge from each shim to its own indexer is the **pass-through path**, plaintext the operator reads exactly as today; the green edge is the **diverted path** that bypasses the operator entirely. Both organisations' migrations enter the mixnet and one edge leaves it, which is the anonymity property: the hub cannot tell which shim a migration came from. Not drawn, because they would crowd the picture: `GetTransaction` is answered by the hub rather than the operator, and a second hub with failover is designed.
 
-  subgraph NYMNET["Nym 5-hop mixnet  (untrusted)"]
-    NYM["Nym mixnet (Sphinx + cover traffic)"]
-  end
-
-  subgraph HH["Hub host  (Caution, UNTRUSTED; 2+ with failover)"]
-    subgraph HUBENC["zero-indexer-hub enclave  (attested TCB; no validator inside)"]
-      HNYM["nym-sdk listener (linked, in-process)"]
-      HDEC["decrypt (STEVE server, designed)"]
-      HVAL["re-validate (stateless)"]
-      HQ["batch queue (payload-hash dedup, in RAM)"]
-      HFLUSH["batch + publish"]
-    end
-  end
-
-  HUB2["standby hub enclave (shared key)"]
-
-  subgraph NET["Hub's indexer / Zcash network"]
-    FN["hub's indexer -> full node(s)"]
-    ZNET["Zcash P2P network"]
-  end
-
-  NOTE_OP["Residual: the operator learns THAT a client migrated (it is the one request not forwarded to its lwd), not the amount"]
-  NOTE_BATCH["Anonymity set = the cross-operator batch; a batch of 1 = no anonymity"]
-
-  %% pass-through path (thin): queries + non-migration txs
-  W -->|"TLS (ends in enclave, not STEVE)"| STLS
-  STLS -->|"decrypted h2 (in TCB)"| SROUTE
-  SROUTE -->|"other queries + streams"| SPROXY
-  SROUTE -->|"SendTransaction"| SCLASS
-  SROUTE ==>|"GetTransaction (hub-served)"| SHUB
-  SCLASS -->|"non-migration"| SPROXY
-  SPROXY -->|"queries except GetTransaction + non-migration txs (plaintext to operator)"| LWD
-  LWD -->|"relay (clearnet)"| ZNET
-
-  %% migration path (thick): encrypted end to end, bypasses the lwd
-  SCLASS ==>|"migration (or fail-safe): encrypt to hub key"| SHUB
-  SHUB -.->|"accepted (not yet on-chain)"| W
-  SHUB ==>|"SubmitV1 frame (padded to 64 KiB)"| SNYM
-  SNYM ==>|"Sphinx (anonymous send + reply SURBs)"| NYM
-  OTHER ==> NYM
-  NYM ==>|"5-hop (hides shim + region)"| HNYM
-  HNYM ==>|"frame (host never sees it)"| HDEC
-  HDEC ==> HVAL
-  HVAL ==>|"valid, unexpired"| HQ
-  HQ ==>|"flush every 20 blocks (~25 min)"| HFLUSH
-  HFLUSH ==>|"SendTransaction (batched, shuffled)"| FN
-  FN -->|"P2P relay"| ZNET
-  HFLUSH -.->|"tip (GetLightdInfo) + lookup fallthrough"| FN
-  HDEC -.->|"AckV1 (SURB return; not awaited)"| SHUB
-  SHUB -.->|"failover (dedup by payload hash)"| HUB2
-  SHUB -.->|"last resort near expiry: direct broadcast over Nym"| NYM
-  HUB2 -.-> FN
-
-  NOTE_OP -.- LWD
-  NOTE_BATCH -.- HFLUSH
-
-  classDef enclave fill:#1b7f4d,color:#fff,stroke:#0d5233;
-  classDef untrusted fill:#c0392b,color:#fff,stroke:#7f261c;
-  classDef external fill:#6b7280,color:#fff,stroke:#4b5563;
-  classDef client fill:#2563eb,color:#fff,stroke:#1e40af;
-  classDef note fill:#fef9c3,color:#000,stroke:#ca8a04,stroke-dasharray:4 3;
-  class STLS,SROUTE,SCLASS,SPROXY,SHUB,SNYM,HNYM,HDEC,HVAL,HQ,HFLUSH,HUB2 enclave;
-  class LWD untrusted;
-  class NYM,FN,ZNET,OTHER external;
-  class W client;
-  class NOTE_OP,NOTE_BATCH note;
-  style OP fill:#fbeae7,stroke:#c0392b;
-  style HH fill:#fbeae7,stroke:#c0392b;
-  style SHIM fill:#e7f4ee,stroke:#1b7f4d;
-  style HUBENC fill:#e7f4ee,stroke:#1b7f4d;
-  style NYMNET fill:#eef0f2,stroke:#6b7280;
-  style NET fill:#eef0f2,stroke:#6b7280;
-  style WAL fill:#e8eefc,stroke:#2563eb;
-```
-
-**Reading it:** *migration* is the code's label for the diverted class ([the shim](./components.md) has the predicate). Thin arrows = the **pass-through path** (queries other than `GetTransaction`, and non-migration txs), which go to the operator's unmodified backing indexer as **plaintext the operator can read**, exactly as today. Thick arrows = the paths that **bypass the operator**: the migration broadcast, encrypted end to end, and the hub-served `GetTransaction`. Green = attested enclave processes, the only things that ever see migration cleartext, and note that this now includes each side's mixnet client, which is linked in-process rather than run as a sidecar; red = the untrusted host and the operator's own indexer, which never sees the migration path at all; gray = external networks; blue = the drop-in wallet.
+Two residuals the picture cannot show, both developed in [honest limits](./trust.md). The operator learns *that* one of its clients migrated, since a diverted transaction is the one request it does not see, though not the amount or which on-chain transaction. And the anonymity set is the batch itself, so at a batch of one there is nothing to hide among.
 
 **Three nested encryption layers are designed for the migration (shim to hub) path**, so that only the two attested enclaves ever see cleartext. **The deployed hop today has the outer layer only**: Sphinx across the mixnet, with the wallet's own TLS terminated by the platform's in-enclave proxy before it.
 1. **Inner** (designed): the tx is encrypted to the **hub key** at the classifier, so it survives a compromised host.
@@ -179,4 +90,4 @@ flowchart LR
 
 The **keymaker M-of-N quorum** persists keys across cold boots and upgrades and hands the **single shared hub key** to every hub instance, which is what makes failover clean. The **Auditor Role** is open to any independent party. The shim's one-way **STEVE** handshake performs this same enclave-verification against the hub, automatically and per session.
 
-STEVE mechanics and the honest limits are in [trust](./trust.md); the open platform questions in [review](./review.md).
+STEVE mechanics and the honest limits are in [trust](./trust.md).
