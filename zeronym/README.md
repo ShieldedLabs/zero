@@ -21,11 +21,11 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 
 ## Security
 
-**Protected.** An Orchard-touching broadcast is hidden from the operator, because the wallet's TLS terminates inside an attested enclave, and the on-chain transaction carries no link to the wallet's IP, because the hub publishes it. That second property is volume-independent.
+**Protected.** An Orchard-touching broadcast is hidden from the operator, because the wallet's TLS terminates inside an attested enclave, and the on-chain transaction carries no link to the wallet's IP, because the hub publishes it. That second property is volume-independent. `GetTransaction` is kept from the operator too: the shim routes every lookup to the hub, so the operator cannot watch a wallet fetch back the transaction it just diverted. That moves the lookup to the hub rather than making it private outright.
 
 **Not protected.**
 
-- **Query content.** Which addresses a wallet looks up still reaches the operator. Only `GetTransaction` is hub-served.
+- **Query content.** Address-level queries (`GetTaddressTxids`, `GetTaddressBalance`, `GetAddressUtxos`) are not intercepted and still reach the operator.
 - **The operator learns *that* a client migrated**, though not the amount or which transaction. A diverted request is the one thing it does not see, and that asymmetry survives padding, so shim-side batching and cover traffic were rejected rather than attempted.
 - **Batch-timing anonymity is conditional, and the condition is not met.** Mainnet carries **0.77 Orchard-touching transactions per block** (144 blocks at tip 3,433,105), so the modal batch is zero or one, where the anonymity set is the transaction itself. The lever is adoption, not code.
 - **The trust root is AWS and the hardware, not mathematics.** No mathematical fallback today; PIR removes it and is deferred.
