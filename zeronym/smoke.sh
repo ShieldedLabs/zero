@@ -76,11 +76,15 @@ die()  { printf 'smoke.sh: %s\n' "$*" >&2; exit 2; }
 
 usage() {
   cat >&2 <<'EOF'
-usage: smoke.sh [--shim URL] [--hub URL] [SHIM_URL [HUB_URL]]
+usage: smoke.sh [--clearnet] [--shim URL] [--hub URL] [SHIM_URL [HUB_URL]]
 
   smoke.sh https://zeronym-shim-8.shieldedinfra.net https://zeronym-hub-3.shieldedinfra.net
   smoke.sh --hub  https://zeronym-hub-3.shieldedinfra.net     # hub only
   smoke.sh --shim https://zeronym-shim-8.shieldedinfra.net    # shim only
+
+--clearnet: the pair runs without the mixnet hop (hub --http-submit, shim --hub/--hub-tls);
+the four Nym-mode checks are replaced by their clearnet invariants rather than
+reported as failures. Deployed this way from 2026-08-17.
 
 Positional URLs are the shim then the hub; a bare URL whose host contains "hub"
 is taken as the hub. https:// is assumed when no scheme is given. Use --shim /
@@ -97,6 +101,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --shim) [ $# -ge 2 ] || usage; SHIM=$2; shift 2 ;;
     --hub)  [ $# -ge 2 ] || usage; HUB=$2;  shift 2 ;;
+    --clearnet) CLEARNET=1; shift ;;
     -h|--help) usage ;;
     -*) printf 'smoke.sh: unknown option: %s\n' "$1" >&2; usage ;;
     *)
@@ -151,6 +156,7 @@ PY=$(find_python) || die "no working python3 found (tried python3, python, py)"
 # an HTTP/2-only gRPC server behind an h2c-upstream proxy, so its checks need a
 # curl that speaks HTTP/2.
 HUB_PROTO=--http1.1
+CLEARNET=${CLEARNET:-0}
 SHIM_PROTO=--http2
 # A cleartext shim (a local one, or an enclave reached without the platform's
 # TLS in front) is h2c with no ALPN to negotiate over, and its HTTP/2-only
@@ -346,6 +352,62 @@ check_shim_nym_status() {
   fi
 }
 
+# ---- clearnet mode: the same components, the mixnet hop replaced by HTTPS ----
+#
+# With --clearnet the four Nym-mode assertions above are wrong by construction:
+# there is no mixnet client to be connected, no Nym address to publish, and the
+# hub's POST / MUST be open because that is how the shim reaches it. Reporting a
+# working clearnet pair as 4/8 FAILED is worse than useless -- it teaches people
+# to ignore the script. So clearnet mode swaps in the invariants a clearnet pair
+# actually has, rather than skipping checks silently: the status endpoints must
+# still answer and must HONESTLY report no mixnet, and the hub's submit path must
+# be reachable. Deployed this way from 2026-08-17 while the enclave's egress path
+# throttles the mixnet client (see hub OPERATORS.md, "Clearnet mode").
+
+check_hub_clearnet_status() {
+  http_request GET "$HUB/nym-status" "$SMOKE_HTTP_TIMEOUT" "$HUB_PROTO"
+  no_reply hub:clearnet-status && return
+  _conn=$(json_field "$BODY" mixnet_connected)
+  if [ "$CODE" = 200 ] && [ "$_conn" = false ]; then
+    pass hub:clearnet-status "$CODE, mixnet_connected=false as expected (no client in clearnet mode), ${SECS}s"
+  else
+    fail hub:clearnet-status "$CODE, mixnet_connected=${_conn:-<absent>}, ${SECS}s ${CURL_ERR}"
+    note "a clearnet hub must report honestly that it has no mixnet client; true here means the wrong build is deployed"
+  fi
+}
+
+check_hub_submit_open() {
+  # The inverse of submit-closed: on a clearnet hub POST / is the submit path and
+  # must answer -- NOT 404 (path closed: ZIH_HTTP_SUBMIT unset) and NOT 000
+  # (unreachable), either of which means shims cannot divert to this hub.
+  #
+  # A one-byte junk body gets 200, and that is CORRECT: the hub deliberately
+  # admits unparseable payloads rather than refusing them (see
+  # hub/tests/nym.rs an_unparseable_payload_is_admitted_not_refused), because a
+  # hub that answered "not a transaction" would be an oracle for what it can
+  # parse. So the pass condition is "the path answered like a submit path"; the
+  # smoke test never sends a real transaction here (that would put junk in a
+  # live batch), so it cannot and does not assert on the verdict.
+  http_request POST "$HUB/" "$SMOKE_HTTP_TIMEOUT" "$HUB_PROTO" -H 'content-type: application/octet-stream' --data-binary x
+  no_reply hub:submit-open && return
+  case $CODE in
+    200|400|413|415) pass hub:submit-open "$CODE: the submit path is open (200 = junk admitted by design, not an error), ${SECS}s" ;;
+    404) fail hub:submit-open "404: submit path is CLOSED (ZIH_HTTP_SUBMIT unset?) -- shims cannot divert to this hub, ${SECS}s" ;;
+    *)   fail hub:submit-open "unexpected $CODE, ${SECS}s ${CURL_ERR}" ;;
+  esac
+}
+
+check_shim_clearnet_status() {
+  http_request GET "$SHIM/nym-status" "$SMOKE_HTTP_TIMEOUT" "$SHIM_PROTO"
+  no_reply shim:clearnet-status && return
+  _conn=$(json_field "$BODY" mixnet_connected)
+  if [ "$CODE" = 200 ] && [ "$_conn" = false ]; then
+    pass shim:clearnet-status "$CODE, mixnet_connected=false as expected; diversion is over HTTPS, proven by shim:lookup below, ${SECS}s"
+  else
+    fail shim:clearnet-status "$CODE, mixnet_connected=${_conn:-<absent>}, ${SECS}s ${CURL_ERR}"
+  fi
+}
+
 check_shim_healthz() {
   # The shim answers 503 here (not 200) once it cannot carry a migration, so
   # this is a real verdict rather than a process-liveness ping.
@@ -474,15 +536,20 @@ PY
 
 if [ -n "$HUB" ]; then
   printf 'hub  %s\n' "$HUB"
-  check_hub_nym_status
-  check_hub_nym_address
-  check_hub_submit_closed
+  if [ "$CLEARNET" = 1 ]; then
+    check_hub_clearnet_status
+    check_hub_submit_open
+  else
+    check_hub_nym_status
+    check_hub_nym_address
+    check_hub_submit_closed
+  fi
   printf '\n'
 fi
 
 if [ -n "$SHIM" ]; then
   printf 'shim %s\n' "$SHIM"
-  check_shim_nym_status
+  if [ "$CLEARNET" = 1 ]; then check_shim_clearnet_status; else check_shim_nym_status; fi
   check_shim_healthz
   check_shim_grpc_passthrough
   check_shim_lookup

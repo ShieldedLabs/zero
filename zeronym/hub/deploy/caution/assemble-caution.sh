@@ -29,9 +29,12 @@
 # fragments per lookup (a local hub's, ~1), because the SDK computes the ack
 # deadline from CONFIGURED mix delays and an enclave's real ack path is slower.
 # Each duplicate costs a send slot at the throttled rate and the SDK's rate
-# controller backs off further as they pile up, so lookups took 45-90 s. 6000 is
-# the value the local A/B showed removes the duplicates entirely. Set it on any
-# enclave hub; leave it unset locally.
+# controller backs off further as they pile up, so lookups took 45-90 s. Use
+# 15000 on an enclave hub: 6000 was tried on hub-5 and still left two of four
+# replies retransmitted in their entirety, so the enclave's ack path is far
+# slower than that or lossy; 15000 trims the late-ack tail as far as is worth
+# trimming and costs nothing on a fast path. It does NOT fix lost acks. Leave it
+# unset locally, where the SDK default of 1500 produces zero retransmissions.
 #
 # --app-source records, in the manifest's build block, the public git URL where
 # this assembled repository is published. `caution verify` clones that URL and
@@ -74,6 +77,7 @@ NYM="false"
 NYM_EGRESS=""
 NYM_GATEWAY=""
 ACK_WAIT_MS=""
+HTTP_SUBMIT="false"
 DEBUG="false"
 SSH_KEYS=""
 DEST=""
@@ -102,6 +106,9 @@ while [ $# -gt 0 ]; do
 		# (request_gateway takes the IDENTITY, egress takes the IP). Unset = SDK picks.
 		--nym-gateway)   NYM_GATEWAY=$2; shift 2 ;;
 		--ack-wait-ms)   ACK_WAIT_MS=$2; shift 2 ;;
+		# Accept clearnet submissions at POST /. OFF by default in the binary and here;
+		# only for a transitional clearnet shim. See the template comment for the cost.
+		--http-submit)   HTTP_SUBMIT="true"; shift ;;
 		--debug)         DEBUG="true"; shift ;;
 		# One authorized debug-console SSH public key, repeatable. Required with
 		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
@@ -473,6 +480,7 @@ sed \
 	-e "s|__ENCLAVE_NAME__|$NAME|g" \
 	-e "s|__INDEXERS__|$INDEXERS_ENV|g" \
 	-e "s|__INDEXER_TLS__|$INDEXER_TLS|g" \
+	-e "s|__HTTP_SUBMIT__|$HTTP_SUBMIT|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
 	"$RENDERED" > "$DEST/caution.hcl"
 

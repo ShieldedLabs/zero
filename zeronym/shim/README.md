@@ -8,9 +8,8 @@ including streaming responses and gRPC trailers. The one exception is
 `SendTransaction`, whose body it decodes, classifies with the real `zebra-chain`
 parser, and **logs**. Nothing else about the call changes.
 
-The design lives in The Zeronym Book, which is reviewed separately on the
-`claude/zeronym-book` branch: see its `components.md` chapter for the shim and
-`problem.md` for the threat model. This crate is one afternoon of it.
+The design, the threat model and the honest limits live in
+[`zeronym/README.md`](../README.md). This crate is one afternoon of it.
 
 ## What this PoC deliberately does NOT do
 

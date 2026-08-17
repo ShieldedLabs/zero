@@ -12,26 +12,9 @@
     <style>
 
 .canvas {
-    fill: #fbfcfe;
+    fill: none;
 }
 
-/* The book renders this on a dark theme too. Only the canvas and the text
-   need to move; the node fills are light-on-light by design and keep their
-   own contrast against a transparent ground. */
-@media (prefers-color-scheme: dark) {
-    .canvas {
-        fill: #0f1419;
-    }
-
-    .title,
-    .node-label {
-        fill: #e6e1cf;
-    }
-
-    .small-label {
-        fill: #b3a992;
-    }
-}
 
 .mixnet {
     fill: #ede8fb;
@@ -132,8 +115,7 @@
 }
 
 .organization {
-    fill: #f7f9fc;
-    fill-opacity: 0.72;
+    fill: none;
     stroke: #a9b2c2;
     stroke-width: 1.8;
     stroke-dasharray: 8 6;
@@ -196,6 +178,27 @@
 
 .highlight {
     fill: #ffffff;
+}
+
+/* Transparent canvas, so the title and the auditor label are the only text
+   sitting on the page's own background. Everything else is on a filled shape
+   and keeps its contrast. Placed last on purpose: at equal specificity the
+   later rule wins. */
+@media (prefers-color-scheme: dark) {
+    .title {
+        fill: #e6edf3;
+    }
+
+    .auditor-label {
+        fill: #d9b75f;
+    }
+
+    /* The organisation boundary has no fill, so its label is on the canvas
+       too. The TEE label is NOT here on purpose: it sits on the enclave's
+       light green panel and has to stay dark. */
+    .boundary-label {
+        fill: #9aa7b8;
+    }
 }
 
     </style>
@@ -261,10 +264,6 @@
 
       .tee {
           filter: url(#panel-shadow);
-      }
-
-      .continuation-dot {
-          fill: #8793a8;
       }
     </style>
   </defs>
@@ -474,22 +473,6 @@
     <path class="cloud" d="M 1592.5,492.2 C 1554.7,492.2 1544.2,462.8 1563.1,433.4 C 1548.4,397.7 1577.8,368.3 1609.3,380.9 C 1621.9,336.8 1674.4,334.7 1691.2,378.8 C 1729.0,370.4 1745.8,404.0 1731.1,435.5 C 1754.2,464.9 1726.9,494.3 1697.5,490.1 L 1592.5,492.2 Z"/>
     <text class="node-label"
           x="1649.2" y="437.6">mempool</text>
-  </g>
-  <g aria-label="more">
-    <circle class="continuation-dot"
-            cx="150" cy="735" r="4.5"/>
-    <circle class="continuation-dot"
-            cx="150" cy="757" r="4.5"/>
-    <circle class="continuation-dot"
-            cx="150" cy="779" r="4.5"/>
-  </g>
-  <g aria-label="more">
-    <circle class="continuation-dot"
-            cx="930" cy="735" r="4.5"/>
-    <circle class="continuation-dot"
-            cx="930" cy="757" r="4.5"/>
-    <circle class="continuation-dot"
-            cx="930" cy="779" r="4.5"/>
   </g>
   <g>
     <ellipse class="eye"

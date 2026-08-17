@@ -263,14 +263,31 @@ impl Hub {
             // Duplicate is not an error, because honest resends and cross-hub
             // submission are the designed behaviour, and identical bytes collapse.
             Admission::Admitted { txid } | Admission::Duplicate { txid } => {
-                // Counts and disposition only: no txid, no body reaches the log
-                // (#157). Whether it parsed is the one telemetry bit worth
-                // keeping, since an unparseable payload is queued regardless.
-                tracing::info!(parseable = txid.is_some(), "migration admitted to the batch");
+                // No txid, no body reaches the log (#157) -- and, since 2026-08-18,
+                // no per-event TIMESTAMP at the default level either. A line per
+                // admission carries no content, but in an enclave the parent host
+                // reads the log, and "a migration arrived at T" is the batch's
+                // arrival-time distribution -- below the "aggregates only" bar
+                // even though it names nothing. In clearnet mode it adds nothing
+                // the host does not already see; in Nym mode it is the one thing
+                // the mixnet was hiding from the host. The aggregate the design
+                // wants -- how many were admitted -- is logged once per flush by
+                // the batcher. Whether this one parsed stays as the single
+                // telemetry bit, at debug.
+                tracing::debug!(parseable = txid.is_some(), "migration admitted to the batch");
                 Ok(txid)
             }
             Admission::Refused(refusal) => {
-                tracing::info!(reason = refusal.as_str(), "submission refused at admission");
+                // A refusal is operationally urgent (TipStale means the hub cannot
+                // see the chain; QueueFull means it is being flooded) and rare, so
+                // it stays at warn, by reason. Be honest that this IS still a
+                // per-event timestamped line: it leaks "someone was refused at T"
+                // to the parent host. That is accepted, because a refusal is the
+                // signal an operator must act on now, and because the successful
+                // path -- the steady-state signal an observer would actually
+                // count -- is what carried the arrival-time distribution and is
+                // now silent above debug.
+                tracing::warn!(reason = refusal.as_str(), "submission refused at admission");
                 Err(refusal)
             }
         }
