@@ -184,6 +184,36 @@ async fn build_client(
             builder.custom_topology_provider(Box::new(provider))
         }
     };
+    // How long the SDK waits for a packet's ack before it RETRANSMITS. The SDK
+    // computes an expected ack round trip from the CONFIGURED mix delays -- not
+    // measured -- and resends after `expected * ack_wait_multiplier +
+    // ack_wait_addition` (defaults 1.5x + 1.5 s). On a path slower than that
+    // formula predicts, acks arrive late but fine, the packet has already been
+    // resent, and the receiver sees it twice. Measured 2026-08-17: a local hub's
+    // replies reached a shim with ~1 duplicate fragment per lookup; every
+    // DEPLOYED hub's reached the same shim with 15-25 -- and each duplicate is a
+    // full send slot at the throttled rate, which is how a 32-packet reply that
+    // should take ~5 s took 45-90 s from every enclave and timed out. Not a bug
+    // in either side: a fixed retransmission timer tuned for a network the
+    // enclave is not on. `ZIH_ACK_WAIT_ADDITION_MS` raises the addition so a
+    // slow-but-honest ack is waited for instead of duplicated. It costs nothing
+    // on a fast path (acks arrive well inside the wait either way) and only
+    // delays retransmission of GENUINELY lost packets by the extra amount.
+    let builder = match std::env::var("ZIH_ACK_WAIT_ADDITION_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(ms) => {
+            let mut debug = nym_sdk::DebugConfig::default();
+            debug.acknowledgements.ack_wait_addition = Duration::from_millis(ms);
+            tracing::info!(
+                ack_wait_addition_ms = ms,
+                "raising the SDK's ack wait before retransmission"
+            );
+            builder.debug_config(debug)
+        }
+        None => builder,
+    };
     builder
         .build()
         .map_err(|err| format!("building the mixnet client: {err}"))?
