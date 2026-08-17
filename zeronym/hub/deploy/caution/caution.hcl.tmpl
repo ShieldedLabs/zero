@@ -130,6 +130,16 @@ __APP_SOURCE__
       # moments before it is public, which would undo most of the reason this
       # runs in an enclave at all.
       ZIH_INDEXER_TLS = "__INDEXER_TLS__"
+
+      # Whether the hub accepts submissions over clearnet HTTP at POST /. The
+      # binary defaults this to FALSE: the mixnet is the submit path, and an open
+      # unauthenticated POST / on a 0.0.0.0/0 ingress is attack surface with no
+      # legitimate user. Assemble emits it explicitly rather than relying on the
+      # default, so a deploy can never be unsure which way it went. Set to true
+      # ONLY for a transitional clearnet shim, a local demo, or a test -- and if
+      # so, know what it costs: the hub then sees which shim sent each migration
+      # and when, which is the linkage the mixnet exists to break.
+      ZIH_HTTP_SUBMIT = "__HTTP_SUBMIT__"
 __NYM_ENV__
 
       # Default is `info`. The hub deliberately logs only counts and dispositions,

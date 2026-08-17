@@ -77,6 +77,7 @@ NYM="false"
 NYM_EGRESS=""
 NYM_GATEWAY=""
 ACK_WAIT_MS=""
+HTTP_SUBMIT="false"
 DEBUG="false"
 SSH_KEYS=""
 DEST=""
@@ -105,6 +106,9 @@ while [ $# -gt 0 ]; do
 		# (request_gateway takes the IDENTITY, egress takes the IP). Unset = SDK picks.
 		--nym-gateway)   NYM_GATEWAY=$2; shift 2 ;;
 		--ack-wait-ms)   ACK_WAIT_MS=$2; shift 2 ;;
+		# Accept clearnet submissions at POST /. OFF by default in the binary and here;
+		# only for a transitional clearnet shim. See the template comment for the cost.
+		--http-submit)   HTTP_SUBMIT="true"; shift ;;
 		--debug)         DEBUG="true"; shift ;;
 		# One authorized debug-console SSH public key, repeatable. Required with
 		# --debug (SSH opens then); recorded-but-unused otherwise. A key line carries
@@ -476,6 +480,7 @@ sed \
 	-e "s|__ENCLAVE_NAME__|$NAME|g" \
 	-e "s|__INDEXERS__|$INDEXERS_ENV|g" \
 	-e "s|__INDEXER_TLS__|$INDEXER_TLS|g" \
+	-e "s|__HTTP_SUBMIT__|$HTTP_SUBMIT|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
 	"$RENDERED" > "$DEST/caution.hcl"
 
