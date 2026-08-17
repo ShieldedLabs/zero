@@ -285,19 +285,52 @@ pub async fn run_driver(
                 let seen = status.inbound_total();
                 match inbound_at_probe {
                     // A probe was outstanding and nothing at all has arrived since.
-                    Some(mark) if seen == mark => {
+                    //
+                    // But "since" only means anything if the probe actually LEFT.
+                    // The mark is stamped when the SDK accepts the probe into its
+                    // one-slot input channel, not when it is emitted, and behind
+                    // that slot sit an 8-deep batch channel and an unbounded FIFO
+                    // drained at the throttled rate. Under a send backlog the probe
+                    // is still queued behind every frame ahead of it, nothing has
+                    // been asked of the gateway yet, and "silent" is a statement
+                    // about OUR queue, not about delivery. Rebuilding on it would
+                    // disconnect a healthy client and discard that whole queue --
+                    // including submits already answered success to a wallet,
+                    // which the supervisor's inflight count cannot protect because
+                    // a submit's waiter is swept the moment it is dispatched. So a
+                    // backlog defers the verdict: the round is not counted, and
+                    // the next probe re-asks once the queue has drained.
+                    // `out_frames.len()` is the backlog we can see: this arm only
+                    // runs when `in_flight` is None, so anything still queued to us
+                    // has not even reached the SDK yet, let alone the gateway. The
+                    // SDK's own internal buffer is not inspectable, but once we
+                    // stop feeding it it can only drain, and two silent rounds is
+                    // 120 s of drain at the throttled rate -- far more than any
+                    // residual it could be holding. So "our queue is empty and two
+                    // rounds passed" is a sound proxy for "the probe was emitted
+                    // and nothing came back".
+                    Some(mark) if seen == mark && out_frames.len() == 0 => {
                         silent_rounds += 1;
                         if silent_rounds >= SILENT_ROUNDS_BEFORE_REBUILD {
                             tracing::error!(
                                 silent_rounds,
                                 gateway = %own.gateway(),
-                                "no inbound mixnet traffic across consecutive probes; the client \
-                                 registered but is not being delivered to. Rebuilding, which \
-                                 rerolls the gateway and the registration together."
+                                "no inbound mixnet traffic across consecutive probes with the \
+                                 send queue idle; the client registered but is not being \
+                                 delivered to. Reporting it as a death so the supervisor \
+                                 rebuilds with its backoff and rotation clock, rather than \
+                                 disconnecting inline."
                             );
                             silent_rounds = 0;
                             inbound_at_probe = None;
-                            Step::Rebuild
+                            // Through the supervisor, not `Step::Rebuild` inline. The
+                            // supervisor owns rebuild backoff (so a gateway that is
+                            // silent on every draw is retried steadily, not in a
+                            // hot loop) and restarts the rotation clock; the inline
+                            // path bypassed both. Its Died handler sends Rebuild
+                            // back, which is the same rebuild this used to do.
+                            let _ = events.send(ClientEvent::Died).await;
+                            Step::Ferried
                         } else {
                             tracing::warn!(
                                 silent_rounds,
@@ -384,8 +417,23 @@ pub async fn run_driver(
                 // Any outstanding send belongs to the client about to go away, so
                 // it goes with it. Nothing is left half-written by that: the SDK's
                 // send is cancel-safe (the message is either fully queued or not
-                // sent at all), and a message queued into a client one line from
-                // being disconnected would not have reached the mixnet either.
+                // sent at all).
+                //
+                // But be clear about what disconnect() DOES discard: everything the
+                // SDK still holds internally -- its one-slot input, an 8-deep batch
+                // channel, and an unbounded transmission buffer drained at the
+                // throttled rate. There is no drain-then-disconnect in the SDK.
+                // Frames in there may include SUBMITS ALREADY ANSWERED SUCCESS to a
+                // wallet, and nothing upstream can protect them: a submit's waiter
+                // is swept the moment it is dispatched, so the supervisor's
+                // inflight count never sees it. That is why the liveness probe
+                // above refuses to call for a rebuild while our own queue is
+                // non-empty, and why a scheduled rotation is deferred while
+                // requests are in flight. The residual exposure is a rebuild that
+                // arrives anyway -- the SDK's own death, or a rotation whose
+                // deferral ran out -- while its buffer is non-empty; that window
+                // is real, bounded by the drain rate, and recorded in
+                // PRODUCTION.md rather than papered over here.
                 in_flight = None;
                 // A live rotation: disconnect the current identity to completion
                 // (D12: disconnect is not cancel-safe), then mint a fresh one.
