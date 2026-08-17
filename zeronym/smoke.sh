@@ -76,11 +76,15 @@ die()  { printf 'smoke.sh: %s\n' "$*" >&2; exit 2; }
 
 usage() {
   cat >&2 <<'EOF'
-usage: smoke.sh [--shim URL] [--hub URL] [SHIM_URL [HUB_URL]]
+usage: smoke.sh [--clearnet] [--shim URL] [--hub URL] [SHIM_URL [HUB_URL]]
 
   smoke.sh https://zeronym-shim-8.shieldedinfra.net https://zeronym-hub-3.shieldedinfra.net
   smoke.sh --hub  https://zeronym-hub-3.shieldedinfra.net     # hub only
   smoke.sh --shim https://zeronym-shim-8.shieldedinfra.net    # shim only
+
+--clearnet: the pair runs without the mixnet hop (hub --http-submit, shim --hub/--hub-tls);
+the four Nym-mode checks are replaced by their clearnet invariants rather than
+reported as failures. Deployed this way from 2026-08-17.
 
 Positional URLs are the shim then the hub; a bare URL whose host contains "hub"
 is taken as the hub. https:// is assumed when no scheme is given. Use --shim /
