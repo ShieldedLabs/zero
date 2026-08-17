@@ -80,12 +80,6 @@ const MAX_SEND_TX_BYTES: usize = 4 * 1024 * 1024;
 /// takes that lever away.
 const MAX_TX_FILTER_BYTES: usize = 1024;
 
-/// How many leading bytes of the transaction to log on a fail-safe. The first
-/// eight carry the version and version group id, which is what distinguishes a
-/// truncated frame from a genuinely new transaction format. A V6 always begins
-/// `06 00 00 80 98 b6 84 d8`.
-const PREFIX_LOG_BYTES: usize = 8;
-
 /// Handle a request routed to the `SendTransaction` method.
 ///
 /// The HTTP method is not checked here or by the caller, on purpose: see rule 3
@@ -573,34 +567,46 @@ fn inspect(headers: &HeaderMap, frame: &[u8]) -> (Inspection, Option<Bytes>) {
     }
 }
 
-/// The proof of concept's visible output.
+/// Log the classification verdict -- as a COUNT, not a description.
+///
+/// This used to be "the proof of concept's visible output" and logged, at INFO
+/// (the default level), every diverted transaction's expiry height, its
+/// Orchard/Ironwood/Sapling value balances, action count, input/output counts
+/// and length; the failsafe arms additionally logged a hex prefix of the raw
+/// body. In an enclave the log reaches the parent host, so that was a
+/// fingerprint the operator could hold for 25 minutes and match against the
+/// batch when it published -- exactly the wallet-to-txid link the shim exists to
+/// break. The `TooLarge` arm in `send_transaction` already refused to log the
+/// size for this reason; the rest of the file had not caught up.
+///
+/// So: the INFO line carries the class and the disposition and nothing else,
+/// which is what an operator needs to see that diversion is happening. Every
+/// per-transaction field is on a DEBUG line, which is off by default and which
+/// the operator guide already says never to raise in a deployed enclave. The
+/// hex body prefix is gone entirely: there is no diagnostic value in raw
+/// transaction bytes that justifies writing them where the operator can read
+/// them.
 fn log_verdict(inspection: &Inspection, frame: &[u8]) {
     let diverted_in_production = inspection.treat_as_migration();
 
     match inspection {
-        Inspection::Classified(evidence) => match evidence.class {
-            Class::Migration => tracing::info!(
+        Inspection::Classified(evidence) => {
+            let class = match evidence.class {
+                Class::Migration => "migration",
+                Class::PassThrough => "passthrough",
+                Class::Unparseable => "unparseable",
+            };
+            tracing::info!(
                 target: "zis::classify",
-                version = %evidence.version,
-                // The deciding fact, first on the line.
-                orchard_actions = evidence.orchard_actions,
-                orchard_vb = %format!("{:+}", evidence.orchard_vb),
-                ironwood_vb = %format!("{:+}", evidence.ironwood_vb),
-                sapling_vb = %format!("{:+}", evidence.sapling_vb),
-                expiry = ?evidence.expiry_height,
-                inputs = evidence.inputs,
-                outputs = evidence.outputs,
-                tx_len = evidence.len,
+                class,
                 diverted_in_production,
-                // orchard_actions is the predicate; the value balances ride
-                // along as evidence and gate nothing. orchard_vb=+0 on a line
-                // that says MIGRATION is the case Zooko's widening added.
-                "MIGRATION detected: the transaction carries Orchard actions, so it is \
-                 diverted whatever its Orchard value balance (this PoC still forwards \
-                 it; production diverts it to the hub)"
-            ),
-            Class::PassThrough => tracing::info!(
+                "SendTransaction classified"
+            );
+            // The evidence behind the verdict, for local debugging only. Never
+            // at info: see the doc comment above.
+            tracing::debug!(
                 target: "zis::classify",
+                class,
                 version = %evidence.version,
                 orchard_actions = evidence.orchard_actions,
                 orchard_vb = %format!("{:+}", evidence.orchard_vb),
@@ -610,29 +616,25 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 inputs = evidence.inputs,
                 outputs = evidence.outputs,
                 tx_len = evidence.len,
-                diverted_in_production,
-                "passthrough: SendTransaction carries no Orchard actions"
-            ),
-            Class::Unparseable => tracing::warn!(
-                target: "zis::classify",
                 error = evidence.error.as_deref().unwrap_or("(none)"),
-                tx_len = evidence.len,
                 frame_len = frame.len(),
-                body_prefix = %hex_prefix(frame, GRPC_PREFIX_LEN + PREFIX_LOG_BYTES),
+                "classification evidence"
+            );
+        }
+        Inspection::Failsafe { reason, detail } => {
+            // A failsafe is a real operational signal (the classifier could not
+            // run at all), so it stays at warn -- but with the REASON, not the
+            // body. `frame_len` alone is not a fingerprint; a body prefix is.
+            tracing::warn!(
+                target: "zis::classify",
+                reason,
+                detail = detail.as_deref().unwrap_or("(none)"),
+                frame_len = frame.len(),
                 diverted_in_production,
-                "MIGRATION-FAILSAFE: unparseable SendTransaction body, treating as migration"
-            ),
-        },
-        Inspection::Failsafe { reason, detail } => tracing::warn!(
-            target: "zis::classify",
-            reason,
-            detail = detail.as_deref().unwrap_or("(none)"),
-            frame_len = frame.len(),
-            body_prefix = %hex_prefix(frame, GRPC_PREFIX_LEN + PREFIX_LOG_BYTES),
-            diverted_in_production,
-            "MIGRATION-FAILSAFE: SendTransaction body could not be classified, \
-             treating as migration"
-        ),
+                "MIGRATION-FAILSAFE: SendTransaction body could not be classified, \
+                 treating as migration"
+            );
+        }
     }
 }
 

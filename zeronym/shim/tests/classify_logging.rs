@@ -230,67 +230,65 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
 
     let log = capture.text();
 
-    // 1. Orchard actions with value leaving the pool. The verdict, the evidence
-    //    it rests on, and the routing decision production would take.
-    //    `orchard_actions` is the predicate; the value balances are logged as
-    //    evidence of what moved and where, and gate nothing.
-    assert!(log.contains("MIGRATION detected"), "log was:\n{log}");
-    assert!(log.contains("orchard_actions=1"), "log was:\n{log}");
-    assert!(log.contains("orchard_vb=+250000"), "log was:\n{log}");
-    assert!(log.contains("ironwood_vb=-240000"), "log was:\n{log}");
-    assert!(log.contains("version=V6"), "log was:\n{log}");
+    // The capture is at INFO, the production default, and that is the point:
+    // this test now guards the OPPOSITE of what it used to assert. Until
+    // 2026-08-17 the shim logged, at INFO, every diverted transaction's expiry
+    // height, value balances, action count, input/output counts and length,
+    // and a hex prefix of the raw body on a failsafe. In an enclave the log
+    // reaches the parent host, so that was a fingerprint the operator could
+    // hold and match against the batch when it published -- the wallet-to-txid
+    // link the shim exists to break. What is allowed at INFO is the verdict and
+    // the disposition: enough to count, nothing to correlate.
 
-    // 2. The gap Zooko's ruling closes, visible in the log: a MIGRATION line
-    //    that reports orchard_vb=+0. The actions diverted it, not the balance.
-    assert!(
-        log.lines()
-            .any(|line| line.contains("MIGRATION detected") && line.contains("orchard_vb=+0")),
-        "a net-zero Orchard bundle must log as a MIGRATION, log was:\n{log}"
-    );
-
-    // 3. The direction of the Orchard balance changes nothing, asserted where
-    //    the sign is actually rendered. `format!("{:+}", ...)` lives in the log
-    //    formatter and nowhere else, so a sign-rendering regression is only
-    //    visible from here.
-    assert!(
-        log.lines()
-            .any(|line| line.contains("MIGRATION detected") && line.contains("orchard_vb=-250000")),
-        "an Orchard bundle with a negative balance must log as a MIGRATION, log was:\n{log}"
-    );
-
-    // 4. The Ironwood-only transaction: no Orchard bundle at all, so ordinary
-    //    commerce in the new pool reaches the operator's indexer.
-    assert!(
-        log.contains("passthrough: SendTransaction carries no Orchard actions"),
-        "log was:\n{log}"
-    );
-    assert!(
-        log.lines()
-            .any(|line| line.contains("passthrough") && line.contains("orchard_actions=0")),
-        "log was:\n{log}"
-    );
-    assert!(
-        log.contains("diverted_in_production=false"),
-        "log was:\n{log}"
-    );
-
-    // 5. Bytes that are not a transaction. Fail-safe for privacy: a body the
-    //    shim could not read is treated as a migration, never as a pass-through.
-    assert!(log.contains("MIGRATION-FAILSAFE"), "log was:\n{log}");
-
-    // 6. The GET. It must produce a verdict of its own, not silence: four
-    //    migrations were detected, not three.
+    // 1. Every SendTransaction produces a verdict line, with its class.
     assert_eq!(
-        log.matches("MIGRATION detected").count(),
-        4,
-        "a SendTransaction with a non-POST method skipped the classifier, log was:\n{log}"
+        log.matches("SendTransaction classified").count(),
+        6,
+        "one verdict per body: four migrations, one passthrough, one unparseable: log was:\n{log}"
     );
+    assert_eq!(
+        log.matches("class=\"migration\"").count(),
+        4,
+        "four transactions carry Orchard actions (including the GET, which the \
+         classifier must not skip): log was:\n{log}"
+    );
+    assert!(log.contains("class=\"passthrough\""), "log was:\n{log}");
+    // 64 bytes of 0xff wrapped in a valid RawTransaction: the wrapper decodes,
+    // the transaction inside does not, so the CLASSIFIER calls it unparseable
+    // (fail-safe for privacy: treated as a migration). Not a Failsafe, which is
+    // reserved for a body the intercept could not even unwrap.
+    assert!(log.contains("class=\"unparseable\""), "log was:\n{log}");
 
-    // Five of the six would be diverted in production: four transactions
-    // carrying Orchard actions, and the unreadable body.
+    // 2. Five of the six would be diverted in production: four transactions
+    //    carrying Orchard actions, and the unreadable body.
     assert_eq!(
         log.matches("diverted_in_production=true").count(),
         5,
         "log was:\n{log}"
     );
+    assert!(log.contains("diverted_in_production=false"), "log was:\n{log}");
+
+    // 3. NO fingerprint at INFO. Each of these was on the old info line; any
+    //    one of them reappearing here is a privacy regression, whatever the
+    //    reason. `orchard_vb=+0` for the net-zero bundle and `orchard_vb=-250000`
+    //    for the reversed one used to be asserted PRESENT -- they are the
+    //    clearest example of a value the operator could match on-chain.
+    for forbidden in [
+        "orchard_vb=",
+        "ironwood_vb=",
+        "sapling_vb=",
+        "expiry=",
+        "tx_len=",
+        "orchard_actions=",
+        "inputs=",
+        "outputs=",
+        "version=V6",
+        "body_prefix=",
+        "06 00 00 80", // the V6 header bytes the old failsafe prefix began with
+    ] {
+        assert!(
+            !log.contains(forbidden),
+            "per-transaction field '{forbidden}' must not be logged at INFO: log was:\n{log}"
+        );
+    }
 }

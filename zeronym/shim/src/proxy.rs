@@ -831,12 +831,42 @@ pub(crate) async fn pass_through(
     Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
 }
 
+/// Strip the client-address headers a TLS-terminating proxy in front of the shim
+/// adds, so the wallet's IP never reaches the operator's indexer.
+///
+/// In the Caution deployment wallet TLS terminates in the enclave's Caddy, which
+/// forwards h2c to the shim -- and Caddy's `reverse_proxy` injects
+/// `X-Forwarded-For: <wallet IP>` by default. `forward()` used to relay every
+/// header except `Host` on the reasoning that gRPC metadata must pass through
+/// untouched, which is right for `grpc-timeout`, `-bin` metadata and the rest,
+/// but it meant every pass-through request (`GetBlockRange`, `GetTaddressTxids`,
+/// a non-Orchard `SendTransaction`) reached the operator carrying the wallet's
+/// real IP in plaintext. The operator then needs no flow correlation on the
+/// parent host to attribute queries to IPs -- the enclave was hiding nothing.
+/// The whole `Forwarded` family goes, plus `X-Real-IP` and `Via`, which some
+/// proxies use instead; none of them is gRPC metadata and no indexer needs them.
+fn strip_client_address_headers(headers: &mut HeaderMap) {
+    for name in [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-forwarded-port",
+        "x-real-ip",
+        "forwarded",
+        "via",
+    ] {
+        headers.remove(name);
+    }
+}
+
 /// The single egress point to the backing indexer, shared by the pass-through
 /// path and by the intercept path after inspection.
 ///
-/// Only the origin is retargeted. `:method`, `:path` and every header stay
+/// Only the origin is retargeted. `:method`, `:path` and every gRPC header stay
 /// byte-identical, which is why unknown and future CompactTxStreamer methods
-/// keep working without a shim release.
+/// keep working without a shim release. The one class removed is the
+/// client-address headers a fronting proxy adds; see
+/// [`strip_client_address_headers`].
 pub async fn forward(
     mut upstream: Upstream,
     req: Request<ProxyBody>,
@@ -855,12 +885,14 @@ pub async fn forward(
     }
     parts.uri = Uri::from_parts(uri_parts)?;
 
-    // Headers pass through untouched: content-type, `te: trailers`,
+    // gRPC headers pass through untouched: content-type, `te: trailers`,
     // grpc-timeout, grpc-encoding, user-agent, authorization and any custom or
     // `-bin` metadata. hyper itself strips only the headers HTTP/2 forbids, and
-    // it deliberately preserves `te: trailers`. The one removal is Host, which
-    // would now contradict the rewritten `:authority`.
+    // it deliberately preserves `te: trailers`. Removed: Host, which would now
+    // contradict the rewritten `:authority`, and the client-address headers a
+    // fronting proxy adds, which would hand the operator the wallet's IP.
     parts.headers.remove(http::header::HOST);
+    strip_client_address_headers(&mut parts.headers);
 
     upstream.sender.ready().await?;
     let mut resp = upstream
@@ -994,6 +1026,9 @@ async fn forward_to_bootproofd(
         .unwrap_or_else(|| PathAndQuery::from_static("/attestation"));
     parts.uri = Uri::from(path_and_query);
     parts.headers.remove(http::header::HOST);
+    // Same reasoning as forward(): bootproofd is a different backend but the
+    // wallet's IP is no more its business than the indexer's.
+    strip_client_address_headers(&mut parts.headers);
     parts
         .headers
         .insert(http::header::HOST, HeaderValue::from_str(addr)?);
