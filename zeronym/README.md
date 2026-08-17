@@ -44,15 +44,13 @@ That group is a triage waiting room. Once admitted, say only that you have a rep
 
 ## Background
 
-A light wallet delegates chain validation to an indexer and speaks to it over [ZIP 307](https://zips.z.cash/zip-0307). The protocol gets note privacy right and metadata privacy wrong: trial decryption is client-side, so the indexer never learns which notes are yours, but it terminates your connection, so it sees your source IP, the timing of every request, and the addresses you query.
+A light wallet delegates chain validation to an indexer over [ZIP 307](https://zips.z.cash/zip-0307). The protocol gets note privacy right and metadata privacy wrong: trial decryption is client-side, so the indexer never learns which notes are yours, but it terminates your connection, so it sees your source IP, the timing of every request, and the addresses you query.
 
-![Current Zcash transaction publication: wallets connect over TLS directly to one of a handful of indexers, each of which publishes to the mempool](./images/zcash_current_publication.svg)
+![Current Zcash transaction publication: wallets connect over TLS directly to one of a handful of indexers, each publishing to the mempool](./images/zcash_current_publication.svg)
 
-The TLS in that picture is doing less than it looks. It protects the transaction from everyone except the party that matters, because it terminates *at* the indexer, which is exactly the party positioned to log the source IP and join it to the public chain.
+That termination is the attack. A transaction crossing a value-pool boundary reveals the movement in cleartext on-chain, so an operator holds both halves: *IP X broadcast at time T*, and *a pool-crossing transaction moving Y appeared at time T*. Joining them links **IP address to on-chain transaction to balance**. The shielded cryptography does not prevent it: the leak is in the transport. It works retrospectively too, since the chain is permanent.
 
-That join is the attack. A transaction crossing a value-pool boundary reveals the movement in cleartext on-chain, so an operator holds two halves of a linkage: *source IP X submitted a broadcast at time T*, and *a pool-crossing transaction moving amount Y appeared at roughly time T*. Joining them links **IP address to on-chain transaction to balance**. Nothing in the shielded cryptography prevents it, because the leak is in the transport, not the transaction. It is a retrospective attack as much as a live one, since the chain is permanent and logs can be joined later.
-
-The acute case is the mandatory Orchard to Ironwood migration, which Zooko called the worst privacy-loss event in Zcash history. It is **mandatory** (users cannot opt out, the value has to move), **mass** (a large population migrates), and **concentrated** (the window is bounded, so many correlatable broadcasts land close together). Those same three properties are what make migrations the ideal thing to protect first: a mandatory, non-urgent mass of transactions can be batched and published together.
+The acute case is the Orchard to Ironwood migration, which Zooko called the worst privacy-loss event in Zcash history: **mandatory**, **mass**, and **concentrated** into a bounded window. Those properties also make migrations the right thing to protect first: a non-urgent mass can be batched.
 
 ## Install
 
@@ -71,16 +69,12 @@ Four audiences, four different answers.
 
 ## How it works
 
-![Zero-indexer transaction publication: wallets connect over TLS to a zero-indexer-shim inside a TEE at each organisation, the shims route Orchard-touching transactions over the Nym mixnet to a zero-indexer-hub inside its own TEE, and the hub publishes to the mempool](./images/zcash_zero_indexer_publication.svg)
+![Zero-indexer transaction publication: wallets reach a shim inside a TEE at each organisation, which routes Orchard-touching transactions over the Nym mixnet to a hub in its own TEE, which publishes to the mempool](./images/zcash_zero_indexer_publication.svg)
 
-Green boxes are attested enclaves, the only things that ever see a migration in cleartext. Each shim links its mixnet client **in-process**, so there is no separate Nym node inside the TEE to draw: the shim itself emits Sphinx traffic. The mixnet is outside both enclaves because the mix nodes are untrusted. Wallets never speak Nym.
+Green boxes are attested enclaves, the only things that see a migration in cleartext. Each shim links its mixnet client **in-process**, so there is no separate Nym node to draw; the mixnet is outside both enclaves because the mix nodes are untrusted, and wallets never speak it. The grey edge to each operator's indexer is the **pass-through path**, plaintext as today; the green edge is the **diverted path**. Both organisations' migrations enter the mixnet and one leaves: the hub cannot tell which shim a migration came from.
 
-The grey edge from each shim to its own indexer is the **pass-through path**: ordinary queries and non-Orchard broadcasts, plaintext the operator reads exactly as today. The green edge is the **diverted path** that bypasses the operator entirely. Both organisations' migrations enter the mixnet and one edge leaves it, which is the anonymity property: the hub cannot tell which shim a migration came from.
-
-Two components:
-
-- **`zero-indexer-shim`** is a lightweight attested router each operator deploys behind its existing URL. It classifies every `SendTransaction`, and any transaction carrying **Orchard actions** goes to the hub instead of the operator. The predicate is presence, not value: `is_orchard_touching(tx) := tx.orchard_shielded_data().is_some()`. NU6.3 closes Orchard to new value, so anyone still spending Orchard has held those notes since before activation, and the spend itself is the identifying event whatever its destination. Classification happens *before* the upstream dial, so a diverted transaction never opens even a TCP connection to the operator's indexer. Anything the shim cannot confidently parse fails safe toward diversion: a false negative is a privacy leak, a false positive is only a wasted diversion. The shim holds no per-migration state.
-- **`zero-indexer-hub`** accumulates diverted transactions from every shim in an in-RAM queue inside its own enclave and publishes them together on a strict 20-block cadence, shuffled and in parallel, so an on-chain observer sees them appear together and unordered. Flushes fire on block height only, never on transaction count, since a count-based trigger lets an attacker isolate a target by flooding. It admits a migration only if it provably survives the next scheduled flush, which makes urgency unreachable rather than handling it.
+- **`zero-indexer-shim`**, an attested router behind the operator's existing URL, classifies `SendTransaction` on presence rather than value: `is_orchard_touching(tx) := tx.orchard_shielded_data().is_some()`. NU6.3 closed Orchard to new value, so anyone still spending it has held those notes since before activation: the spend is the identifying event. Classification happens *before* the upstream dial, so a diverted transaction never opens a TCP connection to the operator's indexer, and anything unparseable fails safe toward diversion. It holds no per-migration state.
+- **`zero-indexer-hub`** queues diverted transactions from every shim in-enclave and publishes them on a strict 20-block cadence, shuffled and in parallel. Flushes fire on block height only: a count-based trigger would let an attacker isolate a target by flooding. It admits a migration only if it provably survives the next flush, making urgency unreachable rather than handled.
 
 ## Status
 
