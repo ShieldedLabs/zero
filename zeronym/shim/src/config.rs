@@ -125,7 +125,13 @@ pub struct Config {
     /// chain. It exists because an attested enclave has no console and three
     /// hypotheses about the enclave lookup failure have each died for want of
     /// this one number. Remove it with the block it feeds.
-    #[arg(long, env = "ZIS_DIAG", default_value_t = false)]
+    /// Takes an explicit `true`/`false` rather than being a bare flag, for the
+    /// same reason `--tls-production` below does, and with more at stake: a bare
+    /// bool with `env` treats ANY value as "set", so `ZIS_DIAG=` or `ZIS_DIAG=no`
+    /// from a deployment template would open the endpoint while reading, to
+    /// whoever wrote it, as off. There it would spend a certificate; here it
+    /// would publish the shim's sender identity.
+    #[arg(long, env = "ZIS_DIAG", action = clap::ArgAction::Set, default_value_t = false)]
     pub diag: bool,
 
     /// Terminate wallet-facing TLS, obtaining a certificate by ACME for this
