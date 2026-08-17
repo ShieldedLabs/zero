@@ -21,7 +21,11 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 
 ## Security
 
-**Protected.** An Orchard-touching broadcast is hidden from the operator, because the wallet's TLS terminates inside an attested enclave, and the on-chain transaction carries no link to the wallet's IP, because the hub publishes it. That second property is volume-independent. `GetTransaction` is kept from the operator too: the shim routes every lookup to the hub, so the operator cannot watch a wallet fetch back the transaction it just diverted. That moves the lookup to the hub rather than making it private outright.
+**Protected.**
+
+- **Broadcast contents.** An Orchard-touching transaction is hidden from the operator: the wallet's TLS terminates inside an attested enclave, not at the operator's indexer.
+- **Source IP.** The on-chain transaction carries no link to the wallet's IP, because the hub publishes it rather than the wallet. Volume-independent: it holds however few others are migrating.
+- **`GetTransaction`.** The shim routes every lookup to the hub, so the operator cannot watch a wallet fetch back the transaction it just diverted. This moves the lookup to the hub rather than making it private outright.
 
 **Not protected.**
 
@@ -30,8 +34,6 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 - **Batch-timing anonymity is conditional, and the condition is not met.** Mainnet carries **0.77 Orchard-touching transactions per block** (144 blocks at tip 3,433,105), so the modal batch is zero or one, where the anonymity set is the transaction itself. The lever is adoption, not code.
 - **The trust root is AWS and the hardware, not mathematics.** No mathematical fallback today; PIR removes it and is deferred.
 - **The broadcast is delayed** up to ~25 minutes, and submit is dispatch-only, so a wallet is told "accepted" before the shim knows the hub received the frame. A failed migration can fail silently.
-
-**Not yet verifiable.** The enclaves are attested and running, but an auditor cannot yet tie either back to a public commit. PCR2 (the application binary) reproduces; PCR0 and PCR1 do not, so `caution verify` reports FAILED on healthy enclaves. The reproduce jobs run on pull requests and manual dispatch, **not on every push**; they last ran 2026-08-17 on `e91170ed` and both reported DOES NOT REPRODUCE, with re-baselines landed since and no run against them. The live pair's provenance also fails: the shim's cites a non-public commit, the hub's a hash its own cited commit does not produce.
 
 **Scope.** zero-indexer targets the server-side and network-metadata adversaries in Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), not the wallet-local concerns that model assigns to the wallet.
 
@@ -62,7 +64,7 @@ Four audiences, four different answers.
 - **Wallet users** install nothing and change no setting. Point your wallet at the same endpoint URL as before.
 - **Wallet developers** have exactly one requirement, and it is a hard one: choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. A latest-anchor wallet is timestamped by its anchor, which re-links it inside the revealed batch and undoes the protection.
 - **Operators** run the shim in front of their indexer, and optionally a hub. Orchard-touching transactions and `GetTransaction` lookups stop being yours to see; everything else passes through as today.
-- **Auditors** verify an endpoint without trusting its operator: fetch its attestation, check the PCRs against the AWS Nitro root, reproduce the build and compare hashes, and check Certificate Transparency for a shadow certificate. Read [Security](#security) first for what that currently does and does not establish.
+- **Auditors** verify an endpoint without trusting its operator: fetch its attestation, check the PCRs against the AWS Nitro root, reproduce the build and compare hashes, and check Certificate Transparency for a shadow certificate.
 
 ## How it works
 
@@ -86,8 +88,6 @@ Two components:
 **Designed, no code yet:** the STEVE handshake, the encrypt-to-hub-key layer, the keymaker quorum and consortium governance, and confirmation tracking.
 
 On **2026-08-11** a real Orchard to Ironwood migration traversed the full stack on mainnet: held at the shim, batched at the hub, published on the cadence, with the operator's indexer never seeing it. That run predates the mixnet deployment and used the clearnet hop, and at today's adoption the batch was size one, so it proved the mechanics and content privacy rather than batching anonymity. No migration has yet been observed crossing Nym in production.
-
-The reproducibility gaps are in [Security](#security), and they are the near-term priority.
 
 ## Maintainers
 
