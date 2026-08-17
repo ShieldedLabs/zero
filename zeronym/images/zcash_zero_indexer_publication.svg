@@ -15,23 +15,6 @@
     fill: #fbfcfe;
 }
 
-/* The book renders this on a dark theme too. Only the canvas and the text
-   need to move; the node fills are light-on-light by design and keep their
-   own contrast against a transparent ground. */
-@media (prefers-color-scheme: dark) {
-    .canvas {
-        fill: #0f1419;
-    }
-
-    .title,
-    .node-label {
-        fill: #e6e1cf;
-    }
-
-    .small-label {
-        fill: #b3a992;
-    }
-}
 
 .mixnet {
     fill: #ede8fb;
