@@ -361,7 +361,10 @@ async fn a_migration_is_admitted_while_lookups_are_stuck_on_the_indexer() {
     tokio::spawn(run_listener(in_rx, out_tx, hub.clone()));
 
     // Saturate every lookup slot, and then some: each of these hangs for the
-    // hub's whole per-call budget.
+    // hub's whole per-call budget. The excess beyond the bound is DROPPED at
+    // the listener (a slot is taken before a lookup task is spawned, and none
+    // is free), never parked in a task or allowed to block the loop; either of
+    // those would be the starvation this test exists to rule out.
     for i in 0..80u16 {
         let frame = encode_lookup(&[i as u8; 16], &[0xEE; 32]).unwrap().to_vec();
         in_tx.send(msg(TAG, frame)).await.unwrap();
