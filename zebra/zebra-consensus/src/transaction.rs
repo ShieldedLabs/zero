@@ -44,6 +44,7 @@ use zebra_state as zs;
 use crate::{error::TransactionError, primitives, script, BoxError};
 
 pub mod check;
+mod script_cache;
 #[cfg(test)]
 mod tests;
 
@@ -60,6 +61,14 @@ mod tests;
 ///     UTXO verification failure will restart the sync, and re-download the
 ///     chain in the correct order.)
 const UTXO_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 60);
+
+/// The maximum number of in-flight state UTXO lookups per transaction.
+///
+/// Bounds the concurrency of `block_spent_utxos` so one transaction with
+/// thousands of transparent inputs cannot flood the state service's buffer,
+/// while still overlapping the per-lookup state latency instead of paying it
+/// as a serial chain of awaited round trips.
+const MAX_CONCURRENT_UTXO_LOOKUPS: usize = 64;
 
 /// A timeout applied to output lookup requests sent to the mempool. This is shorter than the
 /// timeout for the state UTXO lookups because a block is likely to be mined every 75 seconds
@@ -296,6 +305,17 @@ where
                 auth_digest,
             }),
         };
+
+        // This id keys the script verification cache, so it must name the transaction
+        // actually carried by this request. The auth digest half is recomputed from
+        // `tx` above; the hash half is trusted because the block verifier derives
+        // `transaction_hash` from the same transaction it sends here, and binds it to
+        // the block through the merkle root check. See `script_cache::ScriptCacheKey`.
+        debug_assert_eq!(
+            req.transaction_hash,
+            tx.hash(),
+            "BlockRequest::transaction_hash must be the hash of BlockRequest::transaction",
+        );
         let height = req.height;
         let time = req.time;
         let known_utxos = req.known_utxos.clone();
@@ -347,9 +367,9 @@ where
             // Load spent UTXOs from the block context and state.
             // The UTXOs are required for almost all the async checks.
             //
-            // This phase is one awaited state round trip per transparent input, so its share of
-            // the total tells operators whether transaction verification is bound by state
-            // lookups or by the cryptographic checks timed below.
+            // This phase overlaps up to `MAX_CONCURRENT_UTXO_LOOKUPS` state lookups, so its
+            // share of the total tells operators whether transaction verification is bound by
+            // state lookups or by the cryptographic checks timed below.
             let utxo_fetch_start = Instant::now();
             let spent_utxos_result =
                 Self::block_spent_utxos(tx.clone(), known_utxos, state.clone()).await;
@@ -371,6 +391,7 @@ where
             // Select version-specific async verification pipeline
             let async_checks = dispatch_version_verification(
                 tx.as_ref(),
+                tx_id,
                 nu,
                 script_verifier,
                 cached_ffi_transaction.clone()
@@ -393,6 +414,20 @@ where
             checks_result?;
 
             tracing::trace!(?tx_id, "finished async checks");
+
+            // Remember the verified transparent scripts, so re-verifying this
+            // transaction (proposal to submitblock, a reorg, or a resubmit) can skip
+            // them. Success-only; see the `script_cache` module docs. Coinbase
+            // transactions have no `PrevOut` inputs to remember, and shielded-only
+            // transactions have no transparent inputs at all, so remembering them
+            // would only occupy a cache slot whose hit saves nothing.
+            if !tx.is_coinbase() && !tx.inputs().is_empty() {
+                script_cache::verified_scripts().insert(script_cache::ScriptCacheKey::new(
+                    tx_id,
+                    nu,
+                    cached_ffi_transaction.all_previous_outputs(),
+                ));
+            }
 
             let miner_fee = if tx.is_coinbase() {
                 None
@@ -448,33 +483,63 @@ where
         // Pre-allocate with None so we can fill each slot by input index, preserving input order.
         let mut spent_outputs: Vec<Option<transparent::Output>> = vec![None; inputs.len()];
 
-        for (input_idx, input) in inputs.iter().enumerate() {
-            if let transparent::Input::PrevOut { outpoint, .. } = input {
-                tracing::trace!("awaiting outpoint lookup");
+        // Look up the spent UTXOs concurrently. With hundreds or thousands of
+        // transparent inputs, one awaited state round trip per input turns block
+        // verification into a serial latency chain (the `utxo_fetch` phase of the
+        // `zebra.consensus.transaction.duration_seconds` metric); overlapping the
+        // lookups pays that latency once, not once per input. Lookup results carry
+        // their input index, so completion order cannot affect `spent_outputs` order.
+        //
+        // The futures are collected eagerly so each owns its captures; a lazy
+        // iterator would hold `&state` inside the stream and require `ZS: Sync`.
+        let lookups: Vec<_> = inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(input_idx, input)| {
+                let transparent::Input::PrevOut { outpoint, .. } = input else {
+                    return None;
+                };
+                let outpoint = *outpoint;
+                let known_utxo = known_utxos
+                    .get(&outpoint)
+                    .map(|ordered| ordered.utxo.clone());
+                let state = state.clone();
 
-                let utxo = if let Some(output) = known_utxos.get(outpoint) {
-                    tracing::trace!("UTXO in known_utxos, discarding query");
-                    output.utxo.clone()
-                } else {
-                    let response = state
-                        .clone()
-                        .oneshot(zebra_state::Request::AwaitUtxo(*outpoint))
-                        .await
-                        .map_err(|boxed_error| match boxed_error.downcast::<Elapsed>() {
-                            Ok(_) => TransactionError::TransparentInputNotFound,
-                            Err(boxed_error) => TransactionError::from(boxed_error),
-                        })?;
-
-                    if let zebra_state::Response::Utxo(utxo) = response {
+                Some(async move {
+                    let utxo = if let Some(utxo) = known_utxo {
+                        tracing::trace!("UTXO in known_utxos, discarding query");
                         utxo
                     } else {
-                        unreachable!("AwaitUtxo always responds with Utxo")
-                    }
-                };
-                tracing::trace!(?utxo, "got UTXO");
-                spent_outputs[input_idx] = Some(utxo.output.clone());
-                spent_utxos.insert(*outpoint, utxo);
-            }
+                        tracing::trace!("awaiting outpoint lookup");
+
+                        let response = state
+                            .oneshot(zebra_state::Request::AwaitUtxo(outpoint))
+                            .await
+                            .map_err(|boxed_error| match boxed_error.downcast::<Elapsed>() {
+                                Ok(_) => TransactionError::TransparentInputNotFound,
+                                Err(boxed_error) => TransactionError::from(boxed_error),
+                            })?;
+
+                        if let zebra_state::Response::Utxo(utxo) = response {
+                            utxo
+                        } else {
+                            unreachable!("AwaitUtxo always responds with Utxo")
+                        }
+                    };
+
+                    Ok::<_, TransactionError>((input_idx, outpoint, utxo))
+                })
+            })
+            .collect();
+
+        let mut lookups =
+            futures::stream::iter(lookups).buffer_unordered(MAX_CONCURRENT_UTXO_LOOKUPS);
+
+        while let Some(lookup) = lookups.next().await {
+            let (input_idx, outpoint, utxo) = lookup?;
+            tracing::trace!(?utxo, "got UTXO");
+            spent_outputs[input_idx] = Some(utxo.output.clone());
+            spent_utxos.insert(outpoint, utxo);
         }
 
         let spent_outputs: Vec<transparent::Output> = spent_outputs.into_iter().flatten().collect();
@@ -608,6 +673,7 @@ where
             // Select version-specific async verification pipeline
             let mut async_checks = dispatch_version_verification(
                 tx.as_ref(),
+                tx_id,
                 nu,
                 script_verifier,
                 cached_ffi_transaction.clone()
@@ -646,13 +712,30 @@ where
 
             tracing::trace!(?tx_id, "finished async checks");
 
+            // Remember the verified transparent scripts, so the block that mines this
+            // transaction can skip re-running them. Success-only; see the
+            // `script_cache` module docs. Shielded-only transactions have no scripts
+            // worth remembering.
+            //
+            // Conservatively skipped when the transaction spends unmined mempool
+            // outputs. `mempool_spent_utxos()` does pair those outputs by input index
+            // today, but the pairing has a history of alignment bugs (zebra#10346),
+            // the spent data comes from unmined transactions rather than the chain,
+            // and the reuse value is small: such transactions are simply re-verified
+            // in full when they arrive in a block.
+            if spent_mempool_outpoints.is_empty() && !tx.inputs().is_empty() {
+                script_cache::verified_scripts().insert(script_cache::ScriptCacheKey::new(
+                    tx_id,
+                    nu,
+                    cached_ffi_transaction.all_previous_outputs(),
+                ));
+            }
+
             let sigops = tx.sigops().map_err(zebra_script::Error::from)?;
 
-            // TODO: `spent_outputs` may not align with `tx.inputs()` when a transaction
-            // spends both chain and mempool UTXOs (mempool outputs are appended last by
-            // `mempool_spent_utxos()`), causing policy checks to pair the wrong input with
-            // the wrong spent output.
-            // https://github.com/ZcashFoundation/zebra/issues/10346
+            // `spent_outputs` is aligned with `tx.inputs()`: `mempool_spent_utxos()`
+            // fills a slot per input index in both its chain and mempool passes.
+            // zebra#10346 tracked a misalignment in an earlier version of that pairing.
             let spent_outputs = cached_ffi_transaction.all_previous_outputs().clone();
 
             let transaction = VerifiedUnminedTx::new(
@@ -981,6 +1064,7 @@ fn check_maturity_height(
 /// are not supported by any network upgrade Zebra verifies.
 fn dispatch_version_verification(
     tx: &Transaction,
+    tx_id: UnminedTxId,
     nu: NetworkUpgrade,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
@@ -992,16 +1076,17 @@ fn dispatch_version_verification(
         }
         Transaction::V4 { joinsplit_data, .. } => verify_v4_transaction(
             tx,
+            tx_id,
             nu,
             script_verifier,
             cached_ffi_transaction,
             joinsplit_data,
         ),
         Transaction::V5 { .. } => {
-            verify_v5_transaction(tx, nu, script_verifier, cached_ffi_transaction)
+            verify_v5_transaction(tx, tx_id, nu, script_verifier, cached_ffi_transaction)
         }
         Transaction::V6 { .. } => {
-            verify_v6_transaction(tx, nu, script_verifier, cached_ffi_transaction)
+            verify_v6_transaction(tx, tx_id, nu, script_verifier, cached_ffi_transaction)
         }
     }
 }
@@ -1025,6 +1110,7 @@ fn dispatch_version_verification(
 #[allow(clippy::unwrap_in_result)]
 fn verify_v4_transaction(
     tx: &Transaction,
+    tx_id: UnminedTxId,
     nu: NetworkUpgrade,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
@@ -1038,11 +1124,15 @@ fn verify_v4_transaction(
         .sighasher()
         .sighash(HashType::ALL, None);
 
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sprout_shielded_data(joinsplit_data, &sighash)?)
-            .and(verify_sapling_bundle(sapling_bundle, &sighash)),
-    )
+    Ok(verify_transparent_inputs_and_outputs(
+        tx,
+        tx_id,
+        nu,
+        script_verifier,
+        cached_ffi_transaction,
+    )?
+    .and(verify_sprout_shielded_data(joinsplit_data, &sighash)?)
+    .and(verify_sapling_bundle(sapling_bundle, &sighash)))
 }
 
 /// Verifies if a V4 `transaction` is supported by `network_upgrade`.
@@ -1110,6 +1200,7 @@ fn verify_v4_transaction_network_upgrade(
 #[allow(clippy::unwrap_in_result)]
 fn verify_v5_transaction(
     tx: &Transaction,
+    tx_id: UnminedTxId,
     nu: NetworkUpgrade,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
@@ -1123,11 +1214,15 @@ fn verify_v5_transaction(
         .sighasher()
         .sighash(HashType::ALL, None);
 
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sapling_bundle(sapling_bundle, &sighash))
-            .and(verify_orchard_bundle(orchard_bundle, &sighash, nu)),
-    )
+    Ok(verify_transparent_inputs_and_outputs(
+        tx,
+        tx_id,
+        nu,
+        script_verifier,
+        cached_ffi_transaction,
+    )?
+    .and(verify_sapling_bundle(sapling_bundle, &sighash))
+    .and(verify_orchard_bundle(orchard_bundle, &sighash, nu)))
 }
 
 /// Verifies if a V5 `transaction` is supported by `network_upgrade`.
@@ -1179,6 +1274,7 @@ fn verify_v5_transaction_network_upgrade(
 /// NU6.3 key, not the v5 fixed key.
 fn verify_v6_transaction(
     tx: &Transaction,
+    tx_id: UnminedTxId,
     nu: NetworkUpgrade,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
@@ -1195,12 +1291,16 @@ fn verify_v6_transaction(
 
     // The Ironwood bundle reuses the Orchard Action proof system and the NU6.3 circuit key, so
     // it is verified the same way as the v6 Orchard bundle (against the NU6.3 key).
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sapling_bundle(sapling_bundle, &sighash))
-            .and(verify_orchard_v6_bundle(orchard_bundle, &sighash))
-            .and(verify_orchard_v6_bundle(ironwood_bundle, &sighash)),
-    )
+    Ok(verify_transparent_inputs_and_outputs(
+        tx,
+        tx_id,
+        nu,
+        script_verifier,
+        cached_ffi_transaction,
+    )?
+    .and(verify_sapling_bundle(sapling_bundle, &sighash))
+    .and(verify_orchard_v6_bundle(orchard_bundle, &sighash))
+    .and(verify_orchard_v6_bundle(ironwood_bundle, &sighash)))
 }
 
 /// Verifies that a V6 `transaction` is supported by `network_upgrade`.
@@ -1240,12 +1340,31 @@ fn verify_v6_transaction_network_upgrade(
 /// Returns the asynchronous script verification checks for transparent inputs in `tx`.
 fn verify_transparent_inputs_and_outputs(
     tx: &Transaction,
+    tx_id: UnminedTxId,
+    nu: NetworkUpgrade,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
 ) -> Result<AsyncChecks, TransactionError> {
     if tx.is_coinbase() {
         // The script verifier only verifies PrevOut inputs and their corresponding UTXOs.
         // Coinbase transactions don't have any PrevOut inputs.
+        Ok(AsyncChecks::new())
+    } else if tx.inputs().is_empty() {
+        // A shielded-only transaction has no transparent input scripts to verify,
+        // so there is nothing to check and nothing worth consulting the cache for.
+        Ok(AsyncChecks::new())
+    } else if script_cache::verified_scripts().contains(&script_cache::ScriptCacheKey::new(
+        tx_id,
+        nu,
+        cached_ffi_transaction.all_previous_outputs(),
+    )) {
+        // This transaction's input scripts already verified against these spent
+        // outputs under this network upgrade (at mempool admission, in a template
+        // proposal, or in an earlier block request), and the key determines
+        // everything script verification reads, so the per-input script checks are
+        // skipped rather than re-run. Every other check on this transaction still
+        // runs at the requesting block's height. See the `script_cache` module docs
+        // for the derivation.
         Ok(AsyncChecks::new())
     } else {
         // feed all of the inputs to the script verifier
