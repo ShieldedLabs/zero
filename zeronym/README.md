@@ -2,9 +2,9 @@
 
 Privacy for Zcash light wallets: an attested front-end that stops pool-crossing transactions from leaking your IP.
 
-Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet talks to an indexer over clearnet, so the operator sees its source IP and the timing of everything it does. zero-indexer is a Shielded Labs product built on two pillars: **zero-leak indexing**, so a wallet can sync and transact without handing an indexer the raw material to deanonymize it, and the **Nym mixnet**, the transport that unlinks a wallet's traffic from its source IP and region.
+Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet talks to an indexer over clearnet, so the operator sees its source IP and the timing of everything it does. `zero-indexer` is a Shielded Labs product that stops transactions that contain Orchard actions from leaking a user's IP.
 
-What is deployed today stops transactions that touch the Orchard pool, starting with the Orchard to Ironwood migration, from leaking a user's IP: deliberately an 80% first step, honest about the 20% it does not cover. **The long-term vision** is a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer.
+**The long-term vision** is a wallet-facing private indexer serving queries, not just broadcasts, over Nym, terminated inside an attested enclave, with PIR added later as a hardware-independent layer.
 
 ## Table of Contents
 
