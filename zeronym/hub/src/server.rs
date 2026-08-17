@@ -34,7 +34,7 @@ use hyper::header::{HeaderValue, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
@@ -322,6 +322,32 @@ impl Hub {
     }
 }
 
+/// How long the accept loop pauses when the process is out of descriptors,
+/// before trying again. Short, because the point is to stop spinning on EMFILE
+/// (which returns instantly and would otherwise be a hot loop), not to wait for
+/// the condition to clear -- that happens when connections close.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The accept() errors that say something about ONE connection, not the
+/// listener: the peer went away between the SYN and the accept, or the call was
+/// interrupted. Continuing is the only correct answer.
+fn is_transient_accept_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+/// EMFILE (24, this process is out of descriptors) and ENFILE (23, the system
+/// is). Both are transient, and both are self-inflicted denial of service if
+/// the loop treats them as fatal, because on this hub "fatal" means the held
+/// batch is lost.
+fn is_fd_exhaustion(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(23) | Some(24))
+}
+
 /// Accept and serve submissions on an already-bound listener until it errors.
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
@@ -338,12 +364,38 @@ pub async fn serve(
     );
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        // A transient accept() error must not take the hub down. This is the
+        // ingress on 0.0.0.0/0, so ECONNABORTED (the peer left between SYN and
+        // accept), EINTR, and descriptor exhaustion are all reachable, and none
+        // of them says the listener is unusable. Before this, `accept().await?`
+        // returned from serve() on ANY of them, main's select! then exited the
+        // process, and the RAM-only queue -- every migration already acked to a
+        // wallet and waiting for the next flush -- went with it. One EMFILE was
+        // a total loss of the held batch. Same classification as the shim's loop.
+        let (stream, _peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) if is_transient_accept_error(&err) => {
+                tracing::debug!(%err, "transient accept error, continuing");
+                continue;
+            }
+            Err(err) if is_fd_exhaustion(&err) => {
+                tracing::warn!(%err, "out of file descriptors, pausing the accept loop");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
         let hub = hub.clone();
         let options = options.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
+            // `.timer()` is load-bearing, not decoration. hyper 1.x defaults
+            // header_read_timeout to 30 s but silently DISABLES it (a warn!, no
+            // error) when no timer is installed, so without this line a client
+            // that opens a connection and never sends headers holds a task and a
+            // descriptor forever, and enough of them reach the EMFILE arm above.
             if let Err(err) = http1::Builder::new()
+                .timer(TokioTimer::new())
                 .serve_connection(
                     io,
                     service_fn(move |req| handle(req, hub.clone(), options.clone())),
