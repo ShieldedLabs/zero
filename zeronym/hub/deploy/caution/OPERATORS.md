@@ -174,6 +174,39 @@ what identified the deployed hub rather than the network.
 Poll `mixnet_connected`. It is the single field that says whether the system is
 carrying migrations.
 
+## Clearnet mode: a documented, temporary step down (2026-08-17)
+
+The hub can run WITHOUT its mixnet client, accepting submissions over clearnet
+HTTPS at `POST /` (`--http-submit` on assemble → `ZIH_HTTP_SUBMIT=true`). As of
+2026-08-17 the deployed pair (hub-6, shim-9) runs this way. Know exactly what it
+keeps and what it gives up, because it is easy to mistake for "no privacy":
+
+| Property | Nym mode | Clearnet mode |
+|---|---|---|
+| Migrations batched, held, published on the 20-block cadence | ✅ | ✅ |
+| Operator's indexer never sees the migration | ✅ | ✅ |
+| Hub attested; publicly reproducible from `zero-hub` | ✅ | ✅ |
+| Hub sees migration plaintext (it always must; it broadcasts) | ✅ | ✅ |
+| Wallet lookups | 30–90 s from an enclave | sub-second |
+| **Shim ↔ hub link unlinkable** | ✅ | ❌ **the hub sees which shim sent each migration, and when** |
+
+That last row is the mixnet's specific contribution. With one shim and one hub
+the link is trivially known regardless, so today the loss is near zero; it grows
+with the fleet, which is exactly when Nym must return.
+
+**Why:** every hub inside a Nitro enclave answered lookups in 30–90 s, and a
+debug console showed the cause directly — the nym-sdk's send-rate controller
+throttles the enclave hub to ~8 packets/s because its buffer to the gateway
+websocket fills with cover traffic alone, where a laptop hub sits at 50/s. Not
+our code, config, CPU, gateway, or the mixnet (each measured); it is the rate the
+enclave's egress path drains one TCP socket, and it is being raised with Caution
+(`CAUTION_QUESTIONS.md`).
+
+**Re-enable path:** assemble the hub with `--nym` (and the egress rules) instead
+of `--http-submit`; assemble shims with `--hub-nym <address>` instead of
+`--hub <ip:port> --hub-tls <name>`. Nothing else changes; both binaries already
+contain both paths.
+
 ## Known failure modes
 
 **1. A restart changes your address and silently breaks every shim.** The identity
