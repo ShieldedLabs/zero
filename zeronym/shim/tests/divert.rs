@@ -28,6 +28,7 @@ use zaino_proto::proto::service::{BlockId, TxFilter};
 
 use zero_indexer_shim::hub::HubClient;
 use zero_indexer_shim::intercept::Diversion;
+use zero_indexer_shim::proxy::GET_TRANSACTION;
 
 mod common;
 use common::{
@@ -429,4 +430,79 @@ async fn a_block_index_filter_is_invalid_argument() {
     assert_eq!(reply.status, 3, "a block+index filter is INVALID_ARGUMENT");
     assert!(looked_up.lock().unwrap().is_none());
     assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+}
+
+/// A `GetTransaction` body over the TxFilter cap is refused before it is
+/// buffered, and never reaches the hub or the operator.
+///
+/// GetTransaction used to buffer its body under the SendTransaction cap of
+/// 4 MiB. A TxFilter is a block id, an index and a 32-byte hash -- roughly a
+/// hundred bytes at the very most -- so that cap was 4000x looser than the
+/// request can ever legitimately be, and the looseness had a price: hyper allows
+/// ~200 streams per connection and connections are uncapped, so a hostile
+/// client trickling near-4 MiB bodies on many streams could pin gigabytes in an
+/// enclave whose memory is mostly EnclaveOS. The cap is now 1 KiB. This test
+/// pins it, and pins that SendTransaction still gets its 4 MiB, so the two are
+/// never accidentally unified.
+#[tokio::test]
+async fn an_oversized_get_transaction_body_is_refused_before_it_is_buffered() {
+    let looked_up = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub_full(
+        "unused",
+        HubLookup::NotFound,
+        Arc::new(Mutex::new(None)),
+        looked_up.clone(),
+    )
+    .await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+    let mut sender = connect_h2(shim).await;
+
+    // 8 KiB of framed junk: well over the 1 KiB cap, well under the 4 MiB one,
+    // so it discriminates between the two caps.
+    let oversized = common::grpc_frame(&vec![0u8; 8 * 1024]);
+    let reply = common::grpc_call(
+        &mut sender,
+        shim,
+        GET_TRANSACTION,
+        Full::new(oversized).boxed(),
+    )
+    .await;
+    assert_eq!(
+        reply.status, 1,
+        "an oversized filter body is CANCELLED at the cap, got {} ({:?})",
+        reply.status, reply.message
+    );
+    assert!(
+        looked_up.lock().unwrap().is_none(),
+        "nothing over the cap may reach the hub"
+    );
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "nothing over the cap may reach the operator either"
+    );
+
+    // A legitimate hash-only filter (~40 bytes framed) is NOT tripped by the
+    // cap: it goes through to the hub and is answered NotFound as configured.
+    let hash = [0x42u8; 32];
+    let reply = get_transaction(&mut sender, shim, &hash).await;
+    assert_eq!(
+        reply.status, 5,
+        "a legitimate filter must clear the cap and reach the hub (NotFound here)"
+    );
+    assert!(looked_up.lock().unwrap().is_some(), "the hub saw the lookup");
+
+    // And SendTransaction keeps its own, larger cap: a ~100 KiB body is not
+    // refused for size. It is not a valid transaction, so classification
+    // rejects it downstream -- what matters here is that the status is NOT the
+    // body-cap CANCELLED, proving the two caps are independent.
+    let big_tx = vec![0u8; 100 * 1024];
+    let reply = send_tx_reply(&mut sender, shim, &big_tx).await;
+    assert_ne!(
+        reply.status, 1,
+        "a 100 KiB SendTransaction must not trip a body cap; the two caps are separate ({:?})",
+        reply.message
+    );
 }

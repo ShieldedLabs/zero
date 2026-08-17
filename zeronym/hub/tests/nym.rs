@@ -496,3 +496,120 @@ async fn submits_and_lookups_interleave_on_one_listener() {
         }
     }
 }
+
+/// Lookups are bounded at the listener, the excess is DROPPED rather than
+/// parked, and the bound is what the indexer actually sees.
+///
+/// The sibling test above proves admission survives a lookup flood. This one
+/// pins the mechanism that makes that true, because it is the behaviour that
+/// changed and the one most worth guarding: a slot is taken BEFORE a lookup
+/// task is spawned, held until the reply is handed to the driver, and when no
+/// slot is free the lookup is dropped with a warn. Before this, every inbound
+/// frame spawned a task, the semaphore bounded only the indexer dial and was
+/// released before the 64 KiB reply was queued, and nothing dropped a reply
+/// older than the shim's budget -- so a burst built a FIFO of dead replies and
+/// the hub answered every fresh lookup 30-60 s late while reporting itself
+/// healthy. That is what the deployed hub was doing on 2026-08-17.
+///
+/// The bound is observed from OUTSIDE the crate: the hanging indexer holds every
+/// accepted socket, so its accept count is exactly the number of lookups in
+/// flight, and it must plateau at the bound however many lookups arrive.
+#[tokio::test]
+async fn excess_lookups_are_dropped_at_the_bound_not_parked() {
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let indexer = common::spawn_hanging_indexer_counting(accepted.clone()).await;
+    let hub = test_hub_with_indexer(Some(TIP), indexer);
+
+    let (in_tx, in_rx) = mpsc::channel(256);
+    let (out_tx, mut out_rx) = mpsc::channel(256);
+    tokio::spawn(run_listener(in_rx, out_tx, hub.clone()));
+
+    // Well over the bound. Every one dials the hanging indexer and stays there
+    // for the whole per-call budget, so the in-flight count can only go up
+    // until the bound stops it.
+    const FLOOD: u16 = 200;
+    for i in 0..FLOOD {
+        let frame = encode_lookup(&[(i % 256) as u8; 16], &[0xEE; 32])
+            .unwrap()
+            .to_vec();
+        in_tx.send(msg(TAG, frame)).await.unwrap();
+    }
+    // Let the listener work through the flood. The dials are async and the
+    // indexer accepts instantly, so this is generous.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let in_flight = accepted.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        in_flight < FLOOD as usize,
+        "the bound must stop the flood reaching the indexer: {in_flight} of {FLOOD} dialled"
+    );
+    assert!(
+        in_flight >= 32 && in_flight <= 64,
+        "in-flight lookups should plateau at the listener's bound (64), got {in_flight}"
+    );
+
+    // And nothing over the bound is answered LATER: the excess was dropped, not
+    // parked. Wait past the point where any parked lookup would have run and
+    // been answered by the still-hanging indexer as an error, then confirm the
+    // reply channel carried only what fits under the bound. Because every
+    // in-flight lookup hangs for the full budget, no reply arrives at all in
+    // this window; a reply here would mean a parked lookup was picked up.
+    let stray = tokio::time::timeout(std::time::Duration::from_millis(700), out_rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "no lookup should be answered while all slots hang; a reply means the excess was parked, not dropped: {:?}",
+        stray.map(|r| r.map(|r| r.frame.len()))
+    );
+
+    // The count did not creep up either: dropped means gone, not queued for
+    // the next free slot.
+    assert_eq!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        in_flight,
+        "in-flight count must not grow after the flood: dropped lookups are not retried"
+    );
+}
+
+/// A reply that has aged past the deadline is dead and is dropped before it
+/// costs an emission; a fresh one is not, and a fresh one behind a dead one is
+/// still live.
+///
+/// A dead reply is 41 sphinx packets spent on an answer the shim stopped waiting
+/// for, and every one of them delays the next LIVE reply behind it. The
+/// deadline is checked before the 64 KiB encode and again in the driver before
+/// emitting, so a backlog of dead replies drains at channel speed instead of at
+/// the throttled emission rate. This pins the predicate the driver relies on.
+///
+/// `received_at` is a `std::time::Instant`, which tokio's paused clock does not
+/// move, so ages are produced by BACK-DATING the stamp rather than advancing
+/// time -- exact, instant, and independent of the wall clock. `checked_sub`
+/// because an `Instant` cannot precede its origin on every platform.
+#[tokio::test]
+async fn a_reply_past_the_deadline_is_dead_and_a_fresh_one_is_not() {
+    use std::time::{Duration, Instant};
+    use zero_indexer_hub::nym::REPLY_DEADLINE;
+
+    let at = |received_at: Instant| Reply {
+        sender_tag: TAG,
+        frame: Zeroizing::new(vec![0u8; 64]),
+        received_at,
+    };
+
+    assert!(!at(Instant::now()).is_dead(), "a just-received reply is live");
+
+    // Just inside the deadline: still live. The driver must not drop a reply
+    // that would land inside the shim's budget.
+    if let Some(inside) = Instant::now().checked_sub(REPLY_DEADLINE - Duration::from_secs(1)) {
+        assert!(!at(inside).is_dead(), "one second inside the deadline is still live");
+    }
+
+    // Past it: dead. Emitting it now would be packets for nothing.
+    if let Some(past) = Instant::now().checked_sub(REPLY_DEADLINE + Duration::from_secs(1)) {
+        let dead = at(past);
+        assert!(dead.is_dead(), "past REPLY_DEADLINE the reply is dead (age {:?})", dead.age());
+        // And a reply received NOW is live regardless of how stale its
+        // neighbours are: the deadline is per reply, so a dead backlog cannot
+        // poison a fresh answer queued behind it.
+        assert!(!at(Instant::now()).is_dead(), "a fresh reply behind a dead one is still live");
+    }
+}

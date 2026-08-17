@@ -137,15 +137,71 @@ async fn the_shim_serves_its_own_status_and_never_proxies_it() {
     assert!(body.contains("\"diversion_configured\":true"), "{body}");
     assert!(body.contains("\"mixnet_connected\":true"), "{body}");
 
+    // Connected: /healthz agrees. Checked here and at every state below,
+    // because /healthz used to answer 200 unconditionally -- an uptime monitor
+    // on an attested shim whose client had died saw "ok", the exact blind spot
+    // the endpoint was added to close -- and this test passed either way. The
+    // property that matters is that the two endpoints cannot DISAGREE with the
+    // object they both read.
+    assert_eq!(
+        request_path(&mut client, shim, "GET", "/healthz").await,
+        StatusCode::OK,
+        "connected with diversion configured must be healthy"
+    );
+
     // A death is visible, which is the whole point: this is the state that
-    // silently swallows migrations.
+    // silently swallows migrations. And /healthz must say so too: 503, not 200.
     status.set_died();
     let body = body_of(&mut client, shim, "GET", "/nym-status").await;
     assert!(body.contains("\"mixnet_connected\":false"), "{body}");
     assert!(body.contains("\"client_deaths\":1"), "{body}");
+    assert_eq!(
+        request_path(&mut client, shim, "GET", "/healthz").await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a dead client with diversion configured must NOT read as healthy"
+    );
 
-    // NEVER an oracle for user traffic: no send counts, no timestamps, no txids.
-    for forbidden in ["txid", "last", "sent", "diverted", "migration", "queue"] {
+    // Rebuild failing: still down, and the run of failures is visible.
+    status.set_rebuild_failed();
+    let body = body_of(&mut client, shim, "GET", "/nym-status").await;
+    assert!(body.contains("\"mixnet_connected\":false"), "{body}");
+    assert!(body.contains("\"consecutive_rebuild_failures\":1"), "{body}");
+    assert_eq!(
+        request_path(&mut client, shim, "GET", "/healthz").await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    // Reconnected: healthy again, the failure run resets, and deaths are
+    // CUMULATIVE -- a reconnect does not erase the history an operator reads
+    // churn from. If this ever resets to 0 the client_deaths alerting rule in
+    // OPERATORS.md is silently defeated.
+    status.set_connected();
+    let body = body_of(&mut client, shim, "GET", "/nym-status").await;
+    assert!(body.contains("\"mixnet_connected\":true"), "{body}");
+    assert!(body.contains("\"consecutive_rebuild_failures\":0"), "{body}");
+    assert!(
+        body.contains("\"client_deaths\":1"),
+        "deaths are cumulative and must survive a reconnect: {body}"
+    );
+    assert_eq!(
+        request_path(&mut client, shim, "GET", "/healthz").await,
+        StatusCode::OK,
+        "reconnected must be healthy again"
+    );
+
+    // NEVER an oracle for user traffic: no send counts, no timestamps, no txids,
+    // and never the shim's own address (its sender identity).
+    for forbidden in [
+        "txid",
+        "last",
+        "sent",
+        "diverted",
+        "migration",
+        "queue",
+        "address",
+        "depth",
+        "pending",
+    ] {
         assert!(
             !body.contains(forbidden),
             "status must not expose '{forbidden}': {body}"
