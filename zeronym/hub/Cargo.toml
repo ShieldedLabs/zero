@@ -5,6 +5,14 @@ edition = "2021"
 publish = false
 description = "Zeronym zero-indexer-hub: batches migration transactions from many shims and publishes them together"
 
+# Line tables instead of full debug info for tests, for the reason spelled out in
+# the shim's Cargo.toml: these test binaries statically link zebra, zaino and
+# nym-sdk, and a dozen half-gigabyte binaries linked concurrently is what makes
+# `cargo test` fail for disk on a tight machine. `debug = 1` still gives
+# file-and-line in panics, which is all a failing test here is read for.
+[profile.test]
+debug = 1
+
 # Standalone workspace, for the same reason as the shim: there is no Cargo.toml
 # at the repo root, and this stanza stops the crate being absorbed into the
 # vendored zebra/ or zaino/ workspaces if one ever appears above it. It also

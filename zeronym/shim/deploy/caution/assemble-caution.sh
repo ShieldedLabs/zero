@@ -31,6 +31,9 @@
 # allowlist rules (the gateway(s) and nym-api set, from the host operator), and
 # the enclave reaches those, NOT the hub directly. See the long note in the Nym
 # transport block for the DNS / breadth / ticketbook decisions this requires.
+# The nym-api endpoint is NOT configurable here, so those rules have to agree
+# with what nym-sdk's own built-in endpoint list resolves to on the day; the
+# checks in that block say what breaks when they stop agreeing.
 #
 # --app-source records, in the manifest's build block, the public git URL where
 # this assembled repository is published. `caution verify` clones that URL and
@@ -231,34 +234,112 @@ if [ -n "$HUB_NYM" ]; then
 	done
 	IFS=$OLDIFS
 
-	# One egress block per --nym-egress rule (cidr:port[:proto], proto default tcp).
+	# One egress block per --nym-egress rule (cidr:port[:proto], proto default tcp),
+	# tallying the nym-api and resolver hosts on the way past. A rule does not say
+	# which endpoint it was meant for, so the role is read off the PORT: 53 is a
+	# resolver, 443 a nym-api, anything else a gateway. That inference only drives
+	# the warnings below and never changes a byte of what is emitted, so a rule the
+	# tally reads wrongly still lands in the HCL exactly as given.
+	#
+	# Distinct CIDRs are counted rather than rules, because one host allowlisted on
+	# two protocols (udp and tcp 53, say) is still ONE host, and it is hosts that
+	# fail, not rules.
+	nym_api_cidrs=""
+	nym_api_n=0
+	nym_dns_cidrs=""
+	nym_dns_n=0
 	for rule in $NYM_EGRESS; do
 		cidr=${rule%%:*}; rest=${rule#*:}
 		port=${rest%%:*}; proto=${rest#*:}
 		[ "$proto" = "$rest" ] && proto=tcp
 		echo "$port" | grep -qE '^[0-9]+$' || {
 			echo "error: --nym-egress rule '$rule' has a non-numeric port" >&2; exit 2; }
+		if [ "$port" = 443 ]; then
+			case " $nym_api_cidrs " in
+				*" $cidr "*) : ;;
+				*) nym_api_cidrs="$nym_api_cidrs $cidr"; nym_api_n=$((nym_api_n + 1)) ;;
+			esac
+		fi
+		if [ "$port" = 53 ]; then
+			case " $nym_dns_cidrs " in
+				*" $cidr "*) : ;;
+				*) nym_dns_cidrs="$nym_dns_cidrs $cidr"; nym_dns_n=$((nym_dns_n + 1)) ;;
+			esac
+		fi
 		printf '\n    # Nym mixnet egress (gateway / nym-api / DNS / Nyx), operator-allowlisted.\n' >> "$HUB_EGRESS"
 		printf '    egress {\n      cidr_ipv4   = "%s"\n      port        = %s\n      ip_protocol = "%s"\n    }\n' \
 			"$cidr" "$port" "$proto" >> "$HUB_EGRESS"
 	done
 
-	# The DEFAULT Nym network reaches gateways and nym-apis by NAME, and this
-	# enclave resolves nothing without a DNS egress rule (udp:53). A missing one is
-	# a fail-closed at connect_to_mixnet() discovered only on the server. It cannot
-	# be hard-required (an IP-literal / custom-topology deployment needs no DNS at
-	# all), so warn loudly rather than block.
-	nym_has_dns=no
-	for rule in $NYM_EGRESS; do
-		rest=${rule#*:}; port=${rest%%:*}
-		[ "$port" = 53 ] && nym_has_dns=yes
-	done
-	if [ "$nym_has_dns" = no ]; then
+	# THE NYM-API RULES AND THE CONFIGURED NYM-API HAVE TO AGREE, and nothing but
+	# this check will ever tell you that they have stopped agreeing.
+	#
+	# The shim has NO --nym-apis option: the endpoint set is nym-sdk's built-in
+	# mainnet list, compiled into the binary, so the allowlist follows the SDK and
+	# never the other way round. That list holds THREE HTTPS endpoints, which the
+	# client shuffles at startup and rotates through on a network error:
+	#
+	#   validator.nymtech.net                one host (92.39.63.14 as measured)
+	#   nym-frontdoor.global.ssl.fastly.net  fronted, shared CDN edge addresses
+	#   cdn1.media-platform.net              one host
+	#
+	# So allowlisting exactly one of the three costs twice over. Most client builds
+	# begin on one of the two this enclave blocks and spend a connect timeout before
+	# rotating onto the one that answers, which is part of what makes a rebuild loop
+	# hammer the nym-api. And on the day the single allowlisted address moves or
+	# stops answering, all three attempts fail, no topology is ever fetched, and the
+	# enclave diverts nothing with no console to say why.
+	#
+	# The fix is one --nym-egress rule per address that `dig +short
+	# validator.nymtech.net` returns AT ASSEMBLE TIME. The rule is a snapshot of
+	# DNS, not a configuration value, so it has to be re-taken on every redeploy.
+	# Adding cdn1.media-platform.net's address as a SECOND, independent nym-api
+	# costs one further /32 and is the cheap redundancy here. Do NOT allowlist the
+	# Fastly frontdoor: those are shared CDN edge addresses, and permitting them
+	# would let anything running in this enclave reach every origin behind that
+	# CDN, which is a far larger hole than the redundancy is worth.
+	if [ "$nym_api_n" = 0 ]; then
+		echo "==> WARNING: no tcp:443 --nym-egress rule, so NO nym-api is reachable. The"
+		echo "    mixnet client refreshes the topology from a nym-api over HTTPS before it"
+		echo "    can route a single Sphinx packet, so connect_to_mixnet() fails closed on"
+		echo "    the server. Add one '<nym-api-ip>/32:443:tcp' rule per address that"
+		echo "    'dig +short validator.nymtech.net' returns."
+	elif [ "$nym_api_n" = 1 ]; then
+		echo "==> WARNING: exactly ONE nym-api address is allowlisted:$nym_api_cidrs"
+		echo "    The nym-api endpoint is NOT configurable (there is no --nym-apis option),"
+		echo "    so this rule has to match what 'dig +short validator.nymtech.net' returns"
+		echo "    TODAY. If that address moves, topology refresh fails and the shim diverts"
+		echo "    nothing, silently. Pass one rule per returned address, re-checked on every"
+		echo "    redeploy; see the note above for the second nym-api worth adding."
+	fi
+
+	# WHAT STILL NEEDS DNS, and what does not. The backing indexer does not:
+	# ZIS_BACKEND is a literal address and ZIS_BACKEND_TLS names what the
+	# certificate must say, so the enclave dials an IP and authenticates a name.
+	# Neither does the hub on this path, which is reached THROUGH the gateway over
+	# the mixnet and never by address. Two things do, and both are inside nym-sdk:
+	# the nym-api endpoints above are hostnames with no IP-literal alternative, and
+	# the entry gateway is dialled by the HOSTNAME the topology carries, ahead of
+	# the IP addresses it carries alongside it (the SDK has a no_hostname switch
+	# that would reverse that order, and the driver does not set it). So DNS cannot
+	# be dropped from this deployment by editing egress; it needs driver work.
+	# Tracked in NYM_PLAN.md M6.
+	if [ "$nym_dns_n" = 0 ]; then
 		echo "==> WARNING: no DNS (udp:53) --nym-egress rule. On the DEFAULT Nym network"
 		echo "    the enclave resolves gateway/nym-api NAMES and has no resolver, so"
 		echo "    connect_to_mixnet() fails closed on the server. Add a"
 		echo "    '<resolver>/32:53:udp' rule, or pin every endpoint by IP (which also"
 		echo "    needs driver support not yet shipped; see the note above)."
+	elif [ "$nym_dns_n" = 1 ]; then
+		echo "==> NOTE: exactly one resolver is allowlisted:$nym_dns_cidrs"
+		echo "    That is a single point of failure the enclave cannot report on. If it"
+		echo "    stops answering, every gateway and nym-api lookup fails, the shim diverts"
+		echo "    nothing, and /nym-status shows only a client that never connects. A"
+		echo "    second '--nym-egress <resolver>/32:53:udp' costs one more /32 on the"
+		echo "    resolver port and grants no other reach, so it is the cheapest redundancy"
+		echo "    available here. It helps only if the enclave's /etc/resolv.conf actually"
+		echo "    lists that resolver: this allowlist PERMITS a resolver, it does not"
+		echo "    choose one."
 	fi
 
 	# ZIS_HUB_NYM is the address list; the driver picks a live one and fails over

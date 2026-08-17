@@ -5,6 +5,17 @@ edition = "2021"
 publish = false
 description = "Zeronym zero-indexer-shim: a transparent CompactTxStreamer reverse proxy that classifies SendTransaction"
 
+# Line tables instead of full debug info for tests. A test binary here statically
+# links zebra, zaino and nym-sdk, which with `debug = 2` makes each one about half
+# a gigabyte -- and cargo links a dozen of them AT ONCE, so the peak (not the
+# total) exhausted a machine with 17 GB free and failed every link with a bare
+# "linking with `cc` failed". `debug = 1` keeps file-and-line in panics and
+# backtraces, which is all these tests are ever read for, at a fraction of the
+# size. Use `cargo test -j 2` as well if the disk is genuinely tight: the failure
+# is peak concurrency, not total space.
+[profile.test]
+debug = 1
+
 # Standalone workspace. There is no Cargo.toml at the repo root, but this stanza
 # makes sure the crate is never absorbed into the vendored zebra/ or zaino/
 # workspaces if one ever appears above it.
