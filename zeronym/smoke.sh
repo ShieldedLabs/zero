@@ -29,6 +29,7 @@
 #   SMOKE_LOOKUP_HARD_SECS  curl's own ceiling on the two heavy calls (default 90)
 #   SMOKE_HTTP_TIMEOUT      ceiling on the small JSON calls (default 20)
 #   SMOKE_BLOCK_START       first height of the GetBlockRange check (default 3444100)
+#   SMOKE_FIXTURE           path to v6_migration.bin (default: alongside this script)
 
 # Deliberately NOT `set -e`: a failing check must be reported and the remaining
 # checks still run, because the useful diagnosis is usually the SHAPE of the
@@ -485,6 +486,223 @@ PY
   fi
 }
 
+# ---------------------------------------------------------------- the divert
+#
+# The one check that proves this shim is PRIVATE rather than merely alive.
+#
+# Every other check in this file passes on a shim with no hub configured, which
+# runs forward-only: it hands the operator's indexer every transaction it is
+# given, migrations included. `shim:lookup` above fetches a MINED transaction,
+# and the operator's indexer serves that byte-identically -- so on 2026-08-17
+# `--clearnet` reported "7/7, this pair is serving" for a deployment whose
+# divert path had never been exercised at all.
+#
+# The fixture is consensus-INVALID by construction (a zero-filled halo2 proof),
+# so it can never be mined and no indexer will accept it. That is what makes it
+# a discriminator: a diverting shim classifies it as a migration, sends it to
+# the hub, and gets back a txid; a forward-only shim shows it to the operator's
+# indexer and gets back a rejection. Looking it up afterwards can then only be
+# answered from the hub's queue, at height 0, and only if the hub really holds
+# it -- so the pair of calls proves admission end to end.
+#
+# It leaves the fixture in the hub's live queue. The next flush drops it on the
+# indexer's verdict, which is the same harmless thing `hub:submit-open` already
+# does with its junk bytes.
+MIGRATION_FIXTURE=${SMOKE_FIXTURE:-$(dirname "$0")/shim/tests/fixtures/v6_migration.bin}
+
+check_shim_divert() {
+  if [ "$HAVE_HTTP2" = 0 ]; then
+    fail shim:divert "cannot run: this curl has no HTTP/2 support"
+    return
+  fi
+  if [ ! -r "$MIGRATION_FIXTURE" ]; then
+    fail shim:divert "fixture not readable: $MIGRATION_FIXTURE"
+    note "run smoke.sh from a checkout, or point SMOKE_FIXTURE at shim/tests/fixtures/v6_migration.bin"
+    return
+  fi
+
+  # ---- 1. submit: the shim must classify this as a migration and divert it.
+  _req="$RUN_DIR/sendtransaction.grpc"
+  rm -f "$_req"
+  "$PY" - "$MIGRATION_FIXTURE" > "$_req" <<'PY' || { fail shim:divert "could not build the request frame"; return; }
+import sys
+
+def varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+with open(sys.argv[1], "rb") as f:
+    tx = f.read()
+# RawTransaction { bytes data = 1; uint64 height = 2 }. A wallet sends no height
+# on a submit and proto3 omits a zero, so field 2 is absent -- byte-identical to
+# what a real wallet puts on the wire.
+msg = b"\x0a" + varint(len(tx)) + tx
+sys.stdout.buffer.write(b"\x00" + len(msg).to_bytes(4, "big") + msg)
+PY
+  grpc_call SendTransaction "$_req" "$SMOKE_LOOKUP_HARD_SECS"
+  _submit_secs=$SECS
+  if [ "$CURL_RC" != 0 ]; then
+    fail shim:divert "submit got no reply within ${SMOKE_LOOKUP_HARD_SECS}s: ${CURL_ERR:-curl exit $CURL_RC}"
+    return
+  fi
+  if [ "$CODE" != 200 ] || grpc_status_bad "$HDRS"; then
+    fail shim:divert "submit: $CODE, $(grpc_status_text "$HDRS"), ${SECS}s"
+    note "UNAVAILABLE here is the shim failing closed because the hub was unreachable -- check the hub above"
+    return
+  fi
+
+  # SendResponse { int32 error_code = 1; string error_message = 2 }, where the
+  # shim puts the hub's txid in error_message exactly as lightwalletd does.
+  _verdict=$("$PY" - "$BODY" <<'PY'
+import sys
+
+def take_varint(buf, i):
+    n = shift = 0
+    while True:
+        b = buf[i]; i += 1
+        n |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return n, i
+        shift += 7
+
+try:
+    with open(sys.argv[1], "rb") as f:
+        body = f.read()
+    if len(body) < 5 or body[0] != 0:
+        print("ERR\tnot an uncompressed gRPC frame")
+        raise SystemExit
+    msg = body[5:5 + int.from_bytes(body[1:5], "big")]
+    code, message, i = None, "", 0
+    while i < len(msg):
+        key, i = take_varint(msg, i)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            val, i = take_varint(msg, i)
+            if field == 1:
+                # int32 negative arrives as a 10-byte two's-complement varint.
+                code = val - (1 << 64) if val >= 1 << 63 else val
+        elif wire == 2:
+            ln, i = take_varint(msg, i)
+            val, i = msg[i:i + ln], i + ln
+            if field == 2:
+                message = val.decode("utf-8", "replace")
+        else:
+            print("ERR\tunexpected wire type %d" % wire)
+            raise SystemExit
+    print("%s\t%s" % (0 if code is None else code, message))
+except SystemExit:
+    raise
+except Exception as exc:
+    print("ERR\t%s" % exc)
+PY
+)
+  _code=${_verdict%%	*}
+  _txid=${_verdict#*	}
+  if [ "$_code" = ERR ]; then
+    fail shim:divert "submit reply did not parse as a SendResponse: $_txid"
+    return
+  fi
+  if [ "$_code" != 0 ]; then
+    fail shim:divert "submit REJECTED: error_code=$_code, error_message=\"$_txid\", ${_submit_secs}s"
+    note "this is what a FORWARD-ONLY shim does: the fixture is consensus-invalid, so the operator's"
+    note "indexer rejects it. A diverting shim never shows it to the indexer. Is ZIS_HUB set?"
+    return
+  fi
+  if [ "$(printf '%s' "$_txid" | wc -c | tr -d ' ')" != 64 ]; then
+    fail shim:divert "submit accepted but returned no txid (error_message=\"$_txid\"), ${_submit_secs}s"
+    return
+  fi
+
+  # ---- 2. look it back up: only the hub's queue can answer this.
+  _req2="$RUN_DIR/divert-lookup.grpc"
+  rm -f "$_req2"
+  "$PY" - "$_txid" > "$_req2" <<'PY' || { fail shim:divert "could not build the lookup frame"; return; }
+import sys
+txid = bytes.fromhex(sys.argv[1])[::-1]     # display order -> internal order
+assert len(txid) == 32, "a txid is 32 bytes"
+msg = b"\x1a" + bytes([len(txid)]) + txid   # TxFilter.hash, field 3
+sys.stdout.buffer.write(b"\x00" + len(msg).to_bytes(4, "big") + msg)
+PY
+  grpc_call GetTransaction "$_req2" "$SMOKE_LOOKUP_HARD_SECS"
+  _measured="submit ${_submit_secs}s, lookup ${SECS}s, $BYTES bytes"
+  if [ "$CURL_RC" != 0 ]; then
+    fail shim:divert "lookup got no reply within ${SMOKE_LOOKUP_HARD_SECS}s: ${CURL_ERR:-curl exit $CURL_RC}"
+    return
+  fi
+  if [ "$CODE" != 200 ] || grpc_status_bad "$HDRS"; then
+    fail shim:divert "lookup: $CODE, $(grpc_status_text "$HDRS"), $_measured"
+    note "NOT_FOUND means the transaction is not in the hub's queue: it was never diverted there,"
+    note "or a flush has already dropped it (it is consensus-invalid, so a flush always will)"
+    return
+  fi
+  # The reply must be the fixture BYTE FOR BYTE at height 0. Height 0 is the
+  # mempool sentinel: it came out of the hub's queue, not off the chain -- and
+  # this transaction can never be on the chain, which is what makes the whole
+  # assertion airtight.
+  _echo=$("$PY" - "$BODY" "$MIGRATION_FIXTURE" <<'PY'
+import sys
+
+def take_varint(buf, i):
+    n = shift = 0
+    while True:
+        b = buf[i]; i += 1
+        n |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return n, i
+        shift += 7
+
+try:
+    with open(sys.argv[1], "rb") as f:
+        body = f.read()
+    with open(sys.argv[2], "rb") as f:
+        want = f.read()
+    if len(body) < 5 or body[0] != 0:
+        print("ERR\tnot an uncompressed gRPC frame")
+        raise SystemExit
+    msg = body[5:5 + int.from_bytes(body[1:5], "big")]
+    data, height, i = b"", 0, 0
+    while i < len(msg):
+        key, i = take_varint(msg, i)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            val, i = take_varint(msg, i)
+            if field == 2:
+                height = val
+        elif wire == 2:
+            ln, i = take_varint(msg, i)
+            val, i = msg[i:i + ln], i + ln
+            if field == 1:
+                data = val
+        else:
+            print("ERR\tunexpected wire type %d" % wire)
+            raise SystemExit
+    if data != want:
+        print("ERR\tthe %d bytes returned are not the %d-byte fixture" % (len(data), len(want)))
+    elif height != 0:
+        print("ERR\theight=%d, expected 0 (the mempool sentinel a queue hit carries)" % height)
+    else:
+        print("OK\t%d bytes byte-identical, height=0" % len(data))
+except SystemExit:
+    raise
+except Exception as exc:
+    print("ERR\t%s" % exc)
+PY
+)
+  case $_echo in
+    OK*)
+      pass shim:divert "$_measured — ${_echo#*	}, txid $_txid"
+      ;;
+    *)
+      fail shim:divert "lookup returned the wrong thing: ${_echo#*	} ($_measured)"
+      ;;
+  esac
+}
+
 check_shim_blockrange() {
   if [ "$HAVE_HTTP2" = 0 ]; then
     fail shim:blockrange "cannot run: this curl has no HTTP/2 support"
@@ -553,6 +771,7 @@ if [ -n "$SHIM" ]; then
   check_shim_healthz
   check_shim_grpc_passthrough
   check_shim_lookup
+  check_shim_divert
   check_shim_blockrange
   printf '\n'
 fi
