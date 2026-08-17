@@ -55,7 +55,7 @@ use hyper::client::conn::http1 as client_h1;
 use hyper::client::conn::http2 as client_h2;
 use hyper::server::conn::http2 as server_h2;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::intercept;
@@ -250,6 +250,42 @@ where
     });
 }
 
+/// How often the upstream connection PINGs the indexer when idle, and how long it
+/// waits for the PONG before declaring the connection dead.
+///
+/// Without these, a silently dropped upstream -- a NAT or state table timing out
+/// on the enclave's egress, an indexer host power-cycled, a load balancer failing
+/// over without sending RST -- is never noticed: `SendRequest::is_closed()` flips
+/// only once the connection task observes an h2 error, and on a black-holed
+/// socket it never does. Every request from every wallet behind that connection
+/// (in production Caddy multiplexes up to ~200 of them onto ONE shim connection)
+/// is then written into the dead sender and hangs until the kernel's retransmit
+/// timer gives up, ~15 minutes on Linux defaults, or forever if the socket is
+/// idle. With a keepalive the driver task sees the missed PONG, exits, `is_closed`
+/// flips, and the pool redials on the next request. The interval is long enough
+/// that an idle shim is not chatty; the timeout is short enough that a wallet
+/// waits seconds, not a quarter of an hour.
+const UPSTREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const UPSTREAM_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The upstream h2 client builder, configured once so the TLS and plaintext
+/// arms of [`Upstream::connect`] cannot drift apart. `.timer()` is load-bearing:
+/// hyper silently disables keepalive (and every other timed behaviour) when no
+/// timer is installed, exactly as it did the header-read timeout on the hub.
+fn upstream_h2_builder() -> client_h2::Builder<TokioExecutor> {
+    let mut builder = client_h2::Builder::new(TokioExecutor::new());
+    builder
+        .timer(TokioTimer::new())
+        .initial_stream_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONNECTION_WINDOW)
+        .keep_alive_interval(UPSTREAM_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(UPSTREAM_KEEPALIVE_TIMEOUT)
+        // Ping while idle too: an idle-but-dead connection is precisely the case
+        // that otherwise hangs the first wallet request after a quiet period.
+        .keep_alive_while_idle(true);
+    builder
+}
+
 impl Upstream {
     /// Dial the backing indexer and spawn its connection task.
     pub async fn connect(backend: &Backend) -> Result<Self, BoxError> {
@@ -264,18 +300,14 @@ impl Upstream {
         let sender = match &backend.tls {
             Some(tls) => {
                 let stream = tls.connect(backend.addr, stream).await?;
-                let (sender, conn) = client_h2::Builder::new(TokioExecutor::new())
-                    .initial_stream_window_size(STREAM_WINDOW)
-                    .initial_connection_window_size(CONNECTION_WINDOW)
+                let (sender, conn) = upstream_h2_builder()
                     .handshake(TokioIo::new(stream))
                     .await?;
                 spawn_connection_driver(conn);
                 sender
             }
             None => {
-                let (sender, conn) = client_h2::Builder::new(TokioExecutor::new())
-                    .initial_stream_window_size(STREAM_WINDOW)
-                    .initial_connection_window_size(CONNECTION_WINDOW)
+                let (sender, conn) = upstream_h2_builder()
                     .handshake(TokioIo::new(stream))
                     .await?;
                 spawn_connection_driver(conn);

@@ -15,5 +15,4 @@
 
 # Reference
 
-- [Open questions and review](./review.md)
 - [Glossary and references](./glossary.md)

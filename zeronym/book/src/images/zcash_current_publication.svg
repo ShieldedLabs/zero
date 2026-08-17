@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1400"
+     height="820"
+     viewBox="0 0 1400 820"
+     role="img"
+     aria-labelledby="svg-title svg-desc">
+  <title id="svg-title">Current Zcash transaction publication</title>
+  <desc id="svg-desc">Multiple wallets connect over TLS to three indexers, which publish transactions to the mempool.</desc>
+
+  <defs>
+    <style>
+
+.canvas {
+    fill: #fbfcfe;
+}
+
+/* The book renders this on a dark theme too. Only the canvas and the text
+   need to move; the node fills are light-on-light by design and keep their
+   own contrast against a transparent ground. */
+@media (prefers-color-scheme: dark) {
+    .canvas {
+        fill: #0f1419;
+    }
+
+    .title,
+    .node-label {
+        fill: #e6e1cf;
+    }
+
+    .small-label {
+        fill: #b3a992;
+    }
+}
+
+.mixnet {
+    fill: #ede8fb;
+    stroke: #7456c7;
+}
+
+.title {
+    fill: #172033;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 30px;
+    font-weight: 700;
+}
+
+.node-label {
+    fill: #172033;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    font-weight: 650;
+    text-anchor: middle;
+    dominant-baseline: middle;
+}
+
+.small-label {
+    fill: #516078;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.boundary-label {
+    fill: #667085;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-weight: 650;
+}
+
+.node {
+    stroke-width: 2.2;
+    vector-effect: non-scaling-stroke;
+}
+
+.wallet {
+    fill: #f3efff;
+    stroke: #7456c7;
+}
+
+.indexer {
+    fill: #eaf2ff;
+    stroke: #4775bd;
+}
+
+.shim {
+    fill: #fff1d7;
+    stroke: #d88121;
+}
+
+.hub {
+    fill: #dcf7ec;
+    stroke: #218c69;
+}
+
+.cloud {
+    fill: #eaf4fa;
+    stroke: #4c7892;
+    stroke-width: 2.4;
+    vector-effect: non-scaling-stroke;
+}
+
+.edge {
+    fill: none;
+    stroke: #68758a;
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.edge-local {
+    fill: none;
+    stroke: #8a94a6;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.edge-publication {
+    fill: none;
+    stroke: #218c69;
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.organization {
+    fill: #f7f9fc;
+    fill-opacity: 0.72;
+    stroke: #a9b2c2;
+    stroke-width: 1.8;
+    stroke-dasharray: 8 6;
+    vector-effect: non-scaling-stroke;
+}
+
+.tee {
+    fill: #ebfaf4;
+    fill-opacity: 0.9;
+    stroke: #218c69;
+    stroke-width: 2.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.tls-badge {
+    fill: #ffffff;
+    stroke: #7456c7;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.tls-text {
+    fill: #5e43aa;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 750;
+    text-anchor: middle;
+    dominant-baseline: middle;
+}
+
+.lock {
+    fill: none;
+    stroke: #218c69;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.auditor-label {
+    fill: #5f4b13;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    text-anchor: middle;
+}
+
+.eye {
+    fill: #ffffff;
+    stroke: #b38a25;
+    stroke-width: 2.2;
+    vector-effect: non-scaling-stroke;
+}
+
+.pupil {
+    fill: #29303d;
+}
+
+.highlight {
+    fill: #ffffff;
+}
+
+    </style>
+
+    <marker id="arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#68758a"/>
+    </marker>
+
+    <marker id="arrow-local"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a94a6"/>
+    </marker>
+
+    <marker id="arrow-publication"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#218c69"/>
+    </marker>
+  </defs>
+
+  <rect class="canvas" x="0" y="0" width="1400" height="820"/>
+
+  <text x="700.0" y="52" class="title" text-anchor="middle">Current Zcash transaction publication</text>
+  <path class="edge" d="M 260,165 C 385,165 470,197 580,197" marker-end="url(#arrow)"/>
+  <g transform="translate(410 182.6)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 260,255 C 385,255 470,223 580,223" marker-end="url(#arrow)"/>
+  <g transform="translate(410 237.4)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 260,365 C 385,365 470,397 580,397" marker-end="url(#arrow)"/>
+  <g transform="translate(410 382.6)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 260,455 C 385,455 470,423 580,423" marker-end="url(#arrow)"/>
+  <g transform="translate(410 437.4)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 260,565 C 385,565 470,597 580,597" marker-end="url(#arrow)"/>
+  <g transform="translate(410 582.6)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 260,655 C 385,655 470,623 580,623" marker-end="url(#arrow)"/>
+  <g transform="translate(410 637.4)">
+    <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
+    <path d="M -21,-2 V -6
+             C -21,-12 -11,-12 -11,-6
+             V -2"
+          fill="none"
+          stroke="#7456c7"
+          stroke-width="1.5"
+          stroke-linecap="round"/>
+    <rect x="-22.5" y="-3"
+          width="13" height="10"
+          rx="2"
+          fill="#7456c7"/>
+    <text class="tls-text" x="11" y="1">TLS</text>
+  </g>
+  <path class="edge" d="M 810,210 C 930,210 1010,347 1128,347" marker-end="url(#arrow)"/>
+  <path class="edge" d="M 810,410 C 930,410 1010,411 1115,411" marker-end="url(#arrow)"/>
+  <path class="edge" d="M 810,610 C 930,610 1010,477 1128,477" marker-end="url(#arrow)"/>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="165" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="165">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="255" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="255">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node indexer"
+             cx="700" cy="210" rx="110" ry="43"/>
+    <text class="node-label" x="700" y="210">indexer 1</text>
+  </g>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="365" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="365">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="455" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="455">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node indexer"
+             cx="700" cy="410" rx="110" ry="43"/>
+    <text class="node-label" x="700" y="410">indexer 2</text>
+  </g>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="565" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="565">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node wallet"
+             cx="170" cy="655" rx="90" ry="35"/>
+    <text class="node-label" x="170" y="655">wallet</text>
+  </g>
+  <g>
+    <ellipse class="node indexer"
+             cx="700" cy="610" rx="110" ry="43"/>
+    <text class="node-label" x="700" y="610">indexer 3</text>
+  </g>
+  <g>
+    <path class="cloud" d="M 1165.0,493.2 C 1118.2,493.2 1105.2,456.8 1128.6,420.4 C 1110.4,376.2 1146.8,339.8 1185.8,355.4 C 1201.4,300.8 1266.4,298.2 1287.2,352.8 C 1334.0,342.4 1354.8,384.0 1336.6,423.0 C 1365.2,459.4 1331.4,495.8 1295.0,490.6 L 1165.0,493.2 Z"/>
+    <text class="node-label"
+          x="1235.2" y="425.6">mempool</text>
+  </g>
+</svg>
