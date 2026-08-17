@@ -21,19 +21,16 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 
 ## Security
 
-**Protected.**
+**Protected**
 
-- **Broadcast contents.** An Orchard-touching transaction is hidden from the operator: the wallet's TLS terminates inside an attested enclave, not at the operator's indexer.
+- **Broadcast contents.** The operator no longer terminates the wallet's TLS. The key is born inside the enclave, so an Orchard-touching transaction reaches the operator's host as ciphertext it has no key for, rather than as plaintext at its indexer. The attestation is what makes this checkable: it proves the endpoint is the reviewed build and that the certificate's key was born inside it, so an operator cannot quietly substitute its own.
 - **Source IP.** The on-chain transaction carries no link to the wallet's IP, because the hub publishes it rather than the wallet. Volume-independent: it holds however few others are migrating.
 - **`GetTransaction`.** The shim routes every lookup to the hub, so the operator cannot watch a wallet fetch back the transaction it just diverted. This moves the lookup to the hub rather than making it private outright.
 
-**Not protected.**
+**Not protected**
 
-- **Query content.** Address-level queries (`GetTaddressTxids`, `GetTaddressBalance`, `GetAddressUtxos`) are not intercepted and still reach the operator.
-- **The operator learns *that* a client migrated**, though not the amount or which transaction. A diverted request is the one thing it does not see, and that asymmetry survives padding, so shim-side batching and cover traffic were rejected rather than attempted.
-- **Batch-timing anonymity is conditional, and the condition is not met.** Mainnet carries **0.77 Orchard-touching transactions per block** (144 blocks at tip 3,433,105), so the modal batch is zero or one, where the anonymity set is the transaction itself. The lever is adoption, not code.
-- **The trust root is AWS and the hardware, not mathematics.** No mathematical fallback today; PIR removes it and is deferred.
-- **The broadcast is delayed** up to ~25 minutes, and submit is dispatch-only, so a wallet is told "accepted" before the shim knows the hub received the frame. A failed migration can fail silently.
+- **Transparent-pool queries.** `GetTaddressTxids`, `GetTaddressBalance` and `GetAddressUtxos` are not intercepted and still reach the operator.
+- **Physical security is delegated to AWS.** Nitro's memory isolation and hardware root of trust are what keep the operator out of the enclave, which means the guarantees above hold against everyone except AWS itself. We acknowledge that delegation rather than claim it away.
 
 **Scope.** zero-indexer targets the server-side and network-metadata adversaries in Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html), not the wallet-local concerns that model assigns to the wallet.
 
@@ -66,7 +63,7 @@ The operator runbook is [`shim/deploy/caution/OPERATORS.md`](./shim/deploy/cauti
 Four audiences, four different answers.
 
 - **Wallet users** install nothing and change no setting. Point your wallet at the same endpoint URL as before.
-- **Wallet developers** have exactly one requirement, and it is a hard one: choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. A latest-anchor wallet is timestamped by its anchor, which re-links it inside the revealed batch and undoes the protection.
+- **Wallet developers** have exactly one requirement, and it is a hard one: choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. A latest-anchor wallet is timestamped by its anchor, which re-links it inside the revealed batch and undoes the protection. Note also that a diverted broadcast is delayed up to ~25 minutes and the shim answers before the hub has confirmed receipt, so a wallet is told "accepted" ahead of the chain and a failed migration can fail silently.
 - **Operators** run the shim in front of their indexer, and optionally a hub. Orchard-touching transactions and `GetTransaction` lookups stop being yours to see; everything else passes through as today.
 - **Auditors** verify an endpoint without trusting its operator: fetch its attestation, check the PCRs against the AWS Nitro root, reproduce the build and compare hashes, and check Certificate Transparency for a shadow certificate.
 
