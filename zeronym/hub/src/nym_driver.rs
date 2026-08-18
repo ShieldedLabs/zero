@@ -416,9 +416,29 @@ pub async fn run_driver(
                 // MissedTickBehavior::Delay is already set for.
                 _ = probe.tick(), if in_flight.is_none() => {
                     match inbound_at_probe {
-                        // A probe was outstanding and nothing at all has arrived
-                        // since.
-                        Some(mark) if inbound_total == mark => {
+                        // A probe was outstanding, nothing at all has arrived
+                        // since, AND we have nothing of our own left to send.
+                        //
+                        // That last clause is load-bearing and its absence was a
+                        // bug. Silence only means "the gateway is not delivering
+                        // to us" if we were in a position to notice a delivery.
+                        // While replies are still queued, this arm runs in the
+                        // gaps between sends, and a burst of lookups is precisely
+                        // the case where the hub is busy emitting for minutes with
+                        // no NEW inbound behind it -- so two probe ticks would pass,
+                        // the client would be declared dead, and the rebuild would
+                        // destroy both the queued replies and the client whose
+                        // SURBs they are addressed to. A hub working through a
+                        // backlog is the healthiest it ever looks, not the
+                        // deadest.
+                        //
+                        // `outgoing.is_empty()` is what we can see: this arm only
+                        // runs when nothing is in flight, so anything still queued
+                        // has not reached the SDK at all. The shim's driver has
+                        // carried this guard since it was written and documents the
+                        // same reasoning; the hub simply never got it, which is the
+                        // only reason the two differed.
+                        Some(mark) if probe_round_is_silent(mark, inbound_total, outgoing.is_empty()) => {
                             silent_rounds += 1;
                             if silent_rounds >= SILENT_ROUNDS_BEFORE_REBUILD {
                                 tracing::error!(
@@ -439,9 +459,11 @@ pub async fn run_driver(
                                 Step::Ferried
                             }
                         }
-                        // Either the first round, or traffic HAS arrived since the
-                        // last probe — which is all the liveness we need, whether
-                        // it came from the probe or from real shim requests.
+                        // Either the first round, or traffic HAS arrived since
+                        // the last probe -- which is all the liveness we need,
+                        // whether it came from the probe or from real shim
+                        // requests -- or we still have replies to send, in which
+                        // case this round proves nothing and is not counted.
                         _ => {
                             silent_rounds = 0;
                             in_flight = Some(probe_send(sender.clone(), own));
@@ -700,4 +722,56 @@ async fn deliver(
             sender_tag: SenderTag(tag.to_bytes()),
         })
         .await;
+}
+
+/// Whether a probe round counts as evidence that the gateway has stopped
+/// delivering to us.
+///
+/// Extracted as a pure function because it is a RULE, and because as a `match`
+/// guard it was unreachable by any test -- which is how it came to be missing a
+/// clause that its counterpart in the shim's driver has always had.
+///
+/// Two conditions, and both are required:
+///
+/// * nothing has arrived since the probe went out (`inbound_total == mark`), and
+/// * we have nothing of our own left to send (`outgoing_empty`).
+///
+/// The second is the one that is easy to omit and expensive to omit. Silence is
+/// only evidence when we were positioned to notice a delivery; a hub grinding
+/// through a backlog of replies has no NEW inbound behind it by definition, and
+/// counting that as death tears down a healthy client mid-drain, destroying both
+/// the queued replies and the client whose SURBs they are addressed to.
+fn probe_round_is_silent(mark: u64, inbound_total: u64, outgoing_empty: bool) -> bool {
+    inbound_total == mark && outgoing_empty
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traffic_since_the_probe_is_liveness_whatever_the_send_queue_is_doing() {
+        assert!(!probe_round_is_silent(7, 8, true));
+        assert!(!probe_round_is_silent(7, 8, false));
+    }
+
+    #[test]
+    fn silence_with_an_idle_send_queue_is_the_only_thing_that_counts_as_silence() {
+        assert!(probe_round_is_silent(7, 7, true));
+    }
+
+    #[test]
+    fn a_backlog_defers_the_verdict_rather_than_condemning_the_client() {
+        // The regression this function exists for. Nothing has arrived since the
+        // probe, which in isolation reads as a dead gateway -- but replies are
+        // still queued, so the hub has been busy emitting rather than waiting to
+        // receive. Under a lookup burst that state lasts minutes, and two probe
+        // ticks inside it used to rebuild the client and take the undelivered
+        // replies with it.
+        assert!(
+            !probe_round_is_silent(7, 7, false),
+            "a hub working through its send queue must never be declared dead"
+        );
+    }
 }
