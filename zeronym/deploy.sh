@@ -217,7 +217,7 @@ if [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ]; then
 independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
 (gh/ssh) and push by hand, or re-run."
   log "app-source published: $APP_SOURCE @ $APP_SOURCE_TAG"
-  log "verify with: caution verify (expect PCR0/1 FAILED on Caution's floating framework; PCR2 is the check that matters)"
+  log "verify with: caution verify (expect PASSED; require ALL THREE PCRs, a PCR2 match alone does not identify the app)"
 fi
 
 # ---------- the hub's Nym address ----------

@@ -130,10 +130,11 @@ This takes a nonce, fetches a fresh attestation, rebuilds the image from the
 published `app_sources` repo, and compares measurements. It is what turns "they
 say this is the code" into something checkable. Third parties can run
 `caution verify --attestation-url https://<domain>/attestation` with no Caution
-account and no checkout. See OPERATORS.md for the current PCR0/1 caveat: a
-Caution-side unpinned-framework bug makes verify report FAILED on healthy
-enclaves, and PCR2 (the application layer) is the check that matters until
-their fix lands.
+account and no checkout. Expect a clean `PASSED` with all three PCRs
+reproducing: the Caution-side unpinned-framework bug that once made verify
+report PCR0/1 FAILED on healthy enclaves is fixed. Require all three. See
+OPERATORS.md for why a PCR2 match alone proves nothing about which application
+is running.
 
 ## When it boots but does not serve
 
