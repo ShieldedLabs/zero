@@ -49,6 +49,17 @@ const TX_HEIGHT_HEADER: &str = "x-tx-height";
 /// 404/502 verdict usually arrives before this fires.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Ceiling on a submission. The hub answers a submission as soon as it admits
+/// the transaction to a batch, so the only slow part is moving the body: an
+/// enclave sustains ~220 KB/s outbound (measured 2026-08-18), so even a
+/// maximum-size transaction is ~10 s of upload. Thirty seconds leaves room for
+/// that plus a TLS handshake and still fails long before a wallet gives up.
+///
+/// Without this the wallet's `SendTransaction` inherits a hub stall unbounded:
+/// a hub that accepts the connection and never replies would hold the wallet
+/// open forever, and the shim would never fall through to its own verdict.
+const SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Ceiling on a hub response body. A mined transaction is at most ~2 MB; this
 /// bounds memory against a misbehaving or hostile hub.
 const MAX_HUB_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -65,9 +76,15 @@ pub struct HubClient {
 /// the shim makes on its own behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Submit {
-    Accepted { txid: String },
-    AlreadyKnown { txid: Option<String> },
-    Rejected { reason: String },
+    Accepted {
+        txid: String,
+    },
+    AlreadyKnown {
+        txid: Option<String>,
+    },
+    Rejected {
+        reason: String,
+    },
     /// The transaction does not fit the fixed frame, so this transport cannot
     /// carry it at all.
     ///
@@ -76,7 +93,9 @@ pub enum Submit {
     /// to the wallet rather than let it read a generic failure as "try again".
     /// `limit` is the frame budget, deliberately NOT the transaction's length,
     /// which must not reach a log (D4).
-    TooLarge { limit: usize },
+    TooLarge {
+        limit: usize,
+    },
 }
 
 /// The hub's answer to a transaction lookup.
@@ -108,23 +127,32 @@ impl HubClient {
 
     /// POST the raw transaction bytes to the hub and read back its verdict.
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<Submit, BoxError> {
-        let stream = TcpStream::connect(self.addr).await?;
-        stream.set_nodelay(true)?;
+        // The deadline covers the whole exchange -- connect, TLS handshake,
+        // request, response body -- not just the read. Each of those can stall
+        // independently, and a deadline around only one of them bounds nothing.
+        let attempt = async {
+            let stream = TcpStream::connect(self.addr).await?;
+            stream.set_nodelay(true)?;
 
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header(hyper::header::HOST, &self.authority)
-            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
-            .body(Full::new(Bytes::copy_from_slice(tx_bytes)))?;
+            let req = Request::builder()
+                .method("POST")
+                .uri("/")
+                .header(hyper::header::HOST, &self.authority)
+                .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+                .body(Full::new(Bytes::copy_from_slice(tx_bytes)))?;
 
-        let (parts, body) = match &self.tls {
-            Some(tls) => {
-                let stream = tls.connect(self.addr, stream).await?;
-                round_trip(stream, req).await?
+            match &self.tls {
+                Some(tls) => {
+                    let stream = tls.connect(self.addr, stream).await?;
+                    round_trip(stream, req).await
+                }
+                None => round_trip(stream, req).await,
             }
-            None => round_trip(stream, req).await?,
         };
+
+        let (parts, body) = tokio::time::timeout(SUBMIT_TIMEOUT, attempt)
+            .await
+            .map_err(|_| -> BoxError { "hub submission timed out".into() })??;
 
         // The hub caps a clearnet submission body at its frame size and answers
         // `413` with a plain-text body, which would otherwise fail to parse as
