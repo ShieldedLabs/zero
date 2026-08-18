@@ -82,6 +82,19 @@ pub const MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 /// to serve the next one.
 pub const MAX_QUEUE_ENTRIES: usize = MAX_QUEUE_BYTES / MAX_TX_BYTES;
 
+/// How many flushes may fail to place one entry before it is given up on.
+///
+/// Expiry is the PRIMARY bound and covers almost everything: an entry is
+/// admitted only if it survives its scheduled flush, so a few failed flushes put
+/// it past the point of being minable and it goes. This is the backstop for the
+/// one case expiry cannot bound at all: a payload that does not deserialize has
+/// no expiry, correctly treated here as "never expires", so without a count it
+/// would be re-offered to the network for the life of the process.
+///
+/// Eight flushes is a few hours at the production cadence -- long enough to ride
+/// out an indexer outage, far short of forever.
+pub const MAX_REQUEUE_ATTEMPTS: u32 = 8;
+
 /// Why a submission was not admitted.
 ///
 /// Typed rather than a string because the shim reacts differently to each: a
@@ -157,6 +170,10 @@ pub struct Entry {
     /// Wiped on drop: the hub holds migrations in plaintext and a freed copy
     /// lingering in enclave memory is exactly what attestation cannot excuse.
     pub tx_bytes: Zeroizing<Vec<u8>>,
+    /// How many flushes have offered this entry to the network without getting
+    /// a verdict. Zero on admission, incremented on every requeue, and the
+    /// backstop bound for a payload that has no expiry.
+    pub attempts: u32,
     /// The tip when this was admitted. Drives the confirmation deadline.
     pub received_height: u32,
 }
@@ -164,6 +181,21 @@ pub struct Entry {
 struct Inner {
     entries: HashMap<[u8; 32], Entry>,
     bytes: usize,
+}
+
+/// What one requeue did with the entries a flush could not place.
+///
+/// Counts only. An operator needs to see that entries are being given up on and
+/// why; a per-entry line here would be a timing oracle over exactly the
+/// migrations in flight.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Requeued {
+    /// Put back, and offered again at the next flush.
+    pub held: usize,
+    /// Dropped: cannot survive the flush that would publish it.
+    pub dropped_expired: usize,
+    /// Dropped: out of attempts. Only reachable for a payload with no expiry.
+    pub dropped_exhausted: usize,
 }
 
 /// The in-memory batching queue.
@@ -299,6 +331,7 @@ impl Queue {
                 txid: txid.clone(),
                 expiry,
                 tx_bytes: Zeroizing::new(tx_bytes.to_vec()),
+                attempts: 0,
                 received_height: tip,
             },
         );
@@ -343,22 +376,49 @@ impl Queue {
     ///
     /// Same bytes already resident (a shim resent during the window) win, and
     /// the returning copy is dropped, so no key is ever counted twice.
-    pub fn requeue(&self, entries: Vec<Entry>) -> usize {
+    pub fn requeue(
+        &self,
+        entries: Vec<Entry>,
+        tip: u32,
+        flush_interval: u32,
+        mining_margin: u32,
+    ) -> Requeued {
         let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(poison) => poison.into_inner(),
         };
 
-        let mut reinserted = 0;
-        for entry in entries {
+        let mut out = Requeued::default();
+        for mut entry in entries {
             if inner.entries.contains_key(&entry.key) {
                 continue;
             }
+
+            entry.attempts = entry.attempts.saturating_add(1);
+
+            // Bounded, and this bound is what makes biasing every ambiguous
+            // publish failure toward "retry" safe rather than reckless. Without
+            // it, "retry" means "forever": a transaction the network will never
+            // accept would be re-offered at every flush for the life of the
+            // process, and each re-offer is another emission on a throttled lane
+            // and another timing signal about one transaction.
+            //
+            // Expiry is the real bound. The attempt count catches only what
+            // expiry cannot -- a payload that does not parse has no expiry.
+            if !survives_next_flush(entry.expiry, tip, flush_interval, mining_margin) {
+                out.dropped_expired += 1;
+                continue;
+            }
+            if entry.attempts > MAX_REQUEUE_ATTEMPTS {
+                out.dropped_exhausted += 1;
+                continue;
+            }
+
             inner.bytes = inner.bytes.saturating_add(entry.tx_bytes.len());
             inner.entries.insert(entry.key, entry);
-            reinserted += 1;
+            out.held += 1;
         }
-        reinserted
+        out
     }
 
     /// Number of entries currently held. For the hub operator's own metrics
@@ -746,7 +806,7 @@ mod tests {
         let batch = q.drain_shuffled();
         assert!(q.is_empty());
 
-        assert_eq!(q.requeue(batch), 3);
+        assert_eq!(q.requeue(batch, 100, N, MARGIN).held, 3);
         assert_eq!(q.len(), 3);
         assert_eq!(
             q.admit(&junk(4), 100, N, MARGIN),
@@ -770,7 +830,7 @@ mod tests {
         let _ = q.admit(&junk(1), 100, N, MARGIN);
         let batch = q.drain_shuffled();
         let _ = q.admit(&junk(1), 100, N, MARGIN);
-        assert_eq!(q.requeue(batch), 0);
+        assert_eq!(q.requeue(batch, 100, N, MARGIN).held, 0);
         assert_eq!(q.len(), 1);
         // 64 held, so two more 64-byte entries fit under 200 and a third does not.
         let _ = q.admit(&junk(2), 100, N, MARGIN);
@@ -790,7 +850,7 @@ mod tests {
         let _ = q.admit(&junk(3), 100, N, MARGIN);
         let _ = q.admit(&junk(4), 100, N, MARGIN);
         let _ = q.admit(&junk(5), 100, N, MARGIN);
-        assert_eq!(q.requeue(batch), 2);
+        assert_eq!(q.requeue(batch, 100, N, MARGIN).held, 2);
         assert_eq!(
             q.len(),
             5,
@@ -953,9 +1013,96 @@ mod tests {
 
         q.begin_draining();
         assert_eq!(
-            q.requeue(batch),
+            q.requeue(batch, 100, N, MARGIN).held,
             1,
             "a drain closes the door to NEW work, not to work already promised"
+        );
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn a_requeue_gives_up_on_an_entry_that_can_no_longer_be_mined() {
+        // The bound that makes "retry anything ambiguous" safe rather than
+        // reckless. `chain::classify_publish_error` deliberately treats an
+        // unrecognised node error as retryable, because dropping a recoverable
+        // migration is unrecoverable while retrying a doomed one is cheap. That
+        // is only true if the retrying STOPS.
+        // Built directly rather than admitted, because every committed fixture
+        // has `nExpiryHeight == 0` -- no expiry at all -- and admitting one would
+        // make this test pass without exercising the branch it is named for.
+        let q = Queue::new();
+        let entry = Entry {
+            key: [0xA1; 32],
+            txid: Some("a1".repeat(32)),
+            expiry: Some(150),
+            tx_bytes: Zeroizing::new(vec![7u8; 64]),
+            attempts: 0,
+            received_height: 100,
+        };
+
+        // Tip 200 is past the entry's expiry of 150, so no future flush can
+        // publish it.
+        let outcome = q.requeue(vec![entry], 200, N, MARGIN);
+        assert_eq!(
+            outcome,
+            Requeued {
+                held: 0,
+                dropped_expired: 1,
+                dropped_exhausted: 0
+            },
+            "an entry that cannot survive its next flush is given up on, not held"
+        );
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_payload_with_no_expiry_is_bounded_by_attempts_instead() {
+        // The case expiry cannot bound at all. A payload that does not
+        // deserialize has no expiry -- correctly, since "no expiry" means "never
+        // expires" -- so nothing about the chain will ever retire it. Without a
+        // count it would be re-offered to the network for the life of the
+        // process, and every re-offer is another emission on a throttled lane
+        // and another timing signal about one transaction.
+        let q = Queue::new();
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+
+        // Round-trip it through drain/requeue until the attempts run out. Each
+        // pass is one flush that failed to place it.
+        let mut last = Requeued::default();
+        for _ in 0..MAX_REQUEUE_ATTEMPTS + 1 {
+            let batch = q.drain_shuffled();
+            assert_eq!(batch.len(), 1);
+            last = q.requeue(batch, 100, N, MARGIN);
+        }
+
+        assert_eq!(
+            last,
+            Requeued {
+                held: 0,
+                dropped_expired: 0,
+                dropped_exhausted: 1
+            },
+            "a no-expiry payload must still stop being retried"
+        );
+        assert!(q.is_empty(), "and it must actually be gone");
+    }
+
+    #[test]
+    fn a_requeue_within_its_budget_is_still_held() {
+        // The other side of the bound: the common case is an indexer that was
+        // briefly unreachable, and that entry must survive to the next flush.
+        let q = Queue::new();
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+
+        let outcome = q.requeue(batch, 100, N, MARGIN);
+        assert_eq!(
+            outcome,
+            Requeued {
+                held: 1,
+                dropped_expired: 0,
+                dropped_exhausted: 0
+            }
         );
         assert_eq!(q.len(), 1);
     }

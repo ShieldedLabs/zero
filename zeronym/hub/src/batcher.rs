@@ -304,7 +304,7 @@ async fn run_with_poll_interval(
                 // off-cadence.
                 None => last_flush_epoch = Some(epoch),
                 Some(previous) if epoch > previous => {
-                    flush(&queue, &chain).await;
+                    flush(&queue, &chain, &tip, params).await;
                     last_flush_epoch = Some(epoch);
                 }
                 _ => {}
@@ -315,7 +315,7 @@ async fn run_with_poll_interval(
     }
 
     tracing::info!("cadence shutting down; publishing what is held rather than dropping it");
-    flush(&queue, &chain).await;
+    flush(&queue, &chain, &tip, params).await;
 
     // What the shutdown flush could not place is still in the queue, and the
     // queue is about to die with the process. The enclave is diskless by
@@ -338,7 +338,12 @@ async fn run_with_poll_interval(
 /// gone. Public so the cadence is not the only thing that can exercise it: a
 /// flush is the security-critical operation here and it must be testable
 /// directly.
-pub async fn flush(queue: &Arc<Queue>, chain: &Arc<ChainClient>) -> usize {
+pub async fn flush(
+    queue: &Arc<Queue>,
+    chain: &Arc<ChainClient>,
+    tip: &Arc<TipTracker>,
+    params: BatchParams,
+) -> usize {
     let batch = queue.drain_shuffled();
     let size = batch.len();
 
@@ -387,7 +392,17 @@ pub async fn flush(queue: &Arc<Queue>, chain: &Arc<ChainClient>) -> usize {
     // indexer answers again a stale one gets the node's verdict and leaves. A
     // Rejected verdict is not put back: the node said no, and re-offering the
     // same bytes buys the same answer every flush until expiry.
-    let requeued = queue.requeue(unplaced);
+    //
+    // `observed_height`, the same tip admission uses, so an entry is judged
+    // against the same clock on the way back in as on the way in. Using the
+    // cadence height here would test it against a different notion of "now" and
+    // could hold an entry admission would already have refused.
+    let requeued = queue.requeue(
+        unplaced,
+        tip.observed_height(),
+        params.flush_interval,
+        params.mining_margin,
+    );
 
     // Aggregates only. Never a txid, never a body, never a per-entry
     // identifier: in a Nitro enclave the tracing output reaches the parent host,
@@ -397,15 +412,29 @@ pub async fn flush(queue: &Arc<Queue>, chain: &Arc<ChainClient>) -> usize {
         flush_size = size,
         achieved_batch_size = achieved,
         rejected,
-        requeued,
+        requeued = requeued.held,
+        dropped_expired = requeued.dropped_expired,
+        dropped_exhausted = requeued.dropped_exhausted,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "flush published"
     );
-    if requeued > 0 {
+    if requeued.held > 0 {
         tracing::warn!(
-            requeued,
+            requeued = requeued.held,
             reason = sample_failure.as_deref().unwrap_or("no verdict"),
             "indexer could not be reached for part of the batch; held for the next flush"
+        );
+    }
+    // Louder than the requeue, because this is where a migration stops existing.
+    // A wallet was told these were on their way and nothing else holds a copy,
+    // so a non-zero count here is the signal that someone has lost a migration,
+    // not routine housekeeping.
+    if requeued.dropped_expired > 0 || requeued.dropped_exhausted > 0 {
+        tracing::error!(
+            dropped_expired = requeued.dropped_expired,
+            dropped_exhausted = requeued.dropped_exhausted,
+            reason = sample_failure.as_deref().unwrap_or("no verdict"),
+            "gave up on migrations that could not be placed; they exist nowhere else"
         );
     }
 
@@ -560,6 +589,15 @@ mod tests {
     /// and is admissible at any tip.
     fn junk(seed: u8) -> Vec<u8> {
         vec![seed; 64]
+    }
+
+    /// A tip tracker parked at [`TIP`], which is the height `queue_holding`
+    /// admits against. `flush` needs one because the requeue is bounded by the
+    /// same expiry test admission uses.
+    fn test_tip() -> Arc<TipTracker> {
+        let tip = Arc::new(TipTracker::new());
+        tip.observe(TIP);
+        tip
     }
 
     /// How the mock answers one `SendTransaction`.
@@ -724,7 +762,10 @@ mod tests {
         let queue = queue_holding(&[junk(1), junk(2)]);
 
         let dead = client(unreachable_addr().await);
-        assert_eq!(flush(&queue, &dead).await, 0);
+        assert_eq!(
+            flush(&queue, &dead, &test_tip(), BatchParams::default()).await,
+            0
+        );
         assert_eq!(
             queue.len(),
             2,
@@ -734,7 +775,7 @@ mod tests {
         let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
         let live = client(mock.addr);
         assert_eq!(
-            flush(&queue, &live).await,
+            flush(&queue, &live, &test_tip(), BatchParams::default()).await,
             2,
             "the held entries are the next batch"
         );
@@ -757,9 +798,15 @@ mod tests {
         let chain = client(mock.addr);
         let queue = queue_holding(&[junk(1)]);
 
-        assert_eq!(flush(&queue, &chain).await, 0);
+        assert_eq!(
+            flush(&queue, &chain, &test_tip(), BatchParams::default()).await,
+            0
+        );
         assert!(queue.is_empty(), "a rejected transaction is not held");
-        assert_eq!(flush(&queue, &chain).await, 0);
+        assert_eq!(
+            flush(&queue, &chain, &test_tip(), BatchParams::default()).await,
+            0
+        );
         assert_eq!(
             mock.sent.lock().unwrap().len(),
             1,
@@ -773,11 +820,29 @@ mod tests {
         // the split is by status code and this pins where it falls.
         let unavailable = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
         let queue = queue_holding(&[junk(1)]);
-        assert_eq!(flush(&queue, &client(unavailable.addr)).await, 0);
+        assert_eq!(
+            flush(
+                &queue,
+                &client(unavailable.addr),
+                &test_tip(),
+                BatchParams::default()
+            )
+            .await,
+            0
+        );
         assert_eq!(queue.len(), 1, "UNAVAILABLE is no verdict; hold it");
 
         let refusing = spawn_mock_indexer(vec![Answer::Status("3")], Duration::ZERO).await;
-        assert_eq!(flush(&queue, &client(refusing.addr)).await, 0);
+        assert_eq!(
+            flush(
+                &queue,
+                &client(refusing.addr),
+                &test_tip(),
+                BatchParams::default()
+            )
+            .await,
+            0
+        );
         assert!(
             queue.is_empty(),
             "INVALID_ARGUMENT is the indexer refusing it"
@@ -794,7 +859,10 @@ mod tests {
         let chain =
             Arc::new(ChainClient::new(vec![mock.addr, unreachable_addr().await], None).unwrap());
         let queue = queue_holding(&[junk(1), junk(2)]);
-        assert_eq!(flush(&queue, &chain).await, 2);
+        assert_eq!(
+            flush(&queue, &chain, &test_tip(), BatchParams::default()).await,
+            2
+        );
         assert!(queue.is_empty());
     }
 

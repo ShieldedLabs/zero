@@ -39,13 +39,17 @@ struct Harness {
     addr: String,
     queue: Arc<Queue>,
     chain: Arc<ChainClient>,
+    /// `flush` needs it: the requeue is bounded by the same expiry test
+    /// admission uses, so an entry has to be judged against the same tip on the
+    /// way back in as on the way in.
+    tip: Arc<TipTracker>,
 }
 
 impl Harness {
     /// Publish everything held, exactly as the cadence would at a flush
     /// boundary. Returns the achieved batch size.
     async fn flush(&self) -> usize {
-        batcher::flush(&self.queue, &self.chain).await
+        batcher::flush(&self.queue, &self.chain, &self.tip, BatchParams::default()).await
     }
 }
 
@@ -64,7 +68,7 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
         listener,
         Hub {
             queue: queue.clone(),
-            tip,
+            tip: tip.clone(),
             params: BatchParams::default(),
             chain: chain.clone(),
         },
@@ -81,6 +85,7 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
         addr: addr.to_string(),
         queue,
         chain,
+        tip,
     }
 }
 
