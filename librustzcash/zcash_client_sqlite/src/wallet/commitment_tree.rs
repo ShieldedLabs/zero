@@ -28,19 +28,18 @@ use zcash_protocol::{ShieldedPool, consensus::BlockHeight};
 use crate::{error::SqliteClientError, sapling_tree};
 
 #[cfg(feature = "orchard")]
-use incrementalmerkletree::Marking;
-#[cfg(feature = "orchard")]
-use shardtree::{ShardTree, store::memory::MemoryShardStore};
-#[cfg(feature = "orchard")]
-use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
-
-#[cfg(feature = "orchard")]
-use crate::{ORCHARD_TABLES_PREFIX, orchard_tree};
+use {
+    crate::{IRONWOOD_TABLES_PREFIX, ORCHARD_TABLES_PREFIX, ironwood_tree, orchard_tree},
+    incrementalmerkletree::Marking,
+    shardtree::{ShardTree, store::memory::MemoryShardStore},
+    zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT,
+};
 
 use super::common::{TableConstants, table_constants};
 
 /// Errors that can appear in SQLite-back [`ShardStore`] implementation operations.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Errors in deserializing stored shard data
     Serialization(io::Error),
@@ -409,6 +408,30 @@ impl<H: HashSer, const SHARD_HEIGHT: u8> ShardStore
     }
 }
 
+/// Returns the stored root hash of the completed subtree with the given index, as most
+/// recently written by [`put_shard_roots`] or recorded by [`put_shard`], or `Ok(None)` if
+/// no row exists for the subtree or its `root_hash` is unknown.
+pub(crate) fn get_subtree_root<H: HashSer>(
+    conn: &rusqlite::Connection,
+    table_prefix: &'static str,
+    index: u64,
+) -> Result<Option<H>, Error> {
+    conn.query_row(
+        &format!(
+            "SELECT root_hash
+             FROM {table_prefix}_tree_shards
+             WHERE shard_index = :shard_index"
+        ),
+        named_params![":shard_index": index],
+        |row| row.get::<_, Option<Vec<u8>>>(0),
+    )
+    .optional()
+    .map_err(Error::Query)?
+    .flatten()
+    .map(|bytes| H::read(Cursor::new(bytes)).map_err(Error::Serialization))
+    .transpose()
+}
+
 pub(crate) fn get_shard<H: HashSer>(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
@@ -689,6 +712,85 @@ pub(crate) fn min_checkpoint_id_at_or_above(
         },
     )
     .map_err(Error::Query)
+}
+
+/// Resets the note commitment tree with the given table prefix to contain only the roots of
+/// subtrees completed at or below `truncation_height`, discarding all of its other state:
+/// scanned shard contents, the cap, and all checkpoints.
+///
+/// This is the truncation outcome for a tree whose retained checkpoints all lie above the
+/// truncation height: no checkpoint exists at or below that height for
+/// `ShardTree::truncate_to_checkpoint` to target, so the tree's scanned contents postdate the
+/// truncation point and must be discarded; the rescan of heights above that point re-creates
+/// them. The roots of subtrees completed at or below the truncation height remain facts
+/// about the retained portion of the chain, however, so they are preserved (in the form
+/// fast sync would deliver them, via [`put_shard_roots`]); discarding them would leave the
+/// wallet unable to construct witnesses spanning those subtrees until they had been
+/// re-downloaded.
+pub(crate) fn truncate_tree_to_subtree_roots<
+    H: Hashable + HashSer + Clone + Eq,
+    const DEPTH: u8,
+    const SHARD_HEIGHT: u8,
+>(
+    conn: &rusqlite::Transaction<'_>,
+    table_prefix: &'static str,
+    truncation_height: BlockHeight,
+) -> Result<(), ShardTreeError<Error>> {
+    // Collect the roots of subtrees completed at or below the truncation height. Subtree end
+    // heights increase with shard index, so these form a prefix of the shard sequence;
+    // re-insertion via `put_shard_roots` requires contiguity from index zero, so collection
+    // stops at the first shard for which no completed root is recorded.
+    let roots = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT shard_index, subtree_end_height, root_hash
+                 FROM {table_prefix}_tree_shards
+                 WHERE subtree_end_height IS NOT NULL
+                 AND subtree_end_height <= :truncation_height
+                 AND root_hash IS NOT NULL
+                 ORDER BY shard_index"
+            ))
+            .map_err(|e| ShardTreeError::Storage(Error::Query(e)))?;
+
+        let rows = stmt
+            .query_map(
+                named_params![":truncation_height": u32::from(truncation_height)],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|e| ShardTreeError::Storage(Error::Query(e)))?;
+
+        let mut roots = vec![];
+        for row in rows {
+            let (shard_index, subtree_end_height, root_hash) =
+                row.map_err(|e| ShardTreeError::Storage(Error::Query(e)))?;
+            if shard_index != u64::try_from(roots.len()).expect("vec length fits in u64") {
+                break;
+            }
+            let root = H::read(Cursor::new(root_hash))
+                .map_err(|e| ShardTreeError::Storage(Error::Serialization(e)))?;
+            roots.push(CommitmentTreeRoot::from_parts(
+                BlockHeight::from(subtree_end_height),
+                root,
+            ));
+        }
+        roots
+    };
+
+    conn.execute_batch(&format!(
+        "DELETE FROM {table_prefix}_tree_checkpoint_marks_removed;
+         DELETE FROM {table_prefix}_tree_checkpoints;
+         DELETE FROM {table_prefix}_tree_shards;
+         DELETE FROM {table_prefix}_tree_cap;"
+    ))
+    .map_err(|e| ShardTreeError::Storage(Error::Query(e)))?;
+
+    put_shard_roots::<H, DEPTH, SHARD_HEIGHT>(conn, table_prefix, 0, &roots)
 }
 
 pub(crate) fn add_checkpoint(
@@ -1276,6 +1378,31 @@ pub(crate) fn check_witnesses(
             let range = super::get_block_range(conn, ShieldedPool::Orchard, addr)?;
             scan_ranges.extend(range);
         }
+
+        let unspent_ironwood_note_meta = super::common::select_unspent_note_meta(
+            conn,
+            ShieldedPool::Ironwood,
+            wallet_birthday,
+            anchor_height,
+        )?;
+        let mut ironwood_incomplete = vec![];
+        let ironwood_tree = ironwood_tree(conn)?;
+        for m in unspent_ironwood_note_meta.iter() {
+            match ironwood_tree.witness_at_checkpoint_depth(m.commitment_tree_position(), 0) {
+                Ok(_) => {}
+                Err(ShardTreeError::Query(QueryError::TreeIncomplete(mut addrs))) => {
+                    ironwood_incomplete.append(&mut addrs);
+                }
+                Err(other) => {
+                    return Err(SqliteClientError::CommitmentTree(other));
+                }
+            }
+        }
+
+        for addr in ironwood_incomplete {
+            let range = super::get_block_range(conn, ShieldedPool::Ironwood, addr)?;
+            scan_ranges.extend(range);
+        }
     }
 
     Ok(scan_ranges)
@@ -1336,23 +1463,80 @@ pub(crate) fn generate_orchard_witnesses_at_historical_height(
     >,
     SqliteClientError,
 > {
+    generate_orchard_like_witnesses_at_historical_height(
+        conn,
+        ORCHARD_TABLES_PREFIX,
+        note_positions,
+        frontier_at_height,
+        height,
+    )
+}
+
+/// Generates Ironwood Merkle witnesses at a historical height.
+///
+/// This is identical to [`generate_orchard_witnesses_at_historical_height`],
+/// except that it reconstructs witness paths from the Ironwood shard tables.
+#[cfg(feature = "orchard")]
+pub(crate) fn generate_ironwood_witnesses_at_historical_height(
+    conn: &rusqlite::Connection,
+    note_positions: &[Position],
+    frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+        orchard::tree::MerkleHashOrchard,
+    >,
+    height: BlockHeight,
+) -> Result<
+    Vec<
+        incrementalmerkletree::MerklePath<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >,
+    >,
+    SqliteClientError,
+> {
+    generate_orchard_like_witnesses_at_historical_height(
+        conn,
+        IRONWOOD_TABLES_PREFIX,
+        note_positions,
+        frontier_at_height,
+        height,
+    )
+}
+
+#[cfg(feature = "orchard")]
+fn generate_orchard_like_witnesses_at_historical_height(
+    conn: &rusqlite::Connection,
+    table_prefix: &'static str,
+    note_positions: &[Position],
+    frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+        orchard::tree::MerkleHashOrchard,
+    >,
+    height: BlockHeight,
+) -> Result<
+    Vec<
+        incrementalmerkletree::MerklePath<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >,
+    >,
+    SqliteClientError,
+> {
     // `get_shard_roots` returns addresses ordered by shard index, matching the
     // ascending insertion order required by `MemoryShardStore::put_shard`.
     // Storage errors flow through `From<ShardTreeError<commitment_tree::Error>>`
     // into `SqliteClientError::CommitmentTree`.
     let mut store = MemoryShardStore::<orchard::tree::MerkleHashOrchard, BlockHeight>::empty();
     let shard_root_level = Level::new(ORCHARD_SHARD_HEIGHT);
-    let shard_roots = get_shard_roots(conn, ORCHARD_TABLES_PREFIX, shard_root_level)
-        .map_err(ShardTreeError::Storage)?;
+    let shard_roots =
+        get_shard_roots(conn, table_prefix, shard_root_level).map_err(ShardTreeError::Storage)?;
     for shard_root in shard_roots {
         if let Some(shard) =
-            get_shard::<orchard::tree::MerkleHashOrchard>(conn, ORCHARD_TABLES_PREFIX, shard_root)
+            get_shard::<orchard::tree::MerkleHashOrchard>(conn, table_prefix, shard_root)
                 .map_err(ShardTreeError::Storage)?
         {
             store.put_shard(shard).expect("put_shard is infallible");
         }
     }
-    let cap = get_cap::<orchard::tree::MerkleHashOrchard>(conn, ORCHARD_TABLES_PREFIX)
+    let cap = get_cap::<orchard::tree::MerkleHashOrchard>(conn, table_prefix)
         .map_err(ShardTreeError::Storage)?;
     store.put_cap(cap).expect("put_cap is infallible");
 
@@ -1441,8 +1625,9 @@ mod tests {
         check_append, check_checkpoint_rewind, check_remove_mark, check_rewind_remove_mark,
         check_root_hashes, check_witness_consistency, check_witnesses,
     };
-    use shardtree::ShardTree;
+    use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
     use zcash_client_backend::data_api::{
+        WalletCommitmentTrees,
         chain::CommitmentTreeRoot,
         testing::{pool::ShieldedPoolTester, sapling::SaplingPoolTester},
     };
@@ -1456,6 +1641,14 @@ mod tests {
             pool::ShieldedPoolPersistence,
         },
         wallet::init::WalletMigrator,
+    };
+    // Used only by the orchard-gated `HistoricalWitnessGenerator` type alias below.
+    use std::collections::BTreeSet;
+    #[cfg(feature = "orchard")]
+    use {
+        crate::error::SqliteClientError, ::orchard::tree::MerkleHashOrchard,
+        incrementalmerkletree::frontier::Frontier, rand::SeedableRng, rand_chacha::ChaChaRng,
+        zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT,
     };
 
     fn new_tree<T: ShieldedPoolTester + ShieldedPoolPersistence>(
@@ -1481,9 +1674,6 @@ mod tests {
     fn check_retained_checkpoints(
         mut tree: ShardTree<SqliteShardStore<rusqlite::Connection, String, 3>, 4, 3>,
     ) {
-        use shardtree::store::ShardStore;
-        use std::collections::BTreeSet;
-
         let h1 = BlockHeight::from(100);
         let h2 = BlockHeight::from(200);
 
@@ -1551,6 +1741,11 @@ mod tests {
         }
 
         #[test]
+        fn ironwood_witnesses_at_historical_height() {
+            super::ironwood_witnesses_at_historical_height()
+        }
+
+        #[test]
         fn witnesses_at_historical_height_with_many_wallet_checkpoints() {
             super::witnesses_at_historical_height_with_many_wallet_checkpoints()
         }
@@ -1578,11 +1773,6 @@ mod tests {
 
     #[test]
     fn remove_retained_checkpoints_below() {
-        use std::collections::BTreeSet;
-
-        use shardtree::{error::ShardTreeError, store::ShardStore};
-        use zcash_client_backend::data_api::WalletCommitmentTrees;
-
         let data_file = NamedTempFile::new().unwrap();
         let mut db = WalletDb::for_path(
             data_file.path(),
@@ -1601,6 +1791,25 @@ mod tests {
         })
         .unwrap();
 
+        #[cfg(feature = "orchard")]
+        {
+            db.with_orchard_tree_mut(|tree| {
+                for h in [100u32, 200, 300] {
+                    tree.ensure_retained(BlockHeight::from(h))?;
+                }
+                Ok::<_, ShardTreeError<_>>(())
+            })
+            .unwrap();
+
+            db.with_ironwood_tree_mut(|tree| {
+                for h in [100u32, 200, 300] {
+                    tree.ensure_retained(BlockHeight::from(h))?;
+                }
+                Ok::<_, ShardTreeError<_>>(())
+            })
+            .unwrap();
+        }
+
         db.remove_retained_checkpoints_below(BlockHeight::from(250))
             .unwrap();
 
@@ -1612,6 +1821,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining, BTreeSet::from([BlockHeight::from(300)]));
+
+        // The retained checkpoints must be pruned in the Orchard and Ironwood trees as well, not
+        // just Sapling.
+        #[cfg(feature = "orchard")]
+        {
+            let orchard_remaining = db
+                .with_orchard_tree_mut(|tree| {
+                    tree.store()
+                        .retained_checkpoints()
+                        .map_err(ShardTreeError::Storage)
+                })
+                .unwrap();
+            assert_eq!(orchard_remaining, BTreeSet::from([BlockHeight::from(300)]));
+
+            let ironwood_remaining = db
+                .with_ironwood_tree_mut(|tree| {
+                    tree.store()
+                        .retained_checkpoints()
+                        .map_err(ShardTreeError::Storage)
+                })
+                .unwrap()
+                .expect("the wallet tracks an Ironwood tree");
+            assert_eq!(
+                ironwood_remaining,
+                BTreeSet::from([BlockHeight::from(300)]),
+                "retained Ironwood checkpoints below the max height must be released",
+            );
+        }
     }
 
     #[test]
@@ -1724,12 +1961,45 @@ mod tests {
     /// witnesses when given a frontier extracted from an earlier tree state.
     #[cfg(feature = "orchard")]
     fn witnesses_at_historical_height() {
-        use ::orchard::tree::MerkleHashOrchard;
-        use incrementalmerkletree::frontier::Frontier;
-        use rand::SeedableRng;
-        use rand_chacha::ChaChaRng;
-        use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
+        witnesses_at_historical_height_for_table(
+            crate::ORCHARD_TABLES_PREFIX,
+            super::generate_orchard_witnesses_at_historical_height,
+        )
+    }
 
+    /// Test that `generate_ironwood_witnesses_at_historical_height` uses the
+    /// Ironwood shard tables rather than the Orchard shard tables.
+    #[cfg(feature = "orchard")]
+    fn ironwood_witnesses_at_historical_height() {
+        witnesses_at_historical_height_for_table(
+            crate::IRONWOOD_TABLES_PREFIX,
+            super::generate_ironwood_witnesses_at_historical_height,
+        )
+    }
+
+    #[cfg(feature = "orchard")]
+    type OrchardFrontier =
+        incrementalmerkletree::frontier::NonEmptyFrontier<::orchard::tree::MerkleHashOrchard>;
+
+    #[cfg(feature = "orchard")]
+    type OrchardMerklePath = incrementalmerkletree::MerklePath<
+        ::orchard::tree::MerkleHashOrchard,
+        { ::orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+    >;
+
+    #[cfg(feature = "orchard")]
+    type HistoricalWitnessGenerator = fn(
+        &rusqlite::Connection,
+        &[Position],
+        OrchardFrontier,
+        BlockHeight,
+    ) -> Result<Vec<OrchardMerklePath>, SqliteClientError>;
+
+    #[cfg(feature = "orchard")]
+    fn witnesses_at_historical_height_for_table(
+        table_prefix: &'static str,
+        generate_witnesses: HistoricalWitnessGenerator,
+    ) {
         let data_file = NamedTempFile::new().unwrap();
         let mut db_data = WalletDb::for_path(
             data_file.path(),
@@ -1755,7 +2025,8 @@ mod tests {
             let tx = db_data.conn.transaction().unwrap();
             let store =
                 SqliteShardStore::<_, MerkleHashOrchard, ORCHARD_SHARD_HEIGHT>::from_connection(
-                    &tx, "orchard",
+                    &tx,
+                    table_prefix,
                 )
                 .unwrap();
             let mut tree = ShardTree::<
@@ -1795,13 +2066,9 @@ mod tests {
         let expected_root = frontier_tree.root();
         let frontier = frontier_tree.take().expect("frontier is non-empty");
 
-        let witnesses = super::generate_orchard_witnesses_at_historical_height(
-            &db_data.conn,
-            &[note_position],
-            frontier,
-            historical_height,
-        )
-        .expect("witness generation should succeed");
+        let witnesses =
+            generate_witnesses(&db_data.conn, &[note_position], frontier, historical_height)
+                .expect("witness generation should succeed");
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(witnesses[0].root(note_leaf), expected_root);
@@ -1845,12 +2112,6 @@ mod tests {
     /// `SqliteClientError::HistoricalWitnessUnavailable`.
     #[cfg(feature = "orchard")]
     fn witnesses_at_historical_height_with_many_wallet_checkpoints() {
-        use ::orchard::tree::MerkleHashOrchard;
-        use incrementalmerkletree::frontier::Frontier;
-        use rand::SeedableRng;
-        use rand_chacha::ChaChaRng;
-        use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
-
         // Wallet tree capacity << number of blocks we sync, so the historical
         // checkpoint is forcibly pruned from the wallet's own ShardTree before
         // we attempt to generate a witness at that height.

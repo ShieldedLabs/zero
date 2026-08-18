@@ -1,12 +1,18 @@
 use core::cmp::{Ordering, max, min};
 use std::num::{NonZeroU64, NonZeroUsize};
 
+#[cfg(feature = "orchard")]
+use zcash_primitives::transaction::builder::BundlePadding;
 use zcash_primitives::transaction::fees::{
     FeeRule, transparent, zip317::MINIMUM_FEE, zip317::P2PKH_STANDARD_OUTPUT_SIZE,
 };
+#[cfg(feature = "orchard")]
+use zcash_protocol::zip318::PoolMigrationConstants;
+
+use crate::data_api::anchor_retention::PoolMigrationParams;
 use zcash_protocol::{
-    ShieldedPool,
-    consensus::{self, BlockHeight},
+    PoolType, ShieldedPool,
+    consensus::{self, BlockHeight, NetworkUpgrade},
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
 };
@@ -14,12 +20,14 @@ use zcash_protocol::{
 use crate::data_api::{AccountMeta, wallet::TargetHeight};
 
 use super::{
-    ChangeError, ChangeValue, DustAction, DustOutputPolicy, EphemeralBalance, SplitPolicy,
-    TransactionBalance, sapling as sapling_fees,
+    ChangeError, ChangeValue, DummyOutputCounts, DustAction, DustOutputPolicy, EphemeralBalance,
+    SplitPolicy, TransactionBalance, sapling as sapling_fees,
 };
 
+#[cfg(feature = "transparent-inputs")]
+use super::TransparentChangePolicy;
 #[cfg(feature = "orchard")]
-use super::orchard as orchard_fees;
+use super::orchard::{self as orchard_fees, OutputView as _};
 
 pub(crate) struct NetFlows {
     t_in: Zatoshis,
@@ -149,23 +157,54 @@ where
 }
 
 /// Decide which shielded pool change should go to if there is any.
+///
+/// `max_change_value` is an upper bound on the value of the change the transaction will
+/// produce: the value that would remain if it paid only the minimum (changeless) fee.
+/// After Ironwood activation it determines whether change may be returned to the Orchard
+/// pool without violating the turnstile requirement that the pool's balance strictly
+/// decrease.
 pub(crate) fn select_change_pool(
     _net_flows: &NetFlows,
     _fallback_change_pool: ShieldedPool,
+    _ironwood_active: bool,
+    _max_change_value: Zatoshis,
 ) -> ShieldedPool {
     // TODO: implement a less naive strategy for selecting the pool to which change will be sent.
     #[cfg(feature = "orchard")]
-    if _net_flows.orchard_in.is_positive() || _net_flows.orchard_out.is_positive() {
-        // Send change to Orchard if we're spending any Orchard inputs or creating any Orchard outputs.
-        ShieldedPool::Orchard
-    } else if _net_flows.sapling_in.is_positive() || _net_flows.sapling_out.is_positive() {
-        // Otherwise, send change to Sapling if we're spending any Sapling inputs or creating any
-        // Sapling outputs, so that we avoid pool-crossing.
-        ShieldedPool::Sapling
-    } else {
-        // The flows are transparent, so there may not be change. If there is, the caller
-        // gets to decide where to shield it.
-        _fallback_change_pool
+    {
+        let preferred = if _net_flows.orchard_in.is_positive()
+            || _net_flows.orchard_out.is_positive()
+        {
+            // Send change to Orchard if we're spending any Orchard inputs or creating any Orchard outputs.
+            ShieldedPool::Orchard
+        } else if _net_flows.ironwood_in.is_positive() || _net_flows.ironwood_out.is_positive() {
+            // Send change to Ironwood if we're spending Ironwood inputs or creating Ironwood outputs
+            // (and no Orchard flows), so that change from an Ironwood spend stays in the Ironwood pool
+            // rather than crossing the turnstile back into Orchard.
+            ShieldedPool::Ironwood
+        } else if _net_flows.sapling_in.is_positive() || _net_flows.sapling_out.is_positive() {
+            // Otherwise, send change to Sapling if we're spending any Sapling inputs or creating any
+            // Sapling outputs, so that we avoid pool-crossing.
+            ShieldedPool::Sapling
+        } else {
+            // The flows are transparent, so there may not be change. If there is, the caller
+            // gets to decide where to shield it.
+            _fallback_change_pool
+        };
+
+        // After Ironwood activation, the turnstile forbids value from entering the
+        // Orchard pool: change may return to Orchard only when the transaction spends
+        // Orchard notes, and only if strictly less value returns to the pool than the
+        // notes remove from it. Change that cannot go to Orchard flows onward to the
+        // Ironwood pool.
+        if _ironwood_active
+            && preferred == ShieldedPool::Orchard
+            && (!_net_flows.orchard_in.is_positive() || _max_change_value >= _net_flows.orchard_in)
+        {
+            ShieldedPool::Ironwood
+        } else {
+            preferred
+        }
     }
     #[cfg(not(feature = "orchard"))]
     ShieldedPool::Sapling
@@ -176,6 +215,7 @@ pub(crate) struct OutputManifest {
     transparent: usize,
     sapling: usize,
     orchard: usize,
+    ironwood: usize,
 }
 
 impl OutputManifest {
@@ -183,6 +223,7 @@ impl OutputManifest {
         transparent: 0,
         sapling: 0,
         orchard: 0,
+        ironwood: 0,
     };
 
     pub(crate) fn sapling(&self) -> usize {
@@ -193,8 +234,39 @@ impl OutputManifest {
         self.orchard
     }
 
+    pub(crate) fn ironwood(&self) -> usize {
+        self.ironwood
+    }
+
+    #[cfg(feature = "orchard")]
+    pub(crate) fn transparent(&self) -> usize {
+        self.transparent
+    }
+
     pub(crate) fn total_shielded(&self) -> usize {
-        self.sapling + self.orchard
+        self.sapling + self.orchard + self.ironwood
+    }
+
+    /// A manifest placing `count` change outputs in `pool` and none elsewhere.
+    fn for_pool(pool: ShieldedPool, count: usize) -> Self {
+        Self {
+            transparent: 0,
+            sapling: if pool == ShieldedPool::Sapling {
+                count
+            } else {
+                0
+            },
+            orchard: if pool == ShieldedPool::Orchard {
+                count
+            } else {
+                0
+            },
+            ironwood: if pool == ShieldedPool::Ironwood {
+                count
+            } else {
+                0
+            },
+        }
     }
 }
 
@@ -205,6 +277,8 @@ pub(crate) struct SinglePoolBalanceConfig<'a, P, F> {
     default_dust_threshold: Zatoshis,
     split_policy: &'a SplitPolicy,
     fallback_change_pool: ShieldedPool,
+    #[cfg(feature = "transparent-inputs")]
+    transparent_change_policy: TransparentChangePolicy,
     marginal_fee: Zatoshis,
     grace_actions: usize,
 }
@@ -218,6 +292,7 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
         default_dust_threshold: Zatoshis,
         split_policy: &'a SplitPolicy,
         fallback_change_pool: ShieldedPool,
+        #[cfg(feature = "transparent-inputs")] transparent_change_policy: TransparentChangePolicy,
         marginal_fee: Zatoshis,
         grace_actions: usize,
     ) -> Self {
@@ -228,6 +303,8 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
             default_dust_threshold,
             split_policy,
             fallback_change_pool,
+            #[cfg(feature = "transparent-inputs")]
+            transparent_change_policy,
             marginal_fee,
             grace_actions,
         }
@@ -244,11 +321,25 @@ pub(crate) fn single_pool_output_balance<P: consensus::Parameters, NoteRefT: Clo
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] ironwood: &impl orchard_fees::BundleView<NoteRefT>,
-    // Whether Orchard-pool change is routed into the Ironwood bundle (the builder
-    // does this when Ironwood is active). Orchard-pool payment outputs are already
-    // routed into the `ironwood` view by the caller; this carries the same decision
-    // for the change output, which is computed here.
-    #[cfg(feature = "orchard")] orchard_change_to_ironwood: bool,
+    // The transactional bundle padding the transaction builder will use for the Orchard and
+    // Ironwood bundles respectively; the action counts computed here must match them so the
+    // builder's exact-balance check succeeds (see `orchard_fees::transactional_action_count`).
+    //
+    // This is `BundlePadding` rather than `BundleType` deliberately: coinbase construction is a
+    // property of the whole transaction, never of one pool, and a fee is never computed for a
+    // coinbase transaction at all. Carrying padding keeps a per-pool coinbase unrepresentable, as
+    // `BuildConfig::Standard` does for the builder.
+    //
+    // There is no matching Ironwood parameter. That bundle's padding is DERIVED from the
+    // transaction's shape (see `ironwood_is_canonical_crossing` below), not chosen by the caller.
+    #[cfg(feature = "orchard")] orchard_padding: BundlePadding,
+    // The anchor the shielded bundles will be proved against, and the ZIP 318 parameters in force
+    // for the wallet proposing the transaction. A canonical crossing must be anchored to a
+    // boundary of the bucket grid, so the padding decision depends on both. The grid comes from
+    // the wallet rather than the network defaults: the wallet is the side that retains the
+    // checkpoints, so its grid is the only one a crossing can actually be proved against.
+    _anchor_height: BlockHeight,
+    _zip318: &PoolMigrationParams,
     change_memo: Option<&MemoBytes>,
     ephemeral_balance: Option<EphemeralBalance>,
 ) -> Result<TransactionBalance, ChangeError<E, NoteRefT>>
@@ -274,62 +365,18 @@ where
         ephemeral_balance,
     )?;
 
-    let change_pool = select_change_pool(&net_flows, cfg.fallback_change_pool);
-    let target_change_count = wallet_meta.map_or(1, |m| {
-        usize::from(cfg.split_policy.target_output_count)
-            // If we cannot determine a total note count, fall back to a single output
-            .saturating_sub(m.total_note_count().unwrap_or(usize::MAX))
-            .max(1)
-    });
-    let target_change_counts = OutputManifest {
-        transparent: 0,
-        sapling: if change_pool == ShieldedPool::Sapling {
-            target_change_count
-        } else {
-            0
-        },
-        orchard: if change_pool == ShieldedPool::Orchard {
-            target_change_count
-        } else {
-            0
-        },
-    };
-    assert!(target_change_counts.total_shielded() == target_change_count);
-
     // We don't create a fully-transparent transaction if a change memo is used.
     let fully_transparent = net_flows.is_transparent() && change_memo.is_none();
 
-    // If we have a non-zero marginal fee, we need to check for uneconomic inputs.
-    // This is basically assuming that fee rules with non-zero marginal fee are
-    // "ZIP 317-like", but we can generalize later if needed.
-    if cfg.marginal_fee.is_positive() {
-        // Is it certain that there will be a change output? If it is not certain,
-        // we should call `check_for_uneconomic_inputs` with `possible_change`
-        // including both possibilities.
-        let possible_change = {
-            // These are the situations where we might not have a change output.
-            if fully_transparent
-                || (cfg.dust_output_policy.action() == DustAction::AddDustToFee
-                    && change_memo.is_none())
-            {
-                vec![OutputManifest::ZERO, target_change_counts]
-            } else {
-                vec![target_change_counts]
-            }
-        };
-
-        check_for_uneconomic_inputs(
-            transparent_inputs,
-            transparent_outputs,
-            sapling,
-            #[cfg(feature = "orchard")]
-            orchard,
-            cfg.marginal_fee,
-            cfg.grace_actions,
-            &possible_change[..],
-            ephemeral_balance,
-        )?;
-    }
+    // Whether change should be returned to the transparent pool instead of being shielded.
+    // Transparent change is only ever produced when the flows of the transaction are fully
+    // transparent, so that shielded flows never leak change information to the transparent
+    // pool.
+    #[cfg(feature = "transparent-inputs")]
+    let wants_transparent_change = fully_transparent
+        && cfg.transparent_change_policy == TransparentChangePolicy::TransparentChangeAllowed;
+    #[cfg(not(feature = "transparent-inputs"))]
+    let wants_transparent_change = false;
 
     let total_in = net_flows
         .total_in()
@@ -355,6 +402,7 @@ where
     #[cfg(feature = "orchard")]
     let orchard_action_count = |change_count| {
         orchard_fees::transactional_action_count(
+            orchard_padding.bundle_type(),
             orchard.bundle_version(),
             orchard.inputs().len(),
             orchard.outputs().len() + change_count,
@@ -377,34 +425,68 @@ where
     // action floor. Callers route Ironwood inputs/outputs into the `ironwood`
     // view; it is empty (contributing no actions) when nothing targets the
     // Ironwood pool.
+    //
+    // A CANONICAL CROSSING drops the default padding: no Ironwood spends and a single Ironwood
+    // output whose value is a canonical ZIP 318 denomination, which is exactly the shape of a
+    // ZIP 318 migration transfer. Building it unpadded puts an ordinary turnstile-crossing
+    // payment into that anonymity set rather than leaving it distinguishable by action count.
+    // The resulting dummy-output count is recorded below. `Step::ironwood_bundle_padding`
+    // reconstructs the builder's action target from that finished transaction shape.
+    //
+    // The value is only known here when the sole output is a PAYMENT, i.e. `change_count == 0`;
+    // an Ironwood change value is what this function is in the middle of solving for. That costs
+    // nothing: with a change output there are two real Ironwood outputs, so the bundle is at or
+    // above the default floor and the padding is irrelevant.
     #[cfg(feature = "orchard")]
-    let ironwood_action_count = |change_count| {
+    let ironwood_is_canonical_crossing = |change: OutputManifest| {
+        let constants = _zip318;
+        orchard.inputs().len() == 1
+            && ironwood.inputs().is_empty()
+            && change.ironwood() == 0
+            // The Orchard bundle must be exactly two actions, and from NU6.3 a spend and an output
+            // no longer share one; a second Orchard change output would make three. Change in any
+            // other pool adds a bundle no migration transfer carries. `Step::is_canonical_crossing`
+            // applies the identical bounds, and the two must agree or the builder's exact-balance
+            // check rejects the transaction.
+            && change.orchard() <= 1
+            && change.sapling() == 0
+            && change.transparent() == 0
+            && match ironwood.outputs() {
+                [output] => constants.is_canonical_denomination(output.value()),
+                _ => false,
+            }
+            && constants
+                .anchor_bucket_interval()
+                .is_boundary(_anchor_height)
+    };
+    #[cfg(feature = "orchard")]
+    let ironwood_action_count = |change: OutputManifest| {
+        // The Ironwood bundle drops its padding exactly when doing so makes the transaction look
+        // like a migration transfer, and is padded otherwise. This is not the caller's to choose.
+        let padding = if ironwood_is_canonical_crossing(change) {
+            BundlePadding::UNPADDED
+        } else {
+            BundlePadding::DEFAULT
+        };
         orchard_fees::transactional_action_count(
+            padding.bundle_type(),
             ironwood.bundle_version(),
             ironwood.inputs().len(),
-            ironwood.outputs().len() + change_count,
+            ironwood.outputs().len() + change.ironwood(),
         )
         .map_err(ChangeError::BundleError)
     };
     #[cfg(not(feature = "orchard"))]
-    let ironwood_action_count = |change_count: usize| -> Result<usize, ChangeError<E, NoteRefT>> {
-        if change_count != 0 {
-            Err(ChangeError::BundleError(
-                "Nonzero Ironwood change requested but the `orchard` feature is not enabled.",
-            ))
-        } else {
-            Ok(0)
-        }
-    };
-
-    // When Ironwood is active, the builder routes Orchard-pool change into the
-    // Ironwood bundle (Orchard-pool payment outputs are already routed into the
-    // `ironwood` view by the caller). Mirror that here so the change output is
-    // counted in the same bundle the builder will place it in.
-    #[cfg(feature = "orchard")]
-    let route_change_to_ironwood = orchard_change_to_ironwood;
-    #[cfg(not(feature = "orchard"))]
-    let route_change_to_ironwood = false;
+    let ironwood_action_count =
+        |change: OutputManifest| -> Result<usize, ChangeError<E, NoteRefT>> {
+            if change.ironwood() != 0 {
+                Err(ChangeError::BundleError(
+                    "Nonzero Ironwood change requested but the `orchard` feature is not enabled.",
+                ))
+            } else {
+                Ok(0)
+            }
+        };
 
     let transparent_input_sizes = transparent_inputs
         .iter()
@@ -453,11 +535,103 @@ where
             sapling_input_count,
             sapling_output_count(0)?,
             orchard_action_count(0)?,
-            ironwood_action_count(0)?,
+            ironwood_action_count(OutputManifest::ZERO)?,
         )
         .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?;
 
     let total_out_with_min_fee = (subtotal_out + min_fee).ok_or_else(overflow)?;
+
+    // The value that would remain if the transaction paid only the minimum (changeless)
+    // fee is an upper bound on the change value: the fee never falls below `min_fee`.
+    let change_pool = select_change_pool(
+        &net_flows,
+        cfg.fallback_change_pool,
+        cfg.params
+            .is_nu_active(NetworkUpgrade::Nu6_3, target_height.into()),
+        (total_in - total_out_with_min_fee).unwrap_or(Zatoshis::ZERO),
+    );
+
+    let (target_change_count, target_change_counts) = if wants_transparent_change {
+        // Transparent change is always emitted as a single output; the note-splitting policy
+        // exists to improve the spendability of shielded notes and does not apply to
+        // transparent outputs.
+        (
+            1,
+            OutputManifest {
+                transparent: 1,
+                sapling: 0,
+                orchard: 0,
+                ironwood: 0,
+            },
+        )
+    } else {
+        let target_change_count = wallet_meta.map_or(1, |m| {
+            usize::from(cfg.split_policy.target_output_count)
+                // If we cannot determine a total note count, fall back to a single output
+                .saturating_sub(m.total_note_count().unwrap_or(usize::MAX))
+                .max(1)
+        });
+        let target_change_counts = OutputManifest {
+            transparent: 0,
+            sapling: if change_pool == ShieldedPool::Sapling {
+                target_change_count
+            } else {
+                0
+            },
+            orchard: if change_pool == ShieldedPool::Orchard {
+                target_change_count
+            } else {
+                0
+            },
+            ironwood: if change_pool == ShieldedPool::Ironwood {
+                target_change_count
+            } else {
+                0
+            },
+        };
+        assert!(target_change_counts.total_shielded() == target_change_count);
+        (target_change_count, target_change_counts)
+    };
+
+    // If we have a non-zero marginal fee, we need to check for uneconomic inputs.
+    // This is basically assuming that fee rules with non-zero marginal fee are
+    // "ZIP 317-like", but we can generalize later if needed.
+    if cfg.marginal_fee.is_positive() {
+        // Is it certain that there will be a change output? If it is not certain,
+        // we should call `check_for_uneconomic_inputs` with `possible_change`
+        // including both possibilities.
+        let possible_change = {
+            // These are the situations where we might not have a change output.
+            if fully_transparent
+                || (cfg.dust_output_policy.action() == DustAction::AddDustToFee
+                    && change_memo.is_none())
+            {
+                vec![OutputManifest::ZERO, target_change_counts]
+            } else {
+                vec![target_change_counts]
+            }
+        };
+
+        check_for_uneconomic_inputs(
+            transparent_inputs,
+            transparent_outputs,
+            sapling,
+            #[cfg(feature = "orchard")]
+            orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
+            #[cfg(feature = "orchard")]
+            orchard_padding,
+            #[cfg(feature = "orchard")]
+            _anchor_height,
+            #[cfg(feature = "orchard")]
+            _zip318,
+            cfg.marginal_fee,
+            cfg.grace_actions,
+            &possible_change[..],
+            ephemeral_balance,
+        )?;
+    }
 
     #[allow(unused_mut)]
     let (mut change, fee) = match total_in.cmp(&total_out_with_min_fee) {
@@ -482,19 +656,15 @@ where
                         cfg.params,
                         BlockHeight::from(target_height),
                         transparent_input_sizes.clone(),
-                        transparent_output_sizes.clone(),
+                        transparent_output_sizes
+                            .clone()
+                            // Count the standard size of the P2PKH change output when change is
+                            // to be returned to the transparent pool.
+                            .chain(wants_transparent_change.then_some(P2PKH_STANDARD_OUTPUT_SIZE)),
                         sapling_input_count,
                         sapling_output_count(target_change_counts.sapling())?,
-                        orchard_action_count(if route_change_to_ironwood {
-                            0
-                        } else {
-                            target_change_counts.orchard()
-                        })?,
-                        ironwood_action_count(if route_change_to_ironwood {
-                            target_change_counts.orchard()
-                        } else {
-                            0
-                        })?,
+                        orchard_action_count(target_change_counts.orchard())?,
+                        ironwood_action_count(target_change_counts)?,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?,
             );
@@ -503,17 +673,22 @@ where
 
             // We obtain a split count based on the total number of notes of sufficient size
             // available in the wallet, irrespective of pool. If we don't have any wallet metadata
-            // available, we fall back to generating a single change output.
-            let split_count = usize::from(wallet_meta.map_or(NonZeroUsize::MIN, |wm| {
-                cfg.split_policy.split_count(
-                    wm.total_note_count(),
-                    wm.total_value(),
-                    // We use a saturating subtraction here because there may be insufficient funds to pay
-                    // the fee, *if* the requested number of split outputs are created. If there is no
-                    // proposed change, the split policy should recommend only a single change output.
-                    (total_in - total_out_with_max_fee).unwrap_or(Zatoshis::ZERO),
-                )
-            }));
+            // available, we fall back to generating a single change output. Transparent change is
+            // always emitted as a single output.
+            let split_count = if wants_transparent_change {
+                1
+            } else {
+                usize::from(wallet_meta.map_or(NonZeroUsize::MIN, |wm| {
+                    cfg.split_policy.split_count(
+                        wm.total_note_count(),
+                        wm.total_value(),
+                        // We use a saturating subtraction here because there may be insufficient funds to pay
+                        // the fee, *if* the requested number of split outputs are created. If there is no
+                        // proposed change, the split policy should recommend only a single change output.
+                        (total_in - total_out_with_max_fee).unwrap_or(Zatoshis::ZERO),
+                    )
+                }))
+            };
 
             // If we don't have as many change outputs as we expected, recompute the fee.
             let total_fee = if split_count < target_change_count {
@@ -529,20 +704,12 @@ where
                         } else {
                             0
                         })?,
-                        orchard_action_count(
-                            if change_pool == ShieldedPool::Orchard && !route_change_to_ironwood {
-                                split_count
-                            } else {
-                                0
-                            },
-                        )?,
-                        ironwood_action_count(
-                            if change_pool == ShieldedPool::Orchard && route_change_to_ironwood {
-                                split_count
-                            } else {
-                                0
-                            },
-                        )?,
+                        orchard_action_count(if change_pool == ShieldedPool::Orchard {
+                            split_count
+                        } else {
+                            0
+                        })?,
+                        ironwood_action_count(OutputManifest::for_pool(change_pool, split_count))?,
                     )
                     .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?
             } else {
@@ -560,6 +727,22 @@ where
                 NonZeroU64::new(u64::try_from(split_count).expect("usize fits into u64")).unwrap(),
             );
             let simple_case = || {
+                #[cfg(feature = "transparent-inputs")]
+                if wants_transparent_change {
+                    return (
+                        if total_change.is_zero() {
+                            // A zero-valued transparent output would be unspendable, so we omit
+                            // it. Unlike the shielded change case, omitting the output does not
+                            // reveal additional information, because transparent output values
+                            // are already publicly visible.
+                            vec![]
+                        } else {
+                            vec![ChangeValue::transparent(total_change)]
+                        },
+                        total_fee,
+                    );
+                }
+
                 (
                     (0usize..split_count)
                         .map(|i| {
@@ -648,7 +831,51 @@ where
             .map(ChangeValue::ephemeral_transparent),
     );
 
-    TransactionBalance::new(change, fee).map_err(|_| overflow())
+    // Record the exact number of dummy outputs in each shielded bundle. This is transaction
+    // shape, rather than a builder policy; it can therefore be serialized in a proposal and
+    // reproduced by every construction path without re-running the fee model.
+    let final_change = OutputManifest {
+        transparent: change
+            .iter()
+            .filter(|c| c.output_pool() == PoolType::TRANSPARENT)
+            .count(),
+        sapling: change
+            .iter()
+            .filter(|c| c.output_pool() == PoolType::SAPLING)
+            .count(),
+        orchard: change
+            .iter()
+            .filter(|c| c.output_pool() == PoolType::ORCHARD)
+            .count(),
+        ironwood: change
+            .iter()
+            .filter(|c| c.output_pool() == PoolType::IRONWOOD)
+            .count(),
+    };
+    let sapling_real_outputs = sapling.outputs().len() + final_change.sapling();
+    let sapling_dummy_outputs = sapling_output_count(final_change.sapling())?
+        .checked_sub(sapling_real_outputs)
+        .expect("the Sapling action count includes every real output");
+    #[cfg(feature = "orchard")]
+    let orchard_dummy_outputs = orchard_action_count(final_change.orchard())?
+        .checked_sub(orchard.outputs().len() + final_change.orchard())
+        .expect("the Orchard action count includes every real output");
+    #[cfg(feature = "orchard")]
+    let ironwood_dummy_outputs = ironwood_action_count(final_change)?
+        .checked_sub(ironwood.outputs().len() + final_change.ironwood())
+        .expect("the Ironwood action count includes every real output");
+
+    TransactionBalance::new(change, fee)
+        .map(|balance| {
+            balance.with_dummy_outputs(DummyOutputCounts::new(
+                sapling_dummy_outputs,
+                #[cfg(feature = "orchard")]
+                orchard_dummy_outputs,
+                #[cfg(feature = "orchard")]
+                ironwood_dummy_outputs,
+            ))
+        })
+        .map_err(|_| overflow())
 }
 
 /// Returns a `[ChangeStrategy::DustInputs]` error if some of the inputs provided
@@ -660,16 +887,22 @@ where
 /// practice they would not cause the fee to increase. Outputs with value
 /// greater than the marginal fee will never be excluded.
 ///
-/// `possible_change` is a slice of `(transparent_change, sapling_change, orchard_change)`
-/// tuples indicating possible combinations of how many change outputs (0 or 1)
-/// might be included in the transaction for each pool. The shape of the tuple
-/// does not depend on which protocol features are enabled.
+/// `possible_change` is a slice of [`OutputManifest`] values indicating possible
+/// combinations of how many change outputs (0 or 1) might be included in the
+/// transaction for each pool. The shape of the manifest does not depend on which
+/// protocol features are enabled.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     transparent_inputs: &[impl transparent::InputView],
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    #[cfg(feature = "orchard")] ironwood: &impl orchard_fees::BundleView<NoteRefT>,
+    // The Orchard-pool bundle type the builder will use; the action counts computed
+    // for the grace-input check must match it (see `single_pool_output_balance`).
+    #[cfg(feature = "orchard")] orchard_padding: BundlePadding,
+    #[cfg(feature = "orchard")] anchor_height: BlockHeight,
+    #[cfg(feature = "orchard")] zip318: &PoolMigrationParams,
     marginal_fee: Zatoshis,
     grace_actions: usize,
     possible_change: &[OutputManifest],
@@ -715,8 +948,23 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     #[cfg(not(feature = "orchard"))]
     let mut o_dust: Vec<NoteRefT> = vec![];
 
+    #[cfg(feature = "orchard")]
+    let mut i_dust: Vec<NoteRefT> = ironwood
+        .inputs()
+        .iter()
+        .filter_map(|i| {
+            if orchard_fees::InputView::<NoteRefT>::value(i) <= marginal_fee {
+                Some(orchard_fees::InputView::<NoteRefT>::note_id(i).clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    #[cfg(not(feature = "orchard"))]
+    let mut i_dust: Vec<NoteRefT> = vec![];
+
     // If we don't have any dust inputs, there is nothing to check.
-    if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {
+    if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() && i_dust.is_empty() {
         return Ok(());
     }
 
@@ -729,10 +977,15 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     let (o_inputs_len, o_outputs_len) = (orchard.inputs().len(), orchard.outputs().len());
     #[cfg(not(feature = "orchard"))]
     let (o_inputs_len, o_outputs_len) = (0usize, 0usize);
+    #[cfg(feature = "orchard")]
+    let (i_inputs_len, i_outputs_len) = (ironwood.inputs().len(), ironwood.outputs().len());
+    #[cfg(not(feature = "orchard"))]
+    let (i_inputs_len, i_outputs_len) = (0usize, 0usize);
 
     let t_non_dust = t_inputs_len.checked_sub(t_dust.len()).unwrap();
     let s_non_dust = s_inputs_len.checked_sub(s_dust.len()).unwrap();
     let o_non_dust = o_inputs_len.checked_sub(o_dust.len()).unwrap();
+    let i_non_dust = i_inputs_len.checked_sub(i_dust.len()).unwrap();
 
     // Return the number of allowed dust inputs from each pool.
     let allowed_dust = |change: &OutputManifest| {
@@ -760,12 +1013,18 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
             o_dust.len(),
             (o_outputs_len + change.orchard).saturating_sub(o_non_dust),
         );
+        let i_allowed = min(
+            i_dust.len(),
+            (i_outputs_len + change.ironwood).saturating_sub(i_non_dust),
+        );
 
         // We'll be spending the non-dust and allowed dust in each pool.
         let t_req_inputs = t_non_dust + t_allowed;
         let s_req_inputs = s_non_dust + s_allowed;
         #[cfg(feature = "orchard")]
         let o_req_inputs = o_non_dust + o_allowed;
+        #[cfg(feature = "orchard")]
+        let i_req_inputs = i_non_dust + i_allowed;
 
         // This calculates the hypothetical number of actions with given extra inputs,
         // for ZIP 317 and the padding rules in effect. The padding rules for each
@@ -774,7 +1033,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         // whether we can freely add an extra input from a given pool, we need to call
         // them both with and without that input; if the number of actions does not
         // increase, then the input is free to add.
-        let hypothetical_actions = |t_extra, s_extra, _o_extra| {
+        let hypothetical_actions = |t_extra, s_extra, _o_extra, _i_extra| {
             let s_spend_count = sapling
                 .bundle_type()
                 .num_spends(s_req_inputs + s_extra)
@@ -787,6 +1046,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
 
             #[cfg(feature = "orchard")]
             let o_action_count = orchard_fees::transactional_action_count(
+                orchard_padding.bundle_type(),
                 orchard.bundle_version(),
                 o_req_inputs + _o_extra,
                 o_outputs_len + change.orchard,
@@ -795,41 +1055,79 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
             #[cfg(not(feature = "orchard"))]
             let o_action_count = 0;
 
+            // The Ironwood padding is derived here on the same rule as in
+            // `single_pool_output_balance`, over this hypothetical change manifest rather than the
+            // chosen one, so that the two agree about what each candidate would cost.
+            #[cfg(feature = "orchard")]
+            let i_padding = {
+                let constants = zip318;
+                let canonical = o_req_inputs + _o_extra == 1
+                    && i_req_inputs + _i_extra == 0
+                    && change.ironwood == 0
+                    && match ironwood.outputs() {
+                        [output] => constants.is_canonical_denomination(output.value()),
+                        _ => false,
+                    }
+                    && constants
+                        .anchor_bucket_interval()
+                        .is_boundary(anchor_height);
+                if canonical {
+                    BundlePadding::UNPADDED
+                } else {
+                    BundlePadding::DEFAULT
+                }
+            };
+            #[cfg(feature = "orchard")]
+            let i_action_count = orchard_fees::transactional_action_count(
+                i_padding.bundle_type(),
+                ironwood.bundle_version(),
+                i_req_inputs + _i_extra,
+                i_outputs_len + change.ironwood,
+            )
+            .map_err(ChangeError::BundleError)?;
+            #[cfg(not(feature = "orchard"))]
+            let i_action_count = 0;
+
             // To calculate the number of unused actions, we assume that transparent inputs
             // and outputs are P2PKH.
             Ok(
                 max(t_req_inputs + t_extra, t_outputs_len + change.transparent)
                     + max(s_spend_count, s_output_count)
-                    + o_action_count,
+                    + o_action_count
+                    + i_action_count,
             )
         };
 
         // First calculate the baseline number of logical actions with only the definitely
         // allowed inputs estimated above. If it is less than `grace_actions`, try to allocate
-        // a grace input first to transparent dust, then to Sapling dust, then to Orchard dust.
-        // If the number of actions increases, it was not possible to allocate that input for
-        // free. This approach is sufficient because at most one such input can be allocated,
-        // since `grace_actions` is at most 2 for ZIP 317 and there must be at least one
-        // logical action. (If `grace_actions` were greater than 2 then the code would still
-        // be correct, it would just not find all potential extra inputs.)
+        // a grace input first to transparent dust, then to Sapling dust, then to Orchard
+        // dust, then to Ironwood dust. If the number of actions increases, it was not
+        // possible to allocate that input for free. This approach is sufficient because at
+        // most one such input can be allocated, since `grace_actions` is at most 2 for
+        // ZIP 317 and there must be at least one logical action. (If `grace_actions` were
+        // greater than 2 then the code would still be correct, it would just not find all
+        // potential extra inputs.)
 
-        let baseline = hypothetical_actions(0, 0, 0)?;
+        let baseline = hypothetical_actions(0, 0, 0, 0)?;
 
-        let (t_extra, s_extra, o_extra) = if baseline >= grace_actions {
-            (0, 0, 0)
-        } else if t_dust.len() > t_allowed && hypothetical_actions(1, 0, 0)? <= baseline {
-            (1, 0, 0)
-        } else if s_dust.len() > s_allowed && hypothetical_actions(0, 1, 0)? <= baseline {
-            (0, 1, 0)
-        } else if o_dust.len() > o_allowed && hypothetical_actions(0, 0, 1)? <= baseline {
-            (0, 0, 1)
+        let (t_extra, s_extra, o_extra, i_extra) = if baseline >= grace_actions {
+            (0, 0, 0, 0)
+        } else if t_dust.len() > t_allowed && hypothetical_actions(1, 0, 0, 0)? <= baseline {
+            (1, 0, 0, 0)
+        } else if s_dust.len() > s_allowed && hypothetical_actions(0, 1, 0, 0)? <= baseline {
+            (0, 1, 0, 0)
+        } else if o_dust.len() > o_allowed && hypothetical_actions(0, 0, 1, 0)? <= baseline {
+            (0, 0, 1, 0)
+        } else if i_dust.len() > i_allowed && hypothetical_actions(0, 0, 0, 1)? <= baseline {
+            (0, 0, 0, 1)
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         };
         Ok(OutputManifest {
             transparent: t_allowed + t_extra,
             sapling: s_allowed + s_extra,
             orchard: o_allowed + o_extra,
+            ironwood: i_allowed + i_extra,
         })
     };
 
@@ -843,6 +1141,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
             transparent: min(l.transparent, r.transparent),
             sapling: min(l.sapling, r.sapling),
             orchard: min(l.orchard, r.orchard),
+            ironwood: min(l.ironwood, r.ironwood),
         })
         .expect("possible_change is nonempty");
 
@@ -851,8 +1150,9 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     let t_dust = t_dust.split_off(allowed.transparent);
     let s_dust = s_dust.split_off(allowed.sapling);
     let o_dust = o_dust.split_off(allowed.orchard);
+    let i_dust = i_dust.split_off(allowed.ironwood);
 
-    if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {
+    if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() && i_dust.is_empty() {
         Ok(())
     } else {
         Err(ChangeError::DustInputs {
@@ -860,6 +1160,137 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
             sapling: s_dust,
             #[cfg(feature = "orchard")]
             orchard: o_dust,
+            #[cfg(feature = "orchard")]
+            ironwood: i_dust,
         })
+    }
+}
+
+#[cfg(all(test, feature = "orchard"))]
+mod tests {
+    use super::{NetFlows, select_change_pool};
+    use zcash_protocol::{ShieldedPool, value::Zatoshis};
+
+    fn flows(orchard_in: u64, ironwood_in: u64, sapling_in: u64) -> NetFlows {
+        NetFlows {
+            t_in: Zatoshis::ZERO,
+            t_out: Zatoshis::ZERO,
+            sapling_in: Zatoshis::const_from_u64(sapling_in),
+            sapling_out: Zatoshis::ZERO,
+            orchard_in: Zatoshis::const_from_u64(orchard_in),
+            orchard_out: Zatoshis::ZERO,
+            ironwood_in: Zatoshis::const_from_u64(ironwood_in),
+            ironwood_out: Zatoshis::ZERO,
+        }
+    }
+
+    #[test]
+    fn select_change_pool_routes_ironwood_spend_to_ironwood() {
+        // Spending Ironwood funds (no Orchard or Sapling flows) sends change to Ironwood,
+        // keeping it in the pool being spent rather than crossing back into Orchard.
+        assert_eq!(
+            select_change_pool(
+                &flows(0, 10_000, 0),
+                ShieldedPool::Sapling,
+                true,
+                Zatoshis::const_from_u64(5_000)
+            ),
+            ShieldedPool::Ironwood
+        );
+
+        // Spending Orchard funds keeps change in Orchard even when Ironwood funds are also
+        // spent, so that Ironwood-routed change cannot reveal the spent Orchard notes' balances.
+        assert_eq!(
+            select_change_pool(
+                &flows(10_000, 10_000, 0),
+                ShieldedPool::Sapling,
+                true,
+                Zatoshis::const_from_u64(5_000)
+            ),
+            ShieldedPool::Orchard
+        );
+
+        // A combined Sapling + Ironwood spend routes change to Ironwood (Ironwood is preferred
+        // over Sapling).
+        assert_eq!(
+            select_change_pool(
+                &flows(0, 10_000, 10_000),
+                ShieldedPool::Sapling,
+                true,
+                Zatoshis::const_from_u64(5_000)
+            ),
+            ShieldedPool::Ironwood
+        );
+
+        // A Sapling-only spend keeps change in Sapling.
+        assert_eq!(
+            select_change_pool(
+                &flows(0, 0, 10_000),
+                ShieldedPool::Orchard,
+                true,
+                Zatoshis::const_from_u64(5_000)
+            ),
+            ShieldedPool::Sapling
+        );
+    }
+
+    #[test]
+    fn select_change_pool_enforces_orchard_turnstile() {
+        // Before Ironwood activation, Orchard-spend change stays in Orchard regardless of
+        // the change bound: value may freely enter the pool.
+        assert_eq!(
+            select_change_pool(
+                &flows(10_000, 0, 10_000),
+                ShieldedPool::Sapling,
+                false,
+                Zatoshis::const_from_u64(15_000)
+            ),
+            ShieldedPool::Orchard
+        );
+
+        // After activation, change may return to Orchard while the pool balance strictly
+        // decreases: the change bound is below the Orchard input value.
+        assert_eq!(
+            select_change_pool(
+                &flows(10_000, 0, 10_000),
+                ShieldedPool::Sapling,
+                true,
+                Zatoshis::const_from_u64(9_999)
+            ),
+            ShieldedPool::Orchard
+        );
+
+        // After activation, change that could equal or exceed the Orchard input value would
+        // grow the pool, so it flows onward to Ironwood instead.
+        assert_eq!(
+            select_change_pool(
+                &flows(10_000, 0, 10_000),
+                ShieldedPool::Sapling,
+                true,
+                Zatoshis::const_from_u64(10_000)
+            ),
+            ShieldedPool::Ironwood
+        );
+
+        // A post-activation Orchard fallback for transparent-only flows is corrected to
+        // Ironwood: with no Orchard inputs, no value may enter the Orchard pool.
+        assert_eq!(
+            select_change_pool(
+                &NetFlows {
+                    t_in: Zatoshis::const_from_u64(10_000),
+                    t_out: Zatoshis::ZERO,
+                    sapling_in: Zatoshis::ZERO,
+                    sapling_out: Zatoshis::ZERO,
+                    orchard_in: Zatoshis::ZERO,
+                    orchard_out: Zatoshis::ZERO,
+                    ironwood_in: Zatoshis::ZERO,
+                    ironwood_out: Zatoshis::ZERO,
+                },
+                ShieldedPool::Orchard,
+                true,
+                Zatoshis::const_from_u64(10_000)
+            ),
+            ShieldedPool::Ironwood
+        );
     }
 }

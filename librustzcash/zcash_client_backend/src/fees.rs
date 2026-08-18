@@ -8,7 +8,7 @@ use ::transparent::bundle::OutPoint;
 use zcash_primitives::transaction::fees::{
     FeeRule,
     transparent::{self, InputSize},
-    zip317::{self as prim_zip317},
+    zip317 as prim_zip317,
 };
 use zcash_protocol::{
     PoolType, ShieldedPool,
@@ -17,7 +17,7 @@ use zcash_protocol::{
     value::{BalanceError, Zatoshis},
 };
 
-use crate::data_api::{InputSource, wallet::TargetHeight};
+use crate::data_api::{InputSource, anchor_retention::PoolMigrationParams, wallet::TargetHeight};
 
 pub mod common;
 #[cfg(feature = "non-standard-fees")]
@@ -64,9 +64,46 @@ impl FeeRule for StandardFeeRule {
     }
 }
 
+/// A policy that determines how change should be returned to the wallet when the net flows of a
+/// transaction under construction are fully transparent.
+///
+/// This policy has no effect on transactions that have any shielded inputs or outputs; change
+/// for such transactions is always returned to a shielded pool, irrespective of the policy in
+/// use. When the flows of a transaction are fully transparent, shielding change (the default)
+/// reveals the change amount as the value of the shielded output(s) in an otherwise-transparent
+/// transaction; returning the change to the transparent pool matches the behavior of
+/// transparent-only wallets (including `zcashd`) at the cost of the change remaining unshielded.
+///
+/// Transparent change is currently always sent to a P2PKH address derived under the wallet
+/// account's internal scope; returning change to the originating address when spending from a
+/// P2SH (e.g. multisig) address is not yet supported. See [zcash/librustzcash#2570] for
+/// details.
+///
+/// [zcash/librustzcash#2570]: https://github.com/zcash/librustzcash/issues/2570
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransparentChangePolicy {
+    /// Change is always returned to a shielded pool, even when the net flows of the transaction
+    /// are fully transparent.
+    ///
+    /// This is the default policy.
+    #[default]
+    ShieldChange,
+    /// When the net flows of the transaction are fully transparent, change is returned to the
+    /// transparent pool at an internal-scope (change) transparent address of the wallet, as
+    /// described in [BIP 44].
+    ///
+    /// [BIP 44]: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
+    TransparentChangeAllowed,
+}
+
 /// `ChangeValue` represents either a proposed change output to a shielded pool
 /// (with an optional change memo), or if the "transparent-inputs" feature is
-/// enabled, an ephemeral output to the transparent pool.
+/// enabled, an output to the transparent pool: either an ephemeral output as
+/// part of a [ZIP 320] transaction pair, or a change output to an
+/// internal-scope (change) transparent address of the wallet.
+///
+/// [ZIP 320]: https://zips.z.cash/zip-0320
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeValue(ChangeValueInner);
 
@@ -79,6 +116,8 @@ enum ChangeValueInner {
     },
     #[cfg(feature = "transparent-inputs")]
     EphemeralTransparent { value: Zatoshis },
+    #[cfg(feature = "transparent-inputs")]
+    Transparent { value: Zatoshis },
 }
 
 impl ChangeValue {
@@ -86,6 +125,13 @@ impl ChangeValue {
     #[cfg(feature = "transparent-inputs")]
     pub fn ephemeral_transparent(value: Zatoshis) -> Self {
         Self(ChangeValueInner::EphemeralTransparent { value })
+    }
+
+    /// Constructs a new change value that will be created as a non-ephemeral transparent output
+    /// sent to an internal-scope (change) transparent address of the wallet.
+    #[cfg(feature = "transparent-inputs")]
+    pub fn transparent(value: Zatoshis) -> Self {
+        Self(ChangeValueInner::Transparent { value })
     }
 
     /// Constructs a new change value that will be created as a shielded output.
@@ -108,12 +154,20 @@ impl ChangeValue {
         Self::shielded(ShieldedPool::Orchard, value, memo)
     }
 
+    /// Constructs a new change value that will be created as an Ironwood output.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(value: Zatoshis, memo: Option<MemoBytes>) -> Self {
+        Self::shielded(ShieldedPool::Ironwood, value, memo)
+    }
+
     /// Returns the pool to which the change or ephemeral output should be sent.
     pub fn output_pool(&self) -> PoolType {
         match &self.0 {
             ChangeValueInner::Shielded { protocol, .. } => PoolType::Shielded(*protocol),
             #[cfg(feature = "transparent-inputs")]
             ChangeValueInner::EphemeralTransparent { .. } => PoolType::Transparent,
+            #[cfg(feature = "transparent-inputs")]
+            ChangeValueInner::Transparent { .. } => PoolType::Transparent,
         }
     }
 
@@ -123,6 +177,8 @@ impl ChangeValue {
             ChangeValueInner::Shielded { value, .. } => *value,
             #[cfg(feature = "transparent-inputs")]
             ChangeValueInner::EphemeralTransparent { value } => *value,
+            #[cfg(feature = "transparent-inputs")]
+            ChangeValueInner::Transparent { value } => *value,
         }
     }
 
@@ -132,6 +188,8 @@ impl ChangeValue {
             ChangeValueInner::Shielded { memo, .. } => memo.as_ref(),
             #[cfg(feature = "transparent-inputs")]
             ChangeValueInner::EphemeralTransparent { .. } => None,
+            #[cfg(feature = "transparent-inputs")]
+            ChangeValueInner::Transparent { .. } => None,
         }
     }
 
@@ -146,8 +204,43 @@ impl ChangeValue {
             ChangeValueInner::Shielded { .. } => false,
             #[cfg(feature = "transparent-inputs")]
             ChangeValueInner::EphemeralTransparent { .. } => true,
+            #[cfg(feature = "transparent-inputs")]
+            ChangeValueInner::Transparent { .. } => false,
         }
     }
+}
+
+/// Orchard actions in a canonical ZIP 318 crossing: the spend and its change, or a padding dummy
+/// when the note's value exactly covers the crossing and its fee.
+#[cfg(feature = "orchard")]
+const CANONICAL_CROSSING_ORCHARD_ACTIONS: usize = 2;
+
+/// Ironwood actions in a canonical ZIP 318 crossing: the single unpadded output.
+#[cfg(feature = "orchard")]
+const CANONICAL_CROSSING_IRONWOOD_ACTIONS: usize = 1;
+
+/// The fee a canonical ZIP 318 crossing pays at `target_height`, obtained by asking the STANDARD
+/// ZIP 317 rule what the canonical shape costs.
+///
+/// ZIP 318 requires this exact fee. Any other value partitions the anonymity set, so a transaction
+/// paying a non-standard fee is not a canonical crossing however well its structure matches. The
+/// standard rule is used rather than the caller's: a proposal built on a fixed non-standard rule
+/// would otherwise be compared against its own fee and always agree.
+#[cfg(feature = "orchard")]
+pub fn canonical_crossing_fee<P: consensus::Parameters>(
+    params: &P,
+    target_height: BlockHeight,
+) -> Result<Zatoshis, zcash_primitives::transaction::fees::zip317::FeeError> {
+    prim_zip317::FeeRule::standard().fee_required(
+        params,
+        target_height,
+        std::iter::empty::<InputSize>(),
+        std::iter::empty::<usize>(),
+        0,
+        0,
+        CANONICAL_CROSSING_ORCHARD_ACTIONS,
+        CANONICAL_CROSSING_IRONWOOD_ACTIONS,
+    )
 }
 
 /// The amount of change and fees required to make a transaction's inputs and
@@ -161,6 +254,55 @@ pub struct TransactionBalance {
     // A cache for the sum of proposed change and fee; we compute it on construction anyway, so we
     // cache the resulting value.
     total: Zatoshis,
+
+    // The exact number of dummy outputs in each shielded bundle this balance was costed for.
+    // `None` is retained for compatibility with callers and serialized proposals that predate
+    // explicit transaction-shape modelling.
+    dummy_outputs: Option<DummyOutputCounts>,
+}
+
+/// The number of dummy outputs in each shielded value pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DummyOutputCounts {
+    sapling: usize,
+    #[cfg(feature = "orchard")]
+    orchard: usize,
+    #[cfg(feature = "orchard")]
+    ironwood: usize,
+}
+
+impl DummyOutputCounts {
+    /// Constructs per-pool dummy-output counts.
+    pub fn new(
+        sapling: usize,
+        #[cfg(feature = "orchard")] orchard: usize,
+        #[cfg(feature = "orchard")] ironwood: usize,
+    ) -> Self {
+        Self {
+            sapling,
+            #[cfg(feature = "orchard")]
+            orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
+        }
+    }
+
+    /// Returns the number of Sapling dummy outputs.
+    pub fn sapling(&self) -> usize {
+        self.sapling
+    }
+
+    /// Returns the number of Orchard dummy outputs.
+    #[cfg(feature = "orchard")]
+    pub fn orchard(&self) -> usize {
+        self.orchard
+    }
+
+    /// Returns the number of Ironwood dummy outputs.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(&self) -> usize {
+        self.ironwood
+    }
 }
 
 impl TransactionBalance {
@@ -180,7 +322,19 @@ impl TransactionBalance {
             proposed_change,
             fee_required,
             total,
+            dummy_outputs: None,
         })
+    }
+
+    /// Records the exact dummy-output counts this balance was computed for.
+    pub fn with_dummy_outputs(mut self, dummy_outputs: DummyOutputCounts) -> Self {
+        self.dummy_outputs = Some(dummy_outputs);
+        self
+    }
+
+    /// Returns the exact dummy-output counts this balance was computed for, when recorded.
+    pub fn dummy_outputs(&self) -> Option<DummyOutputCounts> {
+        self.dummy_outputs
     }
 
     /// The change values proposed by the [`ChangeStrategy`] that computed this balance.
@@ -202,6 +356,7 @@ impl TransactionBalance {
 
 /// Errors that can occur in computing suggested change and/or fees.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChangeError<E, NoteRefT> {
     /// Insufficient inputs were provided to change selection to fund the
     /// required outputs and fees.
@@ -233,6 +388,10 @@ pub enum ChangeError<E, NoteRefT> {
         /// have economic value in the context of this input selection.
         #[cfg(feature = "orchard")]
         orchard: Vec<NoteRefT>,
+        /// The identifiers for Ironwood inputs that could not be determined to
+        /// have economic value in the context of this input selection.
+        #[cfg(feature = "orchard")]
+        ironwood: Vec<NoteRefT>,
     },
     /// An error occurred that was specific to the change selection strategy in use.
     StrategyError(E),
@@ -257,9 +416,11 @@ impl<CE: fmt::Display, N: fmt::Display> fmt::Display for ChangeError<CE, N> {
                 sapling,
                 #[cfg(feature = "orchard")]
                 orchard,
+                #[cfg(feature = "orchard")]
+                ironwood,
             } => {
                 #[cfg(feature = "orchard")]
-                let orchard_len = orchard.len();
+                let orchard_len = orchard.len() + ironwood.len();
                 #[cfg(not(feature = "orchard"))]
                 let orchard_len = 0;
 
@@ -562,12 +723,6 @@ pub trait ChangeStrategy {
     ///   transaction carries a separate Ironwood bundle, distinct from `orchard`,
     ///   with its own action count; pass an empty view when nothing targets the
     ///   Ironwood pool.
-    /// - `orchard_change_to_ironwood`: whether Orchard-pool change should be counted
-    ///   in the Ironwood bundle, mirroring how the builder routes Orchard-pool
-    ///   outputs into a separate Ironwood bundle when Ironwood is active. This is a
-    ///   single boolean rather than a richer type because it simply carries the
-    ///   builder's already-computed routing decision, so the proposal and the built
-    ///   transaction stay in lock-step.
     /// - `ephemeral_balance`: if the transaction is to be constructed with either an
     ///   ephemeral transparent input or an ephemeral transparent output this argument
     ///   may be used to provide the value of that input or output. The value of this
@@ -583,12 +738,13 @@ pub trait ChangeStrategy {
         &self,
         params: &P,
         target_height: TargetHeight,
+        anchor_height: BlockHeight,
+        zip318: &PoolMigrationParams,
         transparent_inputs: &[impl transparent::InputView],
         transparent_outputs: &[impl transparent::OutputView],
         sapling: &impl sapling::BundleView<NoteRefT>,
         #[cfg(feature = "orchard")] orchard: &impl orchard::BundleView<NoteRefT>,
         #[cfg(feature = "orchard")] ironwood: &impl orchard::BundleView<NoteRefT>,
-        #[cfg(feature = "orchard")] orchard_change_to_ironwood: bool,
         ephemeral_balance: Option<EphemeralBalance>,
         wallet_meta: &Self::AccountMetaT,
     ) -> Result<TransactionBalance, ChangeError<Self::Error, NoteRefT>>;
@@ -596,9 +752,28 @@ pub trait ChangeStrategy {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[cfg(feature = "orchard")]
+    use {
+        zcash_primitives::transaction::fees::zip317::MARGINAL_FEE,
+        zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK},
+    };
+
     use ::transparent::bundle::{OutPoint, TxOut};
     use zcash_primitives::transaction::fees::transparent;
     use zcash_protocol::value::Zatoshis;
+
+    /// The canonical crossing fee is three ZIP 317 marginal fees: the Orchard bundle's two actions
+    /// plus the single unpadded Ironwood one, which together exceed the grace allowance. Pinning it
+    /// means a change to the marginal fee or to the canonical shape surfaces here rather than
+    /// silently reclassifying transactions.
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn canonical_crossing_fee_is_three_marginal_fees() {
+        let fee = super::canonical_crossing_fee(&MAIN_NETWORK, BlockHeight::from_u32(2_000_000))
+            .expect("the canonical shape is a valid input to the ZIP 317 rule");
+        assert_eq!(fee, (MARGINAL_FEE * 3u64).expect("a valid amount"));
+        assert_eq!(u64::from(fee), 15_000);
+    }
 
     use super::sapling;
 

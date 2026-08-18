@@ -12,10 +12,12 @@ use crate::{BlockDb, error::SqliteClientError};
 #[cfg(feature = "unstable")]
 use {
     crate::{BlockHash, FsBlockDb, FsBlockDbError},
-    rusqlite::Connection,
-    std::fs::File,
-    std::io::Read,
-    std::path::{Path, PathBuf},
+    rusqlite::{Connection, OptionalExtension, named_params},
+    std::{
+        fs::File,
+        io::Read,
+        path::{Path, PathBuf},
+    },
 };
 
 pub mod init;
@@ -126,8 +128,6 @@ pub(crate) fn blockmetadb_insert(
     conn: &Connection,
     block_meta: &[BlockMeta],
 ) -> Result<(), rusqlite::Error> {
-    use rusqlite::named_params;
-
     let mut stmt_insert = conn.prepare(
         "INSERT INTO compactblocks_meta (
             height,
@@ -212,8 +212,6 @@ pub(crate) fn blockmetadb_find_block(
     conn: &Connection,
     height: BlockHeight,
 ) -> Result<Option<BlockMeta>, rusqlite::Error> {
-    use rusqlite::OptionalExtension;
-
     conn.query_row(
         "SELECT blockhash, time, sapling_outputs_count, orchard_actions_count
         FROM compactblocks_meta
@@ -457,23 +455,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "expensive-tests")]
+    #[cfg_attr(
+        feature = "ignore-expensive-tests",
+        ignore = "covered by the expensive-test CI matrix"
+    )]
     fn stabilized_note_spendable_after_deep_rewind_sapling() {
         testing::pool::stabilized_note_spendable_after_deep_rewind::<SaplingPoolTester>()
     }
 
     #[test]
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "expensive-tests"))]
+    #[cfg_attr(
+        feature = "ignore-expensive-tests",
+        ignore = "covered by the expensive-test CI matrix"
+    )]
     fn stabilized_note_spendable_after_deep_rewind_orchard() {
         testing::pool::stabilized_note_spendable_after_deep_rewind::<OrchardPoolTester>()
     }
 
     #[test]
+    #[cfg(feature = "expensive-tests")]
+    #[cfg_attr(
+        feature = "ignore-expensive-tests",
+        ignore = "covered by the expensive-test CI matrix"
+    )]
     fn newly_discovered_notes_become_stabilized_sapling() {
         testing::pool::newly_discovered_notes_become_stabilized::<SaplingPoolTester>()
     }
 
     #[test]
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "expensive-tests"))]
+    #[cfg_attr(
+        feature = "ignore-expensive-tests",
+        ignore = "covered by the expensive-test CI matrix"
+    )]
     fn newly_discovered_notes_become_stabilized_orchard() {
         testing::pool::newly_discovered_notes_become_stabilized::<OrchardPoolTester>()
     }

@@ -31,8 +31,8 @@ impl IoFinalizer {
 
         let has_orchard_actions = !pczt.orchard.actions.is_empty();
         let has_ironwood_actions = !pczt.ironwood.actions.is_empty();
-        let has_shielded_spends =
-            !(pczt.sapling.spends.is_empty() && !has_orchard_actions && !has_ironwood_actions);
+        let has_sapling_spends = !pczt.sapling.spends.is_empty();
+        let has_shielded_spends = has_sapling_spends || has_orchard_actions || has_ironwood_actions;
         let has_shielded_outputs =
             !(pczt.sapling.outputs.is_empty() && !has_orchard_actions && !has_ironwood_actions);
 
@@ -45,6 +45,9 @@ impl IoFinalizer {
             return Err(Error::NoOutputs);
         }
 
+        let anchor_requirement =
+            crate::common::AnchorRequirement::for_pre_authorization(pczt.global.tx_version);
+
         let ParsedPczt {
             mut global,
             transparent,
@@ -53,6 +56,7 @@ impl IoFinalizer {
             mut ironwood,
             tx_data,
         } = pczt.extract_tx_data(
+            anchor_requirement,
             |t| {
                 t.extract_effects()
                     .map_err(ExtractError::TransparentExtract)
@@ -76,6 +80,7 @@ impl IoFinalizer {
         // Transaction Extractor, the Sapling one requires `bsk` to be set even when
         // the bundle is empty.
         sapling
+            .bundle
             .finalize_io(shielded_sighash, OsRng)
             .map_err(Error::SaplingFinalize)?;
         // An empty Orchard-protocol bundle carries no value commitment information
@@ -84,11 +89,13 @@ impl IoFinalizer {
         // representable in, the serialization formats).
         if has_orchard_actions {
             orchard
+                .bundle
                 .finalize_io(shielded_sighash, OsRng)
                 .map_err(Error::OrchardFinalize)?;
         }
         if has_ironwood_actions {
             ironwood
+                .bundle
                 .finalize_io(shielded_sighash, OsRng)
                 .map_err(Error::IronwoodFinalize)?;
         }
@@ -96,9 +103,9 @@ impl IoFinalizer {
         Ok(Pczt {
             global,
             transparent: crate::transparent::Bundle::serialize_from(transparent),
-            sapling: crate::sapling::Bundle::serialize_from(sapling),
-            orchard: crate::orchard::Bundle::serialize_from(orchard),
-            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
+            sapling: sapling.reserialize(),
+            orchard: orchard.reserialize(),
+            ironwood: ironwood.reserialize(),
         })
     }
 }

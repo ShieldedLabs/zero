@@ -20,11 +20,15 @@
 
 #[macro_use]
 extern crate alloc;
+// The crate itself needs only `alloc`; the unit tests lean on `proptest`, which is a `std` crate.
+#[cfg(test)]
+extern crate std;
 
 use alloc::vec::Vec;
 
 use getset::Getters;
 
+use zcash_protocol::PoolType;
 #[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
 use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
 #[cfg(all(
@@ -60,9 +64,38 @@ pub mod orchard;
 pub mod sapling;
 pub mod transparent;
 
-pub(crate) const MAGIC_BYTES: &[u8] = b"PCZT";
+pub(crate) const MAGIC_BYTES: &[u8; 4] = b"PCZT";
 pub(crate) const PCZT_VERSION_1: u32 = 1;
 pub(crate) const PCZT_VERSION_2: u32 = 2;
+
+const VERSIONED_HEADER_LEN: usize = 8;
+
+pub(crate) enum HeaderParseError {
+    InvalidMagic,
+    TooShort,
+}
+
+pub(crate) fn parse_header<'a>(
+    bytes: &'a [u8],
+    magic: &[u8; 4],
+) -> Result<(u32, &'a [u8]), HeaderParseError> {
+    if bytes.len() < VERSIONED_HEADER_LEN {
+        return Err(HeaderParseError::TooShort);
+    }
+    if &bytes[..4] != magic {
+        return Err(HeaderParseError::InvalidMagic);
+    }
+
+    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    Ok((version, &bytes[VERSIONED_HEADER_LEN..]))
+}
+
+pub(crate) fn serialize_header(magic: &[u8; 4], version: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(VERSIONED_HEADER_LEN);
+    bytes.extend_from_slice(magic);
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes
+}
 
 /// Parses a PCZT from its encoding.
 pub fn parse(bytes: &[u8]) -> Result<Pczt, ParseError> {
@@ -106,15 +139,13 @@ pub mod v1 {
     pub struct Pczt {
         global: common::Global,
         transparent: transparent::Bundle,
-        sapling: sapling::Bundle,
+        sapling: sapling::v1::Bundle,
         orchard: orchard::v1::Bundle,
     }
 
     impl Pczt {
         pub fn serialize(&self) -> Vec<u8> {
-            let mut bytes = vec![];
-            bytes.extend_from_slice(crate::MAGIC_BYTES);
-            bytes.extend_from_slice(&crate::PCZT_VERSION_1.to_le_bytes());
+            let bytes = crate::serialize_header(crate::MAGIC_BYTES, crate::PCZT_VERSION_1);
             postcard::to_extend(&self, bytes).expect("can serialize into memory")
         }
     }
@@ -140,7 +171,7 @@ pub mod v1 {
             Ok(Self {
                 global: pczt.global,
                 transparent: pczt.transparent,
-                sapling: pczt.sapling,
+                sapling: sapling::v1::Bundle::try_from(pczt.sapling)?,
                 orchard: orchard::v1::Bundle::try_from(pczt.orchard)?,
             })
         }
@@ -151,7 +182,7 @@ pub mod v1 {
             Self {
                 global: pczt.global,
                 transparent: pczt.transparent,
-                sapling: pczt.sapling,
+                sapling: pczt.sapling.into(),
                 orchard: pczt.orchard.into(),
                 ironwood: orchard::EMPTY_IRONWOOD,
             }
@@ -168,9 +199,16 @@ pub mod v1 {
         fn v1_refuses_v6_pczts_and_non_canonical_ironwood_bundles() {
             // A v6 tx cannot be encoded as a v1 PCZT, even when its Ironwood bundle is
             // canonically empty.
-            let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-                .unwrap()
-                .build();
+            let pczt = Creator::new(
+                BranchId::Nu6_3.into(),
+                10_000_000,
+                133,
+                Some([0; 32]),
+                Some([0; 32]),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
             assert!(matches!(
                 super::Pczt::try_from(pczt),
                 Err(crate::EncodingError::UnsupportedTxVersion)
@@ -178,9 +216,16 @@ pub mod v1 {
 
             // A v5 tx carrying non-canonical Ironwood bundle data cannot be encoded
             // as a v1 PCZT, because the data would be dropped.
-            let mut pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
-                .unwrap()
-                .build();
+            let mut pczt = Creator::new(
+                BranchId::Nu6.into(),
+                10_000_000,
+                133,
+                Some([0; 32]),
+                Some([0; 32]),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
             pczt.ironwood.bsk = Some([1; 32]);
             assert!(matches!(
                 super::Pczt::try_from(pczt),
@@ -217,9 +262,7 @@ pub mod v2 {
 
     impl Pczt {
         pub fn serialize(&self) -> Vec<u8> {
-            let mut bytes = vec![];
-            bytes.extend_from_slice(crate::MAGIC_BYTES);
-            bytes.extend_from_slice(&crate::PCZT_VERSION_2.to_le_bytes());
+            let bytes = crate::serialize_header(crate::MAGIC_BYTES, crate::PCZT_VERSION_2);
             postcard::to_extend(&self, bytes).expect("can serialize into memory")
         }
     }
@@ -234,28 +277,30 @@ pub mod v2 {
                 global: pczt.global,
                 transparent: (pczt.transparent != transparent::EMPTY_BUNDLE)
                     .then_some(pczt.transparent),
-                sapling: (pczt.sapling != sapling::EMPTY_BUNDLE).then_some(pczt.sapling),
+                sapling: sapling::v2::encode(pczt.sapling),
                 orchard: orchard::v2::encode(pczt.orchard, &orchard::EMPTY_ORCHARD)?,
                 ironwood: orchard::v2::encode(pczt.ironwood, &orchard::EMPTY_IRONWOOD)?,
             })
         }
     }
 
-    impl From<Pczt> for super::Pczt {
-        fn from(pczt: Pczt) -> Self {
-            Self {
-                global: pczt.global,
-                transparent: pczt.transparent.unwrap_or(transparent::EMPTY_BUNDLE),
-                sapling: pczt.sapling.unwrap_or(sapling::EMPTY_BUNDLE),
-                orchard: pczt
+    impl Pczt {
+        pub(super) fn into_logical(self) -> Result<super::Pczt, super::ParseError> {
+            Ok(super::Pczt {
+                global: self.global,
+                transparent: self.transparent.unwrap_or(transparent::EMPTY_BUNDLE),
+                sapling: self.sapling.unwrap_or(sapling::EMPTY_BUNDLE),
+                orchard: self
                     .orchard
-                    .map(orchard::Bundle::from)
+                    .map(orchard::v2::Bundle::into_logical)
+                    .transpose()?
                     .unwrap_or(orchard::EMPTY_ORCHARD),
-                ironwood: pczt
+                ironwood: self
                     .ironwood
-                    .map(orchard::Bundle::from)
+                    .map(orchard::v2::Bundle::into_logical)
+                    .transpose()?
                     .unwrap_or(orchard::EMPTY_IRONWOOD),
-            }
+            })
         }
     }
 
@@ -268,11 +313,12 @@ pub mod v2 {
 
         #[test]
         fn empty_bundles_encode_as_none_and_decode_as_empty() {
-            // Zero anchors: the shielded bundles carry no anchor and no
+            // Absent anchors: the shielded bundles carry no anchor and no
             // spends/actions, so they are fully empty and omitted.
-            let pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+            let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, None, None)
                 .unwrap()
-                .build();
+                .build()
+                .unwrap();
 
             let encoded = Pczt::try_from(pczt).unwrap();
 
@@ -287,6 +333,7 @@ pub mod v2 {
             assert!(decoded.transparent.outputs.is_empty());
             assert!(decoded.sapling.spends.is_empty());
             assert!(decoded.sapling.outputs.is_empty());
+            assert!(decoded.sapling.anchor.is_none());
             assert!(decoded.orchard.actions.is_empty());
             assert_eq!(decoded.orchard.note_version, NoteVersion::V2);
             {
@@ -300,9 +347,16 @@ pub mod v2 {
             // A Sapling/Orchard bundle with a non-empty anchor differs from its
             // empty form, so it must not be omitted even with no spends/actions,
             // and the anchor must survive the v2 round-trip.
-            let pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [1; 32], [2; 32])
-                .unwrap()
-                .build();
+            let pczt = Creator::new(
+                BranchId::Nu6.into(),
+                10_000_000,
+                133,
+                Some([1; 32]),
+                Some([2; 32]),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
 
             let encoded = Pczt::try_from(pczt).unwrap();
 
@@ -312,15 +366,22 @@ pub mod v2 {
 
             let decoded = crate::parse(&encoded.serialize()).unwrap();
 
-            assert_eq!(decoded.sapling.anchor, [1; 32]);
-            assert_eq!(decoded.orchard.anchor, [2; 32]);
+            assert_eq!(decoded.sapling.anchor, Some([1; 32]));
+            assert_eq!(decoded.orchard.anchor, Some([2; 32]));
         }
 
         #[test]
         fn non_canonical_orchard_flags_and_note_version_prevent_omission() {
-            let mut pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
-                .unwrap()
-                .build();
+            let mut pczt = Creator::new(
+                BranchId::Nu6.into(),
+                10_000_000,
+                133,
+                Some([0; 32]),
+                Some([0; 32]),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
             pczt.orchard.flags = 0;
             pczt.orchard.note_version = NoteVersion::V3;
 
@@ -329,7 +390,7 @@ pub mod v2 {
             let encoded = Pczt::try_from(pczt.clone()).unwrap();
             assert!(encoded.orchard.is_some());
 
-            let decoded = crate::Pczt::from(encoded);
+            let decoded = encoded.into_logical().unwrap();
             assert_eq!(decoded.orchard, pczt.orchard);
             assert_eq!(decoded.orchard.flags, 0);
             assert_eq!(decoded.orchard.note_version, NoteVersion::V3);
@@ -346,35 +407,77 @@ pub enum EncodingError {
     UnsupportedTxVersion,
     /// The v1 PCZT encoding does not support this Orchard note plaintext version.
     UnsupportedOrchardNoteVersion,
+    /// The PCZT contains data that can only be represented in v2.
+    RequiresV2,
 }
 
 impl Pczt {
+    /// Whether this PCZT carries any inputs or outputs in the given pool.
+    ///
+    /// Every bundle is always present as a value, so its existence says nothing; this asks whether
+    /// it holds anything.
+    pub fn has_data_in_pool(&self, pool: PoolType) -> bool {
+        match pool {
+            PoolType::TRANSPARENT => {
+                !self.transparent.inputs().is_empty() || !self.transparent.outputs().is_empty()
+            }
+            PoolType::SAPLING => {
+                !self.sapling.spends().is_empty() || !self.sapling.outputs().is_empty()
+            }
+            PoolType::ORCHARD => !self.orchard.actions().is_empty(),
+            PoolType::IRONWOOD => !self.ironwood.actions().is_empty(),
+        }
+    }
+
     /// Parses a PCZT from its encoding.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        if bytes.len() < 8 {
-            return Err(ParseError::TooShort);
-        }
-        if &bytes[..4] != MAGIC_BYTES {
-            return Err(ParseError::NotPczt);
-        }
-
-        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let (version, body) = parse_header(bytes, MAGIC_BYTES).map_err(|e| match e {
+            HeaderParseError::InvalidMagic => ParseError::NotPczt,
+            HeaderParseError::TooShort => ParseError::TooShort,
+        })?;
         match version {
-            PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(&bytes[8..])
+            PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(body)
                 .map(Pczt::from)
                 .map_err(ParseError::Invalid),
-            PCZT_VERSION_2 => postcard::from_bytes::<v2::Pczt>(&bytes[8..])
-                .map(Pczt::from)
-                .map_err(ParseError::Invalid),
+            PCZT_VERSION_2 => postcard::from_bytes::<v2::Pczt>(body)
+                .map_err(ParseError::Invalid)
+                .and_then(v2::Pczt::into_logical),
             _ => Err(ParseError::UnknownVersion(version)),
         }
     }
 
-    /// Serializes this PCZT as the latest PCZT version.
+    /// Serializes this PCZT in the minimal encoding version capable of
+    /// representing its content: the v1 encoding whenever the PCZT is
+    /// representable in it (maximizing compatibility with receivers that
+    /// predate the v2 encoding), and the v2 encoding otherwise.
     ///
-    /// To serialize a specific PCZT version, e.g. v1, use [`v1::Pczt::serialize`].
+    /// To force a specific PCZT version, use [`v1::Pczt`] or [`v2::Pczt`]
+    /// directly.
     pub fn serialize(self) -> Result<Vec<u8>, EncodingError> {
+        // Fast pre-checks for the conditions that most commonly rule out the
+        // v1 encoding, avoiding the speculative clone below.
+        if self.global.tx_version != zcash_protocol::constants::V6_TX_VERSION
+            && self.ironwood == orchard::EMPTY_IRONWOOD
+        {
+            // The full v1-representability conditions live in the bundle
+            // conversions; attempting the conversion is the single source of
+            // truth for them.
+            if let Ok(v1) = v1::Pczt::try_from(self.clone()) {
+                return Ok(v1.serialize());
+            }
+        }
         Ok(v2::Pczt::try_from(self)?.serialize())
+    }
+
+    /// Resolves derived or compact field representations carried by this PCZT.
+    ///
+    /// For improved efficiency, callers that will pass the same PCZT through
+    /// multiple roles should call this once up front. Parsing also resolves fields
+    /// defensively.
+    #[cfg(feature = "orchard")]
+    pub fn resolve_fields(&mut self) -> Result<(), ::orchard::pczt::ParseError> {
+        self.orchard.resolve_fields()?;
+        self.ironwood.resolve_fields()
     }
 
     /// Parses this PCZT's bundles and constructs a `TransactionData` using caller-provided
@@ -386,6 +489,7 @@ impl Pczt {
     #[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
     pub(crate) fn extract_tx_data<A, E>(
         self,
+        anchor_requirement: common::AnchorRequirement,
         extract_transparent: impl FnOnce(
             &::transparent::pczt::Bundle,
         ) -> Result<
@@ -459,27 +563,28 @@ impl Pczt {
         let transparent = transparent
             .into_parsed()
             .map_err(ExtractError::TransparentParse)?;
-        let sapling = sapling.into_parsed().map_err(ExtractError::SaplingParse)?;
+        let sapling = sapling
+            .into_parsed(anchor_requirement)
+            .map_err(ExtractError::SaplingParse)?;
+        let orchard_bundle_version = crate::orchard::bundle_version_for_revision(
+            orchard_protocol_revision,
+            ::orchard::ValuePool::Orchard,
+        )
+        .expect("the Orchard pool is supported under every protocol revision");
         let orchard = orchard
-            .into_parsed_with_version(
-                crate::orchard::bundle_version_for_revision(
-                    orchard_protocol_revision,
-                    ::orchard::ValuePool::Orchard,
-                )
-                .expect("the Orchard pool is supported under every protocol revision"),
-            )
+            .into_parsed_with_version(orchard_bundle_version, anchor_requirement)
             .map_err(ExtractError::OrchardParse)?;
         let ironwood = ironwood
-            .into_ironwood_parsed()
+            .into_ironwood_parsed(anchor_requirement)
             .map_err(ExtractError::IronwoodParse)?;
 
         let lock_time = determine_lock_time(&global, transparent.inputs())
             .ok_or(ExtractError::IncompatibleLockTimes)?;
 
         let transparent_bundle = extract_transparent(&transparent)?;
-        let sapling_bundle = extract_sapling(&sapling)?;
-        let orchard_bundle = extract_orchard(&orchard)?;
-        let ironwood_bundle = extract_ironwood(&ironwood)?;
+        let sapling_bundle = extract_sapling(&sapling.bundle)?;
+        let orchard_bundle = extract_orchard(&orchard.bundle)?;
+        let ironwood_bundle = extract_ironwood(&ironwood.bundle)?;
 
         let tx_data = match version {
             TxVersion::V6 => TransactionData::from_parts_v6(
@@ -520,7 +625,11 @@ impl Pczt {
     /// Gets the effects of this transaction.
     #[cfg(any(feature = "io-finalizer", feature = "signer"))]
     pub fn into_effects(self) -> Result<TransactionData<EffectsOnly>, ExtractError> {
+        let anchor_requirement =
+            common::AnchorRequirement::for_pre_authorization(self.global.tx_version);
+
         self.extract_tx_data(
+            anchor_requirement,
             |t| {
                 t.extract_effects()
                     .map_err(ExtractError::TransparentExtract)
@@ -542,9 +651,9 @@ impl Pczt {
 pub(crate) struct ParsedPczt<A: Authorization> {
     pub(crate) global: Global,
     pub(crate) transparent: ::transparent::pczt::Bundle,
-    pub(crate) sapling: ::sapling::pczt::Bundle,
-    pub(crate) orchard: ::orchard::pczt::Bundle,
-    pub(crate) ironwood: ::orchard::pczt::Bundle,
+    pub(crate) sapling: crate::sapling::Parsed,
+    pub(crate) orchard: crate::orchard::Parsed,
+    pub(crate) ironwood: crate::orchard::Parsed,
     pub(crate) tx_data: TransactionData<A>,
 }
 
@@ -588,15 +697,15 @@ pub enum ExtractError {
     /// support an Ironwood bundle.
     IronwoodNotSupported,
     /// An error occurred parsing the Ironwood PCZT bundle from the PCZT data.
-    IronwoodParse(::orchard::pczt::ParseError),
+    IronwoodParse(crate::orchard::ParseError),
     /// An error occurred extracting the Orchard protocol bundle from the Orchard PCZT bundle.
     OrchardExtract(::orchard::pczt::TxExtractorError),
     /// An error occurred parsing the Orchard PCZT bundle from the PCZT data.
-    OrchardParse(::orchard::pczt::ParseError),
+    OrchardParse(crate::orchard::ParseError),
     /// An error occurred extracting the Sapling protocol bundle from the Sapling PCZT bundle.
     SaplingExtract(::sapling::pczt::TxExtractorError),
     /// An error occurred parsing the Sapling PCZT bundle from the PCZT data.
-    SaplingParse(::sapling::pczt::ParseError),
+    SaplingParse(crate::sapling::ParseError),
     /// An error occurred extracting the transparent protocol bundle from the
     /// transparent PCZT bundle.
     TransparentExtract(::transparent::pczt::TxExtractorError),
@@ -612,6 +721,57 @@ pub enum ExtractError {
     UnsupportedTxVersion { version: u32, version_group_id: u32 },
 }
 
+#[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
+impl core::fmt::Display for ExtractError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ExtractError::IncompatibleLockTimes => {
+                write!(f, "the transparent inputs have incompatible lock times")
+            }
+            ExtractError::IronwoodExtract(e) => {
+                write!(f, "could not extract the Ironwood bundle: {e}")
+            }
+            ExtractError::IronwoodNotSupported => write!(
+                f,
+                "the PCZT carries Ironwood bundle data, but its transaction version has no \
+                 Ironwood bundle"
+            ),
+            ExtractError::IronwoodParse(e) => {
+                write!(f, "could not parse the Ironwood bundle: {e:?}")
+            }
+            ExtractError::OrchardExtract(e) => {
+                write!(f, "could not extract the Orchard bundle: {e}")
+            }
+            ExtractError::OrchardParse(e) => write!(f, "could not parse the Orchard bundle: {e:?}"),
+            ExtractError::SaplingExtract(e) => {
+                write!(f, "could not extract the Sapling bundle: {e}")
+            }
+            ExtractError::SaplingParse(e) => write!(f, "could not parse the Sapling bundle: {e:?}"),
+            ExtractError::TransparentExtract(e) => {
+                write!(f, "could not extract the transparent bundle: {e:?}")
+            }
+            ExtractError::TransparentParse(e) => {
+                write!(f, "could not parse the transparent bundle: {e:?}")
+            }
+            ExtractError::UnknownConsensusBranchId => write!(f, "unknown consensus branch ID"),
+            ExtractError::UnsupportedConsensusBranchId => write!(
+                f,
+                "the consensus branch ID predates the v5 transaction format"
+            ),
+            ExtractError::UnsupportedTxVersion {
+                version,
+                version_group_id,
+            } => write!(
+                f,
+                "unsupported transaction version {version} (version group ID {version_group_id})"
+            ),
+        }
+    }
+}
+
+#[cfg(any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"))]
+impl core::error::Error for ExtractError {}
+
 /// Errors that can occur while parsing a PCZT.
 #[derive(Debug)]
 pub enum ParseError {
@@ -619,11 +779,30 @@ pub enum ParseError {
     NotPczt,
     /// The PCZT encoding was invalid.
     Invalid(postcard::Error),
+    /// The PCZT encoding omitted a field that is required by the logical PCZT
+    /// type.
+    MissingRequiredField(&'static str),
     /// The bytes are too short to contain a PCZT.
     TooShort,
     /// The PCZT has an unknown version.
     UnknownVersion(u32),
 }
+
+impl core::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ParseError::NotPczt => write!(f, "the bytes do not contain a PCZT"),
+            ParseError::Invalid(e) => write!(f, "invalid PCZT encoding: {e}"),
+            ParseError::MissingRequiredField(field) => {
+                write!(f, "the PCZT encoding omitted the required field {field}")
+            }
+            ParseError::TooShort => write!(f, "the bytes are too short to contain a PCZT"),
+            ParseError::UnknownVersion(v) => write!(f, "unknown PCZT version {v}"),
+        }
+    }
+}
+
+impl core::error::Error for ParseError {}
 
 #[cfg(all(test, any(feature = "io-finalizer", feature = "signer")))]
 mod extraction_tests {
@@ -633,9 +812,16 @@ mod extraction_tests {
 
     #[test]
     fn v5_pczt_with_ironwood_data_does_not_extract() {
-        let mut pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .unwrap()
-            .build();
+        let mut pczt = Creator::new(
+            BranchId::Nu6.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         pczt.ironwood.bsk = Some([1; 32]);
         assert!(matches!(
             pczt.into_effects(),
@@ -645,13 +831,84 @@ mod extraction_tests {
 
     #[test]
     fn v6_pczt_with_pre_nu6_3_branch_does_not_extract() {
-        let mut pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .unwrap()
-            .build();
+        let mut pczt = Creator::new(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         pczt.global.consensus_branch_id = BranchId::Nu6_2.into();
         assert!(matches!(
             pczt.into_effects(),
             Err(ExtractError::UnsupportedConsensusBranchId)
         ));
+    }
+}
+
+#[cfg(test)]
+mod serialize_tests {
+    use zcash_protocol::consensus::BranchId;
+
+    use crate::roles::creator::Creator;
+
+    fn encoding_version(bytes: &[u8]) -> u32 {
+        assert_eq!(&bytes[..4], crate::MAGIC_BYTES);
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap())
+    }
+
+    #[test]
+    fn serialize_emits_minimal_encoding() {
+        // A v1-representable (v5, canonical-empty Ironwood) PCZT serializes as v1.
+        let pczt = Creator::new(
+            BranchId::Nu6.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = pczt.clone().serialize().unwrap();
+        assert_eq!(encoding_version(&bytes), crate::PCZT_VERSION_1);
+        // The minimal encoding still round-trips through the ordinary parser.
+        assert!(crate::Pczt::parse(&bytes).is_ok());
+
+        // Non-canonical Ironwood data forces the v2 encoding.
+        let mut with_ironwood = pczt.clone();
+        with_ironwood.ironwood.bsk = Some([1; 32]);
+        assert_eq!(
+            encoding_version(&with_ironwood.serialize().unwrap()),
+            crate::PCZT_VERSION_2,
+        );
+
+        // An Orchard note-plaintext version the v1 encoding cannot carry
+        // forces the v2 encoding.
+        let mut with_note_v3 = pczt;
+        with_note_v3.orchard.note_version = crate::orchard::NoteVersion::V3;
+        assert_eq!(
+            encoding_version(&with_note_v3.serialize().unwrap()),
+            crate::PCZT_VERSION_2,
+        );
+
+        // A v6 transaction forces the v2 encoding.
+        let v6 = Creator::new(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            encoding_version(&v6.serialize().unwrap()),
+            crate::PCZT_VERSION_2,
+        );
     }
 }

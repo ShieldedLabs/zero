@@ -126,6 +126,7 @@ impl Builder {
 /// The rejected payload (the `Block` or `Transaction`) is returned in both cases, so that
 /// the caller may retry.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TryQueueError<T> {
     /// The batch decryptor has shut down.
     Shutdown(Box<T>),
@@ -339,8 +340,11 @@ where
         P: consensus::Parameters + Send + 'static,
     {
         let mut scanning_keys = Arc::new(reload_keys()?);
-        let mut runners = BatchRunners::<_, (), ()>::for_keys(
+        let mut runners = BatchRunners::<_, (), (), ()>::for_keys(
             self.sapling_batch_size_threshold,
+            #[cfg(feature = "orchard")]
+            self.orchard_batch_size_threshold,
+            // Ironwood outputs are Orchard-shaped, so they use the same batching threshold.
             #[cfg(feature = "orchard")]
             self.orchard_batch_size_threshold,
             &scanning_keys,
@@ -424,6 +428,10 @@ where
                         scanning_keys = Arc::new(reload_keys()?);
                         runners = BatchRunners::for_keys(
                             self.sapling_batch_size_threshold,
+                            #[cfg(feature = "orchard")]
+                            self.orchard_batch_size_threshold,
+                            // Ironwood outputs are Orchard-shaped, so they use the same batching
+                            // threshold.
                             #[cfg(feature = "orchard")]
                             self.orchard_batch_size_threshold,
                             &scanning_keys,

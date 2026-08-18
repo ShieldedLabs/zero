@@ -13,12 +13,14 @@ use zcash_protocol::consensus::{self, BlockHeight, NetworkUpgrade};
 use super::{orchard_shardtree, wallet_summaries};
 use crate::wallet::{chain_tip_height, init::WalletMigrationError, scanning::priority_code};
 
-pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x1f5420e3_f8a0_4afd_a9e5_e20fc6fae271);
+/// This migration adds tables to the wallet database that are needed to persist Ironwood note
+/// commitment tree data using the `shardtree` crate.
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x1f5420e3_f8a0_4afd_a9e5_e20fc6fae271);
 
 // Depends on `orchard_shardtree` (the Ironwood tree tables mirror the Orchard ones) and on
 // `wallet_summaries` (which adds the `blocks` output/action-count columns), so the Ironwood
 // block-metadata columns append after all existing `blocks` columns.
-const DEPENDENCIES: &[Uuid] = &[
+pub(super) const DEPENDENCIES: &[Uuid] = &[
     orchard_shardtree::MIGRATION_ID,
     wallet_summaries::MIGRATION_ID,
 ];
@@ -84,6 +86,9 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
                 FOREIGN KEY (checkpoint_id) REFERENCES ironwood_tree_checkpoints(checkpoint_id)
                 ON DELETE CASCADE,
                 CONSTRAINT spend_position_unique UNIQUE (checkpoint_id, mark_removed_position)
+            );
+            CREATE TABLE ironwood_tree_retained_checkpoints (
+                checkpoint_id INTEGER PRIMARY KEY
             );",
         )?;
 

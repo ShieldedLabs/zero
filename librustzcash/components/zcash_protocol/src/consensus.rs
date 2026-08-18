@@ -25,6 +25,12 @@ memuse::impl_no_dynamic_usage!(BlockHeight);
 /// The height of the genesis block on a network.
 pub const H0: BlockHeight = BlockHeight(0);
 
+/// The target time between blocks, in seconds (the post-Blossom target spacing).
+pub const SECONDS_PER_BLOCK: u32 = 75;
+
+/// The approximate number of blocks produced per hour at [`SECONDS_PER_BLOCK`].
+pub const BLOCKS_PER_HOUR: u32 = 3600 / SECONDS_PER_BLOCK;
+
 impl BlockHeight {
     pub const fn from_u32(v: u32) -> BlockHeight {
         BlockHeight(v)
@@ -493,7 +499,7 @@ impl Parameters for MainNetwork {
             NetworkUpgrade::Nu6 => Some(BlockHeight(2_726_400)),
             NetworkUpgrade::Nu6_1 => Some(BlockHeight(3_146_400)),
             NetworkUpgrade::Nu6_2 => Some(BlockHeight(3_364_600)),
-            NetworkUpgrade::Nu6_3 => None,
+            NetworkUpgrade::Nu6_3 => Some(BlockHeight(3_428_143)),
             #[cfg(zcash_unstable = "nu7")]
             NetworkUpgrade::Nu7 => None,
         }
@@ -635,7 +641,10 @@ impl fmt::Display for NetworkUpgrade {
 }
 
 impl NetworkUpgrade {
-    fn branch_id(self) -> BranchId {
+    /// Returns the consensus branch ID activated by this network upgrade.
+    ///
+    /// This is the inverse of [`BranchId::network_upgrade`].
+    pub fn branch_id(self) -> BranchId {
         match self {
             NetworkUpgrade::Overwinter => BranchId::Overwinter,
             NetworkUpgrade::Sapling => BranchId::Sapling,
@@ -788,6 +797,28 @@ impl BranchId {
 
         // Sprout rules apply before any network upgrade
         BranchId::Sprout
+    }
+
+    /// Returns the network upgrade that activates this set of consensus rules, or
+    /// `None` for the pre-Overwinter Sprout rules, which have no activation height.
+    ///
+    /// This is the inverse of [`NetworkUpgrade::branch_id`].
+    pub fn network_upgrade(&self) -> Option<NetworkUpgrade> {
+        Some(match self {
+            BranchId::Sprout => return None,
+            BranchId::Overwinter => NetworkUpgrade::Overwinter,
+            BranchId::Sapling => NetworkUpgrade::Sapling,
+            BranchId::Blossom => NetworkUpgrade::Blossom,
+            BranchId::Heartwood => NetworkUpgrade::Heartwood,
+            BranchId::Canopy => NetworkUpgrade::Canopy,
+            BranchId::Nu5 => NetworkUpgrade::Nu5,
+            BranchId::Nu6 => NetworkUpgrade::Nu6,
+            BranchId::Nu6_1 => NetworkUpgrade::Nu6_1,
+            BranchId::Nu6_2 => NetworkUpgrade::Nu6_2,
+            BranchId::Nu6_3 => NetworkUpgrade::Nu6_3,
+            #[cfg(zcash_unstable = "nu7")]
+            BranchId::Nu7 => NetworkUpgrade::Nu7,
+        })
     }
 
     /// Returns the range of heights for the consensus epoch associated with this branch id.
@@ -965,7 +996,14 @@ pub mod testing {
         ])
     }
 
-    pub fn arb_height<P: Parameters>(
+    /// An arbitrary [`BlockHeight`], within the range heights realistically take.
+    pub fn arb_block_height() -> impl Strategy<Value = BlockHeight> {
+        (0u32..5_000_000).prop_map(BlockHeight::from_u32)
+    }
+
+    /// An arbitrary [`BlockHeight`], within the range of heights for the given consensus branch on
+    /// the specified network.
+    pub fn arb_height_for_branch<P: Parameters>(
         branch_id: BranchId,
         params: &P,
     ) -> impl Strategy<Value = Option<BlockHeight>> {
@@ -976,6 +1014,16 @@ pub mod testing {
                     (lower.0..upper.map_or(u32::MAX, |u| u.0)).prop_map(|h| Some(BlockHeight(h))),
                 )
             })
+    }
+
+    /// An arbitrary [`BlockHeight`], within the range of heights for the given consensus branch on
+    /// the specified network.
+    #[deprecated(note = "Use arb_height_for_branch instead.")]
+    pub fn arb_height<P: Parameters>(
+        branch_id: BranchId,
+        params: &P,
+    ) -> impl Strategy<Value = Option<BlockHeight>> {
+        arb_height_for_branch(branch_id, params)
     }
 
     #[cfg(feature = "test-dependencies")]
@@ -1100,8 +1148,16 @@ mod tests {
             BranchId::Nu6_2,
         );
         assert_eq!(
-            BranchId::for_height(&MAIN_NETWORK, BlockHeight(5_000_000)),
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_428_142)),
             BranchId::Nu6_2,
+        );
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(3_428_143)),
+            BranchId::Nu6_3,
+        );
+        assert_eq!(
+            BranchId::for_height(&MAIN_NETWORK, BlockHeight(5_000_000)),
+            BranchId::Nu6_3,
         );
     }
 }
