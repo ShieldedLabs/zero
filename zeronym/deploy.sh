@@ -111,10 +111,25 @@ if [ "$COMPONENT" = shim ]; then
   : "${BACKEND:?set BACKEND for a shim}"; : "${BACKEND_TLS:?set BACKEND_TLS for a shim}"
   set -- "$@" --backend "$BACKEND" --backend-tls "$BACKEND_TLS"
   [ -n "${HUB_NYM:-}" ] && set -- "$@" --hub-nym "$HUB_NYM"
+  # The CLEARNET hub address, and the name its certificate must carry. Without
+  # these a shim deployed by this script has no clearnet route to a hub at all:
+  # only HUB_NYM was ever passed through, so a clearnet pair could not be
+  # deployed with this script, only by calling assemble-caution.sh by hand.
+  [ -n "${HUB:-}" ] && set -- "$@" --hub "$HUB"
+  [ -n "${HUB_TLS:-}" ] && set -- "$@" --hub-tls "$HUB_TLS"
+  if [ -z "${HUB:-}" ] && [ -z "${HUB_NYM:-}" ]; then
+    warn "neither HUB nor HUB_NYM set: this shim will be FORWARD-ONLY (it diverts nothing)"
+  fi
 elif [ "$COMPONENT" = hub ]; then
   : "${INDEXERS:?set INDEXERS for a hub}"; : "${INDEXER_TLS:?set INDEXER_TLS for a hub}"
   set -- "$@" --indexers "$INDEXERS" --indexer-tls "$INDEXER_TLS"
   [ "${NYM:-0}" = 1 ] && set -- "$@" --nym
+  # The clearnet submit path, which the hub keeps CLOSED unless asked. A hub
+  # deployed without this answers 404 to every clearnet submission, so a
+  # clearnet shim silently cannot divert to it -- and because the shim fails
+  # closed rather than falling back to the operator, affected wallets simply
+  # cannot migrate. Not needed for a mixnet-only hub, which is why it is opt-in.
+  [ "${HTTP_SUBMIT:-0}" = 1 ] && set -- "$@" --http-submit
   # The hub's ack-wait-before-retransmit. Passed through only when set, so a
   # local or non-enclave hub keeps the SDK default. See deploy.env.example for
   # why 15000 is the value for an enclave hub.
