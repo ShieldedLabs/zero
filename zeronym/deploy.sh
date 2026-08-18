@@ -232,7 +232,10 @@ if [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ]; then
 independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
 (gh/ssh) and push by hand, or re-run."
   log "app-source published: $APP_SOURCE @ $APP_SOURCE_TAG"
-  log "verify with: caution verify (expect PCR0/1 FAILED on Caution's floating framework; PCR2 is the check that matters)"
+  log "verify with: caution verify --attestation-url https://$TLS_DOMAIN/attestation"
+  log "  from a FRESH CLONE of $APP_SOURCE, not this tree. Require ALL THREE PCRs"
+  log "  plus the TLS binding. Do NOT accept a PCR2 match alone: hub and shim, two"
+  log "  different binaries, produce byte-identical PCR2, so it does not identify code."
 fi
 
 # ---------- the hub's Nym address ----------
