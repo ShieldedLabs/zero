@@ -544,6 +544,35 @@ fn classify_publish_failure(err: &BoxError) -> Publish {
 /// non-zero code, which is exactly how lightwalletd and zaino relay the node
 /// saying no, and offering the same bytes again would buy the same answer every
 /// flush until expiry (or forever, for an unparseable payload).
+/// Node rejections that CANNOT become acceptances by waiting, so re-offering the
+/// same bytes buys the same answer at every flush.
+///
+/// Matched against the message lowercased with hyphens folded to spaces, so both
+/// the hyphenated reject reasons and the prose forms hit.
+///
+/// Deliberately short, and every entry has to be a property of the SIGNED BYTES
+/// themselves. Anything time-dependent is excluded on purpose and retries: a
+/// missing parent may arrive, a full mempool may drain, a syncing node may catch
+/// up. Adding a time-dependent pattern here converts a recoverable failure back
+/// into a lost migration, which is the mistake this list exists to prevent.
+const PERMANENT_REJECTIONS: &[&str] = &[
+    // The consensus-failure family: signatures, bindings, spent inputs, values.
+    "bad txns",
+    // Size and fee are fixed by the bytes; waiting changes neither.
+    "tx size",
+    "oversize",
+    "insufficient fee",
+    "min relay fee",
+    "absurdly high fee",
+    "fee out of range",
+    "dust",
+    // Past its expiry height, and it can only get further past it.
+    "expired",
+    // The inputs are gone. A retry re-offers bytes that can never be valid.
+    "conflict",
+    "already spent",
+];
+
 fn classify_publish_error(message: &str) -> Publish {
     // Hyphens folded to spaces before matching. Bitcoin-derived nodes report
     // these as hyphenated reject reasons (`txn-already-known`) while the longer
@@ -553,14 +582,50 @@ fn classify_publish_error(message: &str) -> Publish {
     // would be a fresh timing signal tied to one transaction, which is exactly
     // what this component exists to avoid emitting.
     let m = message.to_ascii_lowercase().replace('-', " ");
-    if m.contains("already in block chain")
+
+    // A NAMED CONSENSUS FAILURE IS CHECKED FIRST, and the order is load-bearing.
+    // `bad-txns-inputs-duplicate` is a consensus rejection that happens to
+    // contain the substring "duplicate", so with already-known matched first it
+    // was classified `AlreadyKnown` -- which the batcher counts as ACHIEVED and
+    // does not hold. A transaction the network refused was being recorded as
+    // successfully published, and the wallet had already been told it was sent.
+    // No already-known message contains any of these patterns, so this ordering
+    // costs nothing and closes that.
+    if PERMANENT_REJECTIONS
+        .iter()
+        .any(|pattern| m.contains(pattern))
+    {
+        Publish::Rejected {
+            reason: message.to_string(),
+        }
+    } else if m.contains("already in block chain")
         || m.contains("already known")
         || m.contains("already in mempool")
         || m.contains("duplicate")
     {
         Publish::AlreadyKnown
     } else {
-        Publish::Rejected {
+        // UNRECOGNISED IS RETRYABLE, not rejected.
+        //
+        // This default used to be the other way round, which put this function
+        // in direct contradiction with `classify_publish_failure` above it: the
+        // same trade, resolved oppositely, in two adjacent functions.
+        //
+        // The costs are not symmetric. A transient error misread as a rejection
+        // drops the migration for good -- the shim has already told the wallet
+        // it was sent and keeps no copy, so nothing anywhere retries it. A
+        // permanent error misread as retryable costs one indexer call per flush
+        // and stops at the entry's expiry.
+        //
+        // It also makes the verdict independent of WHICH INDEXER answered, which
+        // it never was: lightwalletd relays zebra's transient errors as
+        // `SendResponse` with a non-zero code, and they arrived here and were
+        // dropped as rejections; zaino maps everything to gRPC INTERNAL, which
+        // never reaches this function and was retried instead. The same node
+        // failure had opposite outcomes decided by deployment. Biasing toward
+        // retry, and bounding the retry at the queue, removes the need to tell
+        // the two apart at all.
+        Publish::Retryable {
             reason: message.to_string(),
         }
     }
@@ -609,13 +674,65 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_node_error_is_a_verdict_not_a_success_and_not_a_retry() {
-        // The node answered and said no in words this client has not seen. That
-        // is still the node saying no: it must be neither counted as achieved
-        // nor held for the next flush.
+    fn an_unrecognised_node_error_is_retried_not_dropped() {
+        // INVERTED DELIBERATELY. This used to require a rejection, on the
+        // reasoning that the node answered and said no, so the entry should not
+        // be held. The reasoning is right and the conclusion was still wrong,
+        // because it ignored which way the mistake costs.
+        //
+        // We cannot tell, from words we have never seen, whether the node is
+        // refusing these bytes forever or reporting something momentary. Guess
+        // "permanent" and a recoverable migration is dropped for good: the shim
+        // already told the wallet it was sent and keeps no copy, so nothing
+        // anywhere retries it. Guess "transient" and we spend one indexer call
+        // per flush until the entry expires.
+        //
+        // Unrecoverable versus bounded and cheap. So the default is to retry,
+        // and `PERMANENT_REJECTIONS` carries the cases we can actually name.
         match classify_publish_error("some node we have never seen says no") {
-            Publish::Rejected { .. } => {}
-            other => panic!("unrecognised node errors must be rejections: {other:?}"),
+            Publish::Retryable { .. } => {}
+            other => panic!("an unrecognised node error must be retried: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_named_consensus_failure_is_still_a_rejection() {
+        // The other half of the same decision: biasing toward retry must not
+        // turn into retrying everything forever. Anything we can positively
+        // identify as a property of the signed bytes is still a verdict, and
+        // the batcher drops it.
+        for permanent in [
+            "16: bad-txns-sapling-binding-signature-invalid",
+            "bad-txns-inputs-duplicate",
+            "tx-size",
+            "insufficient fee, rejecting replacement",
+            "absurdly-high-fee",
+            "dust",
+            "tx expired",
+            "txn-mempool-conflict",
+        ] {
+            match classify_publish_error(permanent) {
+                Publish::Rejected { .. } => {}
+                other => panic!("{permanent:?} must be a rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_time_dependent_failure_is_not_treated_as_permanent() {
+        // The list must stay free of anything that waiting could fix. These are
+        // the ones most likely to be added to it by mistake: each looks like a
+        // hard failure and each can resolve on its own.
+        for transient in [
+            "mempool full",
+            "node is still syncing",
+            "missing inputs",
+            "too many unconfirmed ancestors",
+        ] {
+            match classify_publish_error(transient) {
+                Publish::Retryable { .. } => {}
+                other => panic!("{transient:?} must be retried, got {other:?}"),
+            }
         }
     }
 

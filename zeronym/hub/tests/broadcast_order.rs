@@ -114,7 +114,7 @@ async fn spawn_content_indexer(calls: Arc<AtomicUsize>) -> SocketAddr {
                                         // failure output rather than just "not
                                         // equal".
                                         error_message: if reject {
-                                            format!("rejected tx {i}")
+                                            format!("bad-txns-rejected-{i}")
                                         } else {
                                             String::new()
                                         },
@@ -156,7 +156,7 @@ async fn every_verdict_belongs_to_the_transaction_at_its_own_index() {
         if rejected(i) {
             match outcome {
                 Publish::Rejected { reason } => assert!(
-                    reason.contains(&format!("rejected tx {i}")),
+                    reason.contains(&format!("bad-txns-rejected-{i}")),
                     "verdict at index {i} carries another transaction's reason: {reason}"
                 ),
                 other => panic!("index {i} was rejected by the indexer, got {other:?}"),
