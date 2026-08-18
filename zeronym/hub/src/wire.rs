@@ -312,6 +312,18 @@ pub fn encode_submit(nonce: &Nonce, tx: &[u8]) -> Result<Zeroizing<Vec<u8>>, Wir
 /// header, silent on the padding (only the declared transaction region is read).
 /// The returned transaction is [`Zeroizing`] for the same reason the encode
 /// buffer is.
+/// Whether these bytes are shaped like a `SubmitV1` frame rather than a bare
+/// transaction.
+///
+/// Cheap and unambiguous: a Zcash transaction begins with its version header
+/// (`0x05000080`, `0x06000080`, ...), never with `ZNS1`, and a bare transaction
+/// is essentially never exactly [`FRAME_BYTES`] long. Used by the clearnet
+/// submit path to accept both the padded frame and the bare transaction an
+/// older shim sends, so the two sides can be deployed in either order.
+pub fn is_submit_frame(bytes: &[u8]) -> bool {
+    bytes.len() == FRAME_BYTES && bytes[0..4] == SUBMIT_MAGIC
+}
+
 pub fn decode_submit(frame: &[u8]) -> Result<(Nonce, Zeroizing<Vec<u8>>), WireError> {
     if frame.len() != FRAME_BYTES {
         return Err(WireError::WrongLength {

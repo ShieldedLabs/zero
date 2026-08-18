@@ -386,3 +386,79 @@ async fn a_body_that_never_arrives_is_timed_out_rather_than_held() {
         "a stalled body must be refused as a timeout, got:\n{response}"
     );
 }
+
+/// The clearnet submit path accepts BOTH shapes: the padded `SubmitV1` frame a
+/// current shim sends, and the bare transaction an older one does.
+///
+/// Accepting both is what lets the shim and the hub be deployed in either
+/// order. Without it, padding the shim's body would be a flag day: every
+/// migration submitted to a not-yet-updated hub would be refused, and the shim
+/// fails closed rather than falling back to the operator, so those wallets
+/// would simply be unable to migrate until both halves landed.
+///
+/// The frame itself exists for privacy, not tidiness -- an unpadded body's
+/// LENGTH is a fingerprint that joins to public on-chain data. See
+/// `HubClient::submit`.
+#[tokio::test]
+async fn clearnet_submit_takes_a_padded_frame_and_a_bare_transaction_alike() {
+    const FRAME_BYTES: usize = 64 * 1024;
+    const HEADER: usize = 24;
+
+    let addr = spawn(ServeOptions {
+        http_submit: true,
+        ..Default::default()
+    })
+    .await;
+    let tx = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+
+    // Bare: what a shim built before the padding change sends.
+    assert_eq!(
+        post(&addr, "/", tx.clone()).await,
+        StatusCode::OK,
+        "a bare transaction must still be admitted"
+    );
+
+    // Framed: magic, nonce, big-endian length, transaction, zero padding.
+    let mut frame = vec![0u8; FRAME_BYTES];
+    frame[0..4].copy_from_slice(b"ZNS1");
+    frame[4..20].copy_from_slice(&[0xAB; 16]);
+    frame[20..24].copy_from_slice(&(tx.len() as u32).to_be_bytes());
+    frame[HEADER..HEADER + tx.len()].copy_from_slice(&tx);
+
+    // Same transaction, so the queue dedupes it by content hash and answers
+    // OK. What is being asserted is that the frame was UNWRAPPED: had the
+    // header and padding been queued as if they were consensus bytes, this
+    // would be a different entry, not the same one.
+    assert_eq!(
+        post(&addr, "/", frame).await,
+        StatusCode::OK,
+        "a padded frame must be unwrapped and admitted"
+    );
+}
+
+/// Shaped like a frame but not a valid one: refused, never salvaged.
+///
+/// The dangerous failure would be falling back to "treat the body as a raw
+/// transaction", which hands the queue 24 bytes of header plus 64 KiB of zero
+/// padding as though a wallet had signed them.
+#[tokio::test]
+async fn a_malformed_frame_is_refused_rather_than_read_as_a_transaction() {
+    const FRAME_BYTES: usize = 64 * 1024;
+
+    let addr = spawn(ServeOptions {
+        http_submit: true,
+        ..Default::default()
+    })
+    .await;
+
+    let mut frame = vec![0u8; FRAME_BYTES];
+    frame[0..4].copy_from_slice(b"ZNS1");
+    // A declared length that runs off the end of the frame.
+    frame[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+
+    assert_eq!(
+        post(&addr, "/", frame).await,
+        StatusCode::BAD_REQUEST,
+        "a frame that does not decode is a bad request, not a transaction"
+    );
+}

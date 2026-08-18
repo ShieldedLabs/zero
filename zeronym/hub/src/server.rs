@@ -595,7 +595,31 @@ async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>
         }
         Err(_) => return Ok(text(StatusCode::REQUEST_TIMEOUT, "body read timed out")),
     };
-    let tx_bytes = Zeroizing::new(collected.to_bytes().to_vec());
+    // A padded `SubmitV1` frame, or a bare transaction from an older shim.
+    //
+    // The frame exists so that the SIZE of a clearnet submission says nothing
+    // about the transaction inside it. On the mixnet every submit is padded to
+    // `FRAME_BYTES` for exactly that reason, but the clearnet hop had no
+    // equivalent: a fresh dial per migration, carrying a body whose length is
+    // the transaction's length, is a timestamped size fingerprint -- and
+    // transaction sizes are public on-chain, so it joins straight to the
+    // published batch. TLS does not help; ciphertext length tracks plaintext
+    // length. Padding closes it at the cost of one fixed 64 KiB body.
+    //
+    // Both shapes are accepted so the shim and hub can be deployed in either
+    // order; the shim always sends the frame.
+    let raw = collected.to_bytes();
+    let tx_bytes = if crate::wire::is_submit_frame(&raw) {
+        match crate::wire::decode_submit(&raw) {
+            Ok((_nonce, tx)) => tx,
+            // Shaped like a frame but not a valid one. Never fall back to
+            // treating it as a raw transaction: that would hand the queue the
+            // header and the padding as if they were consensus bytes.
+            Err(_) => return Ok(text(StatusCode::BAD_REQUEST, "malformed submission frame")),
+        }
+    } else {
+        Zeroizing::new(raw.to_vec())
+    };
 
     if tx_bytes.is_empty() {
         return Ok(text(StatusCode::BAD_REQUEST, "empty body"));
