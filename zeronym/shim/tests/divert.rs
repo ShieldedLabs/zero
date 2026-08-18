@@ -98,7 +98,14 @@ async fn spawn_mock_hub_full(
                                     *lookup_seen.lock().unwrap() = Some(body.to_vec());
                                     Ok::<_, Infallible>(hub_lookup_reply(&lookup))
                                 } else {
-                                    *submit_seen.lock().unwrap() = Some(body.to_vec());
+                                    // Decode the padded SubmitV1 frame the way
+                                    // the real hub does, so `submit_seen` holds
+                                    // the TRANSACTION and every assertion about
+                                    // what the hub received stays about the
+                                    // transaction rather than about framing.
+                                    // The frame's own size is asserted
+                                    // separately, in the padding test.
+                                    *submit_seen.lock().unwrap() = Some(unframe_submit(&body));
                                     let json = format!(
                                         "{{\"disposition\":\"accepted\",\"txid\":\"{submit_txid}\"}}"
                                     );
@@ -508,4 +515,17 @@ async fn an_oversized_get_transaction_body_is_refused_before_it_is_buffered() {
         "a 100 KiB SendTransaction must not trip a body cap; the two caps are separate ({:?})",
         reply.message
     );
+}
+
+/// Pull the transaction out of a `SubmitV1` frame, as the hub's serving path
+/// does. Falls back to the raw body so this mock still stands in for the
+/// bare-transaction shape an older shim would send.
+fn unframe_submit(body: &[u8]) -> Vec<u8> {
+    const FRAME_BYTES: usize = 64 * 1024;
+    const HEADER: usize = 24;
+    if body.len() == FRAME_BYTES && &body[0..4] == b"ZNS1" {
+        let len = u32::from_be_bytes([body[20], body[21], body[22], body[23]]) as usize;
+        return body[HEADER..HEADER + len].to_vec();
+    }
+    body.to_vec()
 }

@@ -109,3 +109,74 @@ async fn a_hub_that_never_answers_is_given_up_on_rather_than_waited_for() {
         "the failure must name the deadline that fired, got: {err}"
     );
 }
+
+/// A hub that records the exact byte length of every submission body it is
+/// handed, and accepts each one.
+async fn spawn_recording_hub(lens: std::sync::Arc<std::sync::Mutex<Vec<usize>>>) -> SocketAddr {
+    use http_body_util::BodyExt;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let lens = lens.clone();
+            tokio::spawn(async move {
+                let _ = http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                            let lens = lens.clone();
+                            async move {
+                                let body = req.into_body().collect().await.unwrap().to_bytes();
+                                lens.lock().unwrap().push(body.len());
+                                Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(
+                                    "{\"disposition\":\"accepted\",\"txid\":\"ab\"}",
+                                ))))
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+/// Every clearnet submission is the same size on the wire, whatever it carries.
+///
+/// This is a PRIVACY property, not a protocol tidiness one, and it is the reason
+/// the body is a padded frame rather than the bare transaction.
+///
+/// The shim dials the hub fresh per migration -- deliberately, since a standing
+/// connection would itself signal that this shim has something to divert. That
+/// makes every dial a timestamped diversion event, which is tolerable only while
+/// the event carries no further detail. An unpadded body carries the
+/// transaction's LENGTH, transaction lengths are public on-chain, and twenty-five
+/// minutes later the batch is published -- so length plus timestamp joins a
+/// wallet's connection to one on-chain transaction. That is the same class of
+/// leak as the fingerprint fields removed from the shim's log, arriving over the
+/// network instead of through the log, and TLS does not touch it: ciphertext
+/// length tracks plaintext length.
+///
+/// Two submissions three orders of magnitude apart in payload must be
+/// indistinguishable by size.
+#[tokio::test]
+async fn every_clearnet_submission_is_the_same_size_on_the_wire() {
+    let lens = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let addr = spawn_recording_hub(lens.clone()).await;
+    let client = HubClient::new(addr, None);
+
+    let _ = client.submit(&[7u8; 64]).await;
+    let _ = client.submit(&[9u8; 40_000]).await;
+
+    let seen = lens.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "both submissions must have reached the hub");
+    assert_eq!(
+        seen[0], seen[1],
+        "a 64-byte and a 40,000-byte migration must be the same size on the wire; \
+         got {seen:?}"
+    );
+    assert_eq!(
+        seen[0], FRAME_BYTES,
+        "and that size is the fixed frame both transports pad to"
+    );
+}

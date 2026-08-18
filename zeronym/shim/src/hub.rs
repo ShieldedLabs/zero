@@ -125,8 +125,38 @@ impl HubClient {
         }
     }
 
-    /// POST the raw transaction bytes to the hub and read back its verdict.
+    /// POST the transaction to the hub, padded, and read back its verdict.
+    ///
+    /// The body is a `SubmitV1` frame -- the same fixed-size, zero-padded frame
+    /// the mixnet path uses -- and NOT the bare transaction, because the bare
+    /// transaction's LENGTH is a fingerprint. This client dials fresh per
+    /// migration (deliberately: a standing connection would itself signal this
+    /// shim's activity), so each dial is already a timestamped diversion event.
+    /// Letting its size track the transaction turns that into a join key
+    /// against public on-chain data, which is the same leak the shim's log was
+    /// just cleaned of. TLS is no defence: ciphertext length tracks plaintext
+    /// length.
     pub async fn submit(&self, tx_bytes: &[u8]) -> Result<Submit, BoxError> {
+        // Minted per submission and never reused. The clearnet path does not
+        // correlate on it -- the verdict comes back on this HTTP response --
+        // but the frame is one format across both transports, and a constant
+        // here would be the one field in an otherwise fixed body that is
+        // identical on every submission.
+        let mut nonce: crate::wire::Nonce = [0u8; crate::wire::NONCE_BYTES];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+
+        // Refused HERE rather than by the hub's 413, so an oversized migration
+        // costs no dial at all. The budget is the frame's, not the raw body's:
+        // the header takes its bite before the transaction does.
+        let frame = match crate::wire::encode_submit(&nonce, tx_bytes) {
+            Ok(frame) => frame,
+            Err(_) => {
+                return Ok(Submit::TooLarge {
+                    limit: crate::wire::MAX_NYM_TX_BYTES,
+                })
+            }
+        };
+
         // The deadline covers the whole exchange -- connect, TLS handshake,
         // request, response body -- not just the read. Each of those can stall
         // independently, and a deadline around only one of them bounds nothing.
@@ -139,7 +169,7 @@ impl HubClient {
                 .uri("/")
                 .header(hyper::header::HOST, &self.authority)
                 .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
-                .body(Full::new(Bytes::copy_from_slice(tx_bytes)))?;
+                .body(Full::new(Bytes::copy_from_slice(&frame)))?;
 
             match &self.tls {
                 Some(tls) => {
