@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::join_all;
+use futures_util::stream::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -46,6 +47,16 @@ use crate::BoxError;
 /// the flush is on a block-cadence deadline: late is not merely slow here, it
 /// can push a migration past its expiry height.
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many of a flush's transactions may be in flight at once.
+///
+/// Each in-flight transaction dials every endpoint, so the real descriptor cost
+/// is this times the endpoint count. Bounded because the queue's entry cap
+/// (`queue::MAX_QUEUE_ENTRIES`) is an order of magnitude larger, and dialling
+/// that many sockets simultaneously fails as fd exhaustion rather than as a
+/// slow flush. See `broadcast_batch` for why bounding this does not weaken the
+/// simultaneity the anonymity set depends on.
+const MAX_PUBLISHES_IN_FLIGHT: usize = 64;
 
 /// gRPC length-prefixed message header: 1 compression flag + 4 big-endian bytes.
 const GRPC_PREFIX_LEN: usize = 5;
@@ -197,16 +208,39 @@ impl ChainClient {
         best_of(join_all(calls).await)
     }
 
-    /// Publish a whole flushed batch, every transaction to every endpoint, all
-    /// at once.
+    /// Publish a whole flushed batch, every transaction to every endpoint,
+    /// concurrently.
     ///
     /// Simultaneity is the property: the batch is the anonymity set only if its
     /// members hit the network together. Publishing them one after another would
     /// re-expose exactly the arrival ordering the shuffle just destroyed, so the
-    /// full (transaction x endpoint) product is issued concurrently and the
-    /// verdicts are positional, one per input transaction.
+    /// (transaction x endpoint) product is issued concurrently and the verdicts
+    /// are positional, one per input transaction.
+    ///
+    /// Concurrency is bounded, though, because "all at once" and "unbounded" are
+    /// not the same requirement. Each in-flight publish dials its own connection,
+    /// so an unbounded product exhausts file descriptors before it finishes, and
+    /// a flush that dies of fd exhaustion publishes nothing at all. The bound is
+    /// chosen so it does not weaken the property: what the anonymity set needs is
+    /// that the batch lands in the same BLOCK, not the same microsecond, and
+    /// `MAX_PUBLISHES_IN_FLIGHT` transactions clear in well under a second
+    /// against a healthy indexer -- against a whole queue at its entry cap, still
+    /// far inside one block interval, let alone the flush interval.
+    ///
+    /// `buffered`, not `buffer_unordered`: the verdicts are positional and the
+    /// caller zips them against the batch by index.
     pub async fn broadcast_batch(&self, txs: &[Vec<u8>]) -> Vec<Publish> {
-        join_all(txs.iter().map(|tx| self.broadcast(tx))).await
+        // Collected into a `Vec` before streaming, not mapped lazily. A lazy
+        // `iter().map(|tx| self.broadcast(tx))` makes the stream's item type
+        // borrow `self` under a higher-ranked lifetime, and the resulting future
+        // fails `tokio::spawn`'s `Send` bound ("implementation of `Send` is not
+        // general enough") at the CALLER, several layers away. Collecting first
+        // pins one concrete lifetime and keeps the error where it belongs.
+        let calls: Vec<_> = txs.iter().map(|tx| self.broadcast(tx)).collect();
+        futures_util::stream::iter(calls)
+            .buffered(MAX_PUBLISHES_IN_FLIGHT)
+            .collect::<Vec<_>>()
+            .await
     }
 
     /// Fetch one transaction by the wallet's `TxFilter.hash` bytes.
