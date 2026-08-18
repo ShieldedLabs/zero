@@ -75,12 +75,30 @@ async fn main() -> Result<(), BoxError> {
     // one.
     let nym_address = server::NymAddress::unknown();
 
+    // Shutdown is ORDERED, not merely broadcast. Everything that stops must stop
+    // in one sequence: admission closes, then the cadence publishes what it
+    // holds, then the process leaves. `shutdown_signal()` on its own gives every
+    // consumer the same instant and no ordering between them, which is how a
+    // migration admitted after the final flush used to be acked to a wallet and
+    // then dropped on exit.
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+    let drain_tx = Arc::new(drain_tx);
+
+    {
+        let queue = queue.clone();
+        let drain_tx = drain_tx.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            begin_drain(&queue, &drain_tx);
+        });
+    }
+
     let cadence = tokio::spawn(batcher::run(
         queue.clone(),
         chain.clone(),
         tip.clone(),
         params,
-        shutdown_signal(),
+        drained(drain_rx.clone()),
     ));
 
     // Optionally also accept submissions over the Nym mixnet (M5), sharing the
@@ -111,7 +129,7 @@ async fn main() -> Result<(), BoxError> {
     let serving = server::serve(
         listener,
         Hub {
-            queue,
+            queue: queue.clone(),
             tip,
             params,
             chain,
@@ -125,10 +143,45 @@ async fn main() -> Result<(), BoxError> {
     // Either half stopping is fatal: a hub that admits without publishing holds
     // migrations until they expire, and a hub that publishes without admitting
     // is not reachable. Neither is a state to keep running in.
+    //
+    // But "fatal" must not mean "exit with the batch still in RAM". The serving
+    // path returns on an accept error it cannot classify as transient, and every
+    // migration the queue is holding at that moment has already been acked to a
+    // wallet and exists nowhere else. So a dead serving path drains and waits for
+    // the cadence to publish, and only then gives up; the exit code and the error
+    // are unchanged, the held batch is not.
+    // `&mut cadence` in both arms: the serving arm has to be able to await the
+    // cadence AFTER the select resolves, which consuming it here would prevent.
+    let mut cadence = cadence;
     tokio::select! {
-        result = serving => result,
-        result = cadence => result.map_err(BoxError::from).and(Ok(())),
+        result = serving => {
+            tracing::error!("the serving path stopped; draining and publishing what is held before exiting");
+            begin_drain(&queue, &drain_tx);
+            if let Err(err) = (&mut cadence).await {
+                tracing::error!(%err, "the cadence did not complete its final flush");
+            }
+            result
+        }
+        result = &mut cadence => result.map_err(BoxError::from).and(Ok(())),
     }
+}
+
+/// Close admission, then release everything waiting on the drain.
+///
+/// The order inside this function is the guarantee: `begin_draining` is visible
+/// to every admission path before the cadence is woken, so the flush it then
+/// runs is genuinely the last word on what this hub holds. Reversing these two
+/// lines reopens the window this exists to close.
+fn begin_drain(queue: &Arc<Queue>, drain_tx: &tokio::sync::watch::Sender<bool>) {
+    queue.begin_draining();
+    let _ = drain_tx.send(true);
+}
+
+/// Resolves once [`begin_drain`] has run. Idempotent and late-safe: a consumer
+/// that starts waiting after the drain has already begun returns immediately,
+/// which a `Notify` would not.
+async fn drained(mut rx: tokio::sync::watch::Receiver<bool>) {
+    let _ = rx.wait_for(|draining| *draining).await;
 }
 
 /// Spawn the mixnet ingress when requested and this binary carries the driver.
@@ -185,12 +238,12 @@ fn spawn_nym_listener(
     let (out_tx, out_rx) = mpsc::channel(64);
     let (addr_tx, mut addr_rx) = mpsc::channel(4);
 
-    tokio::spawn(nym::run_listener(in_rx, out_tx, hub));
+    let listener_task = tokio::spawn(nym::run_listener(in_rx, out_tx, hub));
     // Shut the driver's client down on the SAME signal as the rest of the hub
     // (SIGTERM or ctrl-c), not ctrl-c alone: a container stop is SIGTERM, and the
     // driver must run disconnect() to completion then (D12: it is not cancel-safe
     // and a dropped live client leaks its background tasks).
-    tokio::spawn(nym_driver::run_driver(
+    let driver_task = tokio::spawn(nym_driver::run_driver(
         network,
         config.nym_gateway.clone(),
         in_tx,
@@ -199,6 +252,35 @@ fn spawn_nym_listener(
         nym_address.clone(),
         shutdown_signal(),
     ));
+
+    // Supervise both. Neither task is expected to return before shutdown, so any
+    // return -- value, error, or panic -- means the mixnet ingress is over. The
+    // hub deliberately stays UP: its clearnet ingress and its flush cadence are
+    // independent of the mixnet, and killing the process would drop a queue of
+    // migrations that shims believe are on their way. What it must not do is keep
+    // claiming to be reachable. `/nym-status` is the endpoint that tells the
+    // truth, so this is what makes it tell it.
+    {
+        let nym_address = nym_address.clone();
+        tokio::spawn(async move {
+            let which = tokio::select! {
+                joined = listener_task => ("listener", joined),
+                joined = driver_task => ("driver", joined),
+            };
+            match which {
+                (task, Err(join_err)) if join_err.is_panic() => {
+                    tracing::error!(task, "the mixnet {task} PANICKED; this hub is no longer reachable over the mixnet")
+                }
+                (task, _) => {
+                    tracing::error!(
+                        task,
+                        "the mixnet {task} exited; this hub is no longer reachable over the mixnet"
+                    )
+                }
+            }
+            nym_address.set_driver_exited();
+        });
+    }
     // The driver logs its address, but surfacing it here too keeps it in the
     // startup log the operator reads to configure shims — and, more importantly
     // now, parks it where `GET /nym-address` can answer with it. An ATTESTED
