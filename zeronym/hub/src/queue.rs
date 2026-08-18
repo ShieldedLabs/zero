@@ -64,6 +64,24 @@ pub const MAX_TX_BYTES: usize = 64 * 1024;
 /// submitter who simply keeps submitting.
 pub const MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Total ENTRIES the queue will hold, independently of their size.
+///
+/// The byte budget alone does not bound the batch: a submitter sending
+/// minimum-size transactions fills 64 MB with tens of thousands of entries, and
+/// a flush publishes every entry to every endpoint at once, so the entry count
+/// -- not the byte count -- is what sizes the flush's concurrent dials. Left
+/// unbounded that is a file-descriptor exhaustion path reachable by anyone who
+/// can submit.
+///
+/// 1024 is where the byte budget lands for maximum-size transactions
+/// (`MAX_QUEUE_BYTES / MAX_TX_BYTES`), so this tightens nothing for the traffic
+/// the queue was sized for; it only removes the small-transaction blow-up.
+/// Refusing past it is strictly better than the alternative: a submitter who can
+/// flood the queue has already destroyed the anonymity set for that window, so
+/// the batch is worth nothing anyway, and refusal at least keeps the hub alive
+/// to serve the next one.
+pub const MAX_QUEUE_ENTRIES: usize = MAX_QUEUE_BYTES / MAX_TX_BYTES;
+
 /// Why a submission was not admitted.
 ///
 /// Typed rather than a string because the shim reacts differently to each: a
@@ -82,6 +100,13 @@ pub enum Refusal {
     /// The chain tip is stale, so neither the flush schedule nor the expiry
     /// check can be trusted. Refusing is the fail-closed answer.
     TipStale,
+    /// The hub is shutting down and has stopped admitting, so that the final
+    /// flush is genuinely final. Distinct from [`Refusal::Full`] in this hub's
+    /// own logs, but it deliberately shares `Full`'s code ON THE WIRE: a shim
+    /// does the same thing with both (this hub cannot take it, try another or
+    /// tell the wallet), and minting a new code would make an older shim answer
+    /// `UnknownRefusal` for the length of any rolling deploy.
+    Draining,
 }
 
 impl Refusal {
@@ -93,6 +118,7 @@ impl Refusal {
             Refusal::TooLarge => "too_large",
             Refusal::Full => "queue_full",
             Refusal::TipStale => "tip_stale",
+            Refusal::Draining => "draining",
         }
     }
 }
@@ -144,6 +170,9 @@ struct Inner {
 pub struct Queue {
     inner: Mutex<Inner>,
     max_bytes: usize,
+    /// Set once, at shutdown, before the final flush runs. See
+    /// [`Queue::begin_draining`].
+    draining: std::sync::atomic::AtomicBool,
 }
 
 impl Queue {
@@ -158,7 +187,32 @@ impl Queue {
                 bytes: 0,
             }),
             max_bytes,
+            draining: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Stop admitting, permanently. Called on the shutdown signal and BEFORE the
+    /// cadence runs its final flush.
+    ///
+    /// The ordering is the whole point and it is not decoration. Without it the
+    /// serving path keeps accepting right up to the instant the process exits:
+    /// the cadence publishes what it holds, returns, `main`'s `select!` resolves,
+    /// and every migration admitted in the window between that flush and the
+    /// exit is dropped -- each one already acked to a wallet that believes it is
+    /// on its way to the network, and held nowhere else, because the shim keeps
+    /// no copy. That is a silent loss of funds bounded only by how long the
+    /// runtime takes to wind down.
+    ///
+    /// Refusing is the safe half of the trade: a refused submission is one the
+    /// wallet can retry, against this hub when it comes back or another hub now.
+    pub fn begin_draining(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether [`begin_draining`](Self::begin_draining) has been called.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Offer a transaction to the queue.
@@ -174,6 +228,12 @@ impl Queue {
         flush_interval: u32,
         mining_margin: u32,
     ) -> Admission {
+        // Before every other check: once draining, this hub admits nothing, so
+        // the flush that is about to run is the last word on what it holds.
+        if self.is_draining() {
+            return Admission::Refused(Refusal::Draining);
+        }
+
         if tx_bytes.len() > self.max_bytes.min(MAX_TX_BYTES) {
             return Admission::Refused(Refusal::TooLarge);
         }
@@ -221,6 +281,13 @@ impl Queue {
         // acknowledgement is a promise; never emit one for an entry that is not
         // resident.
         if inner.bytes.saturating_add(tx_bytes.len()) > self.max_bytes {
+            return Admission::Refused(Refusal::Full);
+        }
+
+        // Full by count as well as by size. Same refusal either way: the shim
+        // reacts to "this hub cannot take it" identically regardless of which
+        // budget ran out, so this needs no new variant and no shim change.
+        if inner.entries.len() >= MAX_QUEUE_ENTRIES {
             return Admission::Refused(Refusal::Full);
         }
 
@@ -724,7 +791,11 @@ mod tests {
         let _ = q.admit(&junk(4), 100, N, MARGIN);
         let _ = q.admit(&junk(5), 100, N, MARGIN);
         assert_eq!(q.requeue(batch), 2);
-        assert_eq!(q.len(), 5, "an admitted entry is never evicted, from either side");
+        assert_eq!(
+            q.len(),
+            5,
+            "an admitted entry is never evicted, from either side"
+        );
         assert_eq!(
             q.admit(&junk(6), 100, N, MARGIN),
             Admission::Refused(Refusal::Full)
@@ -767,5 +838,125 @@ mod tests {
             ever_differed,
             "drain_shuffled must not preserve insertion order"
         );
+    }
+
+    /// A distinct 64-byte payload per index. `junk` is seeded by a `u8` and so
+    /// cannot produce more than 256 distinct entries, which is fewer than the
+    /// entry cap this exercises.
+    fn distinct(seed: u32) -> Vec<u8> {
+        let mut v = vec![0u8; 64];
+        v[..4].copy_from_slice(&seed.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn the_entry_cap_refuses_a_flood_the_byte_budget_would_have_allowed() {
+        // The byte budget alone does not bound the BATCH, and the batch is what
+        // sizes a flush's concurrent dials. `MAX_QUEUE_ENTRIES + 1` payloads of
+        // 64 bytes come to ~64 KiB: one thousandth of `MAX_QUEUE_BYTES`, so the
+        // byte check waves every one of them through. That is precisely why this
+        // looked bounded already and was not.
+        let q = Queue::new();
+        for i in 0..MAX_QUEUE_ENTRIES {
+            assert!(
+                matches!(
+                    q.admit(&distinct(i as u32), 100, N, MARGIN),
+                    Admission::Admitted { .. }
+                ),
+                "entry {i} sits well inside the byte budget and must be admitted"
+            );
+        }
+        assert_eq!(q.len(), MAX_QUEUE_ENTRIES);
+
+        assert_eq!(
+            q.admit(&distinct(MAX_QUEUE_ENTRIES as u32), 100, N, MARGIN),
+            Admission::Refused(Refusal::Full),
+            "past the entry cap the queue is full, even though it holds ~64 KiB \
+             of a 64 MiB budget"
+        );
+        assert_eq!(
+            q.len(),
+            MAX_QUEUE_ENTRIES,
+            "a refusal must not evict: an admission is a promise"
+        );
+    }
+
+    #[test]
+    fn the_entry_cap_is_where_the_byte_budget_lands_for_full_size_transactions() {
+        // The two budgets are meant to bind at the same point for the traffic
+        // the queue was sized for, so the entry cap tightens nothing real. If
+        // someone retunes one, this says the other has to move with it.
+        assert_eq!(MAX_QUEUE_ENTRIES, MAX_QUEUE_BYTES / MAX_TX_BYTES);
+    }
+
+    #[test]
+    fn a_draining_queue_refuses_new_work_but_still_yields_what_it_holds() {
+        // The shutdown sequence in one test. Everything admitted before the
+        // drain must still come out of the final flush; everything offered after
+        // it must be refused rather than accepted into a batch that will never
+        // be published.
+        let q = Queue::new();
+        assert!(matches!(
+            q.admit(&junk(1), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
+            q.admit(&junk(2), 100, N, MARGIN),
+            Admission::Admitted { .. }
+        ));
+
+        q.begin_draining();
+        assert!(q.is_draining());
+
+        assert_eq!(
+            q.admit(&junk(3), 100, N, MARGIN),
+            Admission::Refused(Refusal::Draining),
+            "after the drain begins nothing new may be admitted: the flush that \
+             is about to run is the last one, and an admission after it is a \
+             migration acked to a wallet and then dropped on exit"
+        );
+
+        // The two admitted before the drain are still there to be published.
+        let batch = q.drain_shuffled();
+        assert_eq!(
+            batch.len(),
+            2,
+            "draining must not discard what was promised"
+        );
+    }
+
+    #[test]
+    fn draining_is_checked_before_every_other_refusal() {
+        // Ordering inside `admit` matters for the operator reading the log. A
+        // shutting-down hub that reports `too_large` or `expiry_too_tight` sends
+        // whoever is debugging it after the transaction instead of the hub.
+        let q = Queue::new();
+        q.begin_draining();
+
+        let huge = vec![0u8; MAX_TX_BYTES + 1];
+        assert_eq!(
+            q.admit(&huge, 100, N, MARGIN),
+            Admission::Refused(Refusal::Draining),
+            "a draining hub says so, whatever else is also wrong with the request"
+        );
+    }
+
+    #[test]
+    fn a_requeue_still_works_while_draining() {
+        // The final flush requeues anything it could not get a verdict on, and
+        // that path runs entirely inside the drain. Gating it would throw away
+        // exactly the entries the ordered shutdown exists to protect.
+        let q = Queue::new();
+        let _ = q.admit(&junk(1), 100, N, MARGIN);
+        let batch = q.drain_shuffled();
+        assert_eq!(batch.len(), 1);
+
+        q.begin_draining();
+        assert_eq!(
+            q.requeue(batch),
+            1,
+            "a drain closes the door to NEW work, not to work already promised"
+        );
+        assert_eq!(q.len(), 1);
     }
 }
