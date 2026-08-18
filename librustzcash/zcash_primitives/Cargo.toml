@@ -1,7 +1,7 @@
 [package]
 name = "zcash_primitives"
 description = "Rust implementations of the Zcash primitives"
-version = "0.29.0-pre.0"
+version = "0.30.0"
 authors = [
     "Jack Grigg <jack@z.cash>",
     "Kris Nuttycombe <kris@electriccoin.co>"
@@ -146,6 +146,8 @@ bench = false
 [[bench]]
 name = "note_decryption"
 harness = false
+# Needs `sapling::prover::mock`, which sapling gates behind its `circuit` feature.
+required-features = ["circuits"]
 
 [badges]
 maintenance = { status = "actively-developed" }

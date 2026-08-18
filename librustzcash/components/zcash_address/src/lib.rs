@@ -144,7 +144,7 @@ mod convert;
 mod encoding;
 mod kind;
 
-#[cfg(any(test, feature = "test-dependencies"))]
+#[cfg(feature = "test-dependencies")]
 pub mod test_vectors;
 
 pub use convert::{ConversionError, Converter, ToAddress, TryFromAddress, UnsupportedAddress};
@@ -183,7 +183,7 @@ impl ZcashAddress {
     /// [`Display` implementation]: core::fmt::Display
     /// [`address.to_string()`]: alloc::string::ToString
     pub fn encode(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 
     /// Attempts to parse the given string as a Zcash address.
