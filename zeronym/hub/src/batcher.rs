@@ -733,7 +733,11 @@ mod tests {
 
         let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
         let live = client(mock.addr);
-        assert_eq!(flush(&queue, &live).await, 2, "the held entries are the next batch");
+        assert_eq!(
+            flush(&queue, &live).await,
+            2,
+            "the held entries are the next batch"
+        );
         assert!(queue.is_empty());
         assert_eq!(mock.sent.lock().unwrap().len(), 2);
     }
@@ -743,7 +747,10 @@ mod tests {
         // The indexer answered OK with a non-zero code: the node said no. Holding
         // it would cost an indexer call every flush for the same answer.
         let mock = spawn_mock_indexer(
-            vec![Answer::Send(-26, "16: bad-txns-sapling-binding-signature-invalid")],
+            vec![Answer::Send(
+                -26,
+                "16: bad-txns-sapling-binding-signature-invalid",
+            )],
             Duration::ZERO,
         )
         .await;
@@ -771,7 +778,10 @@ mod tests {
 
         let refusing = spawn_mock_indexer(vec![Answer::Status("3")], Duration::ZERO).await;
         assert_eq!(flush(&queue, &client(refusing.addr)).await, 0);
-        assert!(queue.is_empty(), "INVALID_ARGUMENT is the indexer refusing it");
+        assert!(
+            queue.is_empty(),
+            "INVALID_ARGUMENT is the indexer refusing it"
+        );
     }
 
     #[tokio::test]
@@ -781,9 +791,8 @@ mod tests {
         // is held; the dead endpoint must not turn a placed batch into a
         // re-offered one.
         let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
-        let chain = Arc::new(
-            ChainClient::new(vec![mock.addr, unreachable_addr().await], None).unwrap(),
-        );
+        let chain =
+            Arc::new(ChainClient::new(vec![mock.addr, unreachable_addr().await], None).unwrap());
         let queue = queue_holding(&[junk(1), junk(2)]);
         assert_eq!(flush(&queue, &chain).await, 2);
         assert!(queue.is_empty());
@@ -821,7 +830,10 @@ mod tests {
         // moving the height into the next epoch make the following tick flush.
         let deadline = Instant::now() + Duration::from_secs(10);
         while tip.observed_height() != TIP {
-            assert!(Instant::now() < deadline, "the cadence never observed the tip");
+            assert!(
+                Instant::now() < deadline,
+                "the cadence never observed the tip"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         mock.height.store(TIP + N, Ordering::SeqCst);

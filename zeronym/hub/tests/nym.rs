@@ -125,8 +125,15 @@ async fn a_framed_migration_is_admitted_and_acked_accepted() {
 
     assert_eq!(replies.len(), 1);
     assert_eq!(ack(&replies[0]), AckKind::Accepted);
-    assert_eq!(ack_nonce(&replies[0]), nonce(1), "the ack echoes the request nonce");
-    assert_eq!(replies[0].sender_tag, TAG, "the reply goes back to the sender");
+    assert_eq!(
+        ack_nonce(&replies[0]),
+        nonce(1),
+        "the ack echoes the request nonce"
+    );
+    assert_eq!(
+        replies[0].sender_tag, TAG,
+        "the reply goes back to the sender"
+    );
     assert_eq!(hub.queue.len(), 1, "the migration is held for the batch");
 }
 
@@ -170,7 +177,11 @@ async fn a_frame_with_a_bad_tx_len_is_acked_bad_frame_with_the_recovered_nonce()
 
     assert_eq!(replies.len(), 1);
     assert_eq!(ack(&replies[0]), AckKind::Refused(AckRefusal::BadFrame));
-    assert_eq!(ack_nonce(&replies[0]), nonce(4), "the recoverable nonce is echoed");
+    assert_eq!(
+        ack_nonce(&replies[0]),
+        nonce(4),
+        "the recoverable nonce is echoed"
+    );
     assert_eq!(hub.queue.len(), 0);
 }
 
@@ -184,7 +195,10 @@ async fn an_unrecoverable_frame_gets_logged_and_dropped_with_no_reply() {
 
     let replies = run_round(hub.clone(), vec![msg(TAG, frame)]).await;
 
-    assert!(replies.is_empty(), "a frame with no recoverable nonce gets no reply");
+    assert!(
+        replies.is_empty(),
+        "a frame with no recoverable nonce gets no reply"
+    );
     assert_eq!(hub.queue.len(), 0);
 }
 
@@ -419,7 +433,11 @@ async fn a_runt_lookup_shaped_message_buys_no_reply_at_all() {
         replies.is_empty(),
         "a wrong-size lookup frame is dropped, not answered with a full frame"
     );
-    assert_eq!(hub.queue.len(), 0, "and it is not mistaken for a submission");
+    assert_eq!(
+        hub.queue.len(),
+        0,
+        "and it is not mistaken for a submission"
+    );
 }
 
 #[tokio::test]
@@ -595,21 +613,34 @@ async fn a_reply_past_the_deadline_is_dead_and_a_fresh_one_is_not() {
         received_at,
     };
 
-    assert!(!at(Instant::now()).is_dead(), "a just-received reply is live");
+    assert!(
+        !at(Instant::now()).is_dead(),
+        "a just-received reply is live"
+    );
 
     // Just inside the deadline: still live. The driver must not drop a reply
     // that would land inside the shim's budget.
     if let Some(inside) = Instant::now().checked_sub(REPLY_DEADLINE - Duration::from_secs(1)) {
-        assert!(!at(inside).is_dead(), "one second inside the deadline is still live");
+        assert!(
+            !at(inside).is_dead(),
+            "one second inside the deadline is still live"
+        );
     }
 
     // Past it: dead. Emitting it now would be packets for nothing.
     if let Some(past) = Instant::now().checked_sub(REPLY_DEADLINE + Duration::from_secs(1)) {
         let dead = at(past);
-        assert!(dead.is_dead(), "past REPLY_DEADLINE the reply is dead (age {:?})", dead.age());
+        assert!(
+            dead.is_dead(),
+            "past REPLY_DEADLINE the reply is dead (age {:?})",
+            dead.age()
+        );
         // And a reply received NOW is live regardless of how stale its
         // neighbours are: the deadline is per reply, so a dead backlog cannot
         // poison a fresh answer queued behind it.
-        assert!(!at(Instant::now()).is_dead(), "a fresh reply behind a dead one is still live");
+        assert!(
+            !at(Instant::now()).is_dead(),
+            "a fresh reply behind a dead one is still live"
+        );
     }
 }

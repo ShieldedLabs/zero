@@ -59,7 +59,10 @@ enum OnSubmit {
 /// How the mixnet hub answers a lookup.
 #[derive(Clone)]
 enum OnLookup {
-    Found { data: Vec<u8>, height: u64 },
+    Found {
+        data: Vec<u8>,
+        height: u64,
+    },
     NotFound,
     /// The hub could not answer (its indexer failed, or it could not frame the
     /// reply). Must never reach a wallet as "your transaction does not exist".
@@ -111,11 +114,9 @@ async fn spawn_nym_shim(
                     )
                     .expect("the fixture fits a reply frame")
                     .to_vec(),
-                    OnLookup::NotFound => {
-                        wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
-                            .unwrap()
-                            .to_vec()
-                    }
+                    OnLookup::NotFound => wire::encode_lookup_reply(&nonce, &LookupReply::NotFound)
+                        .unwrap()
+                        .to_vec(),
                     OnLookup::Error => wire::encode_lookup_reply(&nonce, &LookupReply::Error)
                         .unwrap()
                         .to_vec(),
@@ -176,8 +177,7 @@ async fn eventually(mut cond: impl FnMut() -> bool) -> bool {
 async fn a_migration_is_diverted_over_the_mixnet_and_the_operator_is_never_connected() {
     let backend_conns = Arc::new(AtomicUsize::new(0));
     let backend = spawn_counting_backend(backend_conns.clone()).await;
-    let (shim, seen) =
-        spawn_nym_shim(backend, OnSubmit::Accept, OnLookup::NotFound).await;
+    let (shim, seen) = spawn_nym_shim(backend, OnSubmit::Accept, OnLookup::NotFound).await;
 
     let mut sender = connect_h2(shim).await;
     let body = send_tx(&mut sender, shim, V6_MIGRATION).await;
@@ -489,7 +489,10 @@ async fn a_malformed_filter_is_rejected_locally_and_never_framed() {
         },
     )
     .await;
-    assert_eq!(by_block.status, 3, "a block+index filter is INVALID_ARGUMENT");
+    assert_eq!(
+        by_block.status, 3,
+        "a block+index filter is INVALID_ARGUMENT"
+    );
 
     assert!(
         seen.lookups.lock().unwrap().is_empty(),

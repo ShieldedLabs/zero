@@ -492,7 +492,10 @@ async fn an_oversized_get_transaction_body_is_refused_before_it_is_buffered() {
         reply.status, 5,
         "a legitimate filter must clear the cap and reach the hub (NotFound here)"
     );
-    assert!(looked_up.lock().unwrap().is_some(), "the hub saw the lookup");
+    assert!(
+        looked_up.lock().unwrap().is_some(),
+        "the hub saw the lookup"
+    );
 
     // And SendTransaction keeps its own, larger cap: a ~100 KiB body is not
     // refused for size. It is not a valid transaction, so classification

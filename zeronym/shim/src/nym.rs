@@ -1276,7 +1276,10 @@ mod tests {
             })
             .await
             .unwrap();
-        out_rx.recv().await.expect("the frame is emitted to the driver");
+        out_rx
+            .recv()
+            .await
+            .expect("the frame is emitted to the driver");
 
         // Close requests while the reply is still outstanding, then deliver it.
         drop(req_tx);
@@ -1312,9 +1315,15 @@ mod tests {
         let (commands_tx, mut commands_rx) = mpsc::channel::<ClientCommand>(64);
         let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        tokio::spawn(run_supervisor(policy, events_rx, commands_tx, inflight, async move {
-            let _ = shutdown_rx.await;
-        }));
+        tokio::spawn(run_supervisor(
+            policy,
+            events_rx,
+            commands_tx,
+            inflight,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
 
         // A window well under the 100 ms backoff. A hot loop fills the 64-slot
         // command channel before it elapses; the floor emits none in this window.

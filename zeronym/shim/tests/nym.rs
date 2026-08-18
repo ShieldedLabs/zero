@@ -46,7 +46,11 @@ fn start_with_targets(timeout: Duration, targets: usize) -> (Driver, Arc<AtomicU
 /// The same, with an explicit driver-channel capacity: the number of frames the
 /// driver can be handed before it must take one, which is what a real driver
 /// mid-emission exhausts.
-fn start_full(timeout: Duration, targets: usize, driver_capacity: usize) -> (Driver, Arc<AtomicUsize>) {
+fn start_full(
+    timeout: Duration,
+    targets: usize,
+    driver_capacity: usize,
+) -> (Driver, Arc<AtomicUsize>) {
     let (req_tx, req_rx) = mpsc::channel(8);
     let (out_tx, out_rx) = mpsc::channel(driver_capacity);
     let (in_tx, in_rx) = mpsc::channel(8);
@@ -54,7 +58,12 @@ fn start_full(timeout: Duration, targets: usize, driver_capacity: usize) -> (Dri
     tokio::spawn(run_transport(req_rx, out_tx, in_rx, inflight.clone()));
     (
         Driver {
-            handle: NymHandle::new(req_tx, timeout, timeout, Arc::new(AtomicUsize::new(targets))),
+            handle: NymHandle::new(
+                req_tx,
+                timeout,
+                timeout,
+                Arc::new(AtomicUsize::new(targets)),
+            ),
             from_transport: out_rx,
             to_transport: in_tx,
         },
@@ -197,8 +206,16 @@ async fn empty_and_undecodable_inbound_messages_do_not_disturb_a_lookup() {
 
     // An empty message (SURB replenishment artifact) and garbage bytes, then
     // the real reply: the first two must not disturb the correlation.
-    driver.to_transport.send(Zeroizing::new(Vec::new())).await.unwrap();
-    driver.to_transport.send(Zeroizing::new(vec![0x77; 30])).await.unwrap();
+    driver
+        .to_transport
+        .send(Zeroizing::new(Vec::new()))
+        .await
+        .unwrap();
+    driver
+        .to_transport
+        .send(Zeroizing::new(vec![0x77; 30]))
+        .await
+        .unwrap();
     driver
         .to_transport
         .send(Zeroizing::new(
@@ -217,7 +234,10 @@ async fn an_oversized_transaction_is_refused_before_anything_is_sent() {
     let mut driver = start(Duration::from_secs(5));
     let tx = vec![0u8; MAX_NYM_TX_BYTES + 1];
     let err = driver.handle.submit(&tx).await.unwrap_err();
-    assert!(matches!(err, NymError::Encode(wire::WireError::TxTooLarge { .. })));
+    assert!(matches!(
+        err,
+        NymError::Encode(wire::WireError::TxTooLarge { .. })
+    ));
     // Nothing reached the mixnet: the gate is at the frame boundary, and an
     // over-budget transaction is never sent in any form.
     assert!(driver.from_transport.try_recv().is_err());
@@ -425,7 +445,10 @@ async fn an_error_lookup_fails_closed_and_is_never_a_not_found() {
         .await
         .unwrap();
 
-    assert!(lookup.await.unwrap().is_err(), "an error reply fails closed");
+    assert!(
+        lookup.await.unwrap().is_err(),
+        "an error reply fails closed"
+    );
 }
 
 #[tokio::test]
@@ -461,7 +484,9 @@ async fn a_reply_of_the_wrong_kind_is_not_an_answer() {
     let (lookup_nonce, _) = next_lookup(&mut driver).await;
     driver
         .to_transport
-        .send(Zeroizing::new(wire::encode_ack(&lookup_nonce, AckKind::Accepted).to_vec()))
+        .send(Zeroizing::new(
+            wire::encode_ack(&lookup_nonce, AckKind::Accepted).to_vec(),
+        ))
         .await
         .unwrap();
     assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
@@ -603,7 +628,11 @@ async fn a_silent_hub_fails_closed_only_after_every_address() {
     assert_eq!(lookup.await.unwrap(), Err(NymError::Timeout));
 
     targets.sort_unstable();
-    assert_eq!(targets, vec![0, 1, 2], "every address was tried exactly once");
+    assert_eq!(
+        targets,
+        vec![0, 1, 2],
+        "every address was tried exactly once"
+    );
     assert!(
         driver.from_transport.try_recv().is_err(),
         "and no more than once"
@@ -666,7 +695,11 @@ async fn a_submit_goes_to_every_hub_address() {
     assert_eq!(submit.await.unwrap(), Ok(()));
 
     targets.sort_unstable();
-    assert_eq!(targets, vec![0, 1, 2], "every configured address was sent to");
+    assert_eq!(
+        targets,
+        vec![0, 1, 2],
+        "every configured address was sent to"
+    );
     nonces.sort_unstable();
     nonces.dedup();
     assert_eq!(
@@ -777,7 +810,11 @@ async fn the_inflight_count_tracks_requests_the_caller_still_wants() {
     let handle = driver.handle.clone();
     let lookup = tokio::spawn(async move { handle.get_transaction(&[0x63; 32]).await });
     let (nonce, _) = next_lookup(&mut driver).await;
-    assert_eq!(inflight.load(Ordering::Relaxed), 1, "a request is in flight");
+    assert_eq!(
+        inflight.load(Ordering::Relaxed),
+        1,
+        "a request is in flight"
+    );
 
     driver
         .to_transport

@@ -266,7 +266,10 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
         5,
         "log was:\n{log}"
     );
-    assert!(log.contains("diverted_in_production=false"), "log was:\n{log}");
+    assert!(
+        log.contains("diverted_in_production=false"),
+        "log was:\n{log}"
+    );
 
     // 3. NO fingerprint at INFO. Each of these was on the old info line; any
     //    one of them reappearing here is a privacy regression, whatever the

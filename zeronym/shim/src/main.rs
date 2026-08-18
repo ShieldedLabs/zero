@@ -342,7 +342,13 @@ fn build_nym_transport(
     // Shut the supervisor (and through it, the driver's client) down on the same
     // SIGTERM-or-ctrl-c signal the proxy uses, so a container stop disconnects the
     // mixnet client cleanly (D12) rather than leaking it on a hard kill.
-    tokio::spawn(nym::run_supervisor(rotation, evt_rx, cmd_tx, inflight, shutdown()));
+    tokio::spawn(nym::run_supervisor(
+        rotation,
+        evt_rx,
+        cmd_tx,
+        inflight,
+        shutdown(),
+    ));
     tokio::spawn(nym_driver::run_driver(
         network,
         config.nym_gateway.clone(),

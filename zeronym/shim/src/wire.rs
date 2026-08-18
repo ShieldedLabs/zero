@@ -183,7 +183,10 @@ impl std::fmt::Display for WireError {
                 write!(f, "declared tx_len {declared} overruns the frame")
             }
             WireError::HashTooLarge { .. } => {
-                write!(f, "hash exceeds the {MAX_LOOKUP_HASH_BYTES}-byte lookup budget")
+                write!(
+                    f,
+                    "hash exceeds the {MAX_LOOKUP_HASH_BYTES}-byte lookup budget"
+                )
             }
             WireError::HashLenOverrunsFrame { declared } => {
                 write!(f, "declared hash_len {declared} overruns the frame")
@@ -389,8 +392,14 @@ impl PartialEq for LookupReply {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                LookupReply::Found { height: a, tx: a_tx },
-                LookupReply::Found { height: b, tx: b_tx },
+                LookupReply::Found {
+                    height: a,
+                    tx: a_tx,
+                },
+                LookupReply::Found {
+                    height: b,
+                    tx: b_tx,
+                },
             ) => a == b && a_tx.as_slice() == b_tx.as_slice(),
             (LookupReply::NotFound, LookupReply::NotFound) => true,
             (LookupReply::Error, LookupReply::Error) => true,
@@ -516,7 +525,11 @@ pub fn decode_lookup_reply(frame: &[u8]) -> Result<(Nonce, LookupReply), WireErr
             if height != 0 || declared != 0 {
                 return Err(WireError::StrayReplyPayload);
             }
-            let reply = if disp == 1 { LookupReply::NotFound } else { LookupReply::Error };
+            let reply = if disp == 1 {
+                LookupReply::NotFound
+            } else {
+                LookupReply::Error
+            };
             Ok((nonce, reply))
         }
         other => Err(WireError::UnknownDisposition(other)),
@@ -927,8 +940,7 @@ mod tests {
         )
         .unwrap();
         let mut overrun = found.clone();
-        overrun[29..33]
-            .copy_from_slice(&((MAX_LOOKUP_REPLY_TX_BYTES + 1) as u32).to_be_bytes());
+        overrun[29..33].copy_from_slice(&((MAX_LOOKUP_REPLY_TX_BYTES + 1) as u32).to_be_bytes());
         assert_eq!(
             decode_lookup_reply(&overrun),
             Err(WireError::TxLenOverrunsFrame {
@@ -963,7 +975,10 @@ mod tests {
         assert_eq!(peek_lookup_nonce(&frame), Some(nonce));
         // Wrong magic or too short: no trustworthy nonce. A submit frame is not
         // a lookup frame, and vice versa.
-        assert_eq!(peek_lookup_nonce(&encode_submit(&nonce, &[]).unwrap()), None);
+        assert_eq!(
+            peek_lookup_nonce(&encode_submit(&nonce, &[]).unwrap()),
+            None
+        );
         assert_eq!(peek_nonce(&frame), None);
         frame[0] ^= 0xff;
         assert_eq!(peek_lookup_nonce(&frame), None);

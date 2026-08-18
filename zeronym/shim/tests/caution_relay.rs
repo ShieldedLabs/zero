@@ -165,7 +165,10 @@ async fn the_shim_serves_its_own_status_and_never_proxies_it() {
     status.set_rebuild_failed();
     let body = body_of(&mut client, shim, "GET", "/nym-status").await;
     assert!(body.contains("\"mixnet_connected\":false"), "{body}");
-    assert!(body.contains("\"consecutive_rebuild_failures\":1"), "{body}");
+    assert!(
+        body.contains("\"consecutive_rebuild_failures\":1"),
+        "{body}"
+    );
     assert_eq!(
         request_path(&mut client, shim, "GET", "/healthz").await,
         StatusCode::SERVICE_UNAVAILABLE
@@ -178,7 +181,10 @@ async fn the_shim_serves_its_own_status_and_never_proxies_it() {
     status.set_connected();
     let body = body_of(&mut client, shim, "GET", "/nym-status").await;
     assert!(body.contains("\"mixnet_connected\":true"), "{body}");
-    assert!(body.contains("\"consecutive_rebuild_failures\":0"), "{body}");
+    assert!(
+        body.contains("\"consecutive_rebuild_failures\":0"),
+        "{body}"
+    );
     assert!(
         body.contains("\"client_deaths\":1"),
         "deaths are cumulative and must survive a reconnect: {body}"

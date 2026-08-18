@@ -448,7 +448,15 @@ pub async fn run_driver(
                         tracing::error!(error = %err, "rebuild failed; awaiting retry");
                         status.set_rebuild_failed();
                         let _ = events.send(ClientEvent::Died).await;
-                        match build_when_told(&mut commands, &network, &events, &mut gateways, &status).await {
+                        match build_when_told(
+                            &mut commands,
+                            &network,
+                            &events,
+                            &mut gateways,
+                            &status,
+                        )
+                        .await
+                        {
                             Some(client) => client,
                             None => return,
                         }
@@ -474,10 +482,13 @@ pub async fn run_driver(
                 // for the supervisor to ask for a rebuild.
                 status.set_died();
                 let _ = events.send(ClientEvent::Died).await;
-                client = match build_when_told(&mut commands, &network, &events, &mut gateways, &status).await {
-                    Some(client) => client,
-                    None => return,
-                };
+                client =
+                    match build_when_told(&mut commands, &network, &events, &mut gateways, &status)
+                        .await
+                    {
+                        Some(client) => client,
+                        None => return,
+                    };
                 sender = client.split_sender();
                 // A rebuild mints a new identity at a possibly different
                 // gateway, so the probe target moves with it. Reset the probe
@@ -611,11 +622,18 @@ async fn send_frame(
     out: OutFrame,
 ) {
     let Some(recipient) = hub_addresses.get(out.target).copied() else {
-        tracing::error!(index = out.target, "no hub address at that index; dropping frame");
+        tracing::error!(
+            index = out.target,
+            "no hub address at that index; dropping frame"
+        );
         return;
     };
     if let Err(err) = sender
-        .send_message(recipient, out.frame.to_vec(), IncludedSurbs::new(out.reply_surbs))
+        .send_message(
+            recipient,
+            out.frame.to_vec(),
+            IncludedSurbs::new(out.reply_surbs),
+        )
         .await
     {
         tracing::warn!(error = %err, "mixnet send failed; the caller will fail closed on timeout");
@@ -669,13 +687,20 @@ mod tests {
     fn one_gateway_is_pinned_on_every_build() {
         let mut selector = GatewaySelector::new(vec!["gw-a".to_owned()]);
         assert_eq!(selector.take().as_deref(), Some("gw-a"));
-        assert_eq!(selector.take().as_deref(), Some("gw-a"), "no other to rotate to");
+        assert_eq!(
+            selector.take().as_deref(),
+            Some("gw-a"),
+            "no other to rotate to"
+        );
     }
 
     #[test]
     fn several_gateways_rotate_and_wrap() {
-        let mut selector =
-            GatewaySelector::new(vec!["gw-a".to_owned(), "gw-b".to_owned(), "gw-c".to_owned()]);
+        let mut selector = GatewaySelector::new(vec![
+            "gw-a".to_owned(),
+            "gw-b".to_owned(),
+            "gw-c".to_owned(),
+        ]);
         // Each build advances, so a rebuild after a bad gateway lands elsewhere;
         // the sequence wraps rather than running off the end.
         let seen: Vec<_> = (0..4).filter_map(|_| selector.take()).collect();

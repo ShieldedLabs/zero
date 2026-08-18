@@ -670,7 +670,10 @@ async fn send_probe(sender: &nym_sdk::mixnet::MixnetClientSender, own: Recipient
 
 /// Hand one inbound reconstructed message to the listener as a [`Received`],
 /// unless it is an artifact or an anonymity failure.
-async fn deliver(incoming: &mpsc::Sender<Received>, message: nym_sdk::mixnet::ReconstructedMessage) {
+async fn deliver(
+    incoming: &mpsc::Sender<Received>,
+    message: nym_sdk::mixnet::ReconstructedMessage,
+) {
     // Wrap the cleartext in Zeroizing FIRST, so EVERY return path below wipes it
     // on drop, not only the one that reaches the listener. A SubmitV1 here holds a
     // diverted migration in cleartext, and freeing it un-wiped is the one thing an

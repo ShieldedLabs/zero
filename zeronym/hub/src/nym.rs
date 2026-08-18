@@ -328,8 +328,9 @@ fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
             // No nonce, no tag, no body: in an enclave the log reaches the parent
             // host, which is exactly who this system withholds those from.
             tracing::warn!(reason = %err, "submission frame could not be decoded");
-            wire::peek_nonce(frame)
-                .map(|nonce| wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::BadFrame)).to_vec())
+            wire::peek_nonce(frame).map(|nonce| {
+                wire::encode_ack(&nonce, AckKind::Refused(AckRefusal::BadFrame)).to_vec()
+            })
         }
     }
 }
