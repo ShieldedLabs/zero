@@ -131,8 +131,8 @@ impl ScriptCacheKey {
         let mut writer = sha256d::Writer::default();
         for output in spent_outputs {
             output.zcash_serialize(&mut writer).expect(
-                "output serialization only fails on scripts over the 2 MiB CompactSize limit, \
-                 and a spent output's script fits in a 2,000,000 byte block",
+                "output serialization only fails if the lock script length exceeds MAX_PROTOCOL_MESSAGE_LEN (2 MiB); \
+                 spent outputs come from blocks bounded by MAX_BLOCK_BYTES (2,000,000), so serialization is infallible here",
             );
         }
 
