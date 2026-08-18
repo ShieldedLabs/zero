@@ -21,9 +21,10 @@ use crate::wallet::init::WalletMigrationError;
 
 use super::ironwood_received_notes;
 
-pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0xa6ef40c7_050a_43c6_a4e2_2f034168c979);
+/// Adds Ironwood received notes to the `v_received_outputs` and `v_received_output_spends` views.
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xa6ef40c7_050a_43c6_a4e2_2f034168c979);
 
-const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[ironwood_received_notes::MIGRATION_ID];
 
 pub(super) struct Migration;
 
@@ -158,6 +159,25 @@ impl RusqliteMigration for Migration {
 #[cfg(test)]
 mod tests {
     use crate::wallet::init::migrations::tests::test_migrate;
+    #[cfg(feature = "orchard")]
+    use {
+        crate::{
+            WalletDb,
+            testing::db::{test_clock, test_rng},
+            wallet::init::{
+                WalletMigrator,
+                migrations::tests::{
+                    ArbIronwoodNote, ArbOrchardNote, arb_ironwood_note, arb_orchard_note,
+                },
+            },
+        },
+        proptest::{prelude::ProptestConfig, prop_assert_eq, test_runner::TestRunner},
+        rusqlite::named_params,
+        secrecy::Secret,
+        tempfile::NamedTempFile,
+        zcash_keys::keys::UnifiedSpendingKey,
+        zcash_protocol::consensus::Network,
+    };
 
     #[test]
     fn migrate() {
@@ -172,24 +192,6 @@ mod tests {
     #[cfg(feature = "orchard")]
     #[test]
     fn ironwood_and_orchard_notes_appear_in_received_outputs() {
-        use proptest::{prelude::ProptestConfig, prop_assert_eq, test_runner::TestRunner};
-        use rusqlite::named_params;
-        use secrecy::Secret;
-        use tempfile::NamedTempFile;
-        use zcash_keys::keys::UnifiedSpendingKey;
-        use zcash_protocol::consensus::Network;
-
-        use crate::{
-            WalletDb,
-            testing::db::{test_clock, test_rng},
-            wallet::init::{
-                WalletMigrator,
-                migrations::tests::{
-                    ArbIronwoodNote, ArbOrchardNote, arb_ironwood_note, arb_orchard_note,
-                },
-            },
-        };
-
         let network = Network::TestNetwork;
         let seed_bytes = vec![0xab; 32];
 

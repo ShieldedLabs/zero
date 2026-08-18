@@ -5,9 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this library adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0-pre.0] - 2026-06-30
+## [Unreleased]
+
+## [0.6.0] - 2026-07-24
+
+### Added
+- `zcash_history` is now compatible with `no_std`, via a new default-enabled
+  `std` feature. Build with `default-features = false` to target `no_std`
+  platforms; an allocator is required.
+
 ### Changed
-- MSRV is now 1.85.1.
+- Updated to depend on `zcash_encoding 0.5`.
+
+### Fixed
+- Invalid history node height ranges are now rejected during deserialization,
+  and leaf ranges starting at block height zero no longer underflow.
+
+## [0.5.0] - 2026-07-09
+
+### Changed
+- MSRV is now 1.88
 - `zcash_history::MAX_NODE_DATA_SIZE` is now 317 bytes and the derived
   `zcash_history::MAX_ENTRY_SIZE` is now 326 bytes, to account for Ironwood
   history node metadata.

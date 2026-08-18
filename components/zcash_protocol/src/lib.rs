@@ -28,6 +28,7 @@ pub mod constants;
 pub mod local_consensus;
 pub mod memo;
 pub mod value;
+pub mod zip318;
 
 mod txid;
 pub use txid::TxId;
@@ -78,6 +79,8 @@ pub mod testing {
     use proptest::prelude::{Just, Strategy, prop_oneof};
 
     use super::ShieldedPool;
+
+    pub use crate::txid::testing::arb_txid;
 
     /// A [`proptest`] strategy that yields a [`ShieldedPool`] variant uniformly at
     /// random.

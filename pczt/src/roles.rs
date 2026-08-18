@@ -37,19 +37,28 @@ pub mod tx_extractor;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "io-finalizer", feature = "tx-extractor"))]
+    use {crate::roles::creator::Creator, zcash_protocol::consensus::BranchId};
+
+    #[cfg(feature = "io-finalizer")]
+    use crate::roles::io_finalizer::{self, IoFinalizer};
+
+    #[cfg(feature = "tx-extractor")]
+    use crate::roles::tx_extractor::{self, TransactionExtractor};
+
     #[cfg(feature = "tx-extractor")]
     #[test]
     fn extract_fails_on_empty() {
-        use zcash_protocol::consensus::BranchId;
-
-        use crate::roles::{
-            creator::Creator,
-            tx_extractor::{self, TransactionExtractor},
-        };
-
-        let pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .unwrap()
-            .build();
+        let pczt = Creator::new(
+            BranchId::Nu6.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
 
         // Extraction fails because we haven't run the IO Finalizer.
         // Extraction fails in Sapling because we happen to extract it before Orchard.
@@ -64,16 +73,16 @@ mod tests {
     #[cfg(feature = "io-finalizer")]
     #[test]
     fn io_finalizer_fails_on_empty() {
-        use zcash_protocol::consensus::BranchId;
-
-        use crate::roles::{
-            creator::Creator,
-            io_finalizer::{self, IoFinalizer},
-        };
-
-        let pczt = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .unwrap()
-            .build();
+        let pczt = Creator::new(
+            BranchId::Nu6.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
 
         // IO finalization fails on spends because we happen to check them first.
         assert!(matches!(

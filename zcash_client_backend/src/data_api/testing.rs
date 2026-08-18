@@ -8,6 +8,8 @@ use std::{
     num::NonZeroU32,
 };
 
+#[cfg(feature = "pczt")]
+use super::wallet::{create_pczt_from_proposal, extract_and_store_transaction_from_pczt};
 use assert_matches::assert_matches;
 use group::ff::Field;
 use incrementalmerkletree::{Marking, Retention};
@@ -15,11 +17,29 @@ use nonempty::NonEmpty;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaChaRng;
 use secrecy::{ExposeSecret, Secret, SecretVec};
-use shardtree::{ShardTree, error::ShardTreeError, store::memory::MemoryShardStore};
+use shardtree::{
+    ShardTree,
+    error::ShardTreeError,
+    store::{ShardStore as _, memory::MemoryShardStore},
+};
 use subtle::ConditionallySelectable;
+#[cfg(feature = "transparent-inputs")]
+use {
+    super::{
+        CoinbaseFilter, TransactionsInvolvingAddress, TransparentBalances,
+        wallet::{
+            input_selection::ShieldingSelector, propose_shielding, propose_shielding_coinbase,
+            shield_transparent_funds,
+        },
+    },
+    crate::wallet::TransparentAddressMetadata,
+    ::transparent::address::TransparentAddress,
+    zcash_keys::keys::transparent::gap_limits::GapLimits,
+};
 
 use ::sapling::{
     note_encryption::{SaplingDomain, sapling_note_encryption},
+    prover::mock::{MockOutputProver, MockSpendProver},
     util::generate_random_rseed,
     zip32::DiversifiableFullViewingKey,
 };
@@ -33,6 +53,7 @@ use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TxId, components::sapling::zip212_enforcement, fees::FeeRule},
 };
+#[cfg(feature = "pczt")]
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
     ShieldedPool,
@@ -45,6 +66,19 @@ use zcash_protocol::{
 use zcash_script::script;
 use zip32::DiversifierIndex;
 use zip321::Payment;
+#[cfg(feature = "orchard")]
+use {
+    super::ORCHARD_SHARD_HEIGHT,
+    crate::proto::compact_formats::CompactOrchardAction,
+    ::orchard::{
+        note::{ExtractedNoteCommitment, Note as OrchardNote, NoteVersion, RandomSeed, Rho},
+        note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
+        tree::MerkleHashOrchard,
+    },
+    group::ff::PrimeField,
+    pasta_curves::pallas,
+    zcash_note_encryption::ShieldedOutput,
+};
 
 use super::{
     Account, AccountBalance, AccountBirthday, AccountMeta, AccountPurpose, AccountSource,
@@ -52,17 +86,32 @@ use super::{
     ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT, ScannedBlock, SeedRelevance,
     SentTransaction, TransactionDataRequest, TransactionStatus, WalletCommitmentTrees, WalletRead,
     WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
+    anchor_retention::AnchorRetentionInterval,
     chain::{BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, scan_cached_blocks},
     error::Error,
-    scanning::ScanRange,
+    scanning::{ScanPriority, ScanRange},
     wallet::{
         ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
-        input_selection::{GreedyInputSelector, InputSelector},
+        input_selection::{
+            GreedyInputSelector, InputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
+        },
         propose_send_max_transfer, propose_standard_transfer_to_address, propose_transfer,
     },
 };
+
+#[cfg(feature = "pczt")]
+fn real_test_prover() -> &'static LocalTxProver {
+    use std::sync::OnceLock;
+
+    static PROVER: OnceLock<LocalTxProver> = OnceLock::new();
+    PROVER.get_or_init(LocalTxProver::bundled)
+}
 use crate::{
-    data_api::{MaxSpendMode, TargetValue, error::RewindError, wallet::TargetHeight},
+    data_api::{
+        MaxSpendMode, OutputLockStore, TargetValue,
+        error::{LockError, RewindError},
+        wallet::TargetHeight,
+    },
     fees::{
         ChangeStrategy, DustOutputPolicy, StandardFeeRule,
         standard::{self, SingleOutputChangeStrategy},
@@ -71,24 +120,9 @@ use crate::{
     proto::compact_formats::{
         self, CompactBlock, CompactSaplingOutput, CompactSaplingSpend, CompactTx,
     },
-    wallet::{Note, NoteId, OvkPolicy, ReceivedNote, WalletTransparentOutput},
-};
-
-#[cfg(feature = "transparent-inputs")]
-use {
-    super::{
-        CoinbaseFilter, TransactionsInvolvingAddress, TransparentBalances,
-        wallet::input_selection::{ShieldingSelector, TransparentSpendPolicy},
+    wallet::{
+        LockOwner, Note, NoteId, OutputRef, OvkPolicy, ReceivedNote, WalletTransparentOutput,
     },
-    crate::wallet::TransparentAddressMetadata,
-    ::transparent::address::TransparentAddress,
-    zcash_keys::keys::transparent::gap_limits::GapLimits,
-};
-
-#[cfg(feature = "orchard")]
-use {
-    super::ORCHARD_SHARD_HEIGHT, crate::proto::compact_formats::CompactOrchardAction,
-    ::orchard::tree::MerkleHashOrchard, group::ff::PrimeField, pasta_curves::pallas,
 };
 
 pub mod pool;
@@ -117,6 +151,7 @@ pub struct TransactionSummary<AccountId> {
     memo_count: usize,
     expired_unmined: bool,
     is_shielding: bool,
+    pool_crossing_value: Option<Zatoshis>,
 }
 
 impl<AccountId> TransactionSummary<AccountId> {
@@ -141,6 +176,7 @@ impl<AccountId> TransactionSummary<AccountId> {
         memo_count: usize,
         expired_unmined: bool,
         is_shielding: bool,
+        pool_crossing_value: Option<Zatoshis>,
     ) -> Self {
         Self {
             account_id,
@@ -158,6 +194,7 @@ impl<AccountId> TransactionSummary<AccountId> {
             memo_count,
             expired_unmined,
             is_shielding,
+            pool_crossing_value,
         }
     }
 
@@ -259,6 +296,33 @@ impl<AccountId> TransactionSummary<AccountId> {
     pub fn is_shielding(&self) -> bool {
         self.is_shielding
     }
+
+    /// Returns `true` if this is detectably a wallet-internal transfer that moves the
+    /// account's own funds between shielded pools (for example, a ZIP 318
+    /// Orchard -> Ironwood migration transfer).
+    ///
+    /// Specifically, `true` means that at a minimum:
+    /// - Every wallet-spent note and wallet-received output is shielded.
+    /// - The transaction spends at least one of the account's notes.
+    /// - At least one output was received in a pool the account spent nothing from.
+    /// - We do not know about any external outputs of the transaction.
+    ///
+    /// A payment that returns value to one of the wallet's own addresses is classified
+    /// once the wallet has observed the returned output (which the scanner marks as
+    /// change); while such a transaction is unmined it is treated as an ordinary payment.
+    ///
+    /// This is exactly the condition that [`Self::pool_crossing_value`] is `Some`; the
+    /// crossed amount is what identifies the transaction, so it is the only thing stored.
+    pub fn is_pool_crossing(&self) -> bool {
+        self.pool_crossing_value.is_some()
+    }
+
+    /// Returns the total value received in pools the account did not spend from, which
+    /// is the amount that crossed pools, when this is a pool-crossing transaction as described
+    /// by [`Self::is_pool_crossing`], or `None` otherwise.
+    pub fn pool_crossing_value(&self) -> Option<Zatoshis> {
+        self.pool_crossing_value
+    }
 }
 
 /// Metadata about a block generated by [`TestState`].
@@ -267,11 +331,12 @@ pub struct CachedBlock {
     chain_state: ChainState,
     sapling_end_size: u32,
     orchard_end_size: u32,
+    ironwood_end_size: u32,
 }
 
 impl CachedBlock {
-    /// Produces metadata for a block "before shielded time", when the Sapling and Orchard
-    /// trees were (by definition) empty.
+    /// Produces metadata for a block "before shielded time", when the Sapling, Orchard, and
+    /// Ironwood trees were (by definition) empty.
     ///
     /// `block_height` must be a height before Sapling activation (and therefore also
     /// before NU5 activation).
@@ -280,11 +345,17 @@ impl CachedBlock {
             chain_state: ChainState::empty(block_height, BlockHash([0; 32])),
             sapling_end_size: 0,
             orchard_end_size: 0,
+            ironwood_end_size: 0,
         }
     }
 
     /// Produces metadata for a block as of the given chain state.
-    pub fn at(chain_state: ChainState, sapling_end_size: u32, orchard_end_size: u32) -> Self {
+    pub fn at(
+        chain_state: ChainState,
+        sapling_end_size: u32,
+        orchard_end_size: u32,
+        ironwood_end_size: u32,
+    ) -> Self {
         assert_eq!(
             chain_state.final_sapling_tree().tree_size() as u32,
             sapling_end_size
@@ -294,11 +365,17 @@ impl CachedBlock {
             chain_state.final_orchard_tree().tree_size() as u32,
             orchard_end_size
         );
+        #[cfg(feature = "orchard")]
+        assert_eq!(
+            chain_state.final_ironwood_tree().tree_size() as u32,
+            ironwood_end_size
+        );
 
         Self {
             chain_state,
             sapling_end_size,
             orchard_end_size,
+            ironwood_end_size,
         }
     }
 
@@ -329,6 +406,25 @@ impl CachedBlock {
             sz + (tx.actions.len() as u32)
         });
 
+        #[cfg(feature = "orchard")]
+        let ironwood_final_tree = cb
+            .vtx
+            .iter()
+            .flat_map(|tx| tx.ironwood_actions.iter())
+            .fold(
+                self.chain_state.final_ironwood_tree().clone(),
+                |mut acc, c_act| {
+                    acc.append(MerkleHashOrchard::from_cmx(&c_act.cmx().unwrap()));
+                    acc
+                },
+            );
+        #[cfg(feature = "orchard")]
+        let ironwood_end_size = ironwood_final_tree.tree_size() as u32;
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_end_size = cb.vtx.iter().fold(self.ironwood_end_size, |sz, tx| {
+            sz + (tx.ironwood_actions.len() as u32)
+        });
+
         Self {
             chain_state: ChainState::new(
                 cb.height(),
@@ -336,9 +432,12 @@ impl CachedBlock {
                 sapling_final_tree,
                 #[cfg(feature = "orchard")]
                 orchard_final_tree,
+                #[cfg(feature = "orchard")]
+                ironwood_final_tree,
             ),
             sapling_end_size,
             orchard_end_size,
+            ironwood_end_size,
         }
     }
 
@@ -360,6 +459,11 @@ impl CachedBlock {
     /// Returns the size of the Orchard note commitment tree as of the end of this block.
     pub fn orchard_end_size(&self) -> u32 {
         self.orchard_end_size
+    }
+
+    /// Returns the size of the Ironwood note commitment tree as of the end of this block.
+    pub fn ironwood_end_size(&self) -> u32 {
+        self.ironwood_end_size
     }
 }
 
@@ -518,6 +622,41 @@ impl<Cache, DataStore: WalletTest, Network: consensus::Parameters>
     }
 }
 
+impl<Cache, DataStore, Network> TestState<Cache, DataStore, Network>
+where
+    DataStore: WalletTest + WalletWrite,
+    Network: consensus::Parameters,
+{
+    /// Creates a FURTHER account under the test seed, at the test account's birthday, and returns
+    /// its id and spending key.
+    ///
+    /// The wallet assigns the next unused ZIP 32 account index, so this is a sibling of the
+    /// account [`TestBuilder`] configured — the shape a test needs to check that some answer is
+    /// scoped to the account it was asked of, rather than to the wallet.
+    ///
+    /// Create every account a test needs BEFORE scanning anything: account creation adjusts the
+    /// scan queue, which clears the wallet's fully-scanned height.
+    pub fn create_account_from_test_seed(
+        &mut self,
+        account_name: &str,
+    ) -> (<DataStore as WalletRead>::AccountId, UnifiedSpendingKey) {
+        let seed = SecretVec::new(
+            self.test_seed()
+                .expect("the test state was built with a seed")
+                .expose_secret()
+                .clone(),
+        );
+        let birthday = self
+            .test_account()
+            .expect("the test state was built with an account")
+            .birthday()
+            .clone();
+        self.wallet_mut()
+            .create_account(account_name, &seed, &birthday, None)
+            .expect("creates a further account under the test seed")
+    }
+}
+
 impl<Cache: TestCache, DataStore, Network> TestState<Cache, DataStore, Network>
 where
     Network: consensus::Parameters,
@@ -589,6 +728,7 @@ where
             outputs,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            prior_cached_block.ironwood_end_size,
             false,
         );
 
@@ -621,8 +761,7 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
-            // The test framework does not generate Ironwood notes.
-            ironwood_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size,
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -644,6 +783,7 @@ where
         outputs: &[FakeCompactOutput<Fvk>],
         initial_sapling_tree_size: u32,
         initial_orchard_tree_size: u32,
+        initial_ironwood_tree_size: u32,
         allow_broken_hash_chain: bool,
     ) -> (Cache::InsertResult, Vec<Fvk::Nullifier>) {
         let mut prior_cached_block = self
@@ -653,6 +793,7 @@ where
         assert!(prior_cached_block.chain_state.block_height() < height);
         assert!(prior_cached_block.sapling_end_size <= initial_sapling_tree_size);
         assert!(prior_cached_block.orchard_end_size <= initial_orchard_tree_size);
+        assert!(prior_cached_block.ironwood_end_size <= initial_ironwood_tree_size);
 
         // If the block height has increased or the Sapling and/or Orchard tree sizes have changed,
         // we need to generate a new prior cached block that the block to be generated can
@@ -683,6 +824,16 @@ where
                     },
                 );
 
+            #[cfg(feature = "orchard")]
+            let final_ironwood_tree =
+                (prior_cached_block.ironwood_end_size..initial_ironwood_tree_size).fold(
+                    prior_cached_block.chain_state.final_ironwood_tree().clone(),
+                    |mut acc, _| {
+                        acc.append(MerkleHashOrchard::random(&mut self.rng));
+                        acc
+                    },
+                );
+
             prior_cached_block = CachedBlock::at(
                 ChainState::new(
                     height - 1,
@@ -690,9 +841,12 @@ where
                     final_sapling_tree,
                     #[cfg(feature = "orchard")]
                     final_orchard_tree,
+                    #[cfg(feature = "orchard")]
+                    final_ironwood_tree,
                 ),
                 initial_sapling_tree_size,
                 initial_orchard_tree_size,
+                initial_ironwood_tree_size,
             );
 
             self.cached_blocks
@@ -707,6 +861,7 @@ where
             outputs,
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            initial_ironwood_tree_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -742,6 +897,7 @@ where
             value,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -796,6 +952,7 @@ where
             tx,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -913,6 +1070,40 @@ where
 
         Ok(())
     }
+
+    /// Generates `n` empty blocks, scans each, and returns the wallet's resulting fully-scanned
+    /// height.
+    ///
+    /// This is the "let the chain advance" step of a test that needs the scanned region to reach a
+    /// chosen depth above some earlier height — an anchor boundary a fixed number of blocks below
+    /// the tip, say — with none of the intervening blocks carrying wallet-relevant data.
+    pub fn generate_and_scan_empty_blocks(&mut self, n: usize) -> BlockHeight {
+        for _ in 0..n {
+            let (height, _) = self.generate_empty_block();
+            self.scan_cached_blocks(height, 1);
+        }
+        self.wallet()
+            .block_fully_scanned()
+            .expect("the wallet reports its fully-scanned block")
+            .expect("the wallet is fully scanned")
+            .block_height()
+    }
+
+    /// The root of the wallet's own Orchard note commitment tree at the checkpoint `height`, as an
+    /// anchor: the value a transaction proved against that height would have installed.
+    ///
+    /// `None` when the tree holds no checkpoint there; the tree's own error when it holds one but
+    /// cannot complete a root over the shard data it retains.
+    #[cfg(feature = "orchard")]
+    pub fn orchard_anchor_at(
+        &mut self,
+        height: BlockHeight,
+    ) -> Result<Option<::orchard::Anchor>, ShardTreeError<<DbT as WalletCommitmentTrees>::Error>>
+    {
+        self.wallet_mut()
+            .with_orchard_tree_mut(|tree| tree.root_at_checkpoint_id(&height))
+            .map(|root| root.map(::orchard::Anchor::from))
+    }
 }
 
 impl<Cache, DbT, ParamsT, AccountIdT, ErrT> TestState<Cache, DbT, ParamsT>
@@ -922,7 +1113,8 @@ where
     ErrT: std::fmt::Debug,
     DbT: InputSource<AccountId = AccountIdT, Error = ErrT>
         + WalletTest
-        + WalletWrite<AccountId = AccountIdT, Error = ErrT>
+        + WalletRead<AccountId = AccountIdT, Error = ErrT>
+        + WalletWrite
         + WalletCommitmentTrees,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + 'static,
 {
@@ -949,12 +1141,8 @@ where
         #[cfg(feature = "orchard")]
         let fallback_change_pool = ShieldedPool::Orchard;
 
-        let change_strategy = standard::SingleOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            fallback_change_pool,
-            DustOutputPolicy::default(),
-        );
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, fallback_change_pool);
 
         let request =
             zip321::TransactionRequest::new(vec![Payment::without_memo(to, value)]).unwrap();
@@ -984,7 +1172,6 @@ where
         InputsT: InputSelector<InputSource = DbT>,
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
-        let prover = LocalTxProver::bundled();
         let network = self.network().clone();
 
         let account = self
@@ -1001,21 +1188,19 @@ where
             change_strategy,
             request,
             confirmations_policy,
-            #[cfg(feature = "transparent-inputs")]
-            &TransparentSpendPolicy::default(),
-            #[cfg(feature = "unstable")]
+            &SpendPolicy::default(),
+            None,
             None,
         )?;
 
         create_proposed_transactions(
             self.wallet_mut(),
             &network,
-            &prover,
-            &prover,
+            &MockSpendProver,
+            &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
             ovk_policy,
             &proposal,
-            #[cfg(feature = "unstable")]
             None,
         )
     }
@@ -1046,20 +1231,19 @@ where
             change_strategy,
             request,
             confirmations_policy,
-            #[cfg(feature = "transparent-inputs")]
-            &TransparentSpendPolicy::default(),
-            #[cfg(feature = "unstable")]
+            &SpendPolicy::default(),
+            None,
             None,
         )
     }
 
     /// Invokes [`propose_transfer`] with the given arguments and an explicit
-    /// [`TransparentSpendPolicy`].
+    /// [`SpendPolicy`].
     ///
-    /// Unlike [`Self::propose_transfer`], which always uses the default
-    /// (shielded-only) spend policy, this allows tests to opt in to spending the
-    /// account's transparent UTXOs.
-    #[cfg(feature = "transparent-inputs")]
+    /// Unlike [`Self::propose_transfer`], which always uses the default spend
+    /// policy (every shielded pool, no transparent), this allows tests to opt in
+    /// to spending the account's transparent UTXOs or to restrict the shielded
+    /// pools notes may be drawn from.
     #[allow(clippy::type_complexity)]
     pub fn propose_transfer_with_policy<InputsT, ChangeT>(
         &mut self,
@@ -1068,7 +1252,7 @@ where
         change_strategy: &ChangeT,
         request: zip321::TransactionRequest,
         confirmations_policy: ConfirmationsPolicy,
-        spend_policy: &TransparentSpendPolicy,
+        spend_policy: &SpendPolicy,
     ) -> Result<
         Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>,
         super::wallet::ProposeTransferErrT<DbT, Infallible, InputsT, ChangeT>,
@@ -1087,7 +1271,7 @@ where
             request,
             confirmations_policy,
             spend_policy,
-            #[cfg(feature = "unstable")]
+            None,
             None,
         )
     }
@@ -1120,6 +1304,8 @@ where
             memo,
             mode,
             confirmations_policy,
+            &LockedInputPolicy::Exclude,
+            None,
         )
     }
 
@@ -1157,12 +1343,12 @@ where
             memo,
             change_memo,
             fallback_change_pool,
-            #[cfg(feature = "unstable")]
+            None,
             None,
         );
 
         if let Ok(proposal) = &result {
-            check_proposal_serialization_roundtrip(self.wallet(), proposal);
+            check_proposal_serialization_roundtrip(&network, self.wallet(), proposal);
         }
 
         result
@@ -1192,8 +1378,6 @@ where
         InputsT: ShieldingSelector<InputSource = DbT>,
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
-        use super::wallet::propose_shielding;
-
         let network = self.network().clone();
         propose_shielding::<_, _, _, _, Infallible>(
             self.wallet_mut(),
@@ -1205,6 +1389,7 @@ where
             to_account,
             confirmations_policy,
             output_filter,
+            None,
         )
     }
 
@@ -1232,8 +1417,6 @@ where
         InputsT: ShieldingSelector<InputSource = DbT>,
         FeeRuleT: zcash_primitives::transaction::fees::FeeRule + Clone,
     {
-        use super::wallet::propose_shielding_coinbase;
-
         let network = self.network().clone();
         propose_shielding_coinbase::<_, _, _, _, Infallible>(
             self.wallet_mut(),
@@ -1245,6 +1428,7 @@ where
             to_address,
             memo,
             limit,
+            None,
         )
     }
 
@@ -1259,17 +1443,15 @@ where
     where
         FeeRuleT: FeeRule,
     {
-        let prover = LocalTxProver::bundled();
         let network = self.network().clone();
         create_proposed_transactions(
             self.wallet_mut(),
             &network,
-            &prover,
-            &prover,
+            &MockSpendProver,
+            &MockOutputProver,
             &SpendingKeys::from_unified_spending_key(usk.clone()),
             ovk_policy,
             proposal,
-            #[cfg(feature = "unstable")]
             None,
         )
     }
@@ -1284,6 +1466,7 @@ where
         spend_from_account: <DbT as InputSource>::AccountId,
         ovk_policy: OvkPolicy,
         proposal: &Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+        expiry_height: Option<BlockHeight>,
     ) -> Result<
         pczt::Pczt,
         super::wallet::CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, DbT::NoteRef>,
@@ -1292,8 +1475,6 @@ where
         <DbT as WalletRead>::AccountId: serde::Serialize,
         FeeRuleT: FeeRule,
     {
-        use super::wallet::create_pczt_from_proposal;
-
         let network = self.network().clone();
 
         create_pczt_from_proposal(
@@ -1302,6 +1483,8 @@ where
             spend_from_account,
             ovk_policy,
             proposal,
+            expiry_height,
+            ::zcash_primitives::transaction::builder::BundlePadding::DEFAULT,
         )
     }
 
@@ -1317,9 +1500,7 @@ where
     where
         <DbT as WalletRead>::AccountId: serde::de::DeserializeOwned,
     {
-        use super::wallet::extract_and_store_transaction_from_pczt;
-
-        let prover = LocalTxProver::bundled();
+        let prover = real_test_prover();
         let (spend_vk, output_vk) = prover.verifying_keys();
 
         extract_and_store_transaction_from_pczt(
@@ -1350,15 +1531,12 @@ where
         InputsT: ShieldingSelector<InputSource = DbT>,
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
-        use crate::data_api::wallet::shield_transparent_funds;
-
-        let prover = LocalTxProver::bundled();
         let network = self.network().clone();
         shield_transparent_funds(
             self.wallet_mut(),
             &network,
-            &prover,
-            &prover,
+            &MockSpendProver,
+            &MockOutputProver,
             input_selector,
             change_strategy,
             shielding_threshold,
@@ -1386,6 +1564,13 @@ where
     /// Returns the total balance in the given account at this point in the test.
     pub fn get_total_balance(&self, account: AccountIdT) -> Zatoshis {
         self.with_account_balance(account, ConfirmationsPolicy::MIN, |balance| balance.total())
+    }
+
+    /// Returns the locked balance in the given account at this point in the test.
+    pub fn get_locked_balance(&self, account: AccountIdT) -> Zatoshis {
+        self.with_account_balance(account, ConfirmationsPolicy::MIN, |balance| {
+            balance.locked_value()
+        })
     }
 
     /// Returns the balance in the given account that is spendable with the given number
@@ -1444,7 +1629,8 @@ where
     ErrT: std::fmt::Debug,
     DbT: InputSource<AccountId = AccountIdT, Error = ErrT>
         + WalletTest
-        + WalletWrite<AccountId = AccountIdT, Error = ErrT>
+        + WalletRead<AccountId = AccountIdT, Error = ErrT>
+        + WalletWrite
         + WalletCommitmentTrees,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + 'static,
 {
@@ -1507,12 +1693,13 @@ pub fn single_output_change_strategy<DbT: InputSource>(
 
 // Checks that a protobuf proposal serialized from the provided proposal value correctly parses to
 // the same proposal value.
-fn check_proposal_serialization_roundtrip<DbT: InputSource>(
+fn check_proposal_serialization_roundtrip<ParamsT: consensus::Parameters, DbT: InputSource>(
+    params: &ParamsT,
     wallet_data: &DbT,
     proposal: &Proposal<StandardFeeRule, DbT::NoteRef>,
 ) {
     let proposal_proto = crate::proto::proposal::Proposal::from_standard_proposal(proposal);
-    let deserialized_proposal = proposal_proto.try_into_standard_proposal(wallet_data);
+    let deserialized_proposal = proposal_proto.try_into_standard_proposal(params, wallet_data);
     assert_matches!(deserialized_proposal, Ok(r) if &r == proposal);
 }
 
@@ -1554,6 +1741,7 @@ pub trait DataStoreFactory {
     fn new_data_store(
         &self,
         network: LocalNetwork,
+        anchor_retention_interval: Option<AnchorRetentionInterval>,
         #[cfg(feature = "transparent-inputs")] gap_limits: Option<GapLimits>,
     ) -> Result<Self::DataStore, Self::Error>;
 }
@@ -1567,6 +1755,7 @@ pub struct TestBuilder<Cache, DataStoreFactory> {
     initial_chain_state: Option<InitialChainState>,
     account_birthday: Option<AccountBirthday>,
     account_index: Option<zip32::AccountId>,
+    anchor_retention_interval: Option<AnchorRetentionInterval>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: Option<GapLimits>,
 }
@@ -1601,6 +1790,7 @@ impl TestBuilder<(), ()> {
             initial_chain_state: None,
             account_birthday: None,
             account_index: None,
+            anchor_retention_interval: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: None,
         }
@@ -1624,6 +1814,7 @@ impl<A> TestBuilder<(), A> {
             initial_chain_state: self.initial_chain_state,
             account_birthday: self.account_birthday,
             account_index: self.account_index,
+            anchor_retention_interval: self.anchor_retention_interval,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         }
@@ -1644,6 +1835,7 @@ impl<A> TestBuilder<A, ()> {
             initial_chain_state: self.initial_chain_state,
             account_birthday: self.account_birthday,
             account_index: self.account_index,
+            anchor_retention_interval: self.anchor_retention_interval,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: self.gap_limits,
         }
@@ -1651,6 +1843,26 @@ impl<A> TestBuilder<A, ()> {
 }
 
 impl<A, B> TestBuilder<A, B> {
+    /// Overrides the network parameters used by the test (the default is
+    /// [`TestBuilder::DEFAULT_NETWORK`]). This must be called before the account birthday is
+    /// established (i.e. before `with_account_from_sapling_activation` /
+    /// `with_account_having_current_birthday`), because the birthday is derived from the network's
+    /// activation heights.
+    pub fn with_network(mut self, network: LocalNetwork) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Overrides the interval on which the wallet retains durable anchor checkpoints (the default
+    /// is [`AnchorRetentionInterval::ZIP_318`]).
+    ///
+    /// A test that must scan past a retained anchor otherwise has to generate 144 blocks per
+    /// boundary; a short interval makes the same coverage cheap.
+    pub fn with_anchor_retention_interval(mut self, interval: AnchorRetentionInterval) -> Self {
+        self.anchor_retention_interval = Some(interval);
+        self
+    }
+
     #[cfg(feature = "transparent-inputs")]
     pub fn with_gap_limits(self, gap_limits: GapLimits) -> TestBuilder<A, B> {
         TestBuilder {
@@ -1661,6 +1873,7 @@ impl<A, B> TestBuilder<A, B> {
             initial_chain_state: self.initial_chain_state,
             account_birthday: self.account_birthday,
             account_index: self.account_index,
+            anchor_retention_interval: self.anchor_retention_interval,
             gap_limits: Some(gap_limits),
         }
     }
@@ -1742,6 +1955,8 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     ///                 sapling_initial_tree,
     ///                 #[cfg(feature = "orchard")]
     ///                 orchard_initial_tree,
+    ///                 #[cfg(feature = "orchard")]
+    ///                 Frontier::empty(),
     ///             ),
     ///             prior_sapling_roots,
     ///             #[cfg(feature = "orchard")]
@@ -1826,6 +2041,7 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             .ds_factory
             .new_data_store(
                 self.network,
+                self.anchor_retention_interval,
                 #[cfg(feature = "transparent-inputs")]
                 self.gap_limits,
             )
@@ -1871,6 +2087,10 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             #[cfg(feature = "orchard")]
             let _final_orchard_tree_size =
                 initial_state.chain_state.final_orchard_tree().tree_size() as u32;
+            let _final_ironwood_tree_size = 0;
+            #[cfg(feature = "orchard")]
+            let _final_ironwood_tree_size =
+                initial_state.chain_state.final_ironwood_tree().tree_size() as u32;
 
             cached_blocks.insert(
                 initial_state.chain_state.block_height(),
@@ -1878,6 +2098,7 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
                     chain_state: initial_state.chain_state.clone(),
                     sapling_end_size: final_sapling_tree_size,
                     orchard_end_size: _final_orchard_tree_size,
+                    ironwood_end_size: _final_ironwood_tree_size,
                 },
             );
         };
@@ -2255,6 +2476,116 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
     }
 }
 
+/// A test-only viewing key that receives Ironwood (version 3) notes. It wraps the account's Orchard
+/// full viewing key, but its outputs are version 3 notes placed in `tx.ironwood_actions` and
+/// encrypted under the Ironwood note-encryption domain, so a wallet scanning them exercises the
+/// Ironwood receive path.
+#[cfg(feature = "orchard")]
+#[derive(Clone)]
+pub struct IronwoodFvk(pub ::orchard::keys::FullViewingKey);
+
+#[cfg(feature = "orchard")]
+impl TestFvk for IronwoodFvk {
+    type Nullifier = ::orchard::note::Nullifier;
+    type OutgoingViewingKey = ::orchard::keys::OutgoingViewingKey;
+
+    fn to_ovk(&self, scope: zip32::Scope) -> Self::OutgoingViewingKey {
+        self.0.to_ovk(scope)
+    }
+
+    fn ovk_bytes(&self, scope: zip32::Scope) -> [u8; 32] {
+        *self.0.to_ovk(scope).as_ref()
+    }
+
+    fn add_spend<R: RngCore + CryptoRng>(
+        &self,
+        ctx: &mut CompactTx,
+        nullifier_to_reveal: Self::Nullifier,
+        rng: &mut R,
+    ) {
+        // Generate a dummy recipient; the output will be zero-valued and be encrypted with a
+        // random OVK.
+        let recipient = loop {
+            let mut bytes = [0; 32];
+            rng.fill_bytes(&mut bytes);
+            let sk = ::orchard::keys::SpendingKey::from_bytes(bytes);
+            if sk.is_some().into() {
+                break ::orchard::keys::FullViewingKey::from(&sk.unwrap())
+                    .address_at(0u32, zip32::Scope::External);
+            }
+        };
+
+        let (cact, _) =
+            compact_ironwood_action(nullifier_to_reveal, recipient, Zatoshis::ZERO, None, rng);
+        ctx.ironwood_actions.push(cact);
+    }
+
+    fn add_output<P: consensus::Parameters, R: RngCore + CryptoRng>(
+        &self,
+        ctx: &mut CompactTx,
+        _: &P,
+        _: BlockHeight,
+        sender_ovk: Option<&Self::OutgoingViewingKey>,
+        recipient_address_type: AddressType,
+        value: Zatoshis,
+        _: u32, // the position is not required for computing the Orchard nullifier
+        mut rng: &mut R,
+    ) -> Self::Nullifier {
+        // Generate a dummy nullifier for the spend
+        let nullifier_to_reveal =
+            ::orchard::note::Nullifier::from_bytes(&pallas::Base::random(&mut rng).to_repr())
+                .unwrap();
+
+        let (j, scope) = match recipient_address_type {
+            AddressType::DefaultExternal => (0u32.into(), zip32::Scope::External),
+            AddressType::DiversifiedExternal(idx) => (idx, zip32::Scope::External),
+            AddressType::Internal => (0u32.into(), zip32::Scope::Internal),
+        };
+
+        let (cact, note) = compact_ironwood_action(
+            nullifier_to_reveal,
+            self.0.address_at(j, scope),
+            value,
+            sender_ovk,
+            rng,
+        );
+        ctx.ironwood_actions.push(cact);
+
+        note.nullifier(&self.0)
+    }
+
+    fn add_logical_action<P: consensus::Parameters, R: RngCore + CryptoRng>(
+        &self,
+        ctx: &mut CompactTx,
+        _: &P,
+        _: BlockHeight,
+        nf_to_reveal_in_spend: Self::Nullifier,
+        sender_ovk: Option<&Self::OutgoingViewingKey>,
+        recipient_address_type: AddressType,
+        value: Zatoshis,
+        _: u32, // the position is not required for computing the Orchard nullifier
+        rng: &mut R,
+    ) -> Self::Nullifier {
+        let (j, scope) = match recipient_address_type {
+            AddressType::DefaultExternal => (0u32.into(), zip32::Scope::External),
+            AddressType::DiversifiedExternal(idx) => (idx, zip32::Scope::External),
+            AddressType::Internal => (0u32.into(), zip32::Scope::Internal),
+        };
+
+        let (cact, note) = compact_ironwood_action(
+            nf_to_reveal_in_spend,
+            self.0.address_at(j, scope),
+            value,
+            sender_ovk,
+            rng,
+        );
+        ctx.ironwood_actions.push(cact);
+
+        // Return the nullifier of the newly created output note
+        note.nullifier(&self.0)
+    }
+}
+
 /// Configures how a [`TestFvk`] receives a particular output.
 ///
 /// Used with [`TestFvk::add_output`] and [`TestFvk::add_logical_action`].
@@ -2321,8 +2652,6 @@ fn compact_orchard_action<R: RngCore + CryptoRng>(
     sender_ovk: Option<&::orchard::keys::OutgoingViewingKey>,
     rng: &mut R,
 ) -> (CompactOrchardAction, ::orchard::Note) {
-    use zcash_note_encryption::ShieldedOutput;
-
     let (compact_action, note) = ::orchard::note_encryption::testing::fake_compact_action(
         rng,
         nf_old,
@@ -2346,6 +2675,53 @@ fn compact_orchard_action<R: RngCore + CryptoRng>(
                     &compact_action,
                 )[..52]
                     .to_vec(),
+        },
+        note,
+    )
+}
+
+/// Builds a version 3 (Ironwood) compact action paying `recipient` the given value, encrypted
+/// under the Ironwood note-encryption domain, for placement in `tx.ironwood_actions`. Returns the
+/// `CompactOrchardAction` and the note. This mirrors [`compact_orchard_action`], but constructs the
+/// action directly because the orchard crate's `fake_compact_action` only produces version 2 notes.
+#[cfg(feature = "orchard")]
+fn compact_ironwood_action<R: RngCore + CryptoRng>(
+    nf_old: ::orchard::note::Nullifier,
+    recipient: ::orchard::Address,
+    value: Zatoshis,
+    sender_ovk: Option<&::orchard::keys::OutgoingViewingKey>,
+    rng: &mut R,
+) -> (CompactOrchardAction, ::orchard::Note) {
+    // Derive `rho` from the revealed nullifier exactly as the crate does internally
+    // (`Rho::from_nf_old(nf) == Rho(nf.inner())`), so that the domain the scanner reconstructs via
+    // `IronwoodDomain::for_compact_action(nf_old)` matches and decryption succeeds.
+    let rho = Rho::from_bytes(&nf_old.to_bytes()).unwrap();
+    let rseed = loop {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        if let Some(rseed) = Option::from(RandomSeed::from_bytes(bytes, &rho)) {
+            break rseed;
+        }
+    };
+    let note = OrchardNote::from_parts(
+        recipient,
+        ::orchard::value::NoteValue::from_raw(value.into_u64()),
+        rho,
+        rseed,
+        NoteVersion::V3,
+    )
+    .unwrap();
+    let encryptor = IronwoodNoteEncryption::new(sender_ovk.cloned(), note, [0u8; 512]);
+    let cmx = ExtractedNoteCommitment::from(note.commitment());
+    let ephemeral_key = IronwoodDomain::epk_bytes(encryptor.epk());
+    let enc_ciphertext = encryptor.encrypt_note_plaintext();
+
+    (
+        CompactOrchardAction {
+            nullifier: nf_old.to_bytes().to_vec(),
+            cmx: cmx.to_bytes().to_vec(),
+            ephemeral_key: ephemeral_key.0.to_vec(),
+            ciphertext: enc_ciphertext[..52].to_vec(),
         },
         note,
     )
@@ -2407,6 +2783,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     outputs: &[FakeCompactOutput<Fvk>],
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
@@ -2432,6 +2809,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        initial_ironwood_tree_size,
         rng,
     );
     (cb, nfs)
@@ -2439,6 +2817,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
 
 /// Create a fake CompactBlock at the given height containing only the given transaction.
 // TODO: `tx` could be a slice and we could add multiple transactions here
+#[allow(clippy::too_many_arguments)]
 fn fake_compact_block_from_tx(
     height: BlockHeight,
     prev_hash: BlockHash,
@@ -2446,6 +2825,7 @@ fn fake_compact_block_from_tx(
     tx: &Transaction,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    initial_ironwood_tree_size: u32,
     rng: impl RngCore,
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
@@ -2471,12 +2851,20 @@ fn fake_compact_block_from_tx(
         }
     }
 
+    #[cfg(feature = "orchard")]
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for action in bundle.actions() {
+            ctx.ironwood_actions.push(action.into());
+        }
+    }
+
     fake_compact_block_from_compact_tx(
         ctx,
         height,
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2494,6 +2882,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     value: Zatoshis,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
@@ -2554,21 +2943,19 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
                 done = true;
             }
 
-            if !done {
-                if let Some(recipient) = ua.sapling() {
-                    ctx.outputs.push(
-                        compact_sapling_output(
-                            params,
-                            height,
-                            *recipient,
-                            value,
-                            Some(::sapling::keys::OutgoingViewingKey(ovk_bytes)),
-                            &mut rng,
-                        )
-                        .0,
-                    );
-                    done = true;
-                }
+            if !done && let Some(recipient) = ua.sapling() {
+                ctx.outputs.push(
+                    compact_sapling_output(
+                        params,
+                        height,
+                        *recipient,
+                        value,
+                        Some(::sapling::keys::OutgoingViewingKey(ovk_bytes)),
+                        &mut rng,
+                    )
+                    .0,
+                );
+                done = true;
             }
             if !done {
                 panic!("No supported shielded receiver to send funds to");
@@ -2582,6 +2969,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2592,6 +2980,7 @@ fn fake_compact_block_from_compact_tx(
     prev_hash: BlockHash,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    initial_ironwood_tree_size: u32,
     mut rng: impl RngCore,
 ) -> CompactBlock {
     let mut cb = CompactBlock {
@@ -2610,8 +2999,11 @@ fn fake_compact_block_from_compact_tx(
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
-        // The test framework does not generate Ironwood notes.
-        ironwood_commitment_tree_size: 0,
+        ironwood_commitment_tree_size: initial_ironwood_tree_size
+            + cb.vtx
+                .iter()
+                .map(|tx| tx.ironwood_actions.len() as u32)
+                .sum::<u32>(),
     });
     cb
 }
@@ -2754,12 +3146,38 @@ impl InputSource for MockWalletDb {
     type NoteRef = u32;
     type AccountId = u32;
 
+    fn anchor_computable(
+        &self,
+        protocol: ShieldedPool,
+        height: BlockHeight,
+    ) -> Result<bool, Self::Error> {
+        match protocol {
+            ShieldedPool::Sapling => Ok(self
+                .sapling_tree
+                .store()
+                .get_checkpoint(&height)
+                .map_err(|_| ())?
+                .is_some()),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Orchard => Ok(self
+                .orchard_tree
+                .store()
+                .get_checkpoint(&height)
+                .map_err(|_| ())?
+                .is_some()),
+            // The mock maintains no Ironwood tree (and no Orchard tree without the `orchard`
+            // feature), so no anchor is computable there.
+            _ => Ok(false),
+        }
+    }
+
     fn get_spendable_note(
         &self,
         _txid: &TxId,
         _protocol: ShieldedPool,
         _index: u32,
         _target_height: TargetHeight,
+        _lock_filter: LockFilter<'_>,
     ) -> Result<Option<ReceivedNote<Self::NoteRef, Note>>, Self::Error> {
         Ok(None)
     }
@@ -2772,6 +3190,7 @@ impl InputSource for MockWalletDb {
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
         _exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         Ok(ReceivedNotes::empty())
     }
@@ -2782,6 +3201,7 @@ impl InputSource for MockWalletDb {
         _sources: &[ShieldedPool],
         _target_height: TargetHeight,
         _exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         Err(())
     }
@@ -2792,6 +3212,7 @@ impl InputSource for MockWalletDb {
         _selector: &NoteFilter,
         _target_height: TargetHeight,
         _exclude: &[Self::NoteRef],
+        _lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
         Err(())
     }
@@ -2879,6 +3300,10 @@ impl WalletRead for MockWalletDb {
         Ok(None)
     }
 
+    fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
+        Ok(None)
+    }
+
     fn get_wallet_summary(
         &self,
         _confirmations_policy: ConfirmationsPolicy,
@@ -2954,6 +3379,14 @@ impl WalletRead for MockWalletDb {
         Ok(Vec::new())
     }
 
+    #[cfg(feature = "orchard")]
+    fn get_ironwood_nullifiers(
+        &self,
+        _query: NullifierQuery,
+    ) -> Result<Vec<(Self::AccountId, ::orchard::note::Nullifier)>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     #[cfg(feature = "transparent-inputs")]
     fn get_transparent_receivers(
         &self,
@@ -3002,6 +3435,36 @@ impl WalletRead for MockWalletDb {
     }
 }
 
+impl OutputLockStore for MockWalletDb {
+    type Error = ();
+    type AccountId = u32;
+
+    fn lock_outputs(
+        &mut self,
+        _outputs: &[OutputRef],
+        _owner: LockOwner,
+        _lock_expiry_height: BlockHeight,
+    ) -> Result<usize, LockError<Self::Error>> {
+        Ok(0)
+    }
+
+    fn unlock_output(
+        &mut self,
+        _output: &OutputRef,
+        _owner: LockOwner,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    fn clear_locked_outputs(&mut self, _account: Self::AccountId) -> Result<usize, Self::Error> {
+        Ok(0)
+    }
+
+    fn get_locked_outputs(&self, _account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
+
 impl WalletWrite for MockWalletDb {
     type UtxoRef = u32;
 
@@ -3011,7 +3474,8 @@ impl WalletWrite for MockWalletDb {
         seed: &SecretVec<u8>,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
-    ) -> Result<(Self::AccountId, UnifiedSpendingKey), Self::Error> {
+    ) -> Result<(<Self as WalletRead>::AccountId, UnifiedSpendingKey), <Self as WalletRead>::Error>
+    {
         let account = zip32::AccountId::ZERO;
         UnifiedSpendingKey::from_seed(&self.network, seed.expose_secret(), account)
             .map(|k| (u32::from(account), k))
@@ -3025,7 +3489,7 @@ impl WalletWrite for MockWalletDb {
         _account_index: zip32::AccountId,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
-    ) -> Result<(Self::Account, UnifiedSpendingKey), Self::Error> {
+    ) -> Result<(Self::Account, UnifiedSpendingKey), <Self as WalletRead>::Error> {
         todo!()
     }
 
@@ -3036,46 +3500,49 @@ impl WalletWrite for MockWalletDb {
         _birthday: &AccountBirthday,
         _purpose: AccountPurpose,
         _key_source: Option<&str>,
-    ) -> Result<Self::Account, Self::Error> {
+    ) -> Result<Self::Account, <Self as WalletRead>::Error> {
         todo!()
     }
 
-    fn delete_account(&mut self, _account: Self::AccountId) -> Result<(), Self::Error> {
+    fn delete_account(
+        &mut self,
+        _account: <Self as WalletRead>::AccountId,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         todo!()
     }
 
     #[cfg(feature = "transparent-key-import")]
     fn import_standalone_transparent_pubkey(
         &mut self,
-        _account: Self::AccountId,
+        _account: <Self as WalletRead>::AccountId,
         _address: secp256k1::PublicKey,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), <Self as WalletRead>::Error> {
         todo!()
     }
 
     #[cfg(feature = "transparent-key-import")]
     fn import_standalone_transparent_script(
         &mut self,
-        _account: Self::AccountId,
+        _account: <Self as WalletRead>::AccountId,
         _script: script::Redeem,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), <Self as WalletRead>::Error> {
         todo!()
     }
 
     fn get_next_available_address(
         &mut self,
-        _account: Self::AccountId,
+        _account: <Self as WalletRead>::AccountId,
         _request: UnifiedAddressRequest,
-    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, Self::Error> {
+    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, <Self as WalletRead>::Error> {
         Ok(None)
     }
 
     fn get_address_for_index(
         &mut self,
-        _account: Self::AccountId,
+        _account: <Self as WalletRead>::AccountId,
         _diversifier_index: DiversifierIndex,
         _request: UnifiedAddressRequest,
-    ) -> Result<Option<UnifiedAddress>, Self::Error> {
+    ) -> Result<Option<UnifiedAddress>, <Self as WalletRead>::Error> {
         Ok(None)
     }
 
@@ -3083,66 +3550,95 @@ impl WalletWrite for MockWalletDb {
     fn put_blocks(
         &mut self,
         _from_state: &ChainState,
-        _blocks: Vec<ScannedBlock<Self::AccountId>>,
-    ) -> Result<(), Self::Error> {
+        _blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 
-    fn update_chain_tip(&mut self, _tip_height: BlockHeight) -> Result<(), Self::Error> {
+    fn update_chain_tip(
+        &mut self,
+        _tip_height: BlockHeight,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
+    }
+
+    fn prune_scan_queue_below(
+        &mut self,
+        _height: BlockHeight,
+        _retain_with_priority: Option<ScanPriority>,
+    ) -> Result<u64, <Self as WalletRead>::Error> {
+        Ok(0)
     }
 
     fn store_decrypted_tx(
         &mut self,
-        _received_tx: DecryptedTransaction<Transaction, Self::AccountId>,
-    ) -> Result<(), Self::Error> {
+        _received_tx: DecryptedTransaction<Transaction, <Self as WalletRead>::AccountId>,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 
-    fn set_tx_trust(&mut self, _txid: TxId, _trusted: bool) -> Result<(), Self::Error> {
+    fn set_tx_trust(
+        &mut self,
+        _txid: TxId,
+        _trusted: bool,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 
     fn store_transactions_to_be_sent(
         &mut self,
-        _transactions: &[SentTransaction<Self::AccountId>],
-    ) -> Result<(), Self::Error> {
+        _transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 
     fn truncate_to_height(
         &mut self,
         _block_height: BlockHeight,
-    ) -> Result<BlockHeight, Self::Error> {
+    ) -> Result<BlockHeight, <Self as WalletRead>::Error> {
         Err(())
     }
 
-    fn truncate_to_chain_state(&mut self, _chain_state: ChainState) -> Result<(), Self::Error> {
+    fn truncate_to_chain_state(
+        &mut self,
+        _chain_state: ChainState,
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Err(())
     }
 
     fn rewind_to_chain_state(
         &mut self,
         _chain_state: ChainState,
-        _reset_account_birthdays: HashSet<Self::AccountId>,
-    ) -> Result<(), RewindError<Self::AccountId, Self::Error>> {
+        _reset_account_birthdays: HashSet<<Self as WalletRead>::AccountId>,
+    ) -> Result<(), RewindError<<Self as WalletRead>::AccountId, <Self as WalletRead>::Error>> {
         Err(RewindError::DataSource(()))
     }
 
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(
         &mut self,
-        _output: &WalletTransparentOutput<Self::AccountId>,
-    ) -> Result<Self::UtxoRef, Self::Error> {
+        _output: &WalletTransparentOutput<<Self as WalletRead>::AccountId>,
+    ) -> Result<Self::UtxoRef, <Self as WalletRead>::Error> {
         Ok(0)
     }
 
     #[cfg(feature = "transparent-inputs")]
     fn reserve_next_n_ephemeral_addresses(
         &mut self,
-        _account_id: Self::AccountId,
+        _account_id: <Self as WalletRead>::AccountId,
         _n: usize,
-    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, Self::Error> {
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, <Self as WalletRead>::Error>
+    {
+        Err(())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn reserve_next_n_internal_addresses(
+        &mut self,
+        _account_id: <Self as WalletRead>::AccountId,
+        _n: usize,
+    ) -> Result<Vec<(TransparentAddress, TransparentAddressMetadata)>, <Self as WalletRead>::Error>
+    {
         Err(())
     }
 
@@ -3150,7 +3646,7 @@ impl WalletWrite for MockWalletDb {
         &mut self,
         _txid: TxId,
         _status: TransactionStatus,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 
@@ -3159,7 +3655,7 @@ impl WalletWrite for MockWalletDb {
         &mut self,
         _request: TransactionsInvolvingAddress,
         _as_of_height: BlockHeight,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())
     }
 }
@@ -3201,6 +3697,25 @@ impl WalletCommitmentTrees for MockWalletDb {
         Ok(())
     }
 
+    fn get_sapling_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<::sapling::Node>, ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|t| {
+            let addr =
+                incrementalmerkletree::Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
+            Ok::<_, ShardTreeError<Self::Error>>(
+                t.store()
+                    .get_shard(addr)
+                    .map_err(ShardTreeError::Storage)?
+                    .and_then(|shard| match shard.root() {
+                        tree if tree.is_leaf() => tree.leaf_value().copied(),
+                        tree => tree.annotation().and_then(|ann| ann.as_deref().copied()),
+                    }),
+            )
+        })
+    }
+
     #[cfg(feature = "orchard")]
     type OrchardShardStore<'a> = MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>;
 
@@ -3238,5 +3753,25 @@ impl WalletCommitmentTrees for MockWalletDb {
         })?;
 
         Ok(())
+    }
+
+    #[cfg(feature = "orchard")]
+    fn get_orchard_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<::orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        self.with_orchard_tree_mut(|t| {
+            let addr =
+                incrementalmerkletree::Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            Ok::<_, ShardTreeError<Self::Error>>(
+                t.store()
+                    .get_shard(addr)
+                    .map_err(ShardTreeError::Storage)?
+                    .and_then(|shard| match shard.root() {
+                        tree if tree.is_leaf() => tree.leaf_value().copied(),
+                        tree => tree.annotation().and_then(|ann| ann.as_deref().copied()),
+                    }),
+            )
+        })
     }
 }

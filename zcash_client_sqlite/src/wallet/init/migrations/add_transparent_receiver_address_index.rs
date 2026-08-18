@@ -28,14 +28,23 @@ use zcash_protocol::consensus;
 
 use super::standalone_p2sh;
 use crate::wallet::{encoding::KeyScope, init::WalletMigrationError};
+#[cfg(feature = "transparent-inputs")]
+use {
+    transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex},
+    zcash_keys::{
+        encoding::AddressCodec as _,
+        keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey},
+    },
+};
 
-pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x3d4f12d6_3da9_4ace_ac65_a0dd0a7adc32);
+/// Adds a `UNIQUE` index on `addresses.cached_transparent_receiver_address`.
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x3d4f12d6_3da9_4ace_ac65_a0dd0a7adc32);
 
 // `standalone_p2sh` is the topologically-latest migration that rebuilds the `addresses` table, so
 // depending on it is sufficient to ensure the table is in its final form (including the
 // `cached_transparent_receiver_address` column) before this index is created. No later migration
 // modifies the `addresses` table, so the index will not be dropped by a subsequent table rebuild.
-const DEPENDENCIES: &[Uuid] = &[standalone_p2sh::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[standalone_p2sh::MIGRATION_ID];
 
 pub(super) struct Migration<P> {
     pub(super) params: P,
@@ -75,12 +84,6 @@ fn record_derives_receiver<P: consensus::Parameters>(
     record: &AddressRecord,
     addr: &str,
 ) -> bool {
-    use transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex};
-    use zcash_keys::{
-        encoding::AddressCodec as _,
-        keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey},
-    };
-
     let Some(idx) = record
         .transparent_child_index
         .and_then(NonHardenedChildIndex::from_index)
@@ -330,6 +333,11 @@ mod tests {
     };
 
     use super::{DEPENDENCIES, MIGRATION_ID};
+    #[cfg(feature = "transparent-inputs")]
+    use {
+        transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex},
+        zcash_keys::encoding::AddressCodec as _,
+    };
 
     #[test]
     fn migrate() {
@@ -369,9 +377,6 @@ mod tests {
     /// derivation-based verification of an address record will succeed.
     #[cfg(feature = "transparent-inputs")]
     fn account_external_address(network: &Network, account_index: u32) -> String {
-        use transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex};
-        use zcash_keys::encoding::AddressCodec as _;
-
         let usk = UnifiedSpendingKey::from_seed(
             network,
             &[0xab; 32][..],
@@ -597,9 +602,6 @@ mod tests {
     /// given ZIP 32 account index, at *ephemeral* child index 0.
     #[cfg(feature = "transparent-inputs")]
     fn account_ephemeral_address(network: &Network, account_index: u32) -> String {
-        use transparent::keys::NonHardenedChildIndex;
-        use zcash_keys::encoding::AddressCodec as _;
-
         let usk = UnifiedSpendingKey::from_seed(
             network,
             &[0xab; 32][..],

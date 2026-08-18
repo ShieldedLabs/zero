@@ -7,9 +7,33 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [Unreleased]
+
+### Changed
+- The `orchard` and `sapling` features are now enabled by default. Consumers
+  that require a smaller feature set should disable default features and enable
+  only the features they need.
+
+## [0.16.1] - 2026-07-28
+
+### Added
+- `impl Debug for zcash_keys::keys::transparent::gap_limits::GapAddressesError`
+
+## [0.16.0] - 2026-07-24
+
+### Changed
+- Migrated to `zcash_transparent 0.10.0`.
+
+## [0.15.0] - 2026-07-09
+
+### Changed
+- Migrated to `zcash_protocol 0.10.0`, `zcash_address 0.13.0`, `zcash_transparent 0.9.0`.
+- Migrated to `orchard 0.15`.
+
 ## [0.15.0-pre.0] - 2026-06-30
 
 ### Changed
+- MSRV is now 1.88
 - Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_address 0.13.0-pre.0`,
   `zcash_transparent 0.9.0-pre.0`.
 

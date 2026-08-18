@@ -19,9 +19,10 @@ use crate::wallet::init::WalletMigrationError;
 
 use super::standalone_p2sh;
 
-pub(super) const MIGRATION_ID: Uuid = Uuid::from_u128(0x93278b0f_77fe_473c_b88e_7f285da38dd3);
+/// Replaces FVK item cache columns with IVK item cache columns in the `accounts` table.
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x93278b0f_77fe_473c_b88e_7f285da38dd3);
 
-const DEPENDENCIES: &[Uuid] = &[standalone_p2sh::MIGRATION_ID];
+pub(super) const DEPENDENCIES: &[Uuid] = &[standalone_p2sh::MIGRATION_ID];
 
 pub(crate) struct Migration<P: consensus::Parameters> {
     pub(super) params: P,
@@ -60,8 +61,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
             let uivk = if let Some(ufvk_str) = ufvk_str {
                 let ufvk = UnifiedFullViewingKey::decode(&self.params, &ufvk_str).map_err(|e| {
                     WalletMigrationError::CorruptedData(format!(
-                        "Unable to parse UFVK for account {}: {}",
-                        account_id, e
+                        "Unable to parse UFVK for account {account_id}: {e}"
                     ))
                 })?;
                 ufvk.to_unified_incoming_viewing_key()
@@ -69,8 +69,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
                 zcash_keys::keys::UnifiedIncomingViewingKey::decode(&self.params, &uivk_str)
                     .map_err(|e| {
                         WalletMigrationError::CorruptedData(format!(
-                            "Unable to parse UIVK for account {}: {}",
-                            account_id, e
+                            "Unable to parse UIVK for account {account_id}: {e}"
                         ))
                     })?
             };

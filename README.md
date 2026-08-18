@@ -23,6 +23,7 @@ graph TB
         direction TB
         subgraph main
             zcash_address
+            zcash_history
             zcash_primitives
             zcash_transparent
             zcash_proofs
@@ -31,10 +32,12 @@ graph TB
             zcash_client_backend
             zcash_client_sqlite
             zcash_keys
+            zcash_pool_migration
             zip321
         end
 
         subgraph standalone_components
+            eip681
             equihash
             f4jumble
             zcash_encoding
@@ -57,10 +60,21 @@ graph TB
 
     zcash_client_sqlite --> zcash_client_backend
 
+    zcash_client_sqlite --> zcash_pool_migration
+
+    %% The base `pczt` data model backs the pool-migration schema backfills, in
+    %% every build configuration.
+    zcash_client_sqlite --> pczt
+
+    %% The `zcash_client_backend` dependency is gated on the `wallet` feature.
+    zcash_pool_migration -.-> zcash_client_backend
+
     zcash_client_backend --> pczt
+    zcash_pool_migration --> pczt
 
     %% zcash_client_sqlite --> zcash_keys
     zcash_client_backend --> zcash_keys
+    %% zcash_pool_migration --> zcash_keys
 
     zcash_client_backend --> zcash_proofs
 
@@ -68,6 +82,7 @@ graph TB
     pczt --> zcash_primitives
     %% zcash_client_backend --> zcash_primitives
     %% zcash_client_sqlite --> zcash_primitives
+    %% zcash_pool_migration --> zcash_primitives
 
     %% zcash_client_sqlite --> zcash_transparent
     %% zcash_client_backend --> zcash_transparent
@@ -91,6 +106,7 @@ graph TB
     %% pczt --> zcash_protocol
     zcash_address --> zcash_protocol
     %% zip321 --> zcash_protocol
+    %% zcash_pool_migration --> zcash_protocol
 
     %% zcash_client_sqlite --> zcash_encoding
     %% zcash_transparent --> zcash_encoding
@@ -98,6 +114,7 @@ graph TB
     %% zcash_keys --> zcash_encoding
     %% zcash_primitives --> zcash_encoding
     %% zcash_address --> zcash_encoding
+    zcash_history --> zcash_encoding
     zcash_protocol --> zcash_encoding
 
     zcash_primitives --> equihash
@@ -108,6 +125,7 @@ graph TB
     zcash_keys --> orchard
     zcash_primitives --> orchard
     %% zcash_client_sqlite --> orchard
+    %% zcash_pool_migration --> orchard
 
     %% zcash_client_sqlite --> sapling-crypto
     %% zcash_client_backend --> sapling-crypto
@@ -123,6 +141,7 @@ graph TB
     %% zcash_client_backend --> zcash_note_encryption
 
     %% zcash_client_sqlite --> zip32
+    %% zcash_pool_migration --> zip32
     %% zcash_client_backend --> zip32
     %% zcash_keys --> zip32
     orchard --> zip32
@@ -150,6 +169,7 @@ graph TB
     click zcash_client_sqlite "https://docs.rs/zcash_client_sqlite/" _blank
     click zcash_keys "https://docs.rs/zcash_keys/" _blank
     click zcash_note_encryption "https://docs.rs/zcash_note_encryption/" _blank
+    click zcash_pool_migration "https://docs.rs/zcash_pool_migration/" _blank
     click zcash_primitives "https://docs.rs/zcash_primitives/" _blank
     click zcash_proofs "https://docs.rs/zcash_proofs/" _blank
     click zcash_protocol "https://docs.rs/zcash_protocol/" _blank
@@ -157,6 +177,7 @@ graph TB
     click zcash_transparent "https://docs.rs/zcash_transparent/" _blank
     click zip321 "https://docs.rs/zip321/" _blank
     click zip32 "https://docs.rs/zip32/" _blank
+    click zcash_history "https://docs.rs/zcash_history/" _blank
 ```
 
 <!-- END mermaid-dependency-graph -->
@@ -204,12 +225,19 @@ graph TB
   - fee calculation
   - transaction proposals & high-level transaction construction APIs
 * `zcash_client_sqlite`: SQLite-based implementation of `zcash_client_backend` storage APIs
+* `zcash_pool_migration`: Backend-agnostic engine for migrating wallet funds between value pools (first used for the NU6.3 Orchard → Ironwood migration)
+  - note-split planning into self-funding denominations
+  - migration PCZT construction, signing & height-based scheduling
+  - state persistence through a wallet backend
 
 #### Utilities & Common Dependencies
 
 * `f4jumble`: Encoding for Unified addresses
 * `zcash_encoding`: Bitcoin-derived transaction encoding utilities for Zcash
 * `equihash`: Proof-of-work protocol implementation
+* `zcash_history`: Zcash blockchain history tree
+  - the ZIP 221 Merkle Mountain Range over per-block metadata
+  - consumed by node implementations (Zebra, zcashd) for FlyClient proofs
 
 
 ## Security Warnings
