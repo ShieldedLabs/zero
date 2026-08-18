@@ -11,15 +11,17 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
-use zeroize::Zeroizing;
 use tracing_subscriber::fmt::MakeWriter;
+use zeroize::Zeroizing;
 
 use zero_indexer_hub::batcher::{BatchParams, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::nym::{run_listener, Received, SenderTag};
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::Hub;
-use zero_indexer_hub::wire::{encode_lookup, encode_submit, MAX_LOOKUP_HASH_BYTES, MAX_NYM_TX_BYTES};
+use zero_indexer_hub::wire::{
+    encode_lookup, encode_submit, MAX_LOOKUP_HASH_BYTES, MAX_NYM_TX_BYTES,
+};
 
 /// A `tracing` writer that keeps everything in memory.
 #[derive(Clone, Default)]
@@ -121,12 +123,8 @@ async fn the_listener_logs_counts_and_reasons_but_never_a_txid_tag_or_nonce() {
 
     let log = capture.text();
 
-    // Counts and reasons ARE logged: an admitted submission, a submit decode
-    // failure, and a lookup decode failure.
-    assert!(
-        log.contains("migration admitted to the batch"),
-        "log was:\n{log}"
-    );
+    // Decode FAILURES are logged with their reason: they describe a malformed
+    // frame, which says nothing about an honest migration.
     assert!(
         log.contains("submission frame could not be decoded"),
         "log was:\n{log}"
@@ -134,6 +132,26 @@ async fn the_listener_logs_counts_and_reasons_but_never_a_txid_tag_or_nonce() {
     assert!(
         log.contains("lookup frame could not be decoded"),
         "log was:\n{log}"
+    );
+
+    // A SUCCESSFUL admission is not logged at the default level, and that is an
+    // assertion here rather than an omission.
+    //
+    // The line named nothing -- no txid, no sender tag, no nonce -- and was kept
+    // at the default level for exactly that reason. It still leaked, because it
+    // was emitted once per admission AT THE MOMENT OF ADMISSION: the log is then
+    // the arrival-time distribution of the very migrations the batch exists to
+    // mix. The operator reads the enclave's console; twenty-five minutes later
+    // the batch is on-chain; lining the two up re-derives the arrival order the
+    // shuffle destroyed.
+    //
+    // Timing is information even when the payload is empty. What remains at the
+    // default level is the per-flush aggregate -- how many, once, AFTER the
+    // mixing -- which is what an operator needs to see the hub working.
+    assert!(
+        !log.contains("migration admitted to the batch"),
+        "a per-admission line at the default level is an arrival-time oracle; \
+         it belongs at debug. log was:\n{log}"
     );
 
     // The sender tag, the nonces, the queried hash, and any txid are NOT.
