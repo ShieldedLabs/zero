@@ -130,10 +130,20 @@ This takes a nonce, fetches a fresh attestation, rebuilds the image from the
 published `app_sources` repo, and compares measurements. It is what turns "they
 say this is the code" into something checkable. Third parties can run
 `caution verify --attestation-url https://<domain>/attestation` with no Caution
-account and no checkout. See OPERATORS.md for the current PCR0/1 caveat: a
-Caution-side unpinned-framework bug makes verify report FAILED on healthy
-enclaves, and PCR2 (the application layer) is the check that matters until
-their fix lands.
+account and no checkout.
+
+**Require all three PCRs to reproduce, plus the TLS certificate binding. Do NOT
+accept a PCR2 match alone.** Measured 2026-08-14, the attested hub and the
+attested shim -- two entirely different binaries -- produced BYTE-IDENTICAL PCR2
+(`21b9efbc...`), while PCR0/PCR1 differed per application. PCR2 does not identify
+the code on this platform, so an attestation accepted on PCR2 alone proves only
+that SOME Caution enclave is running, not that it is running the shim you
+reviewed. Measured 2026-08-17 from fresh public clones with the build cache
+cleared, hub-6 and shim-9 both PASSED on all three.
+
+This supersedes an earlier note here that a Caution-side unpinned-framework bug
+made PCR0/1 report FAILED on healthy enclaves and that PCR2 was "the check that
+matters". The framework is now pinned and all three reproduce. See OPERATORS.md.
 
 ## When it boots but does not serve
 
