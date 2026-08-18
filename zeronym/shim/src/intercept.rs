@@ -45,7 +45,8 @@ use crate::classify::{classify_with_evidence, Class, Evidence};
 use crate::hub::{HubTransport, Lookup, Submit};
 use crate::proxy::{
     forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
-    GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED, GRPC_UNAVAILABLE,
+    GRPC_DEADLINE_EXCEEDED, GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED,
+    GRPC_UNAVAILABLE,
 };
 use crate::BoxError;
 
@@ -80,6 +81,19 @@ const MAX_SEND_TX_BYTES: usize = 4 * 1024 * 1024;
 /// takes that lever away.
 const MAX_TX_FILTER_BYTES: usize = 1024;
 
+/// Ceiling on reading a request body off the wire.
+///
+/// The size caps above bound how MUCH a client may send; they do not bound how
+/// LONG it may take. A client that sends one byte a minute stays under every
+/// size limit forever while holding a connection and a task. hyper's
+/// `header_read_timeout` does not help: it covers the head only, and stops
+/// applying the moment the body starts.
+///
+/// Thirty seconds is far above any honest client on the slowest path measured
+/// (an enclave sustains ~220 KB/s outbound, so even a maximum-size body is ~10 s)
+/// and far below the forever a slow-loris wants.
+const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Handle a request routed to the `SendTransaction` method.
 ///
 /// The HTTP method is not checked here or by the caller, on purpose: see rule 3
@@ -93,9 +107,23 @@ pub(crate) async fn send_transaction(
     let (parts, body) = req.into_parts();
 
     // The only buffering in the entire shim, and it is bounded.
-    let collected = match Limited::new(body, MAX_SEND_TX_BYTES).collect().await {
-        Ok(collected) => collected,
-        Err(err) => return Ok(body_read_failed(err)),
+    let read = Limited::new(body, MAX_SEND_TX_BYTES).collect();
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(err)) => return Ok(body_read_failed(err)),
+        // Fail closed, exactly as an oversized body does: an unclassifiable
+        // transaction is never forwarded to the operator, because forwarding it
+        // is the one outcome the whole component exists to prevent.
+        Err(_) => {
+            tracing::warn!(
+                target: "zis::classify",
+                "MIGRATION-FAILSAFE: SendTransaction body read timed out,                  refusing to forward a body that could not be classified"
+            );
+            return Ok(grpc_error(
+                GRPC_DEADLINE_EXCEEDED,
+                "zero-indexer-shim: SendTransaction body read timed out",
+            ));
+        }
     };
 
     let trailers = collected.trailers().cloned();
@@ -166,9 +194,7 @@ async fn divert(
             );
             Ok(grpc_error(
                 GRPC_RESOURCE_EXHAUSTED,
-                &format!(
-                    "zero-indexer-shim: transaction exceeds the {limit}-byte hub frame limit"
-                ),
+                &format!("zero-indexer-shim: transaction exceeds the {limit}-byte hub frame limit"),
             ))
         }
         Ok(submit) => {
@@ -240,12 +266,19 @@ pub(crate) async fn get_transaction(
     };
 
     let (parts, body) = req.into_parts();
-    let collected = match Limited::new(body, MAX_TX_FILTER_BYTES).collect().await {
-        Ok(collected) => collected,
-        Err(_) => {
+    let read = Limited::new(body, MAX_TX_FILTER_BYTES).collect();
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(_)) => {
             return Ok(grpc_error(
                 GRPC_CANCELLED,
                 "zero-indexer-shim: GetTransaction body could not be read",
+            ))
+        }
+        Err(_) => {
+            return Ok(grpc_error(
+                GRPC_DEADLINE_EXCEEDED,
+                "zero-indexer-shim: GetTransaction body read timed out",
             ))
         }
     };
@@ -348,9 +381,9 @@ fn decode_tx_filter(headers: &HeaderMap, frame: &[u8]) -> Result<TxFilter, &'sta
 /// confirms identity, and a different transaction matches neither.
 fn lookup_is_for_query(tx_bytes: &[u8], wire_hash: &[u8]) -> bool {
     use zebra_chain::serialization::ZcashDeserialize;
-    let Ok(tx) = zebra_chain::transaction::Transaction::zcash_deserialize(&mut std::io::Cursor::new(
-        tx_bytes,
-    )) else {
+    let Ok(tx) = zebra_chain::transaction::Transaction::zcash_deserialize(
+        &mut std::io::Cursor::new(tx_bytes),
+    ) else {
         return false;
     };
     let txid = tx.hash().to_string();
