@@ -120,7 +120,7 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     /// the same period shares; a caller-chosen expiry would single it out and undo the anonymity
     /// the bucketed anchor was chosen to produce. The anchor is already fixed by the time the
     /// transaction is built, so the conflict is reported rather than silently resolved. Pass
-    /// `None` to accept the canonical expiry.
+    /// `None` to accept the ZIP 318 rolling expiry.
     ExpiryHeightConflictsWithBoundaryAnchor { requested: BlockHeight },
 
     /// An error occurred while working with PCZTs.
