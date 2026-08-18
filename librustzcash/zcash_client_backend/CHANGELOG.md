@@ -10,6 +10,22 @@ workspace.
 
 ## [Unreleased]
 
+### Changed - Zero fork
+- `zcash_client_backend::data_api::wallet::propose_transfer` now proves EVERY
+  proposal that spends Orchard notes against a boundary of the wallet's anchor
+  bucket grid, not only a canonical ZIP 318 crossing. When no boundary is
+  reachable, or the wallet cannot fund the payment from notes old enough for
+  one, the proposal falls back to the ordinary anchor as before. The remaining
+  ZIP 318 crossing properties (canonical denomination, Ironwood bundle padding,
+  canonical fee) are unchanged and still apply only to a canonical crossing.
+  Callers should expect an Orchard-spending payment to require up to one grid
+  interval of additional confirmations on its inputs.
+- Any step proved against a bucket boundary now takes the ZIP 318 rolling
+  expiry, where previously only a canonical crossing did.
+- `zcash_client_backend::data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing`
+  has been renamed to `ExpiryHeightConflictsWithBoundaryAnchor`, and is now
+  returned for any boundary-anchored step rather than only a canonical crossing.
+
 ### Added
 - `zcash_client_backend::data_api::WalletWrite::import_standalone_transparent_address`
   (requires the `transparent-key-import` feature): imports a transparent

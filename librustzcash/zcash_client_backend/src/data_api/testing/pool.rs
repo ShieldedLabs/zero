@@ -9101,7 +9101,11 @@ pub fn canonical_crossing_is_bucketed_and_unpadded<Dsf: DataStoreFactory>(
         "the Ironwood bundle must be a single unpadded action"
     );
 
-    // (2) One zatoshi off a canonical denomination: ordinary anchor, padded Ironwood bundle.
+    // (2) One zatoshi off a canonical denomination: BUCKETED anchor, padded Ironwood bundle. The
+    // anchor and the shape are widened separately. Every Orchard-spending payment is proved
+    // against a boundary, so this one shares its anchor with the crossing above; its VALUE is not
+    // a canonical denomination, so it remains distinguishable as a crossing and keeps the padding
+    // its fee was charged for.
     let off_by_one = propose(
         &mut st,
         (MAX_RESIDUAL_VALUE + Zatoshis::const_from_u64(1)).unwrap(),
@@ -9117,8 +9121,14 @@ pub fn canonical_crossing_is_bucketed_and_unpadded<Dsf: DataStoreFactory>(
         Ok(2)
     );
     assert!(
-        !interval.is_boundary(step.anchor_height().unwrap()),
-        "a non-canonical payment must not pay for a bucketed anchor"
+        interval.is_boundary(step.anchor_height().unwrap()),
+        "an Orchard-spending payment must anchor to a grid boundary even when its shape is not \
+         a canonical crossing"
+    );
+    assert_eq!(
+        step.anchor_height(),
+        canonical.steps().first().anchor_height(),
+        "and to the SAME boundary as the crossing: one cohort, not two"
     );
 
     // Building the canonical proposal is left until last: it spends the wallet's only note, so the
@@ -9329,14 +9339,14 @@ pub fn canonical_crossing_builds_at_empty_boundary_block<Dsf: DataStoreFactory>(
 }
 
 /// A canonical amount that cannot be funded from a single Orchard note is NOT a canonical
-/// crossing, and must not pay for a bucketed anchor it gains nothing from.
+/// crossing, but is still bucketed: it spends Orchard notes, and its anchor is shared.
 ///
-/// A migration transfer spends exactly one note, so a multi-input transaction resembles none. The
-/// decision is therefore made before the proposal is kept: had it been made by falling back only
-/// on insufficient funds, this transaction would have funded perfectly well from several notes and
-/// been left carrying an anchor up to a full interval older than necessary, for no benefit.
+/// A migration transfer spends exactly one note, so a multi-input transaction resembles none and
+/// keeps the Ironwood padding its fee was charged for. What it does NOT keep is a chain-tip anchor:
+/// the anchor is the one observable a transaction of any shape can share at no cost beyond
+/// confirmations, so it is bucketed here exactly as it is for the canonical crossing.
 #[cfg(feature = "orchard")]
-pub fn multi_note_crossing_is_not_bucketed<Dsf: DataStoreFactory>(
+pub fn multi_note_crossing_is_bucketed_but_not_canonical<Dsf: DataStoreFactory>(
     ds_factory: Dsf,
     cache: impl TestCache,
 ) {
@@ -9415,8 +9425,8 @@ pub fn multi_note_crossing_is_not_bucketed<Dsf: DataStoreFactory>(
     );
     assert!(!step.is_canonical_crossing(&zip318, canonical_fee));
     assert!(
-        !interval.is_boundary(step.anchor_height().unwrap()),
-        "a multi-input transaction must not pay for a bucketed anchor"
+        interval.is_boundary(step.anchor_height().unwrap()),
+        "a multi-input Orchard payment must still anchor to a grid boundary"
     );
     assert_eq!(
         step.ironwood_action_count(
@@ -9424,6 +9434,148 @@ pub fn multi_note_crossing_is_not_bucketed<Dsf: DataStoreFactory>(
             ::orchard::bundle::BundleVersion::ironwood_v3()
         ),
         Ok(2)
+    );
+
+    // The expiry travels with the anchor, not with the shape: a boundary-anchored transaction takes
+    // the ZIP 318 rolling expiry even though its padding says it is no migration transfer. An
+    // ordinary per-transaction expiry would re-identify what the shared anchor just anonymized.
+    let txids = st.create_proposed_expecting(&proposal, 1);
+    let tx = st.get_tx_from_history(txids[0]).unwrap().unwrap();
+    assert_eq!(
+        tx.expiry_height(),
+        Some(zcash_protocol::zip318::expiry_height(BlockHeight::from(
+            proposal.min_target_height()
+        ))),
+        "a boundary-anchored payment must carry the ZIP 318 rolling expiry"
+    );
+}
+
+/// A payment whose Orchard notes are all younger than the boundary is built IMMEDIATELY against
+/// the ordinary anchor, rather than waiting for a boundary they would be old enough for.
+///
+/// Bucketing is expressed as a raised confirmation requirement, so a wallet whose only notes
+/// arrived since the age-1 boundary cannot fund the bucketed attempt at all. That miss is a
+/// fallback, not a failure: the payment is proposed again under the caller's own policy, takes the
+/// ordinary anchor, and with it the ordinary per-transaction expiry. Anonymity is worth
+/// confirmations; it is never worth refusing to spend.
+#[cfg(feature = "orchard")]
+pub fn orchard_payment_falls_back_when_notes_are_too_new<Dsf: DataStoreFactory>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) {
+    let interval = AnchorBucketInterval::custom(NonZeroU32::new(12).expect("nonzero"));
+    let activation = BlockHeight::from_u32(100_000);
+    let ironwood_active_network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+
+    let mut st = TestDsl::from(
+        TestBuilder::new()
+            .with_network(ironwood_active_network)
+            .with_data_store_factory(ds_factory)
+            .with_block_cache(cache)
+            .with_anchor_retention_interval(interval)
+            .with_account_from_sapling_activation(BlockHash([0; 32])),
+    )
+    .build::<OrchardPoolTester>();
+
+    let account = st.test_account().cloned().unwrap();
+    let fvk = OrchardPoolTester::test_account_fvk(&st);
+    let recipient = OrchardPoolTester::fvk_default_address(&fvk).to_zcash_address(st.network());
+
+    // The wallet's starting note predates NU6.3, as every Orchard note on a real chain now does:
+    // the pool is closed to new value, so the only Orchard note that can be YOUNGER than a
+    // boundary is change from the wallet's own Orchard spend. This test makes one.
+    let note_value = Zatoshis::const_from_u64(10_000_000);
+    let (received_height, _, _) = st.add_a_single_note_checking_balance(note_value);
+
+    let interval_blocks = interval.block_count().get();
+    let tip = u32::from(interval.boundary_at_or_above(received_height)) + 3 * interval_blocks + 5;
+    let filler_count = tip - u32::from(received_height);
+    let not_our_fvk = OrchardPoolTester::sk_to_fvk(&OrchardPoolTester::sk(&[0xf5; 32]));
+    for _ in 0..filler_count {
+        st.generate_next_block(
+            &not_our_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+    }
+    st.scan_cached_blocks(received_height + 1, filler_count as usize);
+
+    let input_selector = GreedyInputSelector::new();
+    let change_strategy =
+        single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Orchard);
+    let propose = |st: &mut TestState<_, _, _>| {
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            recipient.clone(),
+            MAX_RESIDUAL_VALUE,
+        )])
+        .unwrap();
+        st.propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+    };
+
+    // The original note is older than the age-1 boundary, so this payment is bucketed.
+    let first = propose(&mut st).expect("the original note can fund this");
+    assert!(
+        interval.is_boundary(
+            first
+                .steps()
+                .first()
+                .anchor_height()
+                .expect("a shielded step binds an anchor")
+        ),
+        "the scenario starts from a bucketed payment"
+    );
+
+    // Mine it. Its Orchard change is now the wallet's only Orchard note, received at the tip and
+    // so younger than every boundary the bucketed policy can reach.
+    let txids = st.create_proposed_expecting(&first, 1);
+    let (mined_height, _) = st.generate_next_block_including(txids[0]);
+    st.scan_cached_blocks(mined_height, 1);
+    for _ in 0..2 {
+        st.generate_next_block(
+            &not_our_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10_000),
+        );
+    }
+    st.scan_cached_blocks(mined_height + 1, 2);
+    assert!(
+        u32::from(mined_height)
+            > u32::from(interval.boundary_at_or_below(mined_height)) - interval_blocks,
+        "the change note must be younger than the age-1 boundary for this scenario to be meaningful"
+    );
+
+    // The bucketed attempt cannot fund from a note that young, so the payment falls back rather
+    // than waiting for the boundary the change will eventually be old enough for.
+    let second = propose(&mut st).expect("the change must be spendable immediately");
+    let step = second.steps().first();
+    assert!(
+        !interval.is_boundary(
+            step.anchor_height()
+                .expect("a shielded step binds an anchor")
+        ),
+        "a wallet with no note old enough for the boundary must fall back to the ordinary anchor"
+    );
+
+    let txids = st.create_proposed_expecting(&second, 1);
+    let tx = st.get_tx_from_history(txids[0]).unwrap().unwrap();
+    assert_ne!(
+        tx.expiry_height(),
+        Some(zcash_protocol::zip318::expiry_height(BlockHeight::from(
+            second.min_target_height()
+        ))),
+        "and with the ordinary anchor, the ordinary expiry: the two travel together"
     );
 }
 

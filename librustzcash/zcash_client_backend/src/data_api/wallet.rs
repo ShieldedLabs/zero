@@ -838,12 +838,24 @@ where
     #[cfg(feature = "orchard")]
     let canonical_fee = crate::fees::canonical_crossing_fee(params, target_height.into()).ok();
 
-    // The whole attempt is Orchard-gated: without that feature there is no Ironwood pool to cross
-    // into, so there is no canonical crossing to construct.
+    // The whole attempt is Orchard-gated: without that feature there is no Orchard pool to anchor
+    // against, and no Ironwood pool to cross into.
+    //
+    // The bucketed anchor is NOT reserved for a canonical crossing. EVERY step that spends Orchard
+    // notes is proved against a boundary of the anchor bucket grid, so that its anchor joins the
+    // cohort of transactions sharing that boundary instead of pinning the block this wallet
+    // happened to be synced to when it proved. An anchor is one of only two observables an
+    // ordinary payment can share with a migration transfer at no cost beyond confirmations; the
+    // rolling expiry is the other.
+    //
+    // The crossing's REMAINING observables are deliberately not widened with it. Its denomination,
+    // its bundle padding and its fee are what make a crossing indistinguishable from a migration
+    // transfer, and an ordinary payment cannot wear that disguise: it pays an arbitrary amount to
+    // someone else. Adopting half of the shape would be a fingerprint rather than a disguise (see
+    // `Step::is_canonical_crossing`), so those stay gated on the canonical attempt below.
     #[cfg(feature = "orchard")]
-    let bucketed_policy = canonical_crossing_candidate(params, &zip318, &request, target_height)
-        .then(|| params.activation_height(NetworkUpgrade::Nu6_3))
-        .flatten()
+    let bucketed_policy = params
+        .activation_height(NetworkUpgrade::Nu6_3)
         .and_then(|activation| {
             confirmations_policy.bucketed(
                 zip318.anchor_bucket_interval(),
@@ -851,8 +863,8 @@ where
                 activation,
             )
         })
-        // A canonical crossing spends an Orchard note; if the caller forbids that, there is no
-        // canonical path to attempt.
+        // Bucketing buys anonymity for an Orchard anchor; if the caller forbids spending Orchard
+        // notes, there is no anchor to bucket.
         .filter(|_| spend_policy.permits_shielded(ShieldedPool::Orchard));
 
     // An anchor must be COMPUTABLE at the chosen boundary, not merely arithmetically valid: the
@@ -873,33 +885,39 @@ where
         None => None,
     };
 
+    // The canonical crossing attempt runs only for a request whose shape could reach it: a single
+    // payment of a canonical denomination. Every other Orchard-spending request skips straight to
+    // the bucketed attempt below, which asks only for the anchor.
     #[cfg(feature = "orchard")]
-    let canonical_attempt = bucketed_policy.map(|bucketed_policy| {
-        // Single-note funding is PREFERRED, not merely hoped for: a migration transfer
-        // spends exactly one note, and accumulation reaches the target through several
-        // small notes whenever the oldest notes are small — funding perfectly well while
-        // losing the canonical shape. Preferring the oldest single covering note makes the
-        // canonical outcome the common one; when no single note covers the payment, the
-        // fallback accumulation funds it and the shape check below discards the attempt,
-        // exactly as before.
-        let orchard_only = input_selection::SpendPolicy::shielded_pools([ShieldedPool::Orchard])
-            .with_locked_input_policy(spend_policy.locked_input_policy().clone())
-            .with_note_selection(input_selection::NoteSelection::PreferSingle);
+    let canonical_attempt = bucketed_policy
+        .filter(|_| canonical_crossing_candidate(params, &zip318, &request, target_height))
+        .map(|bucketed_policy| {
+            // Single-note funding is PREFERRED, not merely hoped for: a migration transfer
+            // spends exactly one note, and accumulation reaches the target through several
+            // small notes whenever the oldest notes are small — funding perfectly well while
+            // losing the canonical shape. Preferring the oldest single covering note makes the
+            // canonical outcome the common one; when no single note covers the payment, the
+            // fallback accumulation funds it and the shape check below discards the attempt,
+            // exactly as before.
+            let orchard_only =
+                input_selection::SpendPolicy::shielded_pools([ShieldedPool::Orchard])
+                    .with_locked_input_policy(spend_policy.locked_input_policy().clone())
+                    .with_note_selection(input_selection::NoteSelection::PreferSingle);
 
-        input_selector.propose_transaction(
-            params,
-            wallet_db,
-            target_height,
-            bucketed_policy.anchor_height(target_height),
-            &zip318,
-            bucketed_policy,
-            spend_from_account,
-            request.clone(),
-            change_strategy,
-            &orchard_only,
-            proposed_version,
-        )
-    });
+            input_selector.propose_transaction(
+                params,
+                wallet_db,
+                target_height,
+                bucketed_policy.anchor_height(target_height),
+                &zip318,
+                bucketed_policy,
+                spend_from_account,
+                request.clone(),
+                change_strategy,
+                &orchard_only,
+                proposed_version,
+            )
+        });
 
     // Only two outcomes justify falling back to an ordinary proposal: the wallet cannot fund the
     // payment under the stricter policy, or it funded one that is not in fact canonical. Every
@@ -924,10 +942,47 @@ where
         Some(Err(other)) => return Err(other.into()),
     };
 
-    #[cfg(not(feature = "orchard"))]
-    let canonical_proposal = None;
+    // A request that is not a canonical crossing still spends Orchard notes, and its ANCHOR is
+    // the observable worth sharing: proposed against the same boundary, with the caller's own
+    // spend policy and note selection, so that nothing but the anchor — and the confirmations
+    // that anchor implies — differs from what the ordinary attempt would have produced.
+    #[cfg(feature = "orchard")]
+    let bucketed_proposal = match canonical_proposal {
+        Some(proposal) => Some(proposal),
+        None => match bucketed_policy {
+            Some(bucketed_policy) => match input_selector.propose_transaction(
+                params,
+                wallet_db,
+                target_height,
+                bucketed_policy.anchor_height(target_height),
+                &zip318,
+                bucketed_policy,
+                spend_from_account,
+                request.clone(),
+                change_strategy,
+                spend_policy,
+                proposed_version,
+            ) {
+                // Kept only when the selection actually reached for Orchard notes. A proposal
+                // funded entirely from another pool has no Orchard anchor to hide, and would have
+                // paid up to one grid interval of extra confirmations on its inputs for nothing.
+                Ok(proposal) => {
+                    (proposal.input_count_in_pool(PoolType::ORCHARD) > 0).then_some(proposal)
+                }
+                // The wallet cannot fund the payment from notes old enough for the boundary. The
+                // ordinary proposal below is the fallback, exactly as for a missed crossing: an
+                // anchor is worth confirmations, never a payment that cannot be made at all.
+                Err(InputSelectorError::InsufficientFunds { .. }) => None,
+                Err(other) => return Err(other.into()),
+            },
+            None => None,
+        },
+    };
 
-    let proposal = match canonical_proposal {
+    #[cfg(not(feature = "orchard"))]
+    let bucketed_proposal = None;
+
+    let proposal = match bucketed_proposal {
         Some(proposal) => proposal,
         None => input_selector.propose_transaction(
             params,
@@ -979,25 +1034,28 @@ fn canonical_crossing_candidate<ParamsT: consensus::Parameters>(
         }
 }
 
-/// Returns whether `step` will be built as a canonical ZIP 318 crossing, under the ZIP 318
-/// parameters `wallet_db` reports and the fee the canonical shape costs at `target_height`.
+/// Returns whether `step` is proved against a boundary of the anchor bucket grid `wallet_db`
+/// retains, which is the condition for taking the ZIP 318 rolling expiry.
 ///
-/// Shared by every path that builds a proposal, so that each asks the same question of the same
-/// data. `create_pczt_from_proposal` in particular applies its expiry override after the builder
-/// has run, and so cannot rely on the check inside `build_proposed_transaction`.
+/// This is the anchor clause of [`Step::is_canonical_crossing`] on its own. A canonical crossing
+/// satisfies it, and so does every other step `propose_transfer` succeeded in bucketing; the rest
+/// of the crossing's shape decides only the Ironwood bundle's padding, never the expiry.
+///
+/// The test is made against the step's own anchor rather than against the policy that produced it,
+/// because bucketing is attempted and may be abandoned: a step whose anchor is not on the grid
+/// took the ordinary anchor, and an expiry no other transaction in its period shares would then
+/// single it out just as surely as a unique anchor would.
 #[cfg(feature = "orchard")]
-fn step_is_canonical_crossing<DbT, ParamsT, N>(
-    wallet_db: &DbT,
-    params: &ParamsT,
-    step: &Step<N>,
-    target_height: TargetHeight,
-) -> bool
+fn step_is_boundary_anchored<DbT, N>(wallet_db: &DbT, step: &Step<N>) -> bool
 where
     DbT: WalletRead,
-    ParamsT: consensus::Parameters,
 {
-    crate::fees::canonical_crossing_fee(params, target_height.into())
-        .is_ok_and(|fee| step.is_canonical_crossing(&wallet_db.pool_migration_params(), fee))
+    step.anchor_height().is_some_and(|anchor| {
+        wallet_db
+            .pool_migration_params()
+            .anchor_bucket_interval()
+            .is_boundary(anchor)
+    })
 }
 
 /// Proposes making a payment to the specified address from the given account.
@@ -1929,18 +1987,21 @@ where
             ironwood_padding,
         },
     );
-    // A canonical crossing takes the ZIP 318 rolling expiry, which every crossing in the same
-    // modulus period shares. The builder's ordinary per-transaction expiry (target height plus a
-    // small delta) would single it out immediately, undoing the shape the unpadded bundle and the
-    // bucketed anchor were chosen to produce. A caller-supplied expiry is refused rather than
-    // silently overridden: the padding and anchor are already fixed by this point, so honouring it
-    // would emit a transaction that is canonical in every respect but one.
+    // A boundary-anchored step takes the ZIP 318 rolling expiry, which every transaction in the
+    // same modulus period shares. The builder's ordinary per-transaction expiry (target height
+    // plus a small delta) would single it out immediately, undoing the anonymity the bucketed
+    // anchor was chosen to produce. A caller-supplied expiry is refused rather than silently
+    // overridden: the anchor is already fixed by this point, so honouring it would emit a
+    // transaction that is canonical in every respect but one.
+    //
+    // The condition is the ANCHOR, not the canonical crossing shape: this fork buckets the anchor
+    // of every Orchard-spending transaction, and the two observables travel together.
     #[cfg(feature = "orchard")]
     let expiry_height = {
-        if step_is_canonical_crossing(wallet_db, params, proposal_step, min_target_height) {
+        if step_is_boundary_anchored(wallet_db, proposal_step) {
             match expiry_height {
                 Some(requested) => {
-                    return Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { requested });
+                    return Err(Error::ExpiryHeightConflictsWithBoundaryAnchor { requested });
                 }
                 None => Some(zcash_protocol::zip318::expiry_height(
                     min_target_height.into(),
@@ -2945,9 +3006,9 @@ where
     // one that is committed and publicly visible.
     #[cfg(feature = "orchard")]
     if let Some(requested) = expiry_height
-        && step_is_canonical_crossing(wallet_db, params, proposal_step, min_target_height)
+        && step_is_boundary_anchored(wallet_db, proposal_step)
     {
-        return Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { requested });
+        return Err(Error::ExpiryHeightConflictsWithBoundaryAnchor { requested });
     }
 
     // Build the transaction with the specified fee rule

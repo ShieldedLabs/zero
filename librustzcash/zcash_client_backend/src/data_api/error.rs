@@ -114,14 +114,14 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
         min_target_height: BlockHeight,
     },
 
-    /// The caller requested an expiry height for a step that is a canonical ZIP 318 crossing.
+    /// The caller requested an expiry height for a step proved against an anchor bucket boundary.
     ///
-    /// Such a step takes its expiry from the ZIP 318 rolling window, which every crossing in the
-    /// same period shares; a caller-chosen expiry would single it out and undo the shape the
-    /// unpadded bundle and bucketed anchor were chosen to produce. Those are already fixed by the
-    /// time the transaction is built, so the conflict is reported rather than silently resolved.
-    /// Pass `None` to accept the canonical expiry.
-    ExpiryHeightConflictsWithCanonicalCrossing { requested: BlockHeight },
+    /// Such a step takes its expiry from the ZIP 318 rolling window, which every transaction in
+    /// the same period shares; a caller-chosen expiry would single it out and undo the anonymity
+    /// the bucketed anchor was chosen to produce. The anchor is already fixed by the time the
+    /// transaction is built, so the conflict is reported rather than silently resolved. Pass
+    /// `None` to accept the canonical expiry.
+    ExpiryHeightConflictsWithBoundaryAnchor { requested: BlockHeight },
 
     /// An error occurred while working with PCZTs.
     #[cfg(feature = "pczt")]
@@ -326,10 +326,11 @@ where
                     "The specified transparent address was not recognized as belonging to the wallet."
                 )
             }
-            Error::ExpiryHeightConflictsWithCanonicalCrossing { requested } => write!(
+            Error::ExpiryHeightConflictsWithBoundaryAnchor { requested } => write!(
                 f,
-                "An expiry height of {requested} was requested for a canonical ZIP 318 crossing, \
-                 which takes the ZIP 318 rolling expiry; pass `None` to accept it."
+                "An expiry height of {requested} was requested for a transaction proved against \
+                 an anchor bucket boundary, which takes the ZIP 318 rolling expiry; pass `None` \
+                 to accept it."
             ),
             Error::ExpiryHeightBelowTargetHeight {
                 expiry_height,

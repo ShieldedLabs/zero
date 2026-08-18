@@ -405,8 +405,16 @@ pub(crate) fn canonical_crossing_prefers_single_note() {
 }
 
 #[cfg(feature = "orchard")]
-pub(crate) fn multi_note_crossing_is_not_bucketed() {
-    zcash_client_backend::data_api::testing::pool::multi_note_crossing_is_not_bucketed(
+pub(crate) fn orchard_payment_falls_back_when_notes_are_too_new() {
+    zcash_client_backend::data_api::testing::pool::orchard_payment_falls_back_when_notes_are_too_new(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "orchard")]
+pub(crate) fn multi_note_crossing_is_bucketed_but_not_canonical() {
+    zcash_client_backend::data_api::testing::pool::multi_note_crossing_is_bucketed_but_not_canonical(
         TestDbFactory::default(),
         BlockCache::new(),
     )
