@@ -1991,8 +1991,8 @@ where
     // same modulus period shares. The builder's ordinary per-transaction expiry (target height
     // plus a small delta) would single it out immediately, undoing the anonymity the bucketed
     // anchor was chosen to produce. A caller-supplied expiry is refused rather than silently
-    // overridden: the anchor is already fixed by this point, so honouring it would emit a
-    // transaction that is canonical in every respect but one.
+    // overridden: the anchor is already fixed by this point, so honouring it would make the
+    // transaction's expiry unique within its shared-anchor cohort.
     //
     // The condition is the ANCHOR, not the canonical crossing shape: this fork buckets the anchor
     // of every Orchard-spending transaction, and the two observables travel together.
