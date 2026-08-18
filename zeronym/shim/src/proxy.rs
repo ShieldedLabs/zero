@@ -157,7 +157,19 @@ pub const GRPC_UNAVAILABLE: u16 = 14;
 pub const GRPC_RESOURCE_EXHAUSTED: u16 = 8;
 
 /// gRPC status code 1, CANCELLED.
+/// How long the shim waits for an upstream RESPONSE HEAD before giving up.
+///
+/// Bounds time-to-first-headers only, never the response body: see `forward`.
+/// Generous against a cold or loaded indexer -- a warm small request through a
+/// deployed enclave measured 0.76 s end to end (2026-08-18), so this is roughly
+/// forty times the honest cost -- and still far below the deadline a wallet
+/// would otherwise sit through.
+pub const UPSTREAM_HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub const GRPC_CANCELLED: u16 = 1;
+
+/// gRPC `DEADLINE_EXCEEDED`. The shim's own deadline, not the wallet's.
+pub const GRPC_DEADLINE_EXCEEDED: u16 = 4;
 
 /// gRPC status code 5, NOT_FOUND. What a wallet gets for a txid the hub's lookup
 /// does not know, mirroring lightwalletd's answer for an unknown transaction.
@@ -894,11 +906,33 @@ pub async fn forward(
     parts.headers.remove(http::header::HOST);
     strip_client_address_headers(&mut parts.headers);
 
-    upstream.sender.ready().await?;
-    let mut resp = upstream
-        .sender
-        .send_request(Request::from_parts(parts, body))
-        .await?;
+    // Bounded to the RESPONSE HEAD, and deliberately not past it.
+    //
+    // `send_request` resolves when the upstream's response headers arrive; the
+    // body streams afterwards and is not covered here. That distinction is the
+    // whole design: a `GetBlockRange` legitimately streams for minutes, so a
+    // deadline over the whole exchange would break ordinary wallet sync, while a
+    // deadline to first headers costs an honest upstream nothing.
+    //
+    // What it closes is an indexer that is stalled but ALIVE: it completes the
+    // TCP and h2 handshakes, accepts the stream, answers PINGs -- so the
+    // connection keepalive is satisfied and never tears it down -- and simply
+    // never sends response headers. Before this, the wallet hung on that for its
+    // own full deadline with no explanation, and every retry opened another one.
+    // The operator does not have to be malicious to produce it; a half-dead
+    // backend does it by itself.
+    let exchange = async {
+        upstream.sender.ready().await?;
+        upstream
+            .sender
+            .send_request(Request::from_parts(parts, body))
+            .await
+    };
+    let mut resp = tokio::time::timeout(UPSTREAM_HEAD_TIMEOUT, exchange)
+        .await
+        .map_err(|_| -> BoxError {
+            "backing indexer accepted the request but sent no response headers".into()
+        })??;
     normalize_response_encoding(resp.headers_mut());
     Ok(resp)
 }
@@ -1034,7 +1068,9 @@ async fn forward_to_bootproofd(
         .insert(http::header::HOST, HeaderValue::from_str(addr)?);
 
     let body = body.map_err(BoxError::from).boxed();
-    let resp = sender.send_request(Request::from_parts(parts, body)).await?;
+    let resp = sender
+        .send_request(Request::from_parts(parts, body))
+        .await?;
     Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
 }
 
