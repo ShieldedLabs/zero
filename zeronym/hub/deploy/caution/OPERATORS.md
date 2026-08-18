@@ -196,6 +196,38 @@ hub — which for the component holding plaintext migrations is the whole point.
 (Empirical observation; not confirmed with Caution which layer each index
 measures.)
 
+**Re-verified independently 2026-08-18, straight from the signed attestations of
+two live apps** (`POST /attestation` with a nonce, COSE payload decoded, no
+`caution verify` in the loop), and it turned up two things this section did not
+record:
+
+| PCR | shim-10 | hub-6 | Reading |
+|---|---|---|---|
+| 0 | `ed131501…` | `608621de…` | differs per application |
+| 1 | `ed131501…` | `608621de…` | differs per application, **and equals PCR0** |
+| 2 | `21b9efbc…` | `21b9efbc…` | **identical** — the shared base, does not identify code |
+| 3 | `6eab08ea…` | `597eaa50…` | differs, but this is the **IAM role** under standard Nitro |
+| 4 | `af50754c…` | `8c59e320…` | differs, but this is the **instance ID** — changes every redeploy |
+
+1. **PCR0 and PCR1 are byte-identical within each enclave.** So "all three PCRs"
+   is really ONE distinct code-binding value, reported twice, plus a constant.
+   The guidance to require all three stays correct — it includes the values that
+   do track the application — but it should not be read as three independent
+   confirmations, and nobody should quote it as such to an auditor.
+2. **PCR3 and PCR4 differ too, and must NOT be read as code measurements.** Under
+   AWS's documented layout they are the parent instance's IAM role and instance
+   ID. PCR4 in particular changes on every redeploy, so it can never belong in a
+   reproducible expectation.
+
+Note also that AWS documents PCR2 as *the application* measurement. We observe
+the exact opposite, and PCR1 (documented as kernel + bootstrap, and therefore
+expected to be IDENTICAL across two enclaves on one platform) instead tracks the
+application. Caution's EIF layout is therefore not the standard one, which makes
+the question below worth asking rather than assuming.
+
+The 2026-08-14 PCR2 value (`21b9efbc…`) reproduced exactly on 2026-08-18 across a
+redeploy, which is what a stable base layer should do.
+
 Publish the assembled tree to the `--app-source` repo — `main`, plus a tag on the
 deployed commit, since the manifest pins branch **and** commit and a branch tip
 moves. Caution's own git remote is push-only, so this published repo is the only
