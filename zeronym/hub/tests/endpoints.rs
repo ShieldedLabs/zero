@@ -128,7 +128,9 @@ async fn the_read_only_endpoints_reveal_nothing_about_the_queue() {
     for path in ["/nym-address", "/healthz"] {
         let (_, body) = get(&addr, path).await;
         let lowered = body.to_lowercase();
-        for forbidden in ["queue", "batch", "depth", "pending", "txid", "size", "count"] {
+        for forbidden in [
+            "queue", "batch", "depth", "pending", "txid", "size", "count",
+        ] {
             assert!(
                 !lowered.contains(forbidden),
                 "{path} response mentions {forbidden:?}: {body}"
@@ -272,6 +274,115 @@ async fn nym_status_distinguishes_a_dead_client_from_a_live_one() {
 
     // Never an oracle for how much is in flight: that is the anonymity-set size.
     for forbidden in ["queue", "depth", "pending", "batch", "txid", "admitted"] {
-        assert!(!body.contains(forbidden), "must not expose '{forbidden}': {body}");
+        assert!(
+            !body.contains(forbidden),
+            "must not expose '{forbidden}': {body}"
+        );
     }
+}
+
+/// A dead mixnet client and a dead mixnet DRIVER are different states, and the
+/// endpoint must not report them the same way.
+///
+/// `set_died` describes a recoverable condition: the client is down and the
+/// driver is actively rebuilding it, so an operator should wait. A driver that
+/// has returned or panicked is not recoverable, and nothing else in the process
+/// notices: `tokio::spawn` hands back a `JoinHandle` that carries the panic, and
+/// dropping that handle discards it. The hub then stays up with `/healthz`
+/// answering 200 forever while accepting nothing over the mixnet -- the exact
+/// shape of the 2026-08-14 afternoon, one level further up.
+///
+/// The hub deliberately does NOT exit when this happens: its clearnet ingress
+/// and its flush cadence are independent of the mixnet, and dying would drop a
+/// queue of migrations that shims believe are on their way. Staying up is
+/// correct; staying up while claiming to be reachable is not.
+#[tokio::test]
+async fn nym_status_separates_a_client_being_rebuilt_from_a_driver_that_is_gone() {
+    let nym_address = NymAddress::unknown();
+    let addr = spawn(ServeOptions {
+        nym_address: nym_address.clone(),
+        ..Default::default()
+    })
+    .await;
+
+    nym_address.set("ident.enc@gateway".to_owned());
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(body.contains("\"driver_running\":true"), "{body}");
+
+    // A client death alone leaves the driver running: somebody is working on it.
+    nym_address.set_died();
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(body.contains("\"mixnet_connected\":false"), "{body}");
+    assert!(
+        body.contains("\"driver_running\":true"),
+        "a client death is recoverable and must not read as a dead driver: {body}"
+    );
+
+    // A rebuild failure likewise: still down, still being worked on.
+    nym_address.set_rebuild_failed();
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(
+        body.contains("\"driver_running\":true"),
+        "a failed rebuild attempt is the driver WORKING: {body}"
+    );
+
+    // The driver task itself exiting is the terminal state, and the only one
+    // that tells an operator to restart the hub rather than wait.
+    nym_address.set_driver_exited();
+    let (_, body) = get(&addr, "/nym-status").await;
+    assert!(
+        body.contains("\"driver_running\":false"),
+        "a driver that returned or panicked must be visible: {body}"
+    );
+    assert!(
+        body.contains("\"mixnet_connected\":false"),
+        "a gone driver is definitionally not connected: {body}"
+    );
+
+    // Still no oracle for how much is in flight.
+    for forbidden in ["queue", "depth", "pending", "batch", "txid", "admitted"] {
+        assert!(
+            !body.contains(forbidden),
+            "must not expose '{forbidden}': {body}"
+        );
+    }
+}
+
+/// A client that sends headers and then stops must not hold a connection open
+/// forever.
+///
+/// The body caps bound how MUCH a client may send. They say nothing about how
+/// LONG it may take, and hyper's `header_read_timeout` stops applying the moment
+/// the head is complete -- so before this deadline existed, "Content-Length: 64"
+/// followed by silence held a connection and a task until the peer gave up.
+/// Doing that a few thousand times is the whole attack, and it needs no valid
+/// transaction and no credentials.
+///
+/// Time is paused, so this asserts the deadline EXISTS and fires rather than
+/// spending its wall-clock duration proving it.
+#[tokio::test(start_paused = true)]
+async fn a_body_that_never_arrives_is_timed_out_rather_than_held() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = spawn(ServeOptions::default()).await;
+    let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+
+    // A complete, well-formed head promising a body that will never come. The
+    // lookup path is used because it is open unconditionally; the deadline is
+    // the same one on both paths.
+    sock.write_all(b"POST /transaction HTTP/1.1\r\nHost: hub\r\nContent-Length: 64\r\n\r\n")
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    let mut response = Vec::new();
+    // Returns when the hub answers and closes, which only happens if something
+    // gave up on the body. Without the deadline this read never completes.
+    sock.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+
+    assert!(
+        response.starts_with("HTTP/1.1 408"),
+        "a stalled body must be refused as a timeout, got:\n{response}"
+    );
 }

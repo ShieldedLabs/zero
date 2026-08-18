@@ -49,6 +49,19 @@ use crate::BoxError;
 /// wallet's request into a shim and is unrelated.
 const MAX_TX_BYTES: usize = 64 * 1024;
 
+/// Ceiling on reading a request body off the wire.
+///
+/// The size caps above bound how MUCH a client may send; they do not bound how
+/// LONG it may take. A client that sends one byte a minute stays under every
+/// size limit forever while holding a connection and a task. hyper's
+/// `header_read_timeout` does not help: it covers the head only, and stops
+/// applying the moment the body starts.
+///
+/// Thirty seconds is far above any honest client on the slowest path measured
+/// (an enclave sustains ~220 KB/s outbound, so even a maximum-size body is ~10 s)
+/// and far below the forever a slow-loris wants.
+const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The submission path: `POST /` with a raw transaction body. The transitional
 /// clearnet hop, and OFF unless [`ServeOptions::http_submit`] turns it on: with
 /// the mixnet path working, nothing legitimate posts here, while the enclave
@@ -113,6 +126,11 @@ struct NymState {
     connected: std::sync::atomic::AtomicBool,
     deaths: std::sync::atomic::AtomicU64,
     consecutive_failures: std::sync::atomic::AtomicU64,
+    /// Whether the driver TASK itself is gone -- returned or panicked -- as
+    /// opposed to a client that died and will be rebuilt. `set_died` describes a
+    /// recoverable state the driver is actively working out of; this describes
+    /// nobody working on it at all, which no other field can express.
+    driver_exited: std::sync::atomic::AtomicBool,
 }
 
 impl NymAddress {
@@ -156,6 +174,24 @@ impl NymAddress {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The driver task is gone for good: it returned or panicked, and no rebuild
+    /// is coming.
+    ///
+    /// A panicking task is silent by default. `tokio::spawn` returns a
+    /// `JoinHandle` that carries the panic, and dropping it discards that -- the
+    /// process stays up, `/healthz` keeps answering 200, and the hub accepts
+    /// nothing over the mixnet while looking healthy from outside. That is the
+    /// same failure `set_died` was written for, one level up, and the same
+    /// afternoon of misdirected suspicion if it is not surfaced.
+    pub fn set_driver_exited(&self) {
+        self.0
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .driver_exited
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// A rebuild attempt failed: still down, and the run of failures grows.
     pub fn set_rebuild_failed(&self) {
         self.0
@@ -186,6 +222,11 @@ impl NymAddress {
             "address_published": self.get().is_some(),
             "client_deaths": self.0.deaths.load(Ordering::Relaxed),
             "consecutive_rebuild_failures": self.0.consecutive_failures.load(Ordering::Relaxed),
+            // False here means the hub is not merely disconnected but has nobody
+            // trying to reconnect it. An operator seeing `mixnet_connected:false`
+            // with `driver_running:true` should wait; with `driver_running:false`
+            // they should restart the hub.
+            "driver_running": !self.0.driver_exited.load(Ordering::Relaxed),
         })
     }
 }
@@ -224,7 +265,10 @@ pub enum LookupOutcome {
     /// The transaction, at `height` (`0` = mempool, the sentinel a wallet sees
     /// for an unmined transaction). [`Zeroizing`] because a queue hit is a
     /// diverted, not-yet-published migration.
-    Found { data: Zeroizing<Vec<u8>>, height: u64 },
+    Found {
+        data: Zeroizing<Vec<u8>>,
+        height: u64,
+    },
     /// Neither the queue nor the indexer knows it.
     NotFound,
     /// The indexer could not answer. Every transport renders this closed
@@ -274,7 +318,10 @@ impl Hub {
                 // wants -- how many were admitted -- is logged once per flush by
                 // the batcher. Whether this one parsed stays as the single
                 // telemetry bit, at debug.
-                tracing::debug!(parseable = txid.is_some(), "migration admitted to the batch");
+                tracing::debug!(
+                    parseable = txid.is_some(),
+                    "migration admitted to the batch"
+                );
                 Ok(txid)
             }
             Admission::Refused(refusal) => {
@@ -368,11 +415,7 @@ fn is_fd_exhaustion(err: &std::io::Error) -> bool {
 /// Accept and serve submissions on an already-bound listener until it errors.
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
-pub async fn serve(
-    listener: TcpListener,
-    hub: Hub,
-    options: ServeOptions,
-) -> Result<(), BoxError> {
+pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Result<(), BoxError> {
     tracing::info!(
         local = ?listener.local_addr().ok(),
         flush_interval = hub.params.flush_interval,
@@ -502,12 +545,16 @@ fn nym_address(address: &NymAddress) -> Response<Full<Bytes>> {
 /// This is why the shim can be stateless: it holds nothing about the migrations
 /// it diverted, and routes every `GetTransaction` here instead.
 async fn lookup(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
-    let collected = match Limited::new(req.into_body(), MAX_LOOKUP_BYTES)
-        .collect()
-        .await
-    {
-        Ok(collected) => collected,
-        Err(_) => return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "lookup key too large")),
+    let read = Limited::new(req.into_body(), MAX_LOOKUP_BYTES).collect();
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(_)) => return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "lookup key too large")),
+        Err(_) => {
+            return Ok(text(
+                StatusCode::REQUEST_TIMEOUT,
+                "lookup body read timed out",
+            ))
+        }
     };
     let wire_hash = collected.to_bytes();
     if wire_hash.is_empty() {
@@ -537,14 +584,16 @@ fn found(tx_bytes: &[u8], height: u64) -> Response<Full<Bytes>> {
 /// response, not a connection fault.
 async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
     // Buffer the body under a hard cap, refused strictly before anything else.
-    let collected = match Limited::new(req.into_body(), MAX_TX_BYTES).collect().await {
-        Ok(collected) => collected,
-        Err(_) => {
+    let read = Limited::new(req.into_body(), MAX_TX_BYTES).collect();
+    let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(_)) => {
             return Ok(text(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "transaction exceeds the frame size",
             ))
         }
+        Err(_) => return Ok(text(StatusCode::REQUEST_TIMEOUT, "body read timed out")),
     };
     let tx_bytes = Zeroizing::new(collected.to_bytes().to_vec());
 
