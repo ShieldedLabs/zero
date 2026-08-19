@@ -24,8 +24,27 @@ attestation matters most — an unattested hub proves nothing that running the
 binary on a laptop would not, while being trusted with exactly the data the
 system exists to protect.
 
-**One hub.** The current design assumes a single hub operator. That is why there
-is no hub directory, no failover, and a single address baked into every shim.
+**One hub, today.** The current DEPLOYMENT runs a single hub, which is why there
+is no hub directory and a single address baked into every shim.
+
+**But the target model is REPLICATION, not failover** (Taylor Hornby's rule,
+2026-08-17, recorded in `PRODUCTION.md`). Multiple hubs are fine for availability
+provided every hub receives IDENTICAL information: every shim submits every
+migration to EVERY hub, unconditionally. Zcash handles two hubs broadcasting the
+same batch fine. Lookups may pick a hub at random and retry elsewhere, because
+every hub can answer.
+
+What must never be built is STATEFUL ROUTING -- any scheme where a shim chooses
+its hub based on which one looks healthy. `REVIEW.md` #6 reached this
+independently and states the sharper version of the attack: preferring a primary
+creates an ISOLATION ORACLE, because a brief, targeted outage of the primary
+during one migration's retry isolates THAT migration. Taylor's rule states the
+broader one: an attacker who can make Hub1 look down to Shim1 and Hub2 look down
+to Shim2 has partitioned the anonymity set, without touching either hub. Both
+land on the same instruction -- submit to all hubs, always, never conditioned on
+health. That is why the section below is titled as
+the single-hub degraded case rather than as a failover design: failover is the
+wrong shape, not merely an unbuilt one.
 
 ## What the hub does, precisely
 
@@ -341,9 +360,15 @@ emits continuous cover traffic. When it runs out, reception stops. No ticketbook
 **4. Anyone who knows your address can submit.** There is no submitter ACL. The
 64 MiB queue budget is the only thing bounding an abusive submitter.
 
-## If the hub goes down: the failover runbook
+## If the hub goes down: the single-hub recovery runbook
 
-There is **no standby today**. Failover is a manual, multi-party operation, and it
+**Not a failover design, and deliberately not one.** With one hub deployed there
+is nothing to fail over TO, so this is a recovery procedure. When a second hub
+exists it must be REPLICATED to, not failed over to (see "One hub, today" above):
+shims submit to every hub always, so losing one costs redundancy, not service,
+and no shim ever decides which hub to use.
+
+There is **no standby today**. Recovery is a manual, multi-party operation, and it
 is worth reading before you need it rather than during.
 
 **What breaks, and how it looks.** The hub's identity lives in RAM, so a *process
@@ -384,19 +409,34 @@ Budget **well over an hour** end to end, during which migrations are failing.
 `caution verify` is a further ~7 min but does NOT belong on the critical path —
 restore service first, verify after.
 
-**Why it cannot currently be better.** A standby cannot be pre-baked into shims,
-because a diskless hub has no address until it runs — and if it runs, it is *hot*,
-so both hubs broadcast and the batch splits across two moments. Nor can the
-identity be supplied by config to keep the address stable: that would put the
-hub's Nym private key where the host operator can read it, and anyone holding it
-can impersonate the hub and **receive migrations**. Downtime is the better
-failure.
+**Why it cannot currently be better, and which half of that is real.** A standby
+cannot be pre-baked into shims because a diskless hub has no address until it
+runs. Nor can the identity be supplied by config to keep the address stable: that
+would put the hub's Nym private key where the host operator can read it, and
+anyone holding it can impersonate the hub and **receive migrations**. Both of
+those still hold.
 
-**What would fix it** (not built): shims fetch the current hub address at runtime
-from a published endpoint, but accept it only if signed by a key baked into their
-audited config. That keeps the property the baking exists for — an operator
-cannot silently repoint a shim at a hub they control — while reducing failover to
-a poll interval. Until then, treat hub restarts as expensive and rare.
+What no longer holds is the objection that a running standby is *hot*, "so both
+hubs broadcast and the batch splits across two moments". Under the replication
+rule that is the intended state, not a defect. Two hubs each holding every
+migration each publish a full-size batch; the transaction appears twice, which
+on-chain is a known txid and harmless. The cost is a second enclave holding
+plaintext and one migration appearing in two batches at two moments -- accepted
+deliberately, because the alternative that avoids it is health-based hub
+selection, and that hands an attacker the ability to partition the anonymity set.
+
+**What would fix it** (not built): shims fetch the current hub SET at runtime from
+a published endpoint, accepting it only if signed by a key baked into their
+audited config. That keeps the property the baking exists for -- an operator
+cannot silently repoint a shim at a hub they control -- while reducing recovery to
+a poll interval.
+
+Note the unit is the SET, not an address. Every shim must converge on the SAME
+set: two shims running different hub sets partitions the anonymity set exactly as
+health-based selection would, just more slowly. So the signed document has to be
+the whole membership list with a version, and a shim must refuse to act on a set
+older than one it has already seen. Until that exists, treat hub restarts as
+expensive and rare.
 
 ## Operating rules
 

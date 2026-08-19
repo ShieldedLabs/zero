@@ -619,19 +619,32 @@ impl NymHandle {
         // queue on the payload hash (D6), which collapses a resend to the same hub.
         // It does NOT deduplicate across hubs: the hub has no notion of being
         // active or standby, so any hub that RECEIVES a migration will queue and
-        // broadcast it. Sending to every address is therefore safe only while the
-        // other addresses are DEAD -- which is the failover model this list was
-        // built for (D10): a diskless hub mints a new address when it restarts, so
-        // the list is "the current address, and the one it just rotated away from",
-        // and nothing is listening at the stale one.
+        // broadcast it.
         //
-        // If two hubs were ever live at once, both would broadcast the same
-        // transaction. On-chain that is harmless (the second is a known txid), but
-        // it would publish the migration in two different batches at two different
-        // moments, which is strictly worse for the batching this design exists to
-        // provide, and it doubles the number of enclaves holding the plaintext.
-        // Running a hot standby therefore needs an explicit passive mode in the
-        // hub, which does not exist today.
+        // SENDING TO EVERY ADDRESS IS THE RULE, not a concession to the addresses
+        // being dead. This comment used to say the opposite -- that send-to-all
+        // was "safe only while the other addresses are DEAD", the list being the
+        // current address plus the one just rotated away from (D10). That framing
+        // predates Taylor Hornby's rule (2026-08-17, `PRODUCTION.md`): REPLICATE,
+        // NEVER FAIL OVER. Multiple hubs are fine provided every hub receives
+        // identical information, and the thing that must never exist is a shim
+        // choosing its hub based on which looks healthy -- an attacker who can
+        // make one hub look down to half the shims partitions the anonymity set
+        // without touching a hub.
+        //
+        // So the behaviour here is right and must stay right: submit to every
+        // address, unconditionally, never conditioned on liveness. Do not
+        // "optimise" this into trying one address and falling back, and do not
+        // build the hub-side passive mode the old rationale asked for -- that is
+        // the anti-pattern, not the missing piece.
+        //
+        // Two hubs live at once both broadcast the same transaction. On-chain
+        // that is harmless (the second is a known txid). The real costs are that
+        // the migration appears in two batches at two moments, and that a second
+        // enclave holds the plaintext. Both are accepted deliberately: the only
+        // way to avoid them is to have shims pick a single live hub, and that is
+        // precisely the partitioning attack. Redundancy is bought with duplicate
+        // publication, and that is the intended trade.
         //
         // The cost is N frames of packets on a path that carries a migration
         // roughly 0.77 times per block, against a cover-traffic stream running
