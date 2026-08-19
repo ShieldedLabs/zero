@@ -6,7 +6,7 @@ repository = { workspace = true }
 homepage = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
-version = "0.4.0-rc.1"
+version = "0.7.0"
 
 [features]
 default = []
@@ -20,15 +20,13 @@ default = []
 fast-test-seam = []
 
 # Support for connecting to a zcashd validator node. Opt-in (default off, docs/adr/0005); being
-# deprecated. Forwards to zaino-fetch. See
-# docs/adr/0001-zcashd-support-feature-gate.md.
-zcashd_support = ["zaino-fetch/zcashd_support"]
-
+# deprecated. See docs/adr/0001-zcashd-support-feature-gate.md.
+#
 # Prometheus metrics emission (gauge! calls in sync paths).
 prometheus = ["metrics"]
 
 # test_dependencies - Exposes internal functionality for testing.
-test_dependencies = []
+test_dependencies = ["zaino-source-zebra/test_dependencies"]
 
 # **Experimental and alpha features**
 # Exposes the **complete** set of experimental / alpha features currently implemented in Zaino.
@@ -41,7 +39,6 @@ transparent_address_history_experimental = []
 
 [dependencies]
 zaino-common = { workspace = true }
-zaino-fetch = { workspace = true }
 zaino-proto = { workspace = true }
 
 # LibRustZcash
@@ -83,22 +80,30 @@ lmdb = { workspace = true }
 lmdb-sys = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
-prost = { workspace = true }
-primitive-types = { workspace = true }
 blake2 = { workspace = true }
 sha2 = { workspace = true }
 corez = { workspace = true }
-bs58 = { workspace = true }
-nonempty = { workspace = true }
 arc-swap = { workspace = true }
 reqwest.workspace = true
 bitflags = { workspace = true }
-derive_more = { workspace = true, features = ["from"] }
+zaino-source.workspace = true
+zaino-source-zebra.workspace = true
+zaino-primitives.workspace = true
+zaino-rpc.workspace = true
+zaino-source-zebra-rpc.workspace = true
+zaino-source-zebra-readstate.workspace = true
+zaino-address = { workspace = true }
+zaino-convert-zebra.workspace = true
+zaino-status.workspace = true
+zaino-consensus.workspace = true
+bytes.workspace = true
+zaino-mempool = { workspace = true, features = ["tip_aware_mempool"] }
+zaino-mempool-service = { workspace = true, features = ["tip_aware_mempool"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
-once_cell = { workspace = true }
+primitive-types = { workspace = true }
 zebra-chain = { workspace = true, features = ["proptest-impl"] }
 proptest.workspace = true
 incrementalmerkletree = "0.8.2"

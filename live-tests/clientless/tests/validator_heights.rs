@@ -23,10 +23,8 @@
 //!    `activation_heights_from_upgrades` in zaino-state.
 
 use zaino_state::ZcashIndexer as _;
-#[allow(deprecated)]
-use zaino_testutils::Rpc;
 use zaino_testutils::{
-    all_pools_i32, collect_block_range, MinerPool, TestManager, ValidatorKind,
+    all_pools_i32, collect_block_range, MinerPool, Rpc, TestManager, ValidatorKind,
     NU6_3_TRANSITION_BOUNDARY, ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS,
     ZEBRAD_DEFAULT_ACTIVATION_HEIGHTS,
 };
@@ -36,7 +34,6 @@ use zcash_local_net::validator::zebrad::Zebrad;
 /// with zainod enabled. The harness hands zainod only the canonical
 /// placeholder (see `launch_mining_to`), so the launch itself is the
 /// deliberate config/validator misalignment under test.
-#[allow(deprecated)]
 async fn launch_transition_validator() -> TestManager<Zebrad, Rpc> {
     assert_ne!(
         ZEBRAD_DEFAULT_ACTIVATION_HEIGHTS, ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS,
@@ -120,15 +117,19 @@ async fn getblockchaininfo_reports_the_configured_schedule() {
 
     let mut test_manager = launch_transition_validator().await;
 
-    let blockchain_info = test_manager
-        .full_node_jsonrpc_connector()
-        .await
-        .get_blockchain_info()
-        .await
-        .expect("getblockchaininfo");
+    // Read as zebra's own response type: this test asserts on the
+    // `NetworkUpgrade` enum, which is what indexes an activation schedule.
+    let blockchain_info: zebra_rpc::methods::GetBlockchainInfoResponse = serde_json::from_value(
+        test_manager
+            .full_node_jsonrpc_connector()
+            .await
+            .get("getblockchaininfo")
+            .await,
+    )
+    .expect("getblockchaininfo");
 
     let reported: Vec<(NetworkUpgrade, u32)> = blockchain_info
-        .upgrades
+        .upgrades()
         .values()
         .map(|upgrade_info| {
             let (upgrade, height, _status) = upgrade_info.into_parts();

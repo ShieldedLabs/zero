@@ -1,18 +1,11 @@
 //! Zcash RPC implementations.
 
-use zaino_fetch::jsonrpsee::response::block_deltas::BlockDeltas;
-use zaino_fetch::jsonrpsee::response::block_header::GetBlockHeader;
-use zaino_fetch::jsonrpsee::response::block_subsidy::GetBlockSubsidy;
-use zaino_fetch::jsonrpsee::response::chain_tips::GetChainTipsResponse;
-use zaino_fetch::jsonrpsee::response::mining_info::GetMiningInfoWire;
-use zaino_fetch::jsonrpsee::response::peer_info::GetPeerInfo;
-use zaino_fetch::jsonrpsee::response::z_validate_address::{
-    ZValidateAddressResponse, DEPRECATION_NOTICE as Z_VALIDATE_DEPRECATION,
-};
-use zaino_fetch::jsonrpsee::response::{
-    GetMempoolInfoResponse, GetNetworkSolPsResponse, GetSpentInfoRequest, GetSpentInfoResponse,
-    GetTxOutResponse, GetTxOutSetInfoResponse,
-};
+use crate::rpc::jsonrpc::wire::block_deltas::BlockDeltas;
+use crate::rpc::jsonrpc::wire::block_header::GetBlockHeader;
+use crate::rpc::jsonrpc::wire::block_subsidy::GetBlockSubsidy;
+use crate::rpc::jsonrpc::wire::mining_info::GetMiningInfoWire;
+use crate::rpc::jsonrpc::wire::peer_info::GetPeerInfo;
+use zaino_address::DEPRECATION_NOTICE as Z_VALIDATE_DEPRECATION;
 use zaino_state::{LightWalletIndexer, ZcashIndexer};
 
 use zebra_chain::{block::Height, subtree::NoteCommitmentSubtreeIndex};
@@ -28,6 +21,12 @@ use zebra_rpc::methods::{
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::{proc_macros::rpc, types::ErrorCode};
 
+use crate::rpc::jsonrpc::wire::address::{validate_address_from_domain, ZValidateAddressWire};
+use crate::rpc::jsonrpc::wire::chain_tips::{chain_tips_from_domain, GetChainTipsResponse};
+use crate::rpc::jsonrpc::wire::misc::{
+    MempoolInfoWire, NetworkSolPsWire, SpentInfoRequestWire, SpentInfoWire, TxOutSetInfoWire,
+    TxOutWire,
+};
 use crate::rpc::JsonRpcClient;
 
 /// Zcash RPC method signatures.
@@ -73,7 +72,7 @@ pub trait ZcashIndexerRpc {
     ///
     /// Canonical source code implementation: [`getmempoolinfo`](https://github.com/zcash/zcash/blob/18238d90cd0b810f5b07d5aaa1338126aa128c06/src/rpc/blockchain.cpp#L1555)
     #[method(name = "getmempoolinfo")]
-    async fn get_mempool_info(&self) -> Result<GetMempoolInfoResponse, ErrorObjectOwned>;
+    async fn get_mempool_info(&self) -> Result<MempoolInfoWire, ErrorObjectOwned>;
 
     /// Returns a json object containing mining-related information.
     ///
@@ -87,7 +86,7 @@ pub trait ZcashIndexerRpc {
     /// method: post
     /// tags: blockchain
     #[method(name = "gettxoutsetinfo")]
-    async fn get_tx_out_set_info(&self) -> Result<GetTxOutSetInfoResponse, ErrorObjectOwned>;
+    async fn get_tx_out_set_info(&self) -> Result<TxOutSetInfoWire, ErrorObjectOwned>;
 
     /// Returns the hash of the best block (tip) of the longest chain.
     /// zcashd reference: [`getbestblockhash`](https://zcash.github.io/rpc/getbestblockhash.html)
@@ -180,7 +179,7 @@ pub trait ZcashIndexerRpc {
     ///
     /// # Deprecation
     ///
-    /// See [`DEPRECATION_NOTICE`](zaino_fetch::jsonrpsee::response::z_validate_address::DEPRECATION_NOTICE).
+    /// See [`DEPRECATION_NOTICE`](zaino_address::DEPRECATION_NOTICE).
     ///
     /// # Parameters
     /// - `address`: (string, required) The address to validate.
@@ -192,7 +191,7 @@ pub trait ZcashIndexerRpc {
     async fn z_validate_address(
         &self,
         address: String,
-    ) -> Result<ZValidateAddressResponse, ErrorObjectOwned>;
+    ) -> Result<ZValidateAddressWire, ErrorObjectOwned>;
 
     /// Returns the total balance of a provided `addresses` in an [`AddressBalance`] instance.
     ///
@@ -393,7 +392,7 @@ pub trait ZcashIndexerRpc {
         txid: String,
         n: u32,
         include_mempool: Option<bool>,
-    ) -> Result<GetTxOutResponse, ErrorObjectOwned>;
+    ) -> Result<TxOutWire, ErrorObjectOwned>;
 
     /// Returns the txid, input index, and block height where an output is spent.
     ///
@@ -412,8 +411,8 @@ pub trait ZcashIndexerRpc {
     #[method(name = "getspentinfo")]
     async fn get_spent_info(
         &self,
-        request: GetSpentInfoRequest,
-    ) -> Result<GetSpentInfoResponse, ErrorObjectOwned>;
+        request: SpentInfoRequestWire,
+    ) -> Result<SpentInfoWire, ErrorObjectOwned>;
 
     /// Returns the transaction ids made by the provided transparent addresses.
     ///
@@ -473,74 +472,119 @@ pub trait ZcashIndexerRpc {
         &self,
         blocks: Option<i32>,
         height: Option<i32>,
-    ) -> Result<GetNetworkSolPsResponse, ErrorObjectOwned>;
+    ) -> Result<NetworkSolPsWire, ErrorObjectOwned>;
+}
+
+/// Maps an indexer error to the JSON-RPC error object every plain-delegation
+/// method returns: `InvalidParams` (converted to the zcash legacy "misc" code
+/// in RPC middleware) carrying the error's message as data.
+fn invalid_params_error_object(error: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        ErrorCode::InvalidParams.code(),
+        "Internal server error",
+        Some(error.to_string()),
+    )
 }
 
 // Currently all errors are hidden from downstream client, a full fix should be implemented. this is a temporary fix to
 // get zaino working, propagating a 500 error code to "block not found". This is still not the full correct behaviour
 // but fixes the current bugs in zaino and gets tests running.
-fn rpc_error_from_error_source<'a>(
-    error_source: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a zaino_fetch::jsonrpsee::connector::RpcError> {
-    error_source.downcast_ref::<zaino_fetch::jsonrpsee::connector::RpcError>()
+
+/// Recovers a zcashd-compatible legacy error code from one link of an error
+/// chain.
+///
+/// Two things can carry one, and both must be caught:
+///
+/// - [`LegacyRpcError`] — Zaino's *own* rejection, e.g. a malformed block
+///   identifier or an oversized raw transaction, which never reached a
+///   validator.
+/// - [`FetchError`] with [`FailureMode::RpcError`] — a code the *validator*
+///   returned, classified by the source layer.
+///
+/// Before this PR only `zaino-fetch`'s connector type was matched. The new
+/// source stack never produced it, so this recovery was **silently inert**: a
+/// zcashd error code reached the client as a generic internal error. Catching
+/// both closes that.
+fn legacy_code_from_error_source(
+    error_source: &(dyn std::error::Error + 'static),
+) -> Option<(i32, String)> {
+    if let Some(rejection) = error_source.downcast_ref::<zaino_state::LegacyRpcError>() {
+        return Some((rejection.code as i32, rejection.message.clone()));
+    }
+
+    match error_source.downcast_ref::<zaino_source::FetchError>() {
+        Some(fetch_error) => match fetch_error.mode {
+            zaino_source::FailureMode::RpcError(code) => {
+                Some((code as i32, fetch_error.message.clone()))
+            }
+            _ => None,
+        },
+        None => None,
+    }
 }
 
-fn error_object_from_rpc_error(
-    rpc_error: &zaino_fetch::jsonrpsee::connector::RpcError,
-) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(rpc_error.code as i32, rpc_error.message.clone(), None::<()>)
+/// Walks `error`'s `source` chain and returns the first error object `map`
+/// produces, falling back to a generic internal-server-error object carrying
+/// the original error's message. The shared skeleton of the per-method error
+/// translators below, which differ only in the mapping they apply to each
+/// source.
+fn error_object_from_source_chain<Error>(
+    error: Error,
+    map: impl Fn(&(dyn std::error::Error + 'static)) -> Option<ErrorObjectOwned>,
+) -> ErrorObjectOwned
+where
+    Error: std::error::Error + 'static,
+{
+    std::iter::successors(
+        Some(&error as &(dyn std::error::Error + 'static)),
+        |error_source| error_source.source(),
+    )
+    .find_map(map)
+    .unwrap_or_else(|| {
+        ErrorObjectOwned::owned(
+            ErrorCode::InternalError.code(),
+            "Internal server error",
+            Some(error.to_string()),
+        )
+    })
 }
 
 fn getblock_error_object_from_indexer_error<Error>(error: Error) -> ErrorObjectOwned
 where
     Error: std::error::Error + 'static,
 {
-    let mut current_error: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-
-    while let Some(error_source) = current_error {
-        if let Some(zaino_fetch::jsonrpsee::error::TransportError::ErrorStatusCode(500)) =
-            error_source.downcast_ref::<zaino_fetch::jsonrpsee::error::TransportError>()
+    error_object_from_source_chain(error, |error_source| {
+        // A 500 from the validator on a `getblock` means the block is not
+        // there. The source layer classifies HTTP status separately from RPC
+        // error codes, so this reads the status rather than a code.
+        //
+        // Reported with zcashd's `InvalidParameter`, which is what clients key
+        // on for a missing block — not the 500 itself.
+        if let Some(zaino_source::FetchError {
+            mode: zaino_source::FailureMode::HttpStatus(500),
+            ..
+        }) = error_source.downcast_ref::<zaino_source::FetchError>()
         {
-            return ErrorObjectOwned::owned(
-                zaino_fetch::jsonrpsee::connector::RpcError::new_from_legacycode(
-                    zebra_rpc::server::error::LegacyCode::InvalidParameter,
-                    "block not found",
-                )
-                .code as i32,
+            return Some(ErrorObjectOwned::owned(
+                zebra_rpc::server::error::LegacyCode::InvalidParameter as i32,
                 "block not found",
                 None::<()>,
-            );
+            ));
         }
 
-        current_error = error_source.source();
-    }
-
-    ErrorObjectOwned::owned(
-        ErrorCode::InternalError.code(),
-        "Internal server error",
-        Some(error.to_string()),
-    )
+        legacy_code_from_error_source(error_source)
+            .map(|(code, message)| ErrorObjectOwned::owned(code, message, None::<()>))
+    })
 }
 
 fn sendrawtransaction_error_object_from_indexer_error<Error>(error: Error) -> ErrorObjectOwned
 where
     Error: std::error::Error + 'static,
 {
-    let mut current_error: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-
-    while let Some(error_source) = current_error {
-        if let Some(rpc_error) = rpc_error_from_error_source(error_source) {
-            return error_object_from_rpc_error(rpc_error);
-        }
-
-        current_error = error_source.source();
-    }
-
-    ErrorObjectOwned::owned(
-        ErrorCode::InternalError.code(),
-        "Internal server error",
-        Some(error.to_string()),
-    )
+    error_object_from_source_chain(error, |error_source| {
+        legacy_code_from_error_source(error_source)
+            .map(|(code, message)| ErrorObjectOwned::owned(code, message, None::<()>))
+    })
 }
 
 /// Uses ErrorCode::InvalidParams as this is converted to zcash legacy "minsc" ErrorCode in RPC middleware.
@@ -551,42 +595,26 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(crate::rpc::jsonrpc::wire::node_info::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_mining_info(&self) -> Result<GetMiningInfoWire, ErrorObjectOwned> {
-        Ok(self
-            .service_subscriber
+        self.service_subscriber
             .inner_ref()
             .get_mining_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })?)
+            .map(GetMiningInfoWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
-    async fn get_tx_out_set_info(&self) -> Result<GetTxOutSetInfoResponse, ErrorObjectOwned> {
+    async fn get_tx_out_set_info(&self) -> Result<TxOutSetInfoWire, ErrorObjectOwned> {
         self.service_subscriber
             .inner_ref()
             .get_tx_out_set_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(TxOutSetInfoWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_best_blockhash(&self) -> Result<GetBlockHash, ErrorObjectOwned> {
@@ -594,13 +622,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_best_blockhash()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_blockchain_info(&self) -> Result<GetBlockchainInfoResponse, ErrorObjectOwned> {
@@ -608,27 +630,23 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_blockchain_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
+            .map_err(invalid_params_error_object)
+            .and_then(|info| {
+                crate::rpc::jsonrpc::wire::blockchain_info::from_domain(
+                    info,
+                    &self.service_subscriber.inner_ref().network(),
                 )
+                .map_err(invalid_params_error_object)
             })
     }
 
-    async fn get_mempool_info(&self) -> Result<GetMempoolInfoResponse, ErrorObjectOwned> {
+    async fn get_mempool_info(&self) -> Result<MempoolInfoWire, ErrorObjectOwned> {
         self.service_subscriber
             .inner_ref()
             .get_mempool_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(MempoolInfoWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_difficulty(&self) -> Result<f64, ErrorObjectOwned> {
@@ -636,27 +654,22 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_difficulty()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_block_deltas(&self, hash: String) -> Result<BlockDeltas, ErrorObjectOwned> {
-        self.service_subscriber
+        let deltas = self
+            .service_subscriber
             .inner_ref()
             .get_block_deltas(hash)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)?;
+
+        // The only method here whose rendering can fail; see
+        // [`DeltaAmountOutOfRange`](crate::rpc::jsonrpc::wire::block_deltas::DeltaAmountOutOfRange)
+        // for why. Mapped like every other failure on this interface, which
+        // currently hides its kind from the client.
+        BlockDeltas::from_domain(deltas).map_err(invalid_params_error_object)
     }
 
     async fn get_peer_info(&self) -> Result<GetPeerInfo, ErrorObjectOwned> {
@@ -664,13 +677,8 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_peer_info()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(GetPeerInfo::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_block_subsidy(&self, height: u32) -> Result<GetBlockSubsidy, ErrorObjectOwned> {
@@ -678,13 +686,8 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_block_subsidy(height)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(GetBlockSubsidy::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_block_count(&self) -> Result<Height, ErrorObjectOwned> {
@@ -692,13 +695,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_block_count()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_chain_tips(&self) -> Result<GetChainTipsResponse, ErrorObjectOwned> {
@@ -706,13 +703,8 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_chain_tips()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(chain_tips_from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn validate_address(
@@ -723,32 +715,22 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .validate_address(address)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(validate_address_from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     #[allow(deprecated)]
     async fn z_validate_address(
         &self,
         address: String,
-    ) -> Result<ZValidateAddressResponse, ErrorObjectOwned> {
+    ) -> Result<ZValidateAddressWire, ErrorObjectOwned> {
         tracing::warn!("{}", Z_VALIDATE_DEPRECATION);
         self.service_subscriber
             .inner_ref()
             .z_validate_address(address)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(ZValidateAddressWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn z_get_address_balance(
@@ -759,13 +741,8 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .z_get_address_balance(address_strings)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(crate::rpc::jsonrpc::wire::address_queries::address_balance_from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn send_raw_transaction(
@@ -776,6 +753,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .send_raw_transaction(raw_transaction_hex)
             .await
+            .map(crate::rpc::jsonrpc::wire::hashes::sent_transaction_hash_from_domain)
             .map_err(sendrawtransaction_error_object_from_indexer_error)
     }
 
@@ -796,17 +774,24 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
         hash: String,
         verbose: bool,
     ) -> Result<GetBlockHeader, ErrorObjectOwned> {
-        self.service_subscriber
-            .inner_ref()
-            .get_block_header(hash, verbose)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+        // Verbosity is a wire concern: it selects which of the two questions to
+        // ask, rather than making one answer polymorphic. This is the only
+        // layer that knows the caller asked for it.
+        if verbose {
+            self.service_subscriber
+                .inner_ref()
+                .get_block_header(hash)
+                .await
+                .map(GetBlockHeader::verbose_from_domain)
+                .map_err(invalid_params_error_object)
+        } else {
+            self.service_subscriber
+                .inner_ref()
+                .get_raw_block_header(hash)
+                .await
+                .map(GetBlockHeader::compact_from_domain)
+                .map_err(invalid_params_error_object)
+        }
     }
 
     async fn get_raw_mempool(&self) -> Result<Vec<String>, ErrorObjectOwned> {
@@ -814,13 +799,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_raw_mempool()
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn z_get_treestate(
@@ -831,13 +810,8 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .z_get_treestate(hash_or_height)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(crate::rpc::jsonrpc::wire::treestate::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn z_get_subtrees_by_index(
@@ -846,17 +820,17 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
         start_index: NoteCommitmentSubtreeIndex,
         limit: Option<NoteCommitmentSubtreeIndex>,
     ) -> Result<GetSubtreesByIndexResponse, ErrorObjectOwned> {
+        // The pool name is client input, so it is validated here rather than
+        // inside the indexer.
+        let pool = crate::rpc::jsonrpc::wire::subtrees::pool_into_domain(&pool)
+            .map_err(invalid_params_error_object)?;
+
         self.service_subscriber
             .inner_ref()
             .z_get_subtrees_by_index(pool, start_index, limit)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(crate::rpc::jsonrpc::wire::subtrees::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_raw_transaction(
@@ -868,13 +842,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_raw_transaction(txid_hex, verbose)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_tx_out(
@@ -882,35 +850,29 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
         txid: String,
         n: u32,
         include_mempool: Option<bool>,
-    ) -> Result<GetTxOutResponse, ErrorObjectOwned> {
+    ) -> Result<TxOutWire, ErrorObjectOwned> {
         self.service_subscriber
             .inner_ref()
             .get_tx_out(txid, n, include_mempool)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(TxOutWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_spent_info(
         &self,
-        request: GetSpentInfoRequest,
-    ) -> Result<GetSpentInfoResponse, ErrorObjectOwned> {
+        request: SpentInfoRequestWire,
+    ) -> Result<SpentInfoWire, ErrorObjectOwned> {
+        // A client-supplied txid is external input; rejecting it here keeps the
+        // malformed case out of the indexer entirely.
+        let outpoint = request.into_domain().map_err(invalid_params_error_object)?;
+
         self.service_subscriber
             .inner_ref()
-            .get_spent_info(request)
+            .get_spent_info(outpoint)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(SpentInfoWire::from_domain)
+            .map_err(invalid_params_error_object)
     }
 
     async fn get_address_tx_ids(
@@ -921,13 +883,7 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .get_address_tx_ids(request)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map_err(invalid_params_error_object)
     }
 
     async fn z_get_address_utxos(
@@ -938,43 +894,105 @@ impl<Indexer: ZcashIndexer + LightWalletIndexer> ZcashIndexerRpcServer for JsonR
             .inner_ref()
             .z_get_address_utxos(address_strings)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
+            .map_err(invalid_params_error_object)
+            .and_then(|utxos| {
+                crate::rpc::jsonrpc::wire::address_queries::address_utxos_from_domain(utxos)
+                    .map_err(invalid_params_error_object)
             })
     }
 
-    /// Returns the estimated network solutions per second based on the last n blocks.
-    ///
-    /// zcashd reference: [`getnetworksolps`](https://zcash.github.io/rpc/getnetworksolps.html)
-    /// method: post
-    /// tags: blockchain
-    ///
-    /// This RPC is implemented in the [mining.cpp](https://github.com/zcash/zcash/blob/d00fc6f4365048339c83f463874e4d6c240b63af/src/rpc/mining.cpp#L104)
-    /// file of the Zcash repository. The Zebra implementation can be found [here](https://github.com/ZcashFoundation/zebra/blob/19bca3f1159f9cb9344c9944f7e1cb8d6a82a07f/zebra-rpc/src/methods.rs#L2687).
-    ///
-    /// # Parameters
-    ///
-    /// - `blocks`: (number, optional, default=120) Number of blocks, or -1 for blocks over difficulty averaging window.
-    /// - `height`: (number, optional, default=-1) To estimate network speed at the time of a specific block height.
     async fn get_network_sol_ps(
         &self,
         blocks: Option<i32>,
         height: Option<i32>,
-    ) -> Result<GetNetworkSolPsResponse, ErrorObjectOwned> {
+    ) -> Result<NetworkSolPsWire, ErrorObjectOwned> {
         self.service_subscriber
             .inner_ref()
             .get_network_sol_ps(blocks, height)
             .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    ErrorCode::InvalidParams.code(),
-                    "Internal server error",
-                    Some(e.to_string()),
-                )
-            })
+            .map(NetworkSolPsWire)
+            .map_err(invalid_params_error_object)
+    }
+}
+
+#[cfg(test)]
+mod legacy_code_recovery {
+    use super::*;
+
+    /// The recovery this replaced matched `zaino-fetch`'s connector type, which
+    /// the new source stack never constructs — so it silently recovered
+    /// nothing, and every validator error code reached clients as a generic
+    /// internal error. The defect was invisible because a downcast that never
+    /// matches simply falls through. These tests exist so a future retarget
+    /// cannot repeat it: they assert the *walker* recovers a code, not merely
+    /// that the typed error is reachable (which
+    /// `validator_source::error_source_chain` covers from the other side).
+    #[test]
+    fn a_validator_error_code_is_recovered_from_a_fetch_error() {
+        let error = zaino_source::FetchError::new(
+            zaino_source::FailureMode::RpcError(-8),
+            "Block not found",
+        );
+
+        assert_eq!(
+            legacy_code_from_error_source(&error),
+            Some((-8, "Block not found".to_string())),
+            "a code the validator returned must survive to the served response"
+        );
+    }
+
+    /// Zaino's own rejections carry a code too, and never reached a validator.
+    #[test]
+    fn zainos_own_rejection_is_recovered_from_a_legacy_rpc_error() {
+        let error = zaino_state::LegacyRpcError::new(
+            zebra_rpc::server::error::LegacyCode::InvalidParameter,
+            "block identifier is not hex",
+        );
+
+        assert_eq!(
+            legacy_code_from_error_source(&error),
+            Some((
+                zebra_rpc::server::error::LegacyCode::InvalidParameter as i32,
+                "block identifier is not hex".to_string()
+            ))
+        );
+    }
+
+    /// A transport fault names no code the interface can report, so it must
+    /// fall through to the generic internal error rather than inventing one.
+    #[test]
+    fn a_transport_fault_yields_no_code() {
+        let error = zaino_source::FetchError::new(
+            zaino_source::FailureMode::Connection,
+            "connection refused",
+        );
+
+        assert_eq!(legacy_code_from_error_source(&error), None);
+    }
+
+    /// The code has to be recoverable from *inside* a chain, not just when it
+    /// is the outermost error: in production it always arrives wrapped by the
+    /// scaffolding boundary and then by the indexer's own error type.
+    #[test]
+    fn a_code_is_recovered_through_an_intervening_wrapper() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("wrapped: {source}")]
+        struct Wrapper {
+            #[from]
+            source: zaino_source::FetchError,
+        }
+
+        let wrapper = Wrapper::from(zaino_source::FetchError::new(
+            zaino_source::FailureMode::RpcError(-25),
+            "rejected",
+        ));
+
+        let recovered = std::iter::successors(
+            Some(&wrapper as &(dyn std::error::Error + 'static)),
+            |error| error.source(),
+        )
+        .find_map(legacy_code_from_error_source);
+
+        assert_eq!(recovered, Some((-25, "rejected".to_string())));
     }
 }
