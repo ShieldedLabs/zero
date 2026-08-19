@@ -100,29 +100,7 @@ async fn launch_and_build_clients<Conn>() -> (TestManager<Zebrad, Conn>, Devtool
 where
     Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let test_manager = TestManager::<Zebrad, Conn>::launch_mining_to(
-        zaino_testutils::SHIELDED_FUNDING_POOL,
-        &ValidatorKind::Zebrad,
-        None,
-        None,
-        None,
-        true,
-        false,
-        false,
-    )
-    .await
-    .expect("launch TestManager");
-
-    let clients = e2e::devtool::build_clients(
-        test_manager
-            .zaino_grpc_listen_address
-            .expect("zaino enabled")
-            .port(),
-        &test_manager.local_net,
-    )
-    .await;
-
-    (test_manager, clients)
+    e2e::devtool::launch_and_build_devtool_clients(&ValidatorKind::Zebrad, None).await
 }
 
 /// Port of `connect_to_node_get_info` (wallet_to_validator, zebrad): the faucet
@@ -173,23 +151,8 @@ async fn send_to_pool<Conn>(pool: e2e::Pool)
 where
     Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) = launch_and_fund_faucet::<Conn>(1).await;
-
-    let recipient = clients.get_recipient_address(pool.address_kind()).await;
-    let txid = clients.send_from_faucet(&recipient, 250_000).await;
-    dbg!(txid);
-
-    test_manager
-        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
-        .await;
-    clients.sync_recipient().await;
-
-    assert_eq!(
-        pool.spendable_balance(&clients.recipient_balance().await),
-        250_000
-    );
-
-    test_manager.close().await;
+    let (test_manager, clients) = launch_and_fund_faucet::<Conn>(1).await;
+    e2e::devtool::assert_send_to_pool(test_manager, clients, pool).await;
 }
 
 /// Port of `send_to_all` (wallet_to_validator, zebrad): one faucet funds a send
@@ -243,32 +206,8 @@ async fn shield_for_validator<Conn>()
 where
     Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) = launch_and_fund_faucet::<Conn>(1).await;
-
-    let recipient_taddr = clients.get_recipient_address("transparent").await;
-    clients.send_from_faucet(&recipient_taddr, 250_000).await;
-    test_manager
-        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
-        .await;
-    clients.sync_recipient().await;
-
-    assert_eq!(
-        e2e::Pool::Transparent.spendable_balance(&clients.recipient_balance().await),
-        250_000
-    );
-
-    clients.shield_recipient().await;
-    test_manager
-        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
-        .await;
-    clients.sync_recipient().await;
-
-    assert_eq!(
-        e2e::Pool::Ironwood.spendable_balance(&clients.recipient_balance().await),
-        235_000
-    );
-
-    test_manager.close().await;
+    let (test_manager, clients) = launch_and_fund_faucet::<Conn>(1).await;
+    e2e::devtool::assert_shield_for_validator(test_manager, clients, e2e::Pool::Ironwood).await;
 }
 
 /// Launch, fund the faucet with two orchard notes, and broadcast (without
@@ -361,7 +300,7 @@ where
         .z_get_address_utxos(GetAddressBalanceRequest::new(vec![recipient_taddr]))
         .await
         .unwrap();
-    let (_, utxo_txid, ..) = utxos[0].into_parts();
+    let utxo_txid = utxos[0].txid;
 
     dbg!(&txid_hex, &utxo_txid);
     assert_eq!(txid_hex.trim(), utxo_txid.to_string());
@@ -399,7 +338,11 @@ where
 
     dbg!(test_manager
         .subscriber()
-        .z_get_subtrees_by_index("orchard".to_string(), NoteCommitmentSubtreeIndex(0), None)
+        .z_get_subtrees_by_index(
+            zaino_primitives::types::ShieldedPool::Orchard,
+            NoteCommitmentSubtreeIndex(0),
+            None
+        )
         .await
         .unwrap());
 
@@ -532,7 +475,9 @@ where
     let json_service = test_manager.full_node_jsonrpc_connector().await;
 
     let mut zaino_mempool = test_manager.subscriber().get_raw_mempool().await.unwrap();
-    let mut validator_mempool = json_service.get_raw_mempool().await.unwrap().transactions;
+    let mut validator_mempool: Vec<String> =
+        serde_json::from_value(json_service.get("getrawmempool").await)
+            .expect("getrawmempool returns an array of txids");
 
     dbg!(&zaino_mempool);
     dbg!(&validator_mempool);
@@ -694,6 +639,12 @@ where
 /// Port of `fetch_service_get_transaction_mempool` (zebrad): the indexer
 /// serves `get_transaction` for an orchard send that is broadcast but not
 /// mined, keyed by its txid — i.e. from the mempool.
+///
+/// Also the end-to-end guard for the unconfirmed-height wire contract: an
+/// unmined transaction must report `height = 0` (lightwalletd's "in the mempool"
+/// sentinel), never the chain-tip height, which a client would misread as a
+/// confirmation. That sentinel is chosen deep in the serving path, so only a
+/// real broadcast-but-unmined transaction exercises it.
 async fn get_transaction_mempool<Conn>()
 where
     Conn: zaino_testutils::ValidatorConnectionMarker,
@@ -702,11 +653,14 @@ where
 
     let recipient_ua = clients.get_recipient_address("unified").await;
     let txid_hex = clients.send_from_faucet(&recipient_ua, 250_000).await;
+    let expected_txid_bytes = e2e::devtool::txid_internal_bytes(&txid_hex);
     let tx_filter = TxFilter {
         block: None,
         index: 0,
-        hash: e2e::devtool::txid_internal_bytes(&txid_hex),
+        hash: expected_txid_bytes.clone(),
     };
+
+    use zebra_chain::serialization::ZcashDeserializeInto as _;
 
     // Let the broadcaster and the indexer observe the unmined transaction.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -716,7 +670,43 @@ where
         .get_transaction(tx_filter)
         .await
         .unwrap();
-    dbg!(raw_transaction);
+
+    assert_eq!(
+        raw_transaction.height, 0,
+        "an unmined transaction must carry the mempool height sentinel, not the tip height"
+    );
+
+    // The bytes served are the transaction that was actually sent.
+    let served: zebra_chain::transaction::Transaction = raw_transaction
+        .data
+        .as_ref()
+        .zcash_deserialize_into()
+        .expect("served mempool transaction must deserialize");
+    assert_eq!(
+        served.hash().0.to_vec(),
+        expected_txid_bytes,
+        "get_transaction served a different transaction than the one broadcast"
+    );
+
+    // Mine it, and the same query must flip from the mempool sentinel to a real
+    // confirmation height — the mempool-to-mined transition, end to end.
+    test_manager
+        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
+        .await;
+
+    let mined = test_manager
+        .subscriber()
+        .get_transaction(TxFilter {
+            block: None,
+            index: 0,
+            hash: expected_txid_bytes.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        mined.height > 0,
+        "a mined transaction must report its confirmation height, not the mempool sentinel"
+    );
 
     test_manager.close().await;
 }
@@ -917,9 +907,9 @@ where
         .await
         .unwrap();
 
-    dbg!(balance);
+    dbg!(&balance);
     // The fixture sent exactly 250_000 to the recipient taddr.
-    assert_eq!(balance.balance(), 250_000);
+    assert_eq!(u64::from(balance.balance), 250_000);
 
     test_manager.close().await;
 }
@@ -1013,12 +1003,20 @@ async fn z_get_subtrees_by_index_fetch_vs_state() {
 
     let fetch = svc
         .fetch_subscriber
-        .z_get_subtrees_by_index("orchard".to_string(), NoteCommitmentSubtreeIndex(0), None)
+        .z_get_subtrees_by_index(
+            zaino_primitives::types::ShieldedPool::Orchard,
+            NoteCommitmentSubtreeIndex(0),
+            None,
+        )
         .await
         .unwrap();
     let state = svc
         .state_subscriber
-        .z_get_subtrees_by_index("orchard".to_string(), NoteCommitmentSubtreeIndex(0), None)
+        .z_get_subtrees_by_index(
+            zaino_primitives::types::ShieldedPool::Orchard,
+            NoteCommitmentSubtreeIndex(0),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(fetch, state);
@@ -1091,13 +1089,13 @@ async fn get_address_utxos_fetch_vs_state() {
         .z_get_address_utxos(GetAddressBalanceRequest::new(vec![recipient_taddr.clone()]))
         .await
         .unwrap();
-    let (_, fetch_txid, ..) = fetch_utxos[0].into_parts();
+    let fetch_txid = fetch_utxos[0].txid;
     let state_utxos = svc
         .state_subscriber
         .z_get_address_utxos(GetAddressBalanceRequest::new(vec![recipient_taddr]))
         .await
         .unwrap();
-    let (_, state_txid, ..) = state_utxos[0].into_parts();
+    let state_txid = state_utxos[0].txid;
 
     assert_eq!(txid_hex.trim(), fetch_txid.to_string());
     assert_eq!(fetch_txid.to_string(), state_txid.to_string());
@@ -1143,8 +1141,14 @@ async fn fund_and_fill_mempool_dual() -> zaino_testutils::StateAndFetchServices<
     svc
 }
 
-/// Port of `state_service_get_raw_mempool` (zebrad): the fetch and state
+/// Port of `state_service_get_raw_mempool` (zebrad): the RPC and Direct
 /// indexers agree on `get_raw_mempool` while two sends sit unmined.
+///
+/// Guards the single-source rule the mempool rework rests on: the mempool must
+/// be read through the JSON-RPC `mempool_fetcher` on *both* backends, so that
+/// the set and the validator tip it is tagged with come from one place. Routing
+/// the Direct backend's mempool through `ReadStateService` instead would show up
+/// here as the two views disagreeing.
 async fn get_raw_mempool_fetch_vs_state() {
     let mut svc = fund_and_fill_mempool_dual().await;
 
@@ -1266,7 +1270,7 @@ async fn get_address_balance_fetch_vs_state() {
         .unwrap();
 
     // The fixture sent exactly 250_000 to the recipient taddr.
-    assert_eq!(fetch.balance(), 250_000);
+    assert_eq!(u64::from(fetch.balance), 250_000);
     assert_eq!(fetch, state);
 
     svc.test_manager.close().await;
@@ -1550,47 +1554,8 @@ async fn send_to_transparent_finalization<Conn>()
 where
     Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) = launch_and_fund_faucet::<Conn>(1).await;
-
-    let recipient_taddr = clients.get_recipient_address("transparent").await;
-    clients.send_from_faucet(&recipient_taddr, 250_000).await;
-    test_manager
-        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
-        .await;
-
-    let fetch_service = test_manager.full_node_jsonrpc_connector().await;
-    let height = fetch_service.get_blockchain_info().await.unwrap().blocks.0;
-    let unfinalised_transactions = fetch_service
-        .get_address_txids(vec![recipient_taddr.clone()], height, height)
-        .await
-        .unwrap();
-
-    // The load-bearing advance: these blocks push the send below the seam
-    // (`FAST_TEST_MAX_NONFINALISED_DEPTH`) into the finalized DB. Orchard coinbase
-    // here (see #[ignore] rationale).
-    test_manager
-        .generate_blocks_bulk_and_wait_for_tips(
-            // Advance past the seam so the send crosses the finalised floor
-            // (`tip - seam`); a small margin above it keeps the boundary unambiguous.
-            zaino_common::consensus::FAST_TEST_MAX_NONFINALISED_DEPTH + 5,
-            test_manager.subscriber(),
-            test_manager.subscriber(),
-        )
-        .await;
-
-    let finalised_transactions = fetch_service
-        .get_address_txids(vec![recipient_taddr], height, height)
-        .await
-        .unwrap();
-
-    clients.sync_recipient().await;
-    assert_eq!(
-        e2e::Pool::Transparent.spendable_balance(&clients.recipient_balance().await),
-        250_000
-    );
-    assert_eq!(unfinalised_transactions, finalised_transactions);
-
-    test_manager.close().await;
+    let (test_manager, clients) = launch_and_fund_faucet::<Conn>(1).await;
+    e2e::devtool::assert_send_to_transparent_finalization(test_manager, clients).await;
 }
 
 /// Port of `zebra::get::address_deltas` (zebrad): `getaddressdeltas` over a
@@ -1610,9 +1575,18 @@ where
 /// live chain (not the original's hardcoded 102/104) so that once devtool fixes
 /// the off-by-one, the only failure mode is the shield, not setup-height drift.
 async fn address_deltas() {
-    use zaino_fetch::jsonrpsee::response::address_deltas::{
-        GetAddressDeltasParams, GetAddressDeltasResponse,
+    use zaino_primitives::types::{
+        rpc::{AddressDeltas, AddressDeltasRequest},
+        TransparentAddress,
     };
+
+    /// Wraps plain address strings in the domain's address type.
+    fn taddrs(addresses: &[String]) -> Vec<TransparentAddress> {
+        addresses
+            .iter()
+            .map(|address| TransparentAddress::new(address.clone()))
+            .collect()
+    }
 
     const NON_EXISTENT_ADDRESS: &str = "tmVqEASZxBNKFTbmASZikGa5fPLkd68iJyx";
 
@@ -1661,30 +1635,32 @@ async fn address_deltas() {
     // 1) Simple query (single address) -> Simple variant with the send delta.
     let response = svc
         .state_subscriber
-        .get_address_deltas(GetAddressDeltasParams::Address(recipient_taddr.clone()))
+        .get_address_deltas(AddressDeltasRequest::Address(TransparentAddress::new(
+            recipient_taddr.clone(),
+        )))
         .await
         .unwrap();
-    let GetAddressDeltasResponse::Simple(deltas) = response else {
+    let AddressDeltas::Simple(deltas) = response else {
         panic!("Expected Simple variant");
     };
     let recipient_delta = deltas
         .iter()
-        .find(|d| d.height >= tx_height)
+        .find(|d| u32::from(d.height) >= tx_height)
         .expect("Should find recipient transaction delta");
     assert_eq!(recipient_delta.index, 0, "Expected output index 0");
 
     // 2) Filtered with start=0 -> Simple variant, deltas from both addresses.
     let response = svc
         .state_subscriber
-        .get_address_deltas(GetAddressDeltasParams::Filtered {
-            addresses: vec![recipient_taddr.clone(), faucet_taddr.clone()],
+        .get_address_deltas(AddressDeltasRequest::Filtered {
+            addresses: taddrs(&[recipient_taddr.clone(), faucet_taddr.clone()]),
             start: 0,
             end: chain_tip,
             chain_info: true,
         })
         .await
         .unwrap();
-    let GetAddressDeltasResponse::Simple(deltas) = response else {
+    let AddressDeltas::Simple(deltas) = response else {
         panic!("Expected Simple variant for start=0");
     };
     assert!(deltas.len() >= 2, "Expected deltas from multiple addresses");
@@ -1692,54 +1668,62 @@ async fn address_deltas() {
     // 3) Filtered with start>0 and chain_info -> WithChainInfo variant.
     let response = svc
         .state_subscriber
-        .get_address_deltas(GetAddressDeltasParams::Filtered {
-            addresses: vec![recipient_taddr.clone(), faucet_taddr.clone()],
+        .get_address_deltas(AddressDeltasRequest::Filtered {
+            addresses: taddrs(&[recipient_taddr.clone(), faucet_taddr.clone()]),
             start: 1,
             end: chain_tip,
             chain_info: true,
         })
         .await
         .unwrap();
-    let GetAddressDeltasResponse::WithChainInfo { deltas, start, end } = response else {
+    let AddressDeltas::WithChainInfo { deltas, start, end } = response else {
         panic!("Expected WithChainInfo variant");
     };
     assert!(!deltas.is_empty(), "Expected deltas with chain info");
-    assert_eq!(start.height, 1, "Start block should match request");
-    assert_eq!(end.height, chain_tip, "End block should match request");
+    assert_eq!(
+        u32::from(start.height),
+        1,
+        "Start block should match request"
+    );
+    assert_eq!(
+        u32::from(end.height),
+        chain_tip,
+        "End block should match request"
+    );
 
     // 4) Height clamping: end beyond the tip is clamped down to the tip.
     let response = svc
         .state_subscriber
-        .get_address_deltas(GetAddressDeltasParams::Filtered {
-            addresses: vec![recipient_taddr, faucet_taddr],
+        .get_address_deltas(AddressDeltasRequest::Filtered {
+            addresses: taddrs(&[recipient_taddr, faucet_taddr]),
             start: 1,
             end: height_beyond_tip,
             chain_info: true,
         })
         .await
         .unwrap();
-    let GetAddressDeltasResponse::WithChainInfo { deltas, start, end } = response else {
+    let AddressDeltas::WithChainInfo { deltas, start, end } = response else {
         panic!("Expected WithChainInfo variant");
     };
     assert!(!deltas.is_empty(), "Expected deltas with clamped range");
-    assert_eq!(start.height, 1, "Start should match request");
+    assert_eq!(u32::from(start.height), 1, "Start should match request");
     assert!(
-        end.height < height_beyond_tip,
+        u32::from(end.height) < height_beyond_tip,
         "End height should be clamped below the requested value"
     );
 
     // 5) Non-existent address -> empty deltas.
     let response = svc
         .state_subscriber
-        .get_address_deltas(GetAddressDeltasParams::Filtered {
-            addresses: vec![NON_EXISTENT_ADDRESS.to_string()],
+        .get_address_deltas(AddressDeltasRequest::Filtered {
+            addresses: taddrs(&[NON_EXISTENT_ADDRESS.to_string()]),
             start: 1,
             end: height_beyond_tip,
             chain_info: true,
         })
         .await
         .unwrap();
-    let GetAddressDeltasResponse::WithChainInfo { deltas, .. } = response else {
+    let AddressDeltas::WithChainInfo { deltas, .. } = response else {
         panic!("Expected WithChainInfo variant");
     };
     assert!(
@@ -1840,15 +1824,15 @@ async fn get_block_deltas_resolves_transparent_spend() {
         .find(|d| {
             d.outputs
                 .iter()
-                .any(|o| o.satoshis.zatoshis() == FUNDING_AMOUNT)
+                .any(|o| i64::try_from(u64::from(o.satoshis)) == Ok(FUNDING_AMOUNT))
         })
         .expect("funding tx paying the recipient should be in its block");
     let funding_output = funding_delta
         .outputs
         .iter()
-        .find(|o| o.satoshis.zatoshis() == FUNDING_AMOUNT)
+        .find(|o| i64::try_from(u64::from(o.satoshis)) == Ok(FUNDING_AMOUNT))
         .expect("funding output paying the recipient should be present");
-    let funding_txid = funding_delta.txid.clone();
+    let funding_txid = funding_delta.txid;
     let funding_vout = funding_output.index;
     let funding_address = funding_output.address.clone();
 
@@ -1864,7 +1848,7 @@ async fn get_block_deltas_resolves_transparent_spend() {
         .deltas
         .iter()
         .flat_map(|d| d.inputs.iter())
-        .find(|i| i.prevtxid == funding_txid && i.prevout == funding_vout)
+        .find(|i| i.prev_txid == funding_txid && i.prev_output == funding_vout)
         .expect("spend input referencing the funding output should be present");
 
     assert_eq!(
@@ -1872,7 +1856,7 @@ async fn get_block_deltas_resolves_transparent_spend() {
         "input must resolve to the prevout's address"
     );
     assert_eq!(
-        input.satoshis.zatoshis(),
+        i64::from(input.satoshis),
         -FUNDING_AMOUNT,
         "input must resolve to the prevout's full value, negated"
     );
@@ -1939,8 +1923,8 @@ async fn sole_recipient_outpoint(
         1,
         "recipient taddr should hold exactly one funding UTXO"
     );
-    let (_, txid, output_index, ..) = utxos[0].into_parts();
-    zaino_state::chain_index::types::Outpoint::new(txid.0, output_index.index())
+    let (txid, output_index) = (utxos[0].txid, utxos[0].output_index);
+    zaino_state::chain_index::types::Outpoint::new(<[u8; 32]>::from(txid), output_index)
 }
 
 /// The single transaction touching `recipient_taddr` at `height` — the shield
@@ -2031,7 +2015,7 @@ async fn get_outpoint_spenders_fetch_vs_state() {
     // `FAST_TEST_MAX_NONFINALISED_DEPTH`; a small margin above it keeps the boundary
     // unambiguous. (Without the feature the real seam is ~1000, impractical to mine
     // here — see zingolabs/zaino#1352.)
-    const FINALITY_DEPTH: u32 = zaino_common::consensus::FAST_TEST_MAX_NONFINALISED_DEPTH + 5;
+    const FINALITY_DEPTH: u32 = zaino_consensus::FAST_TEST_MAX_NONFINALISED_DEPTH + 5;
     const FUNDING_AMOUNT: u64 = 250_000;
 
     let mut svc = zaino_testutils::launch_state_and_fetch_services_mining_to::<Zebrad>(
@@ -2102,142 +2086,77 @@ async fn get_outpoint_spenders_fetch_vs_state() {
     svc.test_manager.close().await;
 }
 
-/// Port of `monitor_unverified_mempool` (wallet_to_validator): broadcast two
-/// unmined sends, observe them in the validator mempool, then mine them in.
+/// `getmempoolinfo` agrees with the **validator's own** `getmempoolinfo`.
 ///
-/// `#[ignore]`d, with the balance assertions commented out: the original asserts
-/// `WalletBalance::{unconfirmed,confirmed}_*_balance`, fields devtool's
-/// `WalletBalance` does not have (it surfaces only `*_spendable`, and devtool
-/// sync is block-based so it never scans the mempool). Restore the assertions
-/// (using `Pool::spendable_balance` for the confirmed ones) and un-ignore when
-/// devtool surfaces unconfirmed balances.
-async fn monitor_unverified_mempool<Conn>()
-where
-    Conn: zaino_testutils::ValidatorConnectionMarker,
-{
-    let (mut test_manager, mut clients) = launch_and_fund_faucet::<Conn>(2).await;
-
-    let recipient_ua = clients.get_recipient_address("unified").await;
-    let txid_1 = clients.send_from_faucet(&recipient_ua, 250_000).await;
-    let recipient_zaddr = clients.get_recipient_address("sapling").await;
-    let txid_2 = clients.send_from_faucet(&recipient_zaddr, 250_000).await;
-
-    clients.rescan_recipient().await;
-
-    let fetch_service = test_manager.full_node_jsonrpc_connector().await;
-    let mempool_txids = fetch_service.get_raw_mempool().await.unwrap();
-    dbg!(txid_1);
-    dbg!(txid_2);
-    dbg!(mempool_txids.clone());
-
-    let _transaction_1 = dbg!(
-        fetch_service
-            .get_raw_transaction(mempool_txids.transactions[0].clone(), Some(1))
-            .await
-    );
-    let _transaction_2 = dbg!(
-        fetch_service
-            .get_raw_transaction(mempool_txids.transactions[1].clone(), Some(1))
-            .await
-    );
-
-    // Unconfirmed (mempool) balances — devtool's WalletBalance has no
-    // unconfirmed_* fields (block-based sync, no mempool scan):
-    // assert_eq!(
-    //     clients.recipient_balance().await.unconfirmed_orchard_balance.unwrap().into_u64(),
-    //     250_000
-    // );
-    // assert_eq!(
-    //     clients.recipient_balance().await.unconfirmed_sapling_balance.unwrap().into_u64(),
-    //     250_000
-    // );
-
-    test_manager
-        .generate_blocks_and_wait_for_tip(1, test_manager.subscriber())
-        .await;
-
-    let _transaction_1 = dbg!(
-        fetch_service
-            .get_raw_transaction(mempool_txids.transactions[0].clone(), Some(1))
-            .await
-    );
-    let _transaction_2 = dbg!(
-        fetch_service
-            .get_raw_transaction(mempool_txids.transactions[1].clone(), Some(1))
-            .await
-    );
-
-    clients.sync_recipient().await;
-
-    // Confirmed balances — original asserts WalletBalance::confirmed_orchard_balance,
-    // also absent on devtool. Restore as e.g.:
-    // assert_eq!(
-    //     e2e::Pool::Orchard.spendable_balance(&clients.recipient_balance().await),
-    //     250_000
-    // );
-
-    test_manager.close().await;
-}
-
-/// Port of `test_get_mempool_info` (fetch_service, zebrad): `get_mempool_info`
-/// matches values recomputed from the fetch subscriber's mempool internals.
-/// FetchService-only — the recompute reads `FetchServiceSubscriber.indexer`.
+/// This used to recompute the totals from the very entries Zaino had just
+/// reported, which only asserted that Zaino equals itself. The arithmetic is
+/// covered by mocks in `zaino-mempool-service`
+/// (`get_mempool_info_reports_totals`); what a live validator adds is the
+/// cross-check that Zaino's mirror of the mempool holds the same transactions
+/// the validator does.
 async fn get_mempool_info_fetch() {
-    use hex::ToHex as _;
-    use zaino_state::ChainIndex as _;
-
     let (mut test_manager, _transparent_txid, _unified_txid) = fund_and_fill_mempool::<Rpc>().await;
 
-    let subscriber = test_manager.subscriber();
-    let info = subscriber.get_mempool_info().await.unwrap();
-    let keys = subscriber.indexer.get_mempool_txids().await.unwrap();
-    let values = subscriber
-        .indexer
-        .get_mempool_transactions(Vec::new())
+    let info = test_manager.subscriber().get_mempool_info().await.unwrap();
+    let validator = test_manager
+        .full_node_jsonrpc_connector()
         .await
-        .unwrap();
+        .get("getmempoolinfo")
+        .await;
 
-    assert_eq!(info.size, values.len() as u64);
-    assert!(info.size >= 1);
-
-    let expected_bytes: u64 = values.iter().map(|entry| entry.len() as u64).sum();
-    let expected_key_heap_bytes: u64 = keys
-        .iter()
-        .map(|key| key.encode_hex::<String>().capacity() as u64)
-        .sum();
-    let expected_usage = expected_bytes.saturating_add(expected_key_heap_bytes);
-
-    assert!(info.bytes > 0);
-    assert_eq!(info.bytes, expected_bytes);
+    assert!(info.size >= 1, "the test funded the mempool");
+    assert_eq!(
+        info.size,
+        validator["size"].as_u64().expect("validator reports size"),
+        "Zaino's mempool holds a different number of transactions than the validator's"
+    );
+    assert_eq!(
+        info.bytes,
+        validator["bytes"]
+            .as_u64()
+            .expect("validator reports bytes"),
+        "Zaino's serialized-byte total disagrees with the validator's"
+    );
+    // `usage` is deliberately not compared. Zaino reports the ZIP-401 cost total
+    // — each transaction floored at the cost threshold — because that is the
+    // figure its own memory bound is enforced against; the validator reports its
+    // internal heap estimate. Different quantities by design.
     assert!(info.usage >= info.bytes);
-    assert_eq!(info.usage, expected_usage);
 
     test_manager.close().await;
 }
 
-/// Port of `state_service_…::get_mempool_info` (zebrad): `get_mempool_info`
-/// matches values recomputed from the state subscriber's mempool internals.
-/// StateService-only — the recompute reads `StateServiceSubscriber.mempool`.
+/// As [`get_mempool_info_fetch`], for the Direct (`ReadStateService`) backend.
+///
+/// Worth running on both because the mempool is served over JSON-RPC either way
+/// — the Direct backend reads it through the same transport — so this pins that
+/// the backend choice does not change the reported totals.
 async fn get_mempool_info_state() {
     let mut svc = fund_and_fill_mempool_dual().await;
 
     let info = svc.state_subscriber.get_mempool_info().await.unwrap();
-    let entries = svc.state_subscriber.mempool().get_mempool().await;
+    let validator = svc
+        .test_manager
+        .full_node_jsonrpc_connector()
+        .await
+        .get("getmempoolinfo")
+        .await;
 
-    assert_eq!(entries.len() as u64, info.size);
-    assert!(info.size >= 1);
-
-    let expected_bytes: u64 = entries
-        .iter()
-        .map(|(_, v)| v.serialized_tx.as_ref().as_ref().len() as u64)
-        .sum();
-    let expected_key_heap_bytes: u64 = entries.iter().map(|(k, _)| k.txid.capacity() as u64).sum();
-    let expected_usage = expected_bytes.saturating_add(expected_key_heap_bytes);
-
-    assert!(info.bytes > 0);
-    assert_eq!(info.bytes, expected_bytes);
+    assert!(info.size >= 1, "the test funded the mempool");
+    assert_eq!(
+        info.size,
+        validator["size"].as_u64().expect("validator reports size"),
+        "Zaino's mempool holds a different number of transactions than the validator's"
+    );
+    assert_eq!(
+        info.bytes,
+        validator["bytes"]
+            .as_u64()
+            .expect("validator reports bytes"),
+        "Zaino's serialized-byte total disagrees with the validator's"
+    );
+    // See `get_mempool_info_fetch` for why `usage` is not compared.
     assert!(info.usage >= info.bytes);
-    assert_eq!(info.usage, expected_usage);
 
     svc.test_manager.close().await;
 }
@@ -2313,15 +2232,6 @@ mod zebrad {
         #[tokio::test(flavor = "multi_thread")]
         async fn get_mempool_info() {
             crate::get_mempool_info_fetch().await;
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        #[cfg_attr(
-            not(feature = "devtool-incompatible"),
-            ignore = "devtool WalletBalance has no unconfirmed_*/confirmed_* fields; balance asserts are commented out — restore + un-ignore when devtool surfaces unconfirmed balances"
-        )]
-        async fn monitor_unverified_mempool() {
-            crate::monitor_unverified_mempool::<Rpc>().await;
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -2555,15 +2465,6 @@ mod zebrad {
         #[tokio::test(flavor = "multi_thread")]
         async fn get_mempool_info() {
             crate::get_mempool_info_state().await;
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        #[cfg_attr(
-            not(feature = "devtool-incompatible"),
-            ignore = "devtool WalletBalance has no unconfirmed_*/confirmed_* fields; balance asserts are commented out — restore + un-ignore when devtool surfaces unconfirmed balances"
-        )]
-        async fn monitor_unverified_mempool() {
-            crate::monitor_unverified_mempool::<Direct>().await;
         }
 
         // No get_mempool_tx here: the state backend returns mempool-tx txids

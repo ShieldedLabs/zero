@@ -3,6 +3,11 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod legacy_parser;
+pub mod validator_oracle;
+
+pub use validator_oracle::ValidatorOracle;
+
 use futures::StreamExt as _;
 use once_cell::sync::Lazy;
 use std::{
@@ -15,13 +20,9 @@ use std::{
 use tonic::transport::Channel;
 use tracing::{debug, info, instrument};
 use zaino_common::{
-    network::ActivationHeights,
-    probing::{Liveness, Readiness},
-    status::Status,
-    validator::ValidatorConfig,
-    CacheConfig, DatabaseConfig, Network, ServiceConfig, StorageConfig,
+    network::ActivationHeights, validator::ValidatorConfig, CacheConfig, DatabaseConfig, Network,
+    ServiceConfig, StorageConfig,
 };
-use zaino_fetch::jsonrpsee::connector::{test_node_and_return_url, JsonRpSeeConnector};
 use zaino_proto::proto::compact_formats::CompactBlock;
 use zaino_proto::proto::service::{BlockId, BlockRange};
 use zaino_serve::server::config::{GrpcServerConfig, JsonRpcServerConfig};
@@ -30,6 +31,7 @@ use zaino_state::{
     NodeBackedIndexerService, NodeBackedIndexerServiceConfig, NodeBackedIndexerServiceSubscriber,
     ZcashService,
 };
+use zaino_status::{Liveness, Readiness, Status};
 use zainodlib::{config::BackendType, error::IndexerError, indexer::Indexer};
 pub use zcash_local_net as services;
 use zcash_local_net::error::LaunchError;
@@ -41,7 +43,6 @@ use zcash_local_net::validator::ValidatorConfig as _;
 pub use zcash_local_net::MinerPool;
 use zcash_local_net::{logs::LogsToStdoutAndStderr, process::Process};
 use zebra_chain::parameters::NetworkKind;
-use zebra_rpc::methods::GetInfo;
 
 #[cfg(test)]
 use zaino_proto::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
@@ -71,10 +72,8 @@ macro_rules! validator_tests {
 /// the truth source — and is never zainod's own schedule: zainod's config
 /// carries only a network kind, and both backends adopt the runtime schedule
 /// from the running validator's `getblockchaininfo.upgrades` (zaino#1076).
-/// Wallet clients impose no constraint on this choice: they derive their
-/// schedule from the running validator too
-/// (`zcash_local_net::wallet::WalletNetwork::from_validator`, infrastructure
-/// ADR 0003).
+/// It matches zcash_local_net's `supported_regtest_activation_heights`, which
+/// the devtool wallet client currently requires (zaino#1368).
 pub const ZEBRAD_DEFAULT_ACTIVATION_HEIGHTS: ActivationHeights = ActivationHeights {
     before_overwinter: Some(1),
     overwinter: Some(1),
@@ -91,10 +90,10 @@ pub const ZEBRAD_DEFAULT_ACTIVATION_HEIGHTS: ActivationHeights = ActivationHeigh
 };
 
 /// Orchard-era-only fixture: every upgrade through NU6.2 active from height 2 and
-/// NU6.3 never activating, so coinbases stay Orchard for the whole chain. Wallet
-/// launches on this fixture are fine: the wallet derives its schedule from the
-/// running validator (infrastructure ADR 0003), so its transactions carry the
-/// fixture's own consensus branch IDs.
+/// NU6.3 never activating, so coinbases stay Orchard for the whole chain. For
+/// client-free launches only — the zcash-devtool wallet hardcodes the canonical
+/// regtest set (NU6.3 at 2), so wallet-built transactions on this fixture would fail
+/// consensus branch-id validation.
 pub const ORCHARD_ONLY_ACTIVATION_HEIGHTS: ActivationHeights = ActivationHeights {
     before_overwinter: Some(1),
     overwinter: Some(1),
@@ -151,25 +150,16 @@ pub const ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS: ActivationHeights = Activati
 /// All four value pools as the `i32`s a `get_block_range` request carries —
 /// the "request everything" pool filter.
 pub fn all_pools_i32() -> Vec<i32> {
-    use zaino_proto::proto::service::PoolType;
-    vec![
-        PoolType::Transparent as i32,
-        PoolType::Sapling as i32,
-        PoolType::Orchard as i32,
-        PoolType::Ironwood as i32,
-    ]
+    use zaino_proto::proto::utils::{pool_types_into_i32_vec, PoolTypeFilter};
+    pool_types_into_i32_vec(&PoolTypeFilter::includes_all().to_pool_types_vector())
 }
 
 /// The shielded pools as request `i32`s — what `get_block_range` defaults to
 /// when a request names no pools (`PoolTypeFilter::default()`: every shielded
 /// pool including Ironwood, transparent excluded).
 pub fn shielded_pools_i32() -> Vec<i32> {
-    use zaino_proto::proto::service::PoolType;
-    vec![
-        PoolType::Sapling as i32,
-        PoolType::Orchard as i32,
-        PoolType::Ironwood as i32,
-    ]
+    use zaino_proto::proto::utils::{pool_types_into_i32_vec, PoolTypeFilter};
+    pool_types_into_i32_vec(&PoolTypeFilter::default().to_pool_types_vector())
 }
 
 /// Collect a `get_block_range` query over heights `[start, end]` for the given
@@ -293,7 +283,7 @@ pub async fn poll_until_ready(
 /// subscriber or a `NodeBackedChainIndexSubscriber`.
 ///
 /// [`Status`] (and through it [`Liveness`] / [`Readiness`] via the blanket
-/// impls in `zaino_common::status`) is a supertrait so a single
+/// impls in `zaino_status`) is a supertrait so a single
 /// `T: PollableTip` bound is everything the unified helper needs — it can
 /// poll for height, fail fast on a dead backend, and wait for readiness
 /// once the target height is reached.
@@ -475,8 +465,8 @@ pub static ZEBRAD_CHAIN_CACHE_DIR: Lazy<Option<PathBuf>> = Lazy::new(|| {
     Some(workspace_root_path.join("live-tests/chain_cache/client_rpc_tests_large"))
 });
 
-/// Path for the Zebra chain cache in the user's home directory.
-pub static ZEBRAD_TESTNET_CACHE_DIR: Lazy<Option<PathBuf>> = Lazy::new(|| {
+/// Path for the Zebra chain cache of The Public Testnet in the user's home directory.
+pub static ZEBRAD_THE_PUB_TESTNET_CACHE_DIR: Lazy<Option<PathBuf>> = Lazy::new(|| {
     let home_path = PathBuf::from(std::env::var("HOME").unwrap());
     Some(home_path.join(".cache/zebra"))
 });
@@ -738,7 +728,7 @@ where
         // that adoption.
         let zaino_network_kind = match network_kind {
             NetworkKind::Mainnet => Network::Mainnet,
-            NetworkKind::Testnet => Network::Testnet,
+            NetworkKind::Testnet => Network::PubTestnet,
             NetworkKind::Regtest => Network::Regtest,
         };
 
@@ -833,6 +823,9 @@ where
                         ..Default::default()
                     },
                 },
+                // The live suite exercises the built-in mempool bounds; a test
+                // that wants different ones sets them on its own config.
+                mempool: Default::default(),
                 ephemeral_finalised_state: false,
                 zebra_db_path,
                 network: zaino_network_kind,
@@ -1046,23 +1039,13 @@ where
         }
     }
 
-    /// Build a JSON-RPC connector to the backing validator's RPC port, using
-    /// the regtest test cookie credentials. For tests that compare Zaino's
-    /// output against the validator's own JSON-RPC.
-    pub async fn full_node_jsonrpc_connector(&self) -> JsonRpSeeConnector {
-        JsonRpSeeConnector::new_with_basic_auth(
-            test_node_and_return_url(
-                &self.full_node_rpc_listen_address.to_string(),
-                None,
-                Some("xxxxxx".to_string()),
-                Some("xxxxxx".to_string()),
-            )
-            .await
-            .unwrap(),
-            "xxxxxx".to_string(),
-            "xxxxxx".to_string(),
-        )
-        .unwrap()
+    /// A raw JSON-RPC line to the backing validator, for tests that compare
+    /// Zaino's output against the validator's own.
+    ///
+    /// Answers are raw JSON: see [`ValidatorOracle`] for why the oracle side
+    /// deliberately does not go through a Zaino type.
+    pub async fn full_node_jsonrpc_connector(&self) -> ValidatorOracle {
+        ValidatorOracle::new(&self.full_node_rpc_listen_address.to_string())
     }
 
     /// Closes the TestManager.
@@ -1161,7 +1144,7 @@ pub async fn launch_state_and_fetch_services_mining_to<V: ValidatorExt>(
         Some(NetworkKind::Testnet) => {
             println!("Waiting for validator to spawn..");
             tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-            Network::Testnet
+            Network::PubTestnet
         }
         // The kind suffices: zainod adopts the schedule from the validator
         // at spawn (zaino#1076).
@@ -1315,10 +1298,9 @@ pub async fn launch_zcashd_dual_fetch_services() -> ZcashdDualFetchServices {
 }
 
 /// [`launch_zcashd_dual_fetch_services`] with the zcashd chain and both fetch
-/// services pinned to `activation_heights`, for tests whose fixture needs a
-/// schedule other than zcashd's defaults. Wallet clients need no matching on
-/// their side: they derive their schedule from the running validator
-/// (infrastructure ADR 0003).
+/// services pinned to `activation_heights`, for wallet clients (e.g. the devtool
+/// wallet) whose compiled-in regtest heights differ from zcashd's defaults and
+/// must be matched by the validator.
 #[cfg(feature = "zcashd_support")]
 #[allow(deprecated)]
 pub async fn launch_zcashd_dual_fetch_services_at(
@@ -1380,40 +1362,14 @@ pub async fn launch_zcashd_dual_fetch_services_at(
     }
 }
 
-/// Return a copy of `info` with its final (timestamp) field zeroed, so two
-/// `getinfo` responses from different sources can be compared without spurious
-/// timestamp differences.
-pub fn get_info_with_zeroed_timestamp(info: GetInfo) -> GetInfo {
-    let (
-        version,
-        build,
-        subversion,
-        protocol_version,
-        blocks,
-        connections,
-        proxy,
-        difficulty,
-        testnet,
-        pay_tx_fee,
-        relay_fee,
-        errors,
-        _,
-    ) = info.into_parts();
-    GetInfo::new(
-        version,
-        build,
-        subversion,
-        protocol_version,
-        blocks,
-        connections,
-        proxy,
-        difficulty,
-        testnet,
-        pay_tx_fee,
-        relay_fee,
-        errors,
-        0,
-    )
+/// Return a copy of `info` with its error timestamp cleared, so two `getinfo`
+/// responses from different sources can be compared without spurious timestamp
+/// differences.
+pub fn get_info_with_zeroed_timestamp(
+    mut info: zaino_primitives::types::rpc::NodeInfo,
+) -> zaino_primitives::types::rpc::NodeInfo {
+    info.errors_timestamp = None;
+    info
 }
 
 /// Launch a fetch-backend [`TestManager`] and return it together with its own

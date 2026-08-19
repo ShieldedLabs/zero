@@ -32,13 +32,14 @@ _Avoid_: stale version, forgotten bump
 
 ### Chains and networks
 
-**Testnet**:
-The public Zcash test network, and only that. Testnet regimes are
+**The Public Testnet**:
+The public Zcash test network, and only that. Its regimes are
 non-hermetic — state is shared with other participants, and an epoch
 the public chain has left (e.g. pre-NU6.3 once NU6.3 activates there)
-cannot be re-entered.
-_Avoid_: "testnet" for any locally-launched chain, even one launched
-under a testnet network kind
+cannot be re-entered. Always this exact phrase in prose; identifiers
+use `the_pub_testnet` and types use `PubTestnet`.
+_Avoid_: bare "Testnet"/"testnet", and especially "testnet" for any
+locally-launched chain, even one launched under a testnet network kind
 
 **Regtest net**:
 A hermetic, locally-launched chain whose activation heights the
@@ -57,6 +58,16 @@ consensus rules.
 _Avoid_: mixing vocabularies in one name or one sibling set (e.g. an
 `ORCHARD_ONLY_*` fixture whose sibling is `NU6_3_ACTIVE_*` — the sibling
 is `IRONWOOD_ONLY_*`)
+
+**Unfiltered pool set**:
+The pool set served when a client's `poolTypes` request field is empty —
+every shielded pool (Sapling, Orchard, Ironwood), transparent excluded.
+It has exactly one definition (`PoolTypeFilter::default`); serving any
+narrower backfill makes compact blocks disagree with their own
+`chainMetadata` tree sizes, which scanning wallets read as a phantom
+reorg.
+_Avoid_: default pools, backfill set, "Sapling and Orchard" (stale —
+predates Ironwood)
 
 **Cross-address restriction**:
 The post-NU6.3 rule the Orchard Action circuit enforces: "(g_d, pk_d)

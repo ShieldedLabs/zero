@@ -2,7 +2,7 @@
 //!
 //! Every test here runs a devtool wallet on
 //! [`ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS`] — the hermetic replay of what
-//! the public testnet did once at height 4,134,000: heights 2 through 5 are
+//! The Public Testnet did once at height 4,134,000: heights 2 through 5 are
 //! Orchard era, [`NU6_3_TRANSITION_BOUNDARY`] (6) onward is Ironwood era.
 //! The wallets derive their activation schedule from the running validator
 //! (`WalletNetwork::from_validator`, infrastructure ADR 0003), so the
@@ -29,7 +29,7 @@
 //! wire in `compact_block_wire.rs`; this file owns the cells that need a
 //! wallet on both sides of the boundary.
 //!
-//! The public testnet cannot host the migration cell for us: its pre-NU6.3
+//! The Public Testnet cannot host the migration cell for us: its pre-NU6.3
 //! epoch closed at height 4,134,000, no new value may enter Orchard from
 //! there (post-activation Orchard actions permit only same-receiver change
 //! or withdrawal — the cross-address restriction,
@@ -49,8 +49,8 @@
 use e2e::devtool::DevtoolClients;
 use zaino_state::ZcashIndexer;
 use zaino_testutils::{
-    all_pools_i32, collect_block_range, PollableTip, TestManager, ValidatorConnectionMarker,
-    ValidatorKind, NU6_3_TRANSITION_BOUNDARY, ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS,
+    all_pools_i32, collect_block_range, PollableTip, TestManager, ValidatorKind,
+    NU6_3_TRANSITION_BOUNDARY, ORCHARD_THEN_IRONWOOD_ACTIVATION_HEIGHTS,
 };
 use zainodlib::error::IndexerError;
 use zcash_local_net::validator::zebrad::Zebrad;
@@ -64,12 +64,12 @@ use zcash_local_net::validator::zebrad::Zebrad;
 /// that need exact boundary positioning mine to absolute heights from the
 /// observed tip rather than counting from here. The transition-fixture
 /// analogue of `devtool.rs::launch_and_fund_faucet`.
-async fn launch_transition_chain_and_fund_faucet<Service>(
-) -> (TestManager<Zebrad, Service>, DevtoolClients)
+async fn launch_transition_chain_and_fund_faucet<Conn>(
+) -> (TestManager<Zebrad, Conn>, DevtoolClients)
 where
-    Service: ValidatorConnectionMarker,
+    Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let test_manager = TestManager::<Zebrad, Service>::launch_mining_to(
+    let test_manager = TestManager::<Zebrad, Conn>::launch_mining_to(
         zaino_testutils::SHIELDED_FUNDING_POOL,
         &ValidatorKind::Zebrad,
         None,
@@ -103,8 +103,10 @@ where
 /// `height`, read from the served verbosity-1 block object — the same
 /// per-height `valuePools` a zcashd `getblock` reports. Verbosity 1, not 2:
 /// the fetch backend cannot deserialize a verbosity-2 block object (its
-/// `tx` entries are maps where zaino-fetch expects txid strings), and the
-/// value pools ride along at verbosity 1.
+/// `tx` entries are maps where the caller expects txid strings — a
+/// `zaino-fetch` limitation originally, preserved here because the
+/// verbosity-1 read is what this assertion wants anyway), and the value
+/// pools ride along at verbosity 1.
 async fn pool_zats_at_height<S>(subscriber: &S, height: u32, pool_id: &str) -> i64
 where
     S: ZcashIndexer,
@@ -135,12 +137,11 @@ where
 /// send received before the boundary lands in the recipient's Orchard pool
 /// with the Ironwood pool exactly empty — the era-mirror of
 /// `devtool.rs::send_to_pool(Ironwood)`.
-async fn unified_receipt_lands_in_orchard_before_boundary<Service>()
+async fn unified_receipt_lands_in_orchard_before_boundary<Conn>()
 where
-    Service: ValidatorConnectionMarker,
+    Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) =
-        launch_transition_chain_and_fund_faucet::<Service>().await;
+    let (mut test_manager, mut clients) = launch_transition_chain_and_fund_faucet::<Conn>().await;
 
     // Tip is 3: inside the Orchard era, with room to confirm the send at
     // height 4 while staying below the boundary at 6.
@@ -179,12 +180,11 @@ where
 /// (<https://zcash.github.io/ironwood/design/action-circuit.html#the-cross-address-restriction>),
 /// so a genuine Orchard spend nets sent-amount-plus-fee out of the pool even
 /// when change returns to the spent note's address.
-async fn orchard_note_spends_to_ironwood_across_boundary<Service>()
+async fn orchard_note_spends_to_ironwood_across_boundary<Conn>()
 where
-    Service: ValidatorConnectionMarker,
+    Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) =
-        launch_transition_chain_and_fund_faucet::<Service>().await;
+    let (mut test_manager, mut clients) = launch_transition_chain_and_fund_faucet::<Conn>().await;
 
     let pre_boundary_balance = clients.faucet_balance().await;
     assert!(
@@ -300,12 +300,11 @@ where
 /// Orchard-era, targeting the first Ironwood-era height, and it spends an
 /// Orchard note (the faucet holds no Ironwood note until the activation
 /// block is mined) — a migration transaction in the activation block.
-async fn receipts_flip_pools_exactly_at_the_boundary<Service>()
+async fn receipts_flip_pools_exactly_at_the_boundary<Conn>()
 where
-    Service: ValidatorConnectionMarker,
+    Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) =
-        launch_transition_chain_and_fund_faucet::<Service>().await;
+    let (mut test_manager, mut clients) = launch_transition_chain_and_fund_faucet::<Conn>().await;
 
     // Position the tip at exactly boundary − 2, from the observed tip
     // rather than a hand-count, so the two sends below confirm at exactly
@@ -386,12 +385,11 @@ where
 /// the shielded balance (net of the ZIP-317 fee, mirroring
 /// `devtool.rs::shield_for_validator`) lands in Orchard with the Ironwood
 /// pool exactly empty — the era-mirror of the Ironwood-era shield cell.
-async fn shield_deposits_to_orchard_before_boundary<Service>()
+async fn shield_deposits_to_orchard_before_boundary<Conn>()
 where
-    Service: ValidatorConnectionMarker,
+    Conn: zaino_testutils::ValidatorConnectionMarker,
 {
-    let (mut test_manager, mut clients) =
-        launch_transition_chain_and_fund_faucet::<Service>().await;
+    let (mut test_manager, mut clients) = launch_transition_chain_and_fund_faucet::<Conn>().await;
 
     // Tip is 3; the transparent receipt confirms at 4 and the shield at 5,
     // all below the boundary at 6.
@@ -420,9 +418,6 @@ where
 }
 
 mod zebrad {
-    // FetchService is a deprecated re-export; the deprecation fires at the
-    // turbofish use sites below, so the allow covers the whole module.
-    #[allow(deprecated)]
     mod fetch_service {
         use zaino_testutils::Rpc;
 

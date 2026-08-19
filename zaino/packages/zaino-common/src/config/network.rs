@@ -16,8 +16,12 @@ use zebra_chain::parameters::testnet::ConfiguredActivationHeights;
 pub enum Network {
     /// Mainnet network
     Mainnet,
-    /// Testnet network
-    Testnet,
+    /// The Public Testnet: the shared-consensus test network, whose
+    /// activation heights come only from checked-in zebra parameters —
+    /// never from configuration. Accepts the legacy config spelling
+    /// `"Testnet"`.
+    #[serde(alias = "Testnet")]
+    PubTestnet,
     /// Regtest network (for local testing)
     Regtest,
 }
@@ -26,13 +30,13 @@ impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Network::Mainnet => write!(f, "Mainnet"),
-            Network::Testnet => write!(f, "Testnet"),
+            Network::PubTestnet => write!(f, "PubTestnet"),
             Network::Regtest => write!(f, "Regtest"),
         }
     }
 }
 
-/// Configurable activation heights for Regtest and configured Testnets.
+/// Configurable activation heights for a Regtest validator launch.
 ///
 /// We use our own type instead of the zebra type
 /// as the zebra type is missing a number of useful
@@ -98,7 +102,9 @@ impl Default for ActivationHeights {
 /// Records the `NetworkUpgrade`-variant ↔ `ActivationHeights`-field correspondence
 /// exactly once, generating everything derived from it: the two field-by-field
 /// `From` conversions between [`ActivationHeights`] and zebra's
-/// [`ConfiguredActivationHeights`] (the structs share field names).
+/// [`ConfiguredActivationHeights`] (the structs share field names), the
+/// all-`None` [`ActivationHeights::NEVER_ACTIVATED`] schedule, and the
+/// per-upgrade [`ActivationHeights::slot_mut`] accessor.
 ///
 /// A declarative macro rather than functions because plain `fn`s cannot abstract
 /// over struct fields, and the variant/field spellings (`Nu5`/`nu5`) differ only
@@ -124,6 +130,29 @@ macro_rules! activation_heights_mirror {
                 Self { $($field),* }
             }
         }
+
+        impl ActivationHeights {
+            /// The all-`None` schedule: every upgrade never-activated. The
+            /// starting point for building heights from an external report,
+            /// where an upgrade absent from the report must stay unset.
+            pub const NEVER_ACTIVATED: Self = Self { $($field: None),* };
+
+            /// Mutable slot for `upgrade`'s activation height, or `None` for
+            /// `Genesis` (height 0 by definition; it has no slot).
+            pub fn slot_mut(
+                &mut self,
+                upgrade: zebra_chain::parameters::NetworkUpgrade,
+            ) -> Option<&mut Option<u32>> {
+                match upgrade {
+                    zebra_chain::parameters::NetworkUpgrade::Genesis => None,
+                    $(
+                        zebra_chain::parameters::NetworkUpgrade::$variant => {
+                            Some(&mut self.$field)
+                        }
+                    )*
+                }
+            }
+        }
     };
 }
 
@@ -145,12 +174,15 @@ activation_heights_mirror!(
 impl Network {
     /// Determines if we should wait for the server to fully sync. Used for testing
     ///
-    /// - Mainnet/Testnet: Skip sync (false) because we don't want to sync real chains in tests
+    /// - Mainnet / The Public Testnet: Skip sync (false) because we don't want
+    ///   to sync real chains in tests
     /// - Regtest: Enable sync (true) because regtest is local and fast to sync
     pub fn wait_on_server_sync(&self) -> bool {
         match self {
-            Network::Mainnet | Network::Testnet => false, // Real networks - don't try to sync the whole chain
-            Network::Regtest => true,                     // Local network - safe and fast to sync
+            // Real networks - don't try to sync the whole chain
+            Network::Mainnet | Network::PubTestnet => false,
+            // Local network - safe and fast to sync
+            Network::Regtest => true,
         }
     }
 }
@@ -163,7 +195,7 @@ impl From<zebra_chain::parameters::Network> for Network {
                 if parameters.is_regtest() {
                     Network::Regtest
                 } else {
-                    Network::Testnet
+                    Network::PubTestnet
                 }
             }
         }
