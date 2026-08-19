@@ -1,24 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg"
-     width="1780"
-     height="900"
-     viewBox="0 0 1780 900"
+     width="1960"
+     height="1000"
+     viewBox="0 0 1960 1000"
      role="img"
      aria-labelledby="svg-title svg-desc">
   <title id="svg-title">Zero-indexer transaction publication</title>
-  <desc id="svg-desc">Wallet TLS connections terminate at zero-indexer shims inside trusted execution environments. Shims connect to a shared hub inside another trusted execution environment. Indexers retain their direct connections to the mempool.</desc>
+  <desc id="svg-desc">Wallet TLS connections terminate at zero-indexer shims inside locked enclaves. Shims connect to a shared zero-indexer hub inside another enclave. The hub has a dedicated indexer outside its enclave but inside its organizational boundary. All indexers and the hub publish to the mempool. The auditor is independent.</desc>
 
   <defs>
     <style>
 
 .canvas {
-    fill: none;
-}
-
-
-.mixnet {
-    fill: #ede8fb;
-    stroke: #7456c7;
+    fill: #f8fafc;
 }
 
 .title {
@@ -26,7 +20,8 @@
     font-family: Inter, ui-sans-serif, system-ui, -apple-system,
                  BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 30px;
-    font-weight: 700;
+    font-weight: 720;
+    letter-spacing: -0.4px;
 }
 
 .node-label {
@@ -34,63 +29,141 @@
     font-family: Inter, ui-sans-serif, system-ui, -apple-system,
                  BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 16px;
-    font-weight: 650;
+    font-weight: 680;
     text-anchor: middle;
     dominant-baseline: middle;
 }
 
-.small-label {
-    fill: #516078;
+.zero-label {
+    fill: #6f2d1e;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system,
                  BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 740;
+    text-anchor: middle;
+    dominant-baseline: middle;
 }
 
-.boundary-label {
-    fill: #667085;
+.organization-label {
+    fill: #746e67;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                 BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+.enclave-label {
+    fill: #27644c;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system,
                  BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 14px;
-    font-weight: 650;
+    font-weight: 750;
+    letter-spacing: 0.25px;
 }
 
 .node {
-    stroke-width: 2.2;
-    vector-effect: non-scaling-stroke;
-}
-
-.wallet {
-    fill: #f3efff;
-    stroke: #7456c7;
-}
-
-.indexer {
-    fill: #eaf2ff;
-    stroke: #4775bd;
-}
-
-.shim {
-    fill: #fff1d7;
-    stroke: #d88121;
-}
-
-.hub {
-    fill: #dcf7ec;
-    stroke: #218c69;
-}
-
-.cloud {
-    fill: #eaf4fa;
-    stroke: #4c7892;
     stroke-width: 2.4;
     vector-effect: non-scaling-stroke;
+    filter: url(#node-shadow);
 }
 
+/* Class 1: wallets */
+.wallet {
+    fill: #f1edff;
+    stroke: #7658bd;
+}
+
+/* Class 2: indexers */
+.indexer {
+    fill: #e8f1fb;
+    stroke: #3e6f9d;
+}
+
+/* Class 3: mempool */
+.cloud {
+    fill: #e2f6fa;
+    stroke: #318297;
+    stroke-width: 2.5;
+    vector-effect: non-scaling-stroke;
+    filter: url(#node-shadow);
+}
+
+/* Class 4: organizational boundaries */
+.organization {
+    fill: #f5f2ed;
+    fill-opacity: 0.7;
+    stroke: #aaa39a;
+    stroke-width: 1.8;
+    stroke-dasharray: 9 7;
+    vector-effect: non-scaling-stroke;
+}
+
+/* Class 5: locked enclaves */
+.enclave {
+    fill: #eaf8f1;
+    fill-opacity: 0.94;
+    stroke: #3b8968;
+    stroke-width: 2.3;
+    vector-effect: non-scaling-stroke;
+    filter: url(#panel-shadow);
+}
+
+.enclave-lock {
+    fill: none;
+    stroke: #317859;
+    stroke-width: 2.1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.enclave-lock-body {
+    fill: #317859;
+}
+
+/* Class 6: the zero-indexer family */
+.zero-indexer {
+    fill: #fff0e8;
+    stroke: #d65d3a;
+    stroke-width: 2.8;
+}
+
+.zero-brand-disc {
+    fill: #d65d3a;
+}
+
+.zero-brand-ring {
+    fill: none;
+    stroke: #ffffff;
+    stroke-width: 2.2;
+    vector-effect: non-scaling-stroke;
+}
+
+.zero-brand-core {
+    fill: #ffffff;
+}
+
+.auditor-eye {
+    fill: #ffffff;
+    stroke: #a7462e;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.auditor-pupil {
+    fill: #3b2f2b;
+}
+
+.eye-highlight {
+    fill: #ffffff;
+}
+
+/* Connections */
 .edge {
     fill: none;
-    stroke: #68758a;
-    stroke-width: 2.2;
+    stroke: #496987;
+    stroke-width: 2.35;
     stroke-linecap: round;
     stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
@@ -98,8 +171,9 @@
 
 .edge-local {
     fill: none;
-    stroke: #8a94a6;
-    stroke-width: 2;
+    stroke: #7c8796;
+    stroke-width: 2.1;
+    stroke-dasharray: 5 4;
     stroke-linecap: round;
     stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
@@ -107,101 +181,62 @@
 
 .edge-publication {
     fill: none;
-    stroke: #218c69;
-    stroke-width: 3;
+    stroke: #d65d3a;
+    stroke-width: 2.8;
     stroke-linecap: round;
     stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
 }
 
-.organization {
+.edge-tls {
     fill: none;
-    stroke: #a9b2c2;
-    stroke-width: 1.8;
-    stroke-dasharray: 8 6;
-    vector-effect: non-scaling-stroke;
-}
-
-.tee {
-    fill: #ebfaf4;
-    fill-opacity: 0.9;
-    stroke: #218c69;
-    stroke-width: 2.5;
+    stroke: #7658bd;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
 }
 
 .tls-badge {
     fill: #ffffff;
-    stroke: #7456c7;
-    stroke-width: 1.5;
+    stroke: #7658bd;
+    stroke-width: 1.4;
     vector-effect: non-scaling-stroke;
 }
 
 .tls-text {
-    fill: #5e43aa;
+    fill: #6245a6;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system,
                  BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 12px;
-    font-weight: 750;
+    font-weight: 800;
     text-anchor: middle;
     dominant-baseline: middle;
 }
 
-.lock {
-    fill: none;
-    stroke: #218c69;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    vector-effect: non-scaling-stroke;
-}
-
-.auditor-label {
-    fill: #5f4b13;
-    font-family: Inter, ui-sans-serif, system-ui, -apple-system,
-                 BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 16px;
-    font-weight: 700;
-    text-anchor: middle;
-}
-
-.eye {
-    fill: #ffffff;
-    stroke: #b38a25;
-    stroke-width: 2.2;
-    vector-effect: non-scaling-stroke;
-}
-
-.pupil {
-    fill: #29303d;
-}
-
-.highlight {
-    fill: #ffffff;
-}
-
-/* Transparent canvas, so the title and the auditor label are the only text
-   sitting on the page's own background. Everything else is on a filled shape
-   and keeps its contrast. Placed last on purpose: at equal specificity the
-   later rule wins. */
-@media (prefers-color-scheme: dark) {
-    .title {
-        fill: #e6edf3;
-    }
-
-    .auditor-label {
-        fill: #d9b75f;
-    }
-
-    /* The organisation boundary has no fill, so its label is on the canvas
-       too. The TEE label is NOT here on purpose: it sits on the enclave's
-       light green panel and has to stay dark. */
-    .boundary-label {
-        fill: #9aa7b8;
-    }
+.continuation-dot {
+    fill: #8a95a6;
 }
 
     </style>
+
+    <filter id="node-shadow"
+            x="-25%" y="-30%" width="150%" height="170%">
+      <feDropShadow dx="0"
+                    dy="3"
+                    stdDeviation="4"
+                    flood-color="#172033"
+                    flood-opacity="0.11"/>
+    </filter>
+
+    <filter id="panel-shadow"
+            x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0"
+                    dy="3"
+                    stdDeviation="6"
+                    flood-color="#172033"
+                    flood-opacity="0.06"/>
+    </filter>
 
     <marker id="arrow"
             viewBox="0 0 10 10"
@@ -210,7 +245,7 @@
             markerWidth="7"
             markerHeight="7"
             orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#68758a"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#496987"/>
     </marker>
 
     <marker id="arrow-local"
@@ -220,7 +255,7 @@
             markerWidth="7"
             markerHeight="7"
             orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a94a6"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8796"/>
     </marker>
 
     <marker id="arrow-publication"
@@ -230,125 +265,118 @@
             markerWidth="7"
             markerHeight="7"
             orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#218c69"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d65d3a"/>
+    </marker>
+
+    <marker id="arrow-tls"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7658bd"/>
     </marker>
   </defs>
 
-  <rect class="canvas" x="0" y="0" width="1780" height="900"/>
+  <rect class="canvas" x="0" y="0" width="1960" height="1000"/>
 
-
-  <defs>
-    <filter id="node-shadow"
-            x="-20%" y="-25%" width="140%" height="160%">
-      <feDropShadow dx="0"
-                    dy="4"
-                    stdDeviation="5"
-                    flood-color="#172033"
-                    flood-opacity="0.10"/>
-    </filter>
-
-    <filter id="panel-shadow"
-            x="-10%" y="-15%" width="120%" height="140%">
-      <feDropShadow dx="0"
-                    dy="3"
-                    stdDeviation="6"
-                    flood-color="#172033"
-                    flood-opacity="0.06"/>
-    </filter>
-
-    <style>
-      .node,
-      .cloud {
-          filter: url(#node-shadow);
-      }
-
-      .tee {
-          filter: url(#panel-shadow);
-      }
-    </style>
-  </defs>
-
-  <text x="890.0" y="52" class="title" text-anchor="middle">Zero-indexer transaction publication</text>
+  <text x="980.0" y="52" class="title" text-anchor="middle">Zero-indexer transaction publication</text>
   <g>
     <rect class="organization"
-          x="430" y="90" width="680" height="275" rx="22"/>
+          x="400" y="90" width="700" height="275" rx="22"/>
     <text class="boundary-label"
-          x="448" y="115">organisation 1</text>
+          x="418" y="115">organization 1</text>
   </g>
   <g>
-    <rect class="tee"
-          x="470" y="130" width="340" height="180" rx="18"/>
+    <rect class="enclave"
+          x="445" y="145"
+          width="350" height="170"
+          rx="20"/>
 
-    <path class="lock"
-          d="M 490,158
-             V 151
-             C 490,140
-               506,140
-               506,151
-             V 158"/>
+    <path class="enclave-lock"
+          d="M 468,173
+             V 167
+             C 468,157
+               484,157
+               484,167
+             V 173"/>
 
-    <rect x="487" y="157"
-          width="22" height="17" rx="3"
-          fill="#218c69"/>
+    <rect class="enclave-lock-body"
+          x="465" y="172"
+          width="22" height="17"
+          rx="3"/>
 
-    <circle cx="498" cy="165"
-            r="2.3" fill="#ffffff"/>
+    <circle cx="476" cy="180"
+            r="2.2" fill="#ffffff"/>
 
-    <text class="small-label"
-          x="519" y="164">TEE</text>
+    <text class="enclave-label"
+          x="500" y="176">enclave</text>
   </g>
   <g>
     <rect class="organization"
-          x="430" y="405" width="680" height="275" rx="22"/>
+          x="400" y="410" width="700" height="285" rx="22"/>
     <text class="boundary-label"
-          x="448" y="430">organisation 2</text>
+          x="418" y="435">organization 2</text>
   </g>
   <g>
-    <rect class="tee"
-          x="470" y="450" width="340" height="180" rx="18"/>
+    <rect class="enclave"
+          x="445" y="465"
+          width="350" height="170"
+          rx="20"/>
 
-    <path class="lock"
-          d="M 490,478
-             V 471
-             C 490,460
-               506,460
-               506,471
-             V 478"/>
+    <path class="enclave-lock"
+          d="M 468,493
+             V 487
+             C 468,477
+               484,477
+               484,487
+             V 493"/>
 
-    <rect x="487" y="477"
-          width="22" height="17" rx="3"
-          fill="#218c69"/>
+    <rect class="enclave-lock-body"
+          x="465" y="492"
+          width="22" height="17"
+          rx="3"/>
 
-    <circle cx="498" cy="485"
-            r="2.3" fill="#ffffff"/>
+    <circle cx="476" cy="500"
+            r="2.2" fill="#ffffff"/>
 
-    <text class="small-label"
-          x="519" y="484">TEE</text>
+    <text class="enclave-label"
+          x="500" y="496">enclave</text>
   </g>
   <g>
-    <rect class="tee"
-          x="1180" y="270" width="300" height="300" rx="18"/>
-
-    <path class="lock"
-          d="M 1200,298
-             V 291
-             C 1200,280
-               1216,280
-               1216,291
-             V 298"/>
-
-    <rect x="1197" y="297"
-          width="22" height="17" rx="3"
-          fill="#218c69"/>
-
-    <circle cx="1208" cy="305"
-            r="2.3" fill="#ffffff"/>
-
-    <text class="small-label"
-          x="1229" y="304">TEE</text>
+    <rect class="organization"
+          x="1150" y="250" width="510" height="400" rx="22"/>
+    <text class="boundary-label"
+          x="1168" y="275">hub organization</text>
   </g>
-  <path class="edge" d="M 245,170 C 335,170 405,205 522,205" marker-end="url(#arrow)"/>
-  <g transform="translate(365 186.4)">
+  <g>
+    <rect class="enclave"
+          x="1190" y="310"
+          width="300" height="190"
+          rx="20"/>
+
+    <path class="enclave-lock"
+          d="M 1213,338
+             V 332
+             C 1213,322
+               1229,322
+               1229,332
+             V 338"/>
+
+    <rect class="enclave-lock-body"
+          x="1210" y="337"
+          width="22" height="17"
+          rx="3"/>
+
+    <circle cx="1221" cy="345"
+            r="2.2" fill="#ffffff"/>
+
+    <text class="enclave-label"
+          x="1245" y="341">enclave</text>
+  </g>
+  <path class="edge-tls" d="M 245,185 C 335,185 405,215 500,215" marker-end="url(#arrow-tls)"/>
+  <g transform="translate(365 199.4)">
     <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
     <path d="M -21,-2 V -6
              C -21,-12 -11,-12 -11,-6
@@ -363,8 +391,8 @@
           fill="#7456c7"/>
     <text class="tls-text" x="11" y="1">TLS</text>
   </g>
-  <path class="edge" d="M 245,270 C 335,270 405,235 522,235" marker-end="url(#arrow)"/>
-  <g transform="translate(365 253.6)">
+  <path class="edge-tls" d="M 245,275 C 335,275 405,245 500,245" marker-end="url(#arrow-tls)"/>
+  <g transform="translate(365 260.6)">
     <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
     <path d="M -21,-2 V -6
              C -21,-12 -11,-12 -11,-6
@@ -379,8 +407,8 @@
           fill="#7456c7"/>
     <text class="tls-text" x="11" y="1">TLS</text>
   </g>
-  <path class="edge" d="M 245,490 C 335,490 405,525 522,525" marker-end="url(#arrow)"/>
-  <g transform="translate(365 506.4)">
+  <path class="edge-tls" d="M 245,505 C 335,505 405,535 500,535" marker-end="url(#arrow-tls)"/>
+  <g transform="translate(365 519.4)">
     <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
     <path d="M -21,-2 V -6
              C -21,-12 -11,-12 -11,-6
@@ -395,8 +423,8 @@
           fill="#7456c7"/>
     <text class="tls-text" x="11" y="1">TLS</text>
   </g>
-  <path class="edge" d="M 245,590 C 335,590 405,555 522,555" marker-end="url(#arrow)"/>
-  <g transform="translate(365 573.5)">
+  <path class="edge-tls" d="M 245,595 C 335,595 405,565 500,565" marker-end="url(#arrow-tls)"/>
+  <g transform="translate(365 580.6)">
     <rect class="tls-badge" x="-34" y="-13" width="68" height="26" rx="13"/>
     <path d="M -21,-2 V -6
              C -21,-12 -11,-12 -11,-6
@@ -411,87 +439,160 @@
           fill="#7456c7"/>
     <text class="tls-text" x="11" y="1">TLS</text>
   </g>
-  <path class="edge-local" d="M 770,198 C 795,188 807,166 829,158" marker-end="url(#arrow-local)"/>
-  <path class="edge-local" d="M 770,562 C 795,573 807,599 829,607" marker-end="url(#arrow-local)"/>
-  <path class="edge-publication" d="M 780,220 C 880,220 940,300 972,352" marker-end="url(#arrow-publication)"/>
-  <path class="edge-publication" d="M 780,540 C 880,540 940,462 972,410" marker-end="url(#arrow-publication)"/>
-  <path class="edge-publication" d="M 1088,381 C 1140,381 1170,390 1218,398" marker-end="url(#arrow-publication)"/>
-  <path class="edge" d="M 1035,150 C 1100,150 1120,82 1210,82 H 1445 C 1510,82 1542,275 1609,381" marker-end="url(#arrow)"/>
-  <path class="edge" d="M 1035,610 C 1100,610 1120,830 1210,830 H 1445 C 1510,830 1542,585 1592,490" marker-end="url(#arrow)"/>
-  <path class="edge-publication" d="M 1445,420 C 1490,420 1525,428 1563,433" marker-end="url(#arrow-publication)"/>
+  <path class="edge-local" d="M 748,205 C 782,193 802,171 827,163" marker-end="url(#arrow-local)"/>
+  <path class="edge-local" d="M 748,575 C 782,587 802,613 827,620" marker-end="url(#arrow-local)"/>
+  <path class="edge-publication" d="M 765,230 C 920,230 1045,255 1120,310 C 1160,340 1188,377 1222,389" marker-end="url(#arrow-publication)"/>
+  <path class="edge-publication" d="M 765,550 C 920,550 1045,525 1120,490 C 1160,472 1188,437 1222,422" marker-end="url(#arrow-publication)"/>
+  <path class="edge" d="M 1035,155 C 1090,155 1105,75 1180,75 H 1600 C 1670,75 1695,300 1750,398" marker-end="url(#arrow)"/>
+  <path class="edge" d="M 1035,625 C 1090,625 1110,760 1190,760 H 1600 C 1670,760 1690,575 1765,518" marker-end="url(#arrow)"/>
+  <path class="edge-local" d="M 1420,440 C 1440,457 1445,500 1463,523 C 1474,537 1486,545 1497,550" marker-end="url(#arrow-local)"/>
+  <path class="edge-publication" d="M 1460,405 C 1540,405 1625,426 1730,442" marker-end="url(#arrow-publication)"/>
+  <path class="edge" d="M 1635,560 C 1680,560 1693,510 1738,488" marker-end="url(#arrow)"/>
   <g>
     <ellipse class="node wallet"
-             cx="150" cy="170" rx="95" ry="36"/>
-    <text class="node-label" x="150" y="170">wallet</text>
+             cx="150" cy="185" rx="95" ry="36"/>
+    <text class="node-label" x="150" y="185">wallet</text>
   </g>
   <g>
     <ellipse class="node wallet"
-             cx="150" cy="270" rx="95" ry="36"/>
-    <text class="node-label" x="150" y="270">wallet</text>
+             cx="150" cy="275" rx="95" ry="36"/>
+    <text class="node-label" x="150" y="275">wallet</text>
   </g>
-  <g>
-    <ellipse class="node shim"
-             cx="650" cy="220" rx="130" ry="44"/>
-    <text class="node-label" x="650" y="220">zero-indexer-shim</text>
+  <g aria-label="zero-indexer-shim">
+    <ellipse class="node zero-indexer"
+             cx="630" cy="230"
+             rx="135" ry="46"/>
+
+    <circle class="zero-brand-disc"
+            cx="522" cy="230" r="14"/>
+    <circle class="zero-brand-ring"
+            cx="522" cy="230" r="7"/>
+    <circle class="zero-brand-core"
+            cx="522" cy="230" r="2.3"/>
+
+    <text class="zero-label"
+          x="643" y="230">zero-indexer-shim</text>
   </g>
   <g>
     <ellipse class="node indexer"
-             cx="930" cy="150" rx="105" ry="40"/>
-    <text class="node-label" x="930" y="150">indexer</text>
+             cx="930" cy="155" rx="105" ry="42"/>
+    <text class="node-label" x="930" y="155">indexer</text>
   </g>
   <g>
     <ellipse class="node wallet"
-             cx="150" cy="490" rx="95" ry="36"/>
-    <text class="node-label" x="150" y="490">wallet</text>
+             cx="150" cy="505" rx="95" ry="36"/>
+    <text class="node-label" x="150" y="505">wallet</text>
   </g>
   <g>
     <ellipse class="node wallet"
-             cx="150" cy="590" rx="95" ry="36"/>
-    <text class="node-label" x="150" y="590">wallet</text>
+             cx="150" cy="595" rx="95" ry="36"/>
+    <text class="node-label" x="150" y="595">wallet</text>
   </g>
-  <g>
-    <ellipse class="node shim"
-             cx="650" cy="540" rx="130" ry="44"/>
-    <text class="node-label" x="650" y="540">zero-indexer-shim</text>
+  <g aria-label="zero-indexer-shim">
+    <ellipse class="node zero-indexer"
+             cx="630" cy="550"
+             rx="135" ry="46"/>
+
+    <circle class="zero-brand-disc"
+            cx="522" cy="550" r="14"/>
+    <circle class="zero-brand-ring"
+            cx="522" cy="550" r="7"/>
+    <circle class="zero-brand-core"
+            cx="522" cy="550" r="2.3"/>
+
+    <text class="zero-label"
+          x="643" y="550">zero-indexer-shim</text>
   </g>
   <g>
     <ellipse class="node indexer"
-             cx="930" cy="610" rx="105" ry="40"/>
-    <text class="node-label" x="930" y="610">indexer</text>
+             cx="930" cy="625" rx="105" ry="42"/>
+    <text class="node-label" x="930" y="625">indexer</text>
+  </g>
+  <g aria-label="zero-indexer-hub">
+    <ellipse class="node zero-indexer"
+             cx="1340" cy="405"
+             rx="120" ry="48"/>
+
+    <circle class="zero-brand-disc"
+            cx="1247" cy="405" r="14"/>
+    <circle class="zero-brand-ring"
+            cx="1247" cy="405" r="7"/>
+    <circle class="zero-brand-core"
+            cx="1247" cy="405" r="2.3"/>
+
+    <text class="zero-label"
+          x="1353" y="405">zero-indexer-hub</text>
   </g>
   <g>
-    <ellipse class="node mixnet"
-             cx="1030" cy="381" rx="118" ry="46"/>
-    <text class="node-label" x="1030" y="381">Nym mixnet</text>
+    <ellipse class="node indexer"
+             cx="1530" cy="560" rx="105" ry="42"/>
+    <text class="node-label" x="1530" y="560">indexer</text>
   </g>
   <g>
-    <ellipse class="node hub"
-             cx="1330" cy="420" rx="115" ry="48"/>
-    <text class="node-label" x="1330" y="420">zero-indexer-hub</text>
-  </g>
-  <g>
-    <path class="cloud" d="M 1592.5,492.2 C 1554.7,492.2 1544.2,462.8 1563.1,433.4 C 1548.4,397.7 1577.8,368.3 1609.3,380.9 C 1621.9,336.8 1674.4,334.7 1691.2,378.8 C 1729.0,370.4 1745.8,404.0 1731.1,435.5 C 1754.2,464.9 1726.9,494.3 1697.5,490.1 L 1592.5,492.2 Z"/>
+    <path class="cloud" d="M 1765.0,510.4 C 1725.4,510.4 1714.4,479.6 1734.2,448.8 C 1718.8,411.4 1749.6,380.6 1782.6,393.8 C 1795.8,347.6 1850.8,345.4 1868.4,391.6 C 1908.0,382.8 1925.6,418.0 1910.2,451.0 C 1934.4,481.8 1905.8,512.6 1875.0,508.2 L 1765.0,510.4 Z"/>
     <text class="node-label"
-          x="1649.2" y="437.6">mempool</text>
+          x="1824.4" y="453.2">mempool</text>
   </g>
-  <g>
-    <ellipse class="eye"
-             cx="1296" cy="700"
-             rx="26" ry="38"
-             transform="rotate(-5 1296 700)"/>
+  <g aria-label="more">
+    <circle class="continuation-dot"
+            cx="150" cy="735" r="4.5"/>
+    <circle class="continuation-dot"
+            cx="150" cy="757" r="4.5"/>
+    <circle class="continuation-dot"
+            cx="150" cy="779" r="4.5"/>
+  </g>
+  <g aria-label="more">
+    <circle class="continuation-dot"
+            cx="930" cy="735" r="4.5"/>
+    <circle class="continuation-dot"
+            cx="930" cy="757" r="4.5"/>
+    <circle class="continuation-dot"
+            cx="930" cy="779" r="4.5"/>
+  </g>
+  <g aria-label="zero-indexer-auditor">
+    <ellipse class="node zero-indexer"
+             cx="650" cy="880"
+             rx="190" ry="58"/>
 
-    <ellipse class="eye"
-             cx="1354" cy="700"
-             rx="26" ry="38"
-             transform="rotate(5 1354 700)"/>
+    <circle class="zero-brand-disc"
+            cx="490" cy="880" r="14"/>
+    <circle class="zero-brand-ring"
+            cx="490" cy="880" r="7"/>
+    <circle class="zero-brand-core"
+            cx="490" cy="880" r="2.3"/>
 
-    <circle class="pupil" cx="1304" cy="703" r="10"/>
-    <circle class="pupil" cx="1362" cy="703" r="10"/>
+    <ellipse class="auditor-eye"
+             cx="549" cy="879"
+             rx="14" ry="19"
+             transform="rotate(-4 549 879)"/>
 
-    <circle class="highlight" cx="1308" cy="699" r="3"/>
-    <circle class="highlight" cx="1366" cy="699" r="3"/>
+    <ellipse class="auditor-eye"
+             cx="585" cy="879"
+             rx="14" ry="19"
+             transform="rotate(4 585 879)"/>
 
-    <text class="auditor-label"
-          x="1325" y="767">zero-indexer-auditor</text>
+    <circle class="auditor-pupil"
+            cx="553"
+            cy="881"
+            r="5.5"/>
+
+    <circle class="auditor-pupil"
+            cx="589"
+            cy="881"
+            r="5.5"/>
+
+    <circle class="eye-highlight"
+            cx="555"
+            cy="879"
+            r="1.8"/>
+
+    <circle class="eye-highlight"
+            cx="591"
+            cy="879"
+            r="1.8"/>
+
+    <text class="zero-label"
+          x="703"
+          y="880">zero-indexer-auditor</text>
   </g>
 </svg>
