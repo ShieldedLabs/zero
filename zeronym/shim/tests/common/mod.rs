@@ -161,7 +161,7 @@ pub async fn send_tx(
     tx: &[u8],
 ) -> Bytes {
     let message = RawTransaction {
-        data: tx.to_vec(),
+        data: tx.to_vec().into(),
         height: 0,
     }
     .encode_to_vec();
@@ -255,7 +255,7 @@ pub async fn send_tx_reply(
     tx: &[u8],
 ) -> GrpcReply {
     let message = RawTransaction {
-        data: tx.to_vec(),
+        data: tx.to_vec().into(),
         height: 0,
     }
     .encode_to_vec();

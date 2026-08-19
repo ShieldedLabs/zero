@@ -173,7 +173,7 @@ async fn send_tx_with_method(
     method: &str,
 ) {
     let message = RawTransaction {
-        data: tx.to_vec(),
+        data: tx.to_vec().into(),
         height: 0,
     }
     .encode_to_vec();

@@ -191,7 +191,7 @@ impl ChainClient {
         // reintroduce the very ordering the shuffle exists to remove.
         let calls = self.endpoints.iter().map(|addr| {
             let raw = RawTransaction {
-                data: tx_bytes.to_vec(),
+                data: tx_bytes.to_vec().into(),
                 height: 0,
             };
             async move {
@@ -265,7 +265,10 @@ impl ChainClient {
                     .await
                 {
                     Ok(raw) => Ok(TxLookup::Found {
-                        data: raw.data,
+                        // `RawTransaction.data` is `Bytes` since zaino-proto 0.4.0;
+                        // copy it out because `TxLookup` feeds `Zeroizing`, which
+                        // needs a buffer it owns exclusively.
+                        data: raw.data.to_vec(),
                         height: raw.height,
                     }),
                     // NOT_FOUND is a real answer, not a fault; anything else is a

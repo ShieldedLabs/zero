@@ -98,7 +98,7 @@ pub async fn spawn_mock_indexer_full(
                                     _ => {
                                         if let Ok(raw) = RawTransaction::decode(message_bytes) {
                                             if !raw.data.is_empty() {
-                                                broadcast_seen.lock().unwrap().push(raw.data);
+                                                broadcast_seen.lock().unwrap().push(raw.data.to_vec());
                                             }
                                         }
                                         Ok(grpc_send_response(code, message))
@@ -148,7 +148,7 @@ fn grpc_send_response(code: i32, message: &str) -> Response<BoxBody<Bytes, Infal
 fn grpc_raw_tx(data: &[u8], height: u64) -> Response<BoxBody<Bytes, Infallible>> {
     grpc_ok(
         RawTransaction {
-            data: data.to_vec(),
+            data: data.to_vec().into(),
             height,
         }
         .encode_to_vec(),

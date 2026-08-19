@@ -412,7 +412,7 @@ fn not_found_message(wire_hash: &[u8]) -> String {
 /// transaction relays the indexer's height.
 fn get_transaction_response(tx_bytes: &[u8], height: u64) -> Response<ProxyBody> {
     let message = RawTransaction {
-        data: tx_bytes.to_vec(),
+        data: tx_bytes.to_vec().into(),
         height,
     }
     .encode_to_vec();
@@ -741,7 +741,7 @@ mod tests {
     /// the way a wallet's gRPC client does.
     fn framed(tx: &[u8]) -> Vec<u8> {
         let message = RawTransaction {
-            data: tx.to_vec(),
+            data: tx.to_vec().into(),
             height: 0,
         }
         .encode_to_vec();
