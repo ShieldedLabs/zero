@@ -212,6 +212,16 @@ fi
 # ---------- publish the app-source (attested deploys only) ----------
 # `caution verify` clones the --app-source URL and rebuilds from it; Caution's own
 # remote is push-only, so the assembled tree must ALSO live at a public, clonable
+# ORDERING, unresolved and deliberately left as-is. OPERATORS.md says the
+# app-source push must land BEFORE the enclave push, so a verifier arriving the
+# moment the enclave goes live already finds the right tree. This script does it
+# AFTER. Neither is clean for both cases: publishing first is right for a NEW app
+# (its domain is not serving yet, so nobody can verify during the build) but
+# wrong for a REDEPLOY, where the OLD enclave is still live and would then be
+# checked against the NEW tree. Publishing after is the mirror image. The tag
+# makes the deployed commit durably reachable either way, which is what limits
+# the damage. Pick one deliberately before relying on the window being small.
+#
 # repo, or the attestation is not independently verifiable. Push the EXACT deployed
 # commit and tag it: the manifest pins branch AND commit, and a branch tip moves
 # and can be garbage-collected. Push over APP_SOURCE_PUSH if set (e.g. an ssh URL),
@@ -222,15 +232,33 @@ if [ "$DEBUG" != 1 ] && [ -n "${APP_SOURCE:-}" ]; then
   APP_SOURCE_PUSH=${APP_SOURCE_PUSH:-$APP_SOURCE}
   APP_SOURCE_TAG=${APP_SOURCE_TAG:-deploy-$APP_ID}
   log "publishing the app-source to $APP_SOURCE_PUSH (tag $APP_SOURCE_TAG) ..."
+  # FORCED, and it has to be. Assembling a NEW app name creates a fresh
+  # directory with no prior `.git`, so its history is unrelated to whatever is
+  # on the app-source repo and a plain push is rejected as a non-fast-forward.
+  # Measured 2026-08-18: this step failed on exactly that for hub-7, leaving the
+  # enclave live and NOT independently verifiable, which is the worst state to
+  # stop in. (It happened to work before only when redeploying into an existing
+  # directory, where `.git` is preserved and the push fast-forwards.)
+  #
+  # These repos are deploy SNAPSHOTS, not shared branches: their entire content
+  # is "the tree that is deployed right now", so overwriting is the intended
+  # operation, not a loss of anyone's work.
+  #
+  # The TAG is what makes a deployment durably verifiable -- it is per-app-id and
+  # never moves, so the exact deployed commit stays reachable even after `main`
+  # advances to the next deploy. It is pushed second only because it is named
+  # after the app id.
   ( cd "$DEST" &&
     { git remote remove app-source 2>/dev/null || true; } &&
     git remote add app-source "$APP_SOURCE_PUSH" &&
-    git push app-source HEAD:main &&
+    git push -f app-source HEAD:main &&
     git tag -f "$APP_SOURCE_TAG" &&
     git push -f app-source "refs/tags/$APP_SOURCE_TAG"
-  ) >&2 || die "app-source publish FAILED. The enclave is up, but it is not \
-independently verifiable until '$DEST' is pushed to $APP_SOURCE_PUSH. Fix auth \
-(gh/ssh) and push by hand, or re-run."
+  ) >&2 || die "app-source publish FAILED. The enclave is UP but is NOT \
+independently verifiable: '$APP_SOURCE' does not yet contain the deployed tree, \
+so anyone running 'caution verify' gets a PCR mismatch indistinguishable from a \
+compromised enclave. Fix auth (gh/ssh) and, from '$DEST':
+    git push -f app-source HEAD:main && git push -f app-source refs/tags/$APP_SOURCE_TAG"
   log "app-source published: $APP_SOURCE @ $APP_SOURCE_TAG"
   log "verify with: caution verify --attestation-url https://$TLS_DOMAIN/attestation"
   log "  from a FRESH CLONE of $APP_SOURCE, not this tree. Require ALL THREE PCRs"
