@@ -49,7 +49,13 @@ CONFIG=${1:-deploy.env}
 : "${DNS_DOMAIN:?set DNS_DOMAIN (the Vultr-hosted zone)}"
 : "${VULTR_API_KEY:?export VULTR_API_KEY in your environment (not deploy.env)}"
 DNS_TTL=${DNS_TTL:-300}
-DEBUG=${DEBUG:-1}
+# Default ATTESTED. This used to default to 1, which meant the repository's own
+# one-command deploy shipped the configuration that zeroes the attestation PCRs,
+# opens SSH on the operator's parent host, and turns on per-request wallet-method
+# logging -- and said nothing about it (Hornby review, 2026-08-19). A debug
+# enclave has to be asked for now, which is the right way round: the safe
+# configuration is the one you get by not thinking about it.
+DEBUG=${DEBUG:-0}
 SSH_PUBKEY_FILE=${SSH_PUBKEY_FILE:-$HOME/.ssh/id_ed25519.pub}
 DNS_CNAME_TRAILING_DOT=${DNS_CNAME_TRAILING_DOT:-1}
 # How long to wait for a NYM=1 hub to come up ON THE MIXNET after the push has
