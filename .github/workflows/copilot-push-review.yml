@@ -21,6 +21,16 @@ name: Copilot review of pushes to main
 #
 # The pull requests this opens are scratch. They are closed automatically, never
 # merged, and the branches under copilot-review/ are deleted on the way out.
+#
+# IDENTITY MATTERS. A pull request opened with the built-in GITHUB_TOKEN is
+# authored by github-actions[bot], and Copilot does not review it: measured
+# directly, the identical diff into the identical base got no review as the bot
+# (PR #39) and a review in under two minutes as a real user (PR #41). So the
+# pull request is created with COPILOT_REVIEW_PAT, a personal access token
+# belonging to someone holding a Copilot seat (repo scope, or fine-grained with
+# read/write on Contents and Pull requests). Without that secret the workflow
+# still runs and still cleans up, but the review will not arrive, and the job
+# summary says so rather than implying the range came back clean.
 
 on:
   push:
@@ -47,7 +57,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # Pinned by SHA, not tag: this job holds contents:write and
+        # pull-requests:write, and a tag can be moved under it.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
         with:
           fetch-depth: 0
 
@@ -121,7 +133,7 @@ jobs:
         if: steps.gate.outputs.run == 'true' && steps.prcheck.outputs.run == 'true'
         id: pr
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
           REPO: ${{ github.repository }}
           BASE_SHA: ${{ steps.gate.outputs.base }}
           AFTER: ${{ github.sha }}
@@ -135,6 +147,12 @@ jobs:
           # The scratch base: exactly where main stood before this push.
           git push --force origin "${BASE_SHA}:refs/heads/${BASE_BRANCH}"
           git push --force origin "${AFTER}:refs/heads/${head_branch}"
+
+          # Recorded BEFORE the pull request is created, so that a failure in
+          # `gh pr create` still leaves the cleanup step something to delete.
+          # Keyed off the pull request number instead, a creation failure would
+          # strand this branch.
+          echo "head_branch=$head_branch" >>"$GITHUB_OUTPUT"
 
           body=$(printf '%s\n' \
             "Automated review of commits pushed directly to \`main\`, which Copilot cannot see otherwise." \
@@ -153,7 +171,6 @@ jobs:
           pr_number=$(basename "$pr_url")
           echo "number=$pr_number" >>"$GITHUB_OUTPUT"
           echo "url=$pr_url" >>"$GITHUB_OUTPUT"
-          echo "head_branch=$head_branch" >>"$GITHUB_OUTPUT"
           echo "range=${short_base}..${short_after}" >>"$GITHUB_OUTPUT"
 
       # Belt and braces. If the ruleset covers this base branch the review is
@@ -164,7 +181,7 @@ jobs:
         if: steps.pr.outputs.number != ''
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.pr.outputs.number }}
         run: |
@@ -181,6 +198,7 @@ jobs:
           PR: ${{ steps.pr.outputs.number }}
           RANGE: ${{ steps.pr.outputs.range }}
           PR_URL: ${{ steps.pr.outputs.url }}
+          HAVE_PAT: ${{ secrets.COPILOT_REVIEW_PAT != '' }}
         run: |
           set -euo pipefail
           deadline=$(( $(date +%s) + REVIEW_TIMEOUT_SECONDS ))
@@ -199,9 +217,15 @@ jobs:
             printf '# Copilot review of `main` %s\n\n' "$RANGE"
             if [ "$found" = "0" ]; then
               printf '**No review arrived within %ss.**\n\n' "$REVIEW_TIMEOUT_SECONDS"
-              printf 'This is a reviewer failure, not a clean review: nothing was checked.\n'
-              printf 'Check whether Copilot code review is enabled for `%s` and whether\n' "$BASE_BRANCH"
-              printf 'GitHub is reporting a Copilot incident.\n'
+              printf 'This is a reviewer failure, not a clean review: nothing was checked.\n\n'
+              if [ "$HAVE_PAT" != "true" ]; then
+                printf 'The COPILOT_REVIEW_PAT secret is not set, so the pull request was opened\n'
+                printf 'by github-actions[bot], which Copilot does not review. That is the most\n'
+                printf 'likely cause here. See the note at the top of the workflow.\n'
+              else
+                printf 'Check whether Copilot code review is enabled for `%s`, whether the token\n' "$BASE_BRANCH"
+                printf 'owner holds a Copilot seat, and whether GitHub reports a Copilot incident.\n'
+              fi
             else
               printf '## Summary\n\n'
               gh api "repos/$REPO/pulls/$PR/reviews" \
@@ -226,7 +250,7 @@ jobs:
       # Always runs, so a timeout or a failure above still cleans up rather than
       # leaving scratch pull requests and branches behind.
       - name: Close the review pull request and delete the snapshot
-        if: always() && steps.pr.outputs.number != ''
+        if: always() && steps.pr.outputs.head_branch != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -234,6 +258,8 @@ jobs:
           HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
         run: |
           set -euo pipefail
-          gh pr close "$PR" --repo "$REPO" \
-            --comment "Recorded in the workflow run summary. Closing; this pull request is never merged." || true
+          if [ -n "$PR" ]; then
+            gh pr close "$PR" --repo "$REPO" \
+              --comment "Recorded in the workflow run summary. Closing; this pull request is never merged." || true
+          fi
           git push origin --delete "$HEAD_BRANCH" || true
