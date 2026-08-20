@@ -1,0 +1,239 @@
+name: Copilot review of pushes to main
+
+# Copilot code review only ever looks at pull requests. There is no trigger, API
+# or setting that reviews a bare commit range, so a commit pushed straight to
+# main is invisible to it -- and this repository does not require pull requests.
+#
+# This workflow manufactures the one thing Copilot will look at. On a push to
+# main it points a scratch base branch at the commit main was on BEFORE the push,
+# snapshots the new tip on a second branch, and opens a pull request between
+# them. The diff of that pull request is exactly the commits that were just
+# pushed, so Copilot reviews them. The review is copied into this run's job
+# summary, then the pull request is closed and the snapshot deleted.
+#
+# The base is derived from `github.event.before` every run rather than being
+# advanced and remembered, so there is no lagging state to get out of step with
+# main. A force-push makes before/after non-linear, which the two-dot diff still
+# renders correctly.
+#
+# Pushes that ARRIVED through a pull request are skipped: Copilot already
+# reviewed them on the way in, and reviewing the merge again is pure noise.
+#
+# The pull requests this opens are scratch. They are closed automatically, never
+# merged, and the branches under copilot-review/ are deleted on the way out.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize. Two pushes in quick succession would otherwise race on the shared
+# base branch and produce two pull requests with overlapping diffs.
+concurrency:
+  group: copilot-push-review
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  BASE_BRANCH: copilot-review-base
+  REVIEW_TIMEOUT_SECONDS: "420"
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether this push needs a review
+        id: gate
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual runs review the last commit, so the workflow can be tested
+            # without pushing anything.
+            before=$(git rev-parse HEAD~1)
+          else
+            before="$BEFORE"
+          fi
+
+          # A push that created the branch, or whose previous tip has been
+          # garbage collected, has nothing coherent to diff against.
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "no usable base for this push; skipping"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            echo "previous tip $before is not present; skipping"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$before" = "$AFTER" ]; then
+            echo "nothing new; skipping"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$before" "$AFTER" | wc -l | tr -d ' ')
+          if [ "$changed" -eq 0 ]; then
+            echo "empty diff; skipping"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "base=$before" >>"$GITHUB_OUTPUT"
+          echo "changed=$changed" >>"$GITHUB_OUTPUT"
+          echo "run=true" >>"$GITHUB_OUTPUT"
+
+      - name: Skip pushes that already came through a pull request
+        if: steps.gate.outputs.run == 'true'
+        id: prcheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AFTER: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Any pull request already associated with this commit means Copilot
+          # saw it on the way in.
+          count=$(gh api "repos/$REPO/commits/$AFTER/pulls" --jq 'length' 2>/dev/null || echo 0)
+          if [ "$count" != "0" ]; then
+            echo "commit arrived via a pull request; already reviewed"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the review pull request
+        if: steps.gate.outputs.run == 'true' && steps.prcheck.outputs.run == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ steps.gate.outputs.base }}
+          AFTER: ${{ github.sha }}
+          CHANGED: ${{ steps.gate.outputs.changed }}
+        run: |
+          set -euo pipefail
+          short_after=$(git rev-parse --short "$AFTER")
+          short_base=$(git rev-parse --short "$BASE_SHA")
+          head_branch="copilot-review/${short_after}"
+
+          # The scratch base: exactly where main stood before this push.
+          git push --force origin "${BASE_SHA}:refs/heads/${BASE_BRANCH}"
+          git push --force origin "${AFTER}:refs/heads/${head_branch}"
+
+          body=$(printf '%s\n' \
+            "Automated review of commits pushed directly to \`main\`, which Copilot cannot see otherwise." \
+            "" \
+            "Range: \`${short_base}..${short_after}\` (${CHANGED} files)" \
+            "" \
+            "**This pull request is scratch and is closed automatically. Do not merge it.**")
+
+          pr_url=$(gh pr create \
+            --repo "$REPO" \
+            --base "$BASE_BRANCH" \
+            --head "$head_branch" \
+            --title "Copilot review: main ${short_base}..${short_after}" \
+            --body "$body")
+
+          pr_number=$(basename "$pr_url")
+          echo "number=$pr_number" >>"$GITHUB_OUTPUT"
+          echo "url=$pr_url" >>"$GITHUB_OUTPUT"
+          echo "head_branch=$head_branch" >>"$GITHUB_OUTPUT"
+          echo "range=${short_base}..${short_after}" >>"$GITHUB_OUTPUT"
+
+      # Belt and braces. If the ruleset covers this base branch the review is
+      # requested automatically and this is a no-op; if it does not, this asks
+      # explicitly. Failure is tolerated so a permissions quirk cannot fail the
+      # run before the wait step has had a chance.
+      - name: Ask Copilot to review
+        if: steps.pr.outputs.number != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          echo '{"reviewers":["Copilot"]}' \
+            | gh api "repos/$REPO/pulls/$PR/requested_reviewers" -X POST --input - >/dev/null || true
+
+      - name: Wait for the review, then record it
+        if: steps.pr.outputs.number != ''
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+          RANGE: ${{ steps.pr.outputs.range }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + REVIEW_TIMEOUT_SECONDS ))
+          found=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            n=$(gh api "repos/$REPO/pulls/$PR/reviews" \
+                  --jq '[.[] | select(.user.login | test("copilot";"i"))] | length' 2>/dev/null || echo 0)
+            if [ "$n" != "0" ]; then
+              found=1
+              break
+            fi
+            sleep 20
+          done
+
+          {
+            printf '# Copilot review of `main` %s\n\n' "$RANGE"
+            if [ "$found" = "0" ]; then
+              printf '**No review arrived within %ss.**\n\n' "$REVIEW_TIMEOUT_SECONDS"
+              printf 'This is a reviewer failure, not a clean review: nothing was checked.\n'
+              printf 'Check whether Copilot code review is enabled for `%s` and whether\n' "$BASE_BRANCH"
+              printf 'GitHub is reporting a Copilot incident.\n'
+            else
+              printf '## Summary\n\n'
+              gh api "repos/$REPO/pulls/$PR/reviews" \
+                --jq '.[] | select(.user.login | test("copilot";"i")) | .body' \
+                | sed 's/^/> /'
+              printf '\n## Inline findings\n\n'
+              count=$(gh api "repos/$REPO/pulls/$PR/comments" \
+                        --jq '[.[] | select(.user.login | test("copilot";"i"))] | length')
+              if [ "$count" = "0" ]; then
+                printf '_No inline findings._\n'
+              else
+                gh api "repos/$REPO/pulls/$PR/comments" \
+                  --jq '.[] | select(.user.login | test("copilot";"i"))
+                        | "### `\(.path):\(.line // .original_line)`\n\n\(.body)\n"'
+              fi
+            fi
+            printf '\nReviewed on %s (closed automatically).\n' "$PR_URL"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "found=$found" >>"$GITHUB_OUTPUT"
+
+      # Always runs, so a timeout or a failure above still cleans up rather than
+      # leaving scratch pull requests and branches behind.
+      - name: Close the review pull request and delete the snapshot
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          gh pr close "$PR" --repo "$REPO" \
+            --comment "Recorded in the workflow run summary. Closing; this pull request is never merged." || true
+          git push origin --delete "$HEAD_BRANCH" || true
