@@ -70,3 +70,39 @@ jobs:
         env:
           PROTOC: ""
         run: cargo test --all-targets
+
+  # The mixnet driver is behind a feature, and a plain `cargo test` therefore
+  # never compiles it -- so eight tests do not run, including all three
+  # regressions for the liveness-probe finding the review raised. Measured
+  # 2026-08-19: hub 147 -> 152, shim 189 -> 192.
+  #
+  # A separate job because it pulls the whole nym-sdk dependency tree, which is
+  # most of the build time (6m22s cold versus 2m27s without). Running it beside
+  # the plain job rather than after keeps the wall clock flat, and the cache
+  # makes the second run cheap.
+  tests-mixnet:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mixnet
+          workspaces: |
+            zeronym/hub
+            zeronym/shim
+
+      - name: hub tests (mixnet-driver)
+        working-directory: zeronym/hub
+        env:
+          PROTOC: ""
+        run: cargo test --all-targets --features mixnet-driver
+
+      - name: shim tests (mixnet-driver)
+        working-directory: zeronym/shim
+        env:
+          PROTOC: ""
+        run: cargo test --all-targets --features mixnet-driver
