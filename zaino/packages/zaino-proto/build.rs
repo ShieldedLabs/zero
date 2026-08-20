@@ -9,8 +9,12 @@ const PROPOSAL_PROTO: &str = "proto/proposal.proto";
 const SERVICE_PROTO: &str = "proto/service.proto";
 
 fn protoc_available() -> bool {
-    if env::var_os("PROTOC").is_some() {
-        return true;
+    // Set and non-empty selects that binary. Set-but-EMPTY means explicitly
+    // off: a consumer that must not run codegen (pregenerated sources only)
+    // can only shadow an inherited PROTOC through the environment, and an
+    // empty override must not read as "protoc at the empty path".
+    if let Some(path) = env::var_os("PROTOC") {
+        return !path.is_empty();
     }
     #[cfg(feature = "heavy")]
     if which::which("protoc").is_ok() {
