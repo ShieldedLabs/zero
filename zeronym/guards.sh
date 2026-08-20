@@ -110,6 +110,40 @@ else
 		"It must name 'caution verify', require all three PCRs, and check the network path."
 fi
 
+# ---------------------------------------------------------------- H1
+# `caution verify` rebuilds from the repository the OPERATOR nominated, so a
+# clean PASS proves the enclave runs THEIR published code. The step that closes
+# the gap is re-assembling from our own repo and diffing. Taylor calls this "the
+# whole fix, and it costs one paragraph" -- so losing the paragraph loses the fix.
+if grep -qi "diff -r" README.md && grep -qi "assemble-caution.sh" README.md; then
+	pass "H1  auditor procedure keeps the re-assemble-and-diff step"
+else
+	fail "H1  the re-assemble-and-diff step is gone from README.md" \
+		"Without it a caution verify PASS proves only that the enclave runs the" \
+		"operator's published tree, not that the tree is zero-indexer."
+fi
+
+# ---------------------------------------------------------------- M2
+# `debug.ssh_keys` is not gated on `debug.enabled`, and debug is a parent-side
+# launch flag, so a key listed on an attested build can reopen the console. Both
+# assemblers must refuse the combination rather than note it.
+m2_ok=1
+for asm in shim/deploy/caution/assemble-caution.sh hub/deploy/caution/assemble-caution.sh; do
+	# The refusal must be an exit, not the NOTE it used to print.
+	grep -q 'error: --ssh-key given without --debug' "$asm" || m2_ok=0
+	# Tests what the script PRINTS, not what it mentions. Checking for the old
+	# wording anywhere flagged the comment that cites it while explaining why it
+	# was wrong -- the assertion-vs-citation trap this file documents, which
+	# caught the author of the check as well.
+	grep -q 'echo "==> NOTE: --ssh-key' "$asm" && m2_ok=0
+done
+if [ "$m2_ok" = 1 ]; then
+	pass "M2  both assemblers refuse --ssh-key without --debug"
+else
+	fail "M2  an assembler no longer refuses --ssh-key without --debug" \
+		"The audit bounds every log-discipline finding on attested meaning no console."
+fi
+
 # ---------------------------------------------------------------- M31
 # "Not protected" must state the consequence, not just name the endpoints.
 if grep -q "txid \*\*and its value\*\*" README.md; then
