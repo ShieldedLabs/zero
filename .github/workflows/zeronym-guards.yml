@@ -57,19 +57,25 @@ jobs:
             zeronym/hub
             zeronym/shim
 
-      # PROTOC must be empty, not inherited: zaino-proto's build.rs fails
-      # against the repository's broken proto symlinks when it is set.
+      # PROTOC must be UNSET, and `env: PROTOC: ""` does not unset it -- it
+      # sets it to an empty string, which is the opposite of what is wanted.
+      # Both zeronym crates take zaino-proto with default-features = false, so
+      # its build.rs has no `which` branch compiled in and regenerates nothing;
+      # the committed src/proto/*.rs are used as they are. But its
+      # protoc_available() asks only whether PROTOC is PRESENT, and an empty
+      # string is present. So the empty value forced the generation path and
+      # then handed prost an empty protoc path: every run of these two jobs
+      # died in under a minute on `Could not find protoc`, from the day they
+      # were added, and the 336 tests they exist to run never compiled once.
+      # `env -u` is what actually unsets it, and is what zeronym/nymnet/
+      # localnet.sh already does for this same build script.
       - name: hub tests
         working-directory: zeronym/hub
-        env:
-          PROTOC: ""
-        run: cargo test --all-targets
+        run: env -u PROTOC cargo test --all-targets
 
       - name: shim tests
         working-directory: zeronym/shim
-        env:
-          PROTOC: ""
-        run: cargo test --all-targets
+        run: env -u PROTOC cargo test --all-targets
 
   # The mixnet driver is behind a feature, and a plain `cargo test` therefore
   # never compiles it -- so eight tests do not run, including all three
@@ -97,12 +103,8 @@ jobs:
 
       - name: hub tests (mixnet-driver)
         working-directory: zeronym/hub
-        env:
-          PROTOC: ""
-        run: cargo test --all-targets --features mixnet-driver
+        run: env -u PROTOC cargo test --all-targets --features mixnet-driver
 
       - name: shim tests (mixnet-driver)
         working-directory: zeronym/shim
-        env:
-          PROTOC: ""
-        run: cargo test --all-targets --features mixnet-driver
+        run: env -u PROTOC cargo test --all-targets --features mixnet-driver

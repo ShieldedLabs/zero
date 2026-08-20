@@ -101,7 +101,29 @@ async fn a_stalled_upstream_becomes_an_error_the_wallet_can_read() {
     sender.ready().await.unwrap();
     // If the deadline is missing, this await never returns and the test hangs
     // rather than failing -- which is exactly what the wallet experienced.
-    let response = sender.send_request(request).await.unwrap();
+    //
+    // Paced, because a paused clock and a real socket do not compose on their
+    // own: auto-advance jumps to the nearest armed timer as soon as the runtime
+    // has nothing to run, and a tokio socket polls `Pending` once before its
+    // readiness event arrives even when the peer is already there. The nearest
+    // timer while the shim is dialling is its 5 s DIAL deadline, not the 30 s
+    // head deadline this test is about, so under load the wallet was told
+    // "dialling the backing indexer timed out" and the assertion below failed
+    // on a message that was accurate about a different mechanism. Holding a
+    // 100 ms timer keeps every jump small enough for the dial to complete, and
+    // costs no wall-clock time.
+    let mut send = std::pin::pin!(sender.send_request(request));
+    let mut steps = 0;
+    let response = loop {
+        tokio::select! {
+            biased;
+            response = &mut send => break response.unwrap(),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                steps += 1;
+                assert!(steps < 900, "no answer within 90 s of virtual time");
+            }
+        }
+    };
 
     let status = response
         .headers()
