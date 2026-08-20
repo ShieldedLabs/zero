@@ -32,7 +32,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures_util::future::join_all;
 use futures_util::stream::StreamExt;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
@@ -64,6 +64,15 @@ const GRPC_PREFIX_LEN: usize = 5;
 const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
 const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+
+/// Ceiling on an indexer response body. The three unary calls this client makes
+/// are `GetLightdInfo`, a `SendResponse`, and a `RawTransaction` -- a mined
+/// transaction is at most ~2 MB and the other two are tiny, so nothing
+/// legitimate approaches this. Without it a ~100-byte unauthenticated lookup
+/// buys an unbounded allocation in a fixed-size enclave, because the response
+/// was collected with no limit at all. Same value and same reasoning as the
+/// shim's `MAX_HUB_RESPONSE_BYTES`, which bounds the mirror-image hop.
+const MAX_INDEXER_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// gRPC NOT_FOUND. The one status a transaction lookup treats as "the indexer
 /// answered, and this txid is not one it knows", distinct from the indexer being
@@ -404,9 +413,13 @@ where
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_owned());
 
-    let collected = tokio::time::timeout(RPC_TIMEOUT, response.into_body().collect())
-        .await
-        .map_err(|_| -> BoxError { "reading the gRPC response timed out".into() })??;
+    let collected = tokio::time::timeout(
+        RPC_TIMEOUT,
+        Limited::new(response.into_body(), MAX_INDEXER_RESPONSE_BYTES).collect(),
+    )
+    .await
+    .map_err(|_| -> BoxError { "reading the gRPC response timed out".into() })?
+    .map_err(|_| -> BoxError { "indexer response exceeded the size limit".into() })?;
     let trailers = collected.trailers().cloned();
     let body = collected.to_bytes();
 
