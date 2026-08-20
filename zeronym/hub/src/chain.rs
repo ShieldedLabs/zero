@@ -149,6 +149,14 @@ pub struct ChainClient {
 }
 
 impl ChainClient {
+    /// How many indexers a batch is published through.
+    ///
+    /// Read by the flush to decide whether a mixed outcome is explicable. With
+    /// several endpoints a partial failure is ordinary; with ONE it is not.
+    pub fn endpoint_count(&self) -> usize {
+        self.endpoints.len()
+    }
+
     pub fn new(endpoints: Vec<SocketAddr>, tls: Option<IndexerTls>) -> Result<Self, BoxError> {
         if endpoints.is_empty() {
             // Refused at construction rather than at the first flush, when the

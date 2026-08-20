@@ -141,6 +141,19 @@ struct NymState {
     connected: std::sync::atomic::AtomicBool,
     deaths: std::sync::atomic::AtomicU64,
     consecutive_failures: std::sync::atomic::AtomicU64,
+    /// How many DISTINCT addresses this hub has published, counting the first.
+    ///
+    /// Not the same as `deaths`. A client can die and come back on the same
+    /// address, which costs nothing: the address is what shims are baked with,
+    /// and it survives a client death deliberately. But a fresh IDENTITY mints a
+    /// new address, and at that moment every shim's configuration is stale --
+    /// their submits go to an address nobody is listening at, and because a
+    /// submit is answered on dispatch, no error reaches anyone.
+    ///
+    /// So this is the one number that tells an operator their fleet has been
+    /// invalidated. `deaths` moving is routine; this moving means go and look
+    /// (Hornby review, 2026-08-19).
+    address_generation: std::sync::atomic::AtomicU64,
     /// Whether the driver TASK itself is gone -- returned or panicked -- as
     /// opposed to a client that died and will be rebuilt. `set_died` describes a
     /// recoverable state the driver is actively working out of; this describes
@@ -159,6 +172,25 @@ impl NymAddress {
     /// the address did not change.
     pub fn set(&self, address: String) {
         if let Ok(mut slot) = self.0.address.write() {
+            // Counted on CHANGE, not on every publish: a client that reconnects
+            // on the same address has invalidated nothing, and counting those
+            // would bury the case that matters in noise.
+            let changed = slot.as_deref() != Some(address.as_str());
+            if changed {
+                let generation = self
+                    .0
+                    .address_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if generation > 1 {
+                    tracing::error!(
+                        generation,
+                        "NYM ADDRESS CHANGED: every shim baked with the previous address is \
+                         now misconfigured, and their submits are answered success while \
+                         reaching nobody"
+                    );
+                }
+            }
             *slot = Some(address);
         }
         self.0
@@ -242,6 +274,10 @@ impl NymAddress {
             // with `driver_running:true` should wait; with `driver_running:false`
             // they should restart the hub.
             "driver_running": !self.0.driver_exited.load(Ordering::Relaxed),
+            // Anything above 1 means the address shims were baked with has been
+            // replaced at least once. See the field's own comment: this is the
+            // number that says the fleet is stale, and `client_deaths` is not.
+            "address_generation": self.0.address_generation.load(Ordering::Relaxed),
         })
     }
 }

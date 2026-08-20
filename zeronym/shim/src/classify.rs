@@ -160,6 +160,32 @@ pub struct Evidence {
 }
 
 impl Evidence {
+    /// True when the parse failed because the transaction names a consensus
+    /// branch this build does not know.
+    ///
+    /// This distinguishes the one unparseable case that is not an attack and not
+    /// a bug: at a network upgrade, every transaction built for the new branch
+    /// fails to parse against a shim compiled before it. `Unparseable` folds into
+    /// `treat_as_migration`, which is the right default for garbage — but at an
+    /// upgrade boundary it silently turns every un-redeployed shim into a
+    /// divert-everything box, sending ordinary traffic to the hub (Hornby review,
+    /// 2026-08-19).
+    ///
+    /// Reporting it is free and changes no behaviour. Whether the shim should
+    /// then fail closed, keep diverting, or refuse to start is a decision with a
+    /// deadline set by the network, and this is the signal that decision needs.
+    ///
+    /// Matched on zebra's own wording: `Error::InvalidConsensusBranchId` maps to
+    /// `Parse("invalid consensus branch id")` in
+    /// `zebra-chain/src/serialization/error.rs`. The string is pinned by a test
+    /// below, built from real bytes, so an upstream rewording fails loudly here
+    /// rather than silently turning the signal off.
+    pub fn is_unrecognised_branch(&self) -> bool {
+        self.error
+            .as_deref()
+            .is_some_and(|err| err.contains("invalid consensus branch id"))
+    }
+
     /// Evidence for bytes that never parsed. Balances and counts are reported as
     /// zero because nothing was read out of them; `error` carries the reason.
     fn unparseable(len: usize, error: String) -> Self {
@@ -385,6 +411,59 @@ mod tests {
             V6_IRONWOOD_ONLY,
         ] {
             assert_eq!(classify(bytes), classify_with_evidence(bytes).class);
+        }
+    }
+}
+
+#[cfg(test)]
+mod branch_id_tests {
+    use super::*;
+
+    /// A V5 transaction header naming a consensus branch that does not exist.
+    ///
+    /// This is what every transaction on the network looks like to a shim built
+    /// before the upgrade that introduced the branch.
+    fn v5_with_branch(branch: u32) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&0x8000_0005u32.to_le_bytes()); // fOverwintered | v5
+        raw.extend_from_slice(&0x26A7_270Au32.to_le_bytes()); // nVersionGroupId (v5)
+        raw.extend_from_slice(&branch.to_le_bytes()); // nConsensusBranchId
+        raw.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        raw.extend_from_slice(&0u32.to_le_bytes()); // expiry_height
+        raw.extend_from_slice(&[0u8; 8]);
+        raw
+    }
+
+    #[test]
+    fn an_unknown_consensus_branch_is_reported_as_such() {
+        // Pins zebra's wording, which the matcher depends on
+        // (`zebra-chain/src/serialization/error.rs`: `InvalidConsensusBranchId`
+        // maps to `Parse("invalid consensus branch id")`). Measured, not assumed:
+        // the observed string is "parse error: invalid consensus branch id". An
+        // upstream rewording must fail here rather than silently turning the
+        // signal off, because the signal is what says a shim has started
+        // diverting the entire network's traffic.
+        let ev = classify_with_evidence(&v5_with_branch(0xDEAD_BEEF));
+        assert_eq!(ev.class, Class::Unparseable, "precondition: it does not parse");
+        assert!(
+            ev.is_unrecognised_branch(),
+            "an unknown branch must be distinguishable from garbage, got {:?}",
+            ev.error
+        );
+    }
+
+    #[test]
+    fn ordinary_garbage_is_not_reported_as_a_branch_problem() {
+        // The signal has to stay quiet for the case it is not about, or an
+        // operator learns to ignore it before the upgrade that matters.
+        for junk in [&b""[..], &b"not a transaction"[..], &[0xFFu8; 64][..]] {
+            let ev = classify_with_evidence(junk);
+            assert_eq!(ev.class, Class::Unparseable, "precondition: junk");
+            assert!(
+                !ev.is_unrecognised_branch(),
+                "garbage must not read as a branch problem, got {:?}",
+                ev.error
+            );
         }
     }
 }

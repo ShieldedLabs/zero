@@ -132,6 +132,27 @@ pub(crate) async fn send_transaction(
     let (inspection, tx_data) = inspect(&parts.headers, &frame);
     log_verdict(&inspection, &frame);
 
+    // A network upgrade looks exactly like garbage to a shim built before it, and
+    // both fold into `treat_as_migration`. Separating them costs nothing and is
+    // the difference between "someone is sending junk" and "this shim is now
+    // diverting the whole network's traffic because it was never redeployed".
+    //
+    // Reported ONCE, not per request. At an upgrade every transaction on the
+    // network takes this arm, so a line each would flood the log for as long as
+    // the shim runs -- and per-request lines are exactly what this file is
+    // otherwise careful not to write. The condition is a property of the BUILD,
+    // so saying it once says all of it, and the remedy it names is a redeploy.
+    if inspection.is_unrecognised_branch() {
+        static REPORTED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                target: "zis::classify",
+                "UNRECOGNISED CONSENSUS BRANCH: this build cannot parse transactions for the active network upgrade, so every one of them classifies as a migration and is diverted to the hub. Redeploy against a zebra that knows this branch. Reported once per process"
+            );
+        }
+    }
+
     // A migration bound for the hub is diverted here, and ONLY here does the
     // operator's indexer stay undialled: this function holds the pool and dials
     // it (below) solely on a pass-through verdict, or on a migration when no hub
@@ -175,6 +196,33 @@ async fn divert(
             "zero-indexer-shim: could not divert transaction",
         ));
     };
+
+    // EMPTY is not the same as absent, and it used to slip through here. A
+    // five-byte gRPC frame decodes to a `RawTransaction` with empty `data`,
+    // which is `Some(empty)` rather than `None`, so the guard above did not
+    // fire; `Unparseable` then folds into `treat_as_migration`, and the empty
+    // body was padded into a full `FRAME_BYTES` submission and dispatched to
+    // every configured hub. That is roughly 45 Sphinx packets of the shim's one
+    // throttled egress bought for five bytes in, from an unauthenticated
+    // internet-facing listener -- about a byte per second holds the divert path
+    // full (Hornby review, 2026-08-19).
+    //
+    // A wallet never sends a zero-length transaction, so refusing costs nothing
+    // real. This does NOT weaken REVIEW #5: an unparseable payload with actual
+    // bytes is still diverted and still published, because the shim diverted it
+    // for the same reason it could not read it and the node is the authority on
+    // validity. Zero bytes carry no such claim.
+    if tx_data.is_empty() {
+        tracing::warn!(
+            target: "zis::classify",
+            "MIGRATION-FAILSAFE: empty transaction body; refusing rather than spending a \
+             mixnet frame on it"
+        );
+        return Ok(grpc_error(
+            GRPC_INVALID_ARGUMENT,
+            "zero-indexer-shim: empty transaction",
+        ));
+    }
 
     match diversion.hub.submit(&tx_data).await {
         // Too large for the transport's fixed frame. RESOURCE_EXHAUSTED, not
@@ -499,6 +547,16 @@ impl Inspection {
         Inspection::Failsafe {
             reason,
             detail: Some(detail.into()),
+        }
+    }
+
+    /// True when the body failed to parse specifically because it names a
+    /// consensus branch this build does not know. A `Failsafe` never qualifies:
+    /// it never reached the classifier, so there is no branch to complain about.
+    fn is_unrecognised_branch(&self) -> bool {
+        match self {
+            Inspection::Classified(evidence) => evidence.is_unrecognised_branch(),
+            Inspection::Failsafe { .. } => false,
         }
     }
 

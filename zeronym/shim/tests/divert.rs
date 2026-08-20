@@ -529,3 +529,48 @@ fn unframe_submit(body: &[u8]) -> Vec<u8> {
     }
     body.to_vec()
 }
+
+/// An empty transaction is refused before it costs a mixnet frame.
+///
+/// A five-byte gRPC frame decodes to a `RawTransaction` with empty `data`, which
+/// is `Some(empty)` rather than `None`, so the fail-closed arm did not fire.
+/// `Unparseable` then folds into `treat_as_migration`, and those zero bytes were
+/// padded into a full `FRAME_BYTES` submission and dispatched to every hub —
+/// roughly 45 Sphinx packets of the shim's one throttled egress bought for five
+/// bytes in, from an unauthenticated internet-facing listener (Hornby review,
+/// 2026-08-19).
+///
+/// Refusing costs nothing real: a wallet never sends a zero-length transaction.
+/// This does not weaken REVIEW #5 — an unparseable payload with actual bytes is
+/// still diverted and still published, which `an_unparseable_body_is_diverted`
+/// above covers.
+#[tokio::test]
+async fn an_empty_transaction_is_refused_rather_than_diverted() {
+    let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    let reply = send_tx_reply(&mut sender, shim, b"").await;
+
+    assert_eq!(
+        reply.status, 3,
+        "an empty transaction must be refused as INVALID_ARGUMENT, not diverted"
+    );
+
+    // The hub was never asked to carry it.
+    assert!(
+        hub_seen.lock().unwrap().is_none(),
+        "an empty body must not reach the hub, let alone as a full padded frame"
+    );
+
+    // And it still fails CLOSED: the operator never saw it either.
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "refusing must not become a fall-back to the operator"
+    );
+}

@@ -117,9 +117,26 @@ if [ "$DEBUG" = "true" ] && [ -z "$SSH_KEYS" ]; then
 	echo "         --ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\"" >&2
 	exit 2
 fi
+# REFUSED, not noted. This used to print "SSH is closed when attestation is on,
+# so the key is recorded in the HCL but unused until a --debug build" -- which is
+# backwards (Hornby review, 2026-08-19). `debug.ssh_keys` is NOT gated on
+# `debug.enabled`: the keys are recorded in the manifest either way, and debug
+# mode is a PARENT-SIDE launch flag, so an operator holding a listed key can
+# reopen the console on an enclave that attests as non-debug. A key listed "but
+# unused" is a key waiting to be used.
+#
+# This matters beyond itself: the audit's bounding of every log-discipline
+# finding rests on the premise that an attested deployment has no console
+# channel. Refusing the combination here is what makes that premise true for
+# anything this script deploys.
 if [ -n "$SSH_KEYS" ] && [ "$DEBUG" != "true" ]; then
-	echo "==> NOTE: --ssh-key given without --debug. SSH is closed when attestation is"
-	echo "    on, so the key is recorded in the HCL but unused until a --debug build."
+	echo "error: --ssh-key given without --debug." >&2
+	echo "       The key would be recorded in the manifest, and debug.ssh_keys is NOT" >&2
+	echo "       gated on debug.enabled: debug mode is a parent-side launch flag, so a" >&2
+	echo "       holder of that key can reopen the console on an enclave that attests" >&2
+	echo "       as non-debug. Drop --ssh-key for an attested build, or pass --debug" >&2
+	echo "       and accept that the deployment is not attested." >&2
+	exit 2
 fi
 
 # There is no staging knob on this path: the in-enclave Caddy picks the ACME

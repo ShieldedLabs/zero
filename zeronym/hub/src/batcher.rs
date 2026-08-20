@@ -442,6 +442,28 @@ pub async fn flush(
             "indexer could not be reached for part of the batch; held for the next flush"
         );
     }
+    // A SHAPE WITH NO BENIGN EXPLANATION, when there is only one endpoint.
+    //
+    // The batch goes out as `k` simultaneous requests to the same indexer. If it
+    // is up, they all reach it; if it is down, none do. So "some placed, some
+    // held" from a SINGLE endpoint is not an outage -- it is that endpoint
+    // choosing which members of the batch reach the chain, which sets the
+    // on-chain batch size regardless of how large the hub's batch was (Hornby
+    // review, 2026-08-19). Every other defence in this file protects the
+    // DECISION to publish; nothing protected what happens after.
+    //
+    // Only meaningful with one endpoint. With several, a partial failure is
+    // ordinary and this would cry wolf on every routine outage.
+    if chain.endpoint_count() == 1 && achieved >= 1 && requeued.held >= 1 {
+        tracing::error!(
+            achieved_batch_size = achieved,
+            requeued = requeued.held,
+            "SELECTIVE HOLD-BACK: one indexer placed part of a simultaneous batch and \
+             held the rest. An outage cannot do this; the endpoint is choosing what \
+             reaches the chain, and the on-chain batch is smaller than this hub's"
+        );
+    }
+
     // Louder than the requeue, because this is where a migration stops existing.
     // A wallet was told these were on their way and nothing else holds a copy,
     // so a non-zero count here is the signal that someone has lost a migration,
