@@ -27,8 +27,10 @@ name: Copilot review of pushes to main
 # directly, the identical diff into the identical base got no review as the bot
 # (PR #39) and a review in under two minutes as a real user (PR #41). So the
 # pull request is created with COPILOT_REVIEW_PAT, a personal access token
-# belonging to someone holding a Copilot seat (repo scope, or fine-grained with
-# read/write on Contents and Pull requests). Without that secret the workflow
+# belonging to someone holding a Copilot seat. It needs BOTH `repo` and
+# `workflow` scopes: the snapshot branch mirrors whatever landed on main, and a
+# token without `workflow` is refused the moment a pushed range touches
+# .github/workflows/**. Without that secret the workflow
 # still runs and still cleans up, but the review will not arrive, and the job
 # summary says so rather than implying the range came back clean.
 
@@ -62,6 +64,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
         with:
           fetch-depth: 0
+          # The credential git pushes with, not just the one `gh` calls with.
+          # checkout persists whatever it is given, so leaving this at the
+          # default makes every `git push` below act as the GitHub App, and the
+          # App is refused outright when the pushed range touches
+          # .github/workflows/** -- which is exactly what this workflow's own
+          # commits do. GITHUB_TOKEN can never be granted that permission, so
+          # the PAT has to own the push as well as the pull request.
+          token: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
 
       - name: Decide whether this push needs a review
         id: gate
