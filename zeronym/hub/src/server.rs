@@ -72,6 +72,21 @@ const SUBMIT_PATH: &str = "/";
 /// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
 const TRANSACTION_PATH: &str = "/transaction";
 
+/// How many clearnet lookups may be in flight at once.
+///
+/// The mixnet arm has had this bound since it was written, with the reasoning in
+/// `nym::MAX_CONCURRENT_LOOKUPS`; the clearnet arm was simply never given one, so
+/// a ~100-byte unauthenticated `POST /transaction` bought a fresh TCP + TLS +
+/// HTTP/2 dial to the indexer with nothing above it (Hornby review, 2026-08-19).
+/// Descriptors exhaust, the accept loop hits its EMFILE backoff, and the flush's
+/// own `broadcast_batch` then competes for the same descriptors -- so a lookup
+/// flood degrades PUBLICATION, not just lookups.
+///
+/// Same value as the mixnet arm deliberately: the two ingress paths answer the
+/// same question with the same machinery behind them, and a reader comparing
+/// them should not have to wonder why the numbers differ.
+const MAX_CONCURRENT_HTTP_LOOKUPS: usize = 64;
+
 /// The hub's current Nym address: `GET /nym-address`.
 ///
 /// Exists because an ATTESTED enclave has no console. The address is minted
@@ -416,6 +431,10 @@ fn is_fd_exhaustion(err: &std::io::Error) -> bool {
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
 pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Result<(), BoxError> {
+    // Created here rather than in `ServeOptions` so that every caller gets the
+    // bound without having to know it exists. There is no configuration for it:
+    // an operator who could raise it could re-open the hole.
+    let lookups = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_LOOKUPS));
     tracing::info!(
         local = ?listener.local_addr().ok(),
         flush_interval = hub.params.flush_interval,
@@ -447,6 +466,7 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
         };
         let hub = hub.clone();
         let options = options.clone();
+        let lookups = lookups.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
             // `.timer()` is load-bearing, not decoration. hyper 1.x defaults
@@ -458,7 +478,9 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
                 .timer(TokioTimer::new())
                 .serve_connection(
                     io,
-                    service_fn(move |req| handle(req, hub.clone(), options.clone())),
+                    service_fn(move |req| {
+                        handle(req, hub.clone(), options.clone(), lookups.clone())
+                    }),
                 )
                 .await
             {
@@ -490,6 +512,7 @@ async fn handle(
     req: Request<Incoming>,
     hub: Hub,
     options: ServeOptions,
+    lookups: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Cloned up front: the handlers below consume `req`, so the method cannot
     // be borrowed from it at the same time. `Method` is cheap to clone.
@@ -500,7 +523,28 @@ async fn handle(
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
         TRANSACTION_PATH => match method {
-            Method::POST => lookup(req, hub).await,
+            // REFUSED, not queued, when every slot is held. Parking it would
+            // rebuild the unbounded pile the bound exists to prevent -- the same
+            // reasoning the mixnet arm records. 503 is the honest answer: the
+            // caller learns to come back, and a shim treats it as a failed
+            // lookup and fails closed, which is the correct outcome.
+            Method::POST => match lookups.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    let response = lookup(req, hub).await;
+                    drop(permit);
+                    response
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        limit = MAX_CONCURRENT_HTTP_LOOKUPS,
+                        "clearnet lookup refused: every lookup slot is held"
+                    );
+                    Ok(text(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "too many lookups in flight",
+                    ))
+                }
+            },
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
         NYM_ADDRESS_PATH => match method {

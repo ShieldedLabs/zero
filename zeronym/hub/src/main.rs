@@ -27,15 +27,14 @@ async fn main() -> Result<(), BoxError> {
 
     let config = Config::parse();
 
-    // Refuse to run blind. A hub without indexer TLS lets the enclave's parent
-    // host read every batch in the clear moments before it is public, so this is
-    // announced loudly rather than left to a config review.
+    // Refuse to run blind, and mean it. A hub without indexer TLS lets the
+    // enclave's parent host read every batch in the clear moments before it is
+    // public, so this ABORTS STARTUP rather than logging into a console that
+    // attestation has closed. `--allow-plaintext-indexer` is the deliberate
+    // escape for a local run; the flag is measured into PCR0/PCR1, so a
+    // deployment cannot use it quietly.
+    config.check_indexer_tls()?;
     let tls = config.indexer_tls()?;
-    if tls.is_none() {
-        tracing::warn!(
-            "no --indexer-tls: the hop to the indexer is PLAINTEXT and the host can read every batch"
-        );
-    }
     let chain = Arc::new(ChainClient::new(config.indexers.clone(), tls)?);
 
     // The expiry budget is asserted at startup, not trusted. A parameter change
