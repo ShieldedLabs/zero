@@ -28,9 +28,6 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [policy.zaino-common]
 audit-as-crates-io = true
 
-[policy.zaino-fetch]
-audit-as-crates-io = true
-
 [policy.zaino-proto]
 audit-as-crates-io = true
 
@@ -91,6 +88,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.arrayvec]]
 version = "0.7.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-stream]]
+version = "0.3.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.async-stream-impl]]
+version = "0.3.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-trait]]
@@ -367,14 +372,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.derive-getters]]
 version = "0.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.derive_more]]
-version = "2.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.derive_more-impl]]
-version = "2.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
@@ -785,10 +782,6 @@ criteria = "safe-to-deploy"
 version = "0.2.19"
 criteria = "safe-to-deploy"
 
-[[exemptions.lazycell]]
-version = "1.3.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.left-right]]
 version = "0.11.7"
 criteria = "safe-to-deploy"
@@ -810,7 +803,7 @@ version = "0.1.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.librocksdb-sys]]
-version = "0.16.0+8.10.0"
+version = "0.17.3+10.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.libz-sys]]
@@ -909,10 +902,6 @@ criteria = "safe-to-deploy"
 version = "0.30.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.nonempty]]
-version = "0.12.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.num-bigint]]
 version = "0.4.6"
 criteria = "safe-to-deploy"
@@ -950,7 +939,7 @@ version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.orchard]]
-version = "0.15.0-pre.1"
+version = "0.15.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.ordered-map]]
@@ -1234,7 +1223,7 @@ version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.rocksdb]]
-version = "0.22.0"
+version = "0.24.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.route-recognizer]]
@@ -1526,11 +1515,11 @@ version = "0.5.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.tower-batch-control]]
-version = "1.0.1"
+version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tower-fallback]]
-version = "0.2.41"
+version = "0.2.43"
 criteria = "safe-to-deploy"
 
 [[exemptions.tower-http]]
@@ -1862,23 +1851,19 @@ version = "0.8.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zaino-common]]
-version = "0.3.0-rc.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.zaino-fetch]]
-version = "0.3.0-rc.1"
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zaino-proto]]
-version = "0.2.0-rc.1"
+version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zaino-serve]]
-version = "0.4.0-rc.1"
+version = "0.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zaino-state]]
-version = "0.4.0-rc.1"
+version = "0.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zaino-testutils]]
@@ -1886,11 +1871,11 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zainod]]
-version = "0.6.0-rc.1"
+version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_address]]
-version = "0.13.0-pre.0"
+version = "0.13.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_encoding]]
@@ -1898,23 +1883,23 @@ version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_history]]
-version = "0.5.0-pre.0"
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_keys]]
-version = "0.15.0-pre.0"
+version = "0.16.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_primitives]]
-version = "0.29.0-pre.0"
+version = "0.30.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_proofs]]
-version = "0.29.0-pre.0"
+version = "0.30.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_protocol]]
-version = "0.10.0-pre.0"
+version = "0.10.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_script]]
@@ -1926,35 +1911,35 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.zcash_transparent]]
-version = "0.9.0-pre.0"
+version = "0.10.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-chain]]
-version = "11.0.0"
+version = "12.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-consensus]]
-version = "10.0.0"
+version = "15.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-network]]
-version = "10.0.0"
+version = "12.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-node-services]]
-version = "9.0.0"
+version = "10.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-rpc]]
-version = "11.0.0"
+version = "16.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-script]]
-version = "10.0.0"
+version = "11.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-state]]
-version = "10.0.0"
+version = "13.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zebra-test]]
@@ -1998,7 +1983,7 @@ version = "0.11.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.zingo_test_vectors]]
-version = "0.0.1@git:f6a2af51e4eb65cfa5d1443f8ea00f6b9f55bf05"
+version = "0.0.1@git:85502cd0b5faf9308e590865dae51bf31fdd342e"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip32]]
