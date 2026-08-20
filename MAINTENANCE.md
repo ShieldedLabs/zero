@@ -129,6 +129,38 @@ upstream. To recover the rationale during a conflict, grep the change:
 - The weekly **upstream-watch** scheduled job reports what is new and the
   conflict risk against our delta. It never merges on its own.
 
+## Supply-chain audits (cargo vet)
+
+Every Rust workspace carries a [cargo vet](https://mozilla.github.io/cargo-vet/)
+store (`<component>/supply-chain/`; zcashd keeps its at `zcashd/qa/supply-chain`
+via `[package.metadata.vet]`). CI (`cargo-vet.yml`, check "cargo vet result")
+fails any PR whose dependency graph contains a third-party crate version that is
+neither audited (ours or imported from Mozilla, Google, Bytecode Alliance, ISRG,
+Embark, Fermyon, or ECC's rust-ecosystem) nor exempted in that store. The point
+is not that every crate is audited today (most are baseline exemptions); it is
+that a dependency can no longer change without a reviewable diff under
+`supply-chain/`.
+
+When the gate goes red after a dependency change, in the component directory:
+
+- `cargo vet` (network) refreshes `imports.lock`; a bumped crate is often
+  already covered by a newer imported audit.
+- For what remains, `cargo vet diff <crate> <old> <new>` to actually review the
+  delta and `cargo vet certify`, or `cargo vet regenerate exemptions` to accept
+  the current graph as baseline. Regenerating is an explicit trust decision:
+  say so in the PR rather than burying it.
+- Commit store changes with the component's normal `[zero]` prefix; a subtree
+  pull that brings upstream's own store update keeps the plain subtree commit.
+
+Divergence to keep: zebra's upstream config marks its own crates
+`audit-as-crates-io = true` (they publish them and exempt each release). Our
+fork deliberately diverges from the crates.io releases, so we set `false`:
+first-party code is reviewed through our PR process, not audited as a registry
+copy. Without this, every zebra version bump demands fresh exemptions for
+zebra's own crates. Upstream zebra does not enforce its store in CI, so expect
+it stale on pulls; zallet and librustzcash enforce theirs (`audits.yml`) and
+should arrive green.
+
 ## Release changelog
 
 `CHANGELOG.md` at the repo root carries one `## vN` section per release:

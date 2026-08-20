@@ -60,6 +60,14 @@ MAINTENANCE.md tag-pinning policy).
    zcashd, a full build is heavy; do a build smoke unless asked for the full
    suite.
 
+9b. **Vet.** For Rust components, run `cargo vet --locked` in the component
+    directory. If it fails, run `cargo vet` to refresh imports, then
+    `cargo vet regenerate exemptions` for the rest, and include the
+    `supply-chain/` diff in the review summary as an explicit trust decision
+    (see MAINTENANCE.md, "Supply-chain audits"). Watch the zebra
+    `audit-as-crates-io = false` policy entries: ours win over upstream's
+    `true` on conflict.
+
 10. **Report.** Summarize: commits taken, conflicts and how resolved, test
     result. Leave the branch for the user to review and merge to `main`. Do not
     push or merge without confirmation.
