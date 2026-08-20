@@ -1,0 +1,72 @@
+name: zeronym-guards
+
+# Cheap assertions over the repository's own claims, plus the test suites.
+#
+# Two gaps this closes. First, `zeronym/guards.sh` checks that documents making
+# security claims still agree with the code -- the class of defect that has
+# shipped here twice, each time found by a person reading carefully rather than
+# by anything automatic. Second, and more basic: before this workflow existed the
+# repository had NO cargo test job of any kind. The reproduce workflows were the
+# only automated gate and they only rebuild a binary; the 300-odd tests in the
+# hub and shim crates ran on developer machines and nowhere else.
+#
+# Deliberately fast, so it can gate every push: no enclave build, no network, no
+# Docker. The reproduce workflows remain the slow half.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/zeronym-guards.yml"
+      - "zeronym/**"
+  pull_request:
+    paths:
+      - ".github/workflows/zeronym-guards.yml"
+      - "zeronym/**"
+
+concurrency:
+  group: zeronym-guards-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Runs on its own and on the cheap runner: a failure here is a document making
+  # a claim the code does not support, and it should be visible without waiting
+  # for a compile.
+  guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Repository claim guards
+        run: sh zeronym/guards.sh
+
+  tests:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `hub` and `shim` each declare their own `[workspace]`, so they are two
+      # separate build graphs with two separate target directories. Naming both
+      # is what makes the cache cover the second one.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            zeronym/hub
+            zeronym/shim
+
+      # PROTOC must be empty, not inherited: zaino-proto's build.rs fails
+      # against the repository's broken proto symlinks when it is set.
+      - name: hub tests
+        working-directory: zeronym/hub
+        env:
+          PROTOC: ""
+        run: cargo test --all-targets
+
+      - name: shim tests
+        working-directory: zeronym/shim
+        env:
+          PROTOC: ""
+        run: cargo test --all-targets
