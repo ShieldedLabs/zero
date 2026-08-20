@@ -21,12 +21,18 @@
 # WHY THIS EXISTS: the hub is the one component that sees migration transactions
 # in PLAINTEXT. It receives the bytes the shim removed from the operator's link
 # and broadcasts them to the network, so attestation is not optional here, it is
-# the whole basis for anyone trusting the hub with that plaintext. The Zeronym
-# trust model gives the auditor the job of rebuilding from source, getting the
-# same hash, and matching it against the hash bound into the enclave
-# attestation. Without that, an attestation proves only that SOME binary runs
-# inside a genuine enclave, which collapses the design back into trusting
-# whoever compiled it.
+# the whole basis for anyone trusting the hub with that plaintext.
+#
+# What this build contributes, precisely (corrected 2026-08-19): a DETERMINISTIC
+# binary, so that a given commit yields a given hash on any machine. It does NOT
+# contribute a value the attestation carries -- no attestation this platform
+# produces contains a binary hash, and `EXPECTED_SHA256` appears nowhere in the
+# Caution source. The enclave is bound to the code by `caution verify`, which
+# rebuilds the EIF from the manifest's app-source repo and compares PCR0/1/2 plus
+# the TLS certificate binding. Reproducibility is what makes that comparison
+# mean anything; it is not itself the comparison. Without it an attestation
+# proves only that SOME enclave is running, which collapses the design back into
+# trusting whoever compiled it.
 #
 # Build context = a partial mirror of the zero repo (assemble via assemble.sh):
 #   zeronym/hub/                  the crate, including this file under deploy/

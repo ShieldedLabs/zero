@@ -72,6 +72,21 @@ const SUBMIT_PATH: &str = "/";
 /// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
 const TRANSACTION_PATH: &str = "/transaction";
 
+/// How many clearnet lookups may be in flight at once.
+///
+/// The mixnet arm has had this bound since it was written, with the reasoning in
+/// `nym::MAX_CONCURRENT_LOOKUPS`; the clearnet arm was simply never given one, so
+/// a ~100-byte unauthenticated `POST /transaction` bought a fresh TCP + TLS +
+/// HTTP/2 dial to the indexer with nothing above it (Hornby review, 2026-08-19).
+/// Descriptors exhaust, the accept loop hits its EMFILE backoff, and the flush's
+/// own `broadcast_batch` then competes for the same descriptors -- so a lookup
+/// flood degrades PUBLICATION, not just lookups.
+///
+/// Same value as the mixnet arm deliberately: the two ingress paths answer the
+/// same question with the same machinery behind them, and a reader comparing
+/// them should not have to wonder why the numbers differ.
+const MAX_CONCURRENT_HTTP_LOOKUPS: usize = 64;
+
 /// The hub's current Nym address: `GET /nym-address`.
 ///
 /// Exists because an ATTESTED enclave has no console. The address is minted
@@ -126,6 +141,19 @@ struct NymState {
     connected: std::sync::atomic::AtomicBool,
     deaths: std::sync::atomic::AtomicU64,
     consecutive_failures: std::sync::atomic::AtomicU64,
+    /// How many DISTINCT addresses this hub has published, counting the first.
+    ///
+    /// Not the same as `deaths`. A client can die and come back on the same
+    /// address, which costs nothing: the address is what shims are baked with,
+    /// and it survives a client death deliberately. But a fresh IDENTITY mints a
+    /// new address, and at that moment every shim's configuration is stale --
+    /// their submits go to an address nobody is listening at, and because a
+    /// submit is answered on dispatch, no error reaches anyone.
+    ///
+    /// So this is the one number that tells an operator their fleet has been
+    /// invalidated. `deaths` moving is routine; this moving means go and look
+    /// (Hornby review, 2026-08-19).
+    address_generation: std::sync::atomic::AtomicU64,
     /// Whether the driver TASK itself is gone -- returned or panicked -- as
     /// opposed to a client that died and will be rebuilt. `set_died` describes a
     /// recoverable state the driver is actively working out of; this describes
@@ -144,6 +172,25 @@ impl NymAddress {
     /// the address did not change.
     pub fn set(&self, address: String) {
         if let Ok(mut slot) = self.0.address.write() {
+            // Counted on CHANGE, not on every publish: a client that reconnects
+            // on the same address has invalidated nothing, and counting those
+            // would bury the case that matters in noise.
+            let changed = slot.as_deref() != Some(address.as_str());
+            if changed {
+                let generation = self
+                    .0
+                    .address_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if generation > 1 {
+                    tracing::error!(
+                        generation,
+                        "NYM ADDRESS CHANGED: every shim baked with the previous address is \
+                         now misconfigured, and their submits are answered success while \
+                         reaching nobody"
+                    );
+                }
+            }
             *slot = Some(address);
         }
         self.0
@@ -227,6 +274,10 @@ impl NymAddress {
             // with `driver_running:true` should wait; with `driver_running:false`
             // they should restart the hub.
             "driver_running": !self.0.driver_exited.load(Ordering::Relaxed),
+            // Anything above 1 means the address shims were baked with has been
+            // replaced at least once. See the field's own comment: this is the
+            // number that says the fleet is stale, and `client_deaths` is not.
+            "address_generation": self.0.address_generation.load(Ordering::Relaxed),
         })
     }
 }
@@ -358,10 +409,35 @@ impl Hub {
     /// broadcast returns would extend how long the hub remembers a txid, which
     /// is the wrong trade.
     pub async fn lookup(&self, wire_hash: &[u8]) -> LookupOutcome {
-        if let Some(bytes) = self.queue.find_by_txid(wire_hash) {
+        if self.queue.find_by_txid(wire_hash).is_some() {
+            // FOUND, HEIGHT 0, AND NO BYTES.
+            //
+            // This used to return the queued transaction's raw bytes to whoever
+            // asked. The lookup is unauthenticated on both transports by design
+            // -- the mixnet address is published at `/nym-address` and clearnet
+            // `POST /transaction` is served unconditionally -- so those bytes
+            // were available to anyone, for a migration that has not been
+            // broadcast anywhere yet. A third party could take them and publish
+            // first, which destroys the batching this hub exists to provide, and
+            // does it before the batch that was supposed to hide the transaction
+            // ever forms (Hornby review, 2026-08-19).
+            //
+            // What the design actually needs from this path is preserved. The
+            // shim is stateless BECAUSE the hub can answer "yes, height 0" for a
+            // diverted migration; that is the existence-and-status signal, and a
+            // wallet renders "pending" from it. The BYTES were never the
+            // load-bearing part -- the wallet that sent the transaction already
+            // has them, and nobody else has any business with them before
+            // publication.
+            //
+            // What this does NOT close: the 200-versus-NotFound distinction
+            // still discloses that a given txid is queued here. Closing that too
+            // means answering NotFound, which costs a wallet the ability to tell
+            // "pending" from "never seen". That is a product decision, not a
+            // code one, and it is left open deliberately.
             tracing::debug!(source = "queue", "transaction lookup answered");
             return LookupOutcome::Found {
-                data: bytes,
+                data: Zeroizing::new(Vec::new()),
                 height: 0,
             };
         }
@@ -416,6 +492,10 @@ fn is_fd_exhaustion(err: &std::io::Error) -> bool {
 /// Taking the listener rather than an address lets the caller (and tests) choose
 /// and observe the bound port.
 pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Result<(), BoxError> {
+    // Created here rather than in `ServeOptions` so that every caller gets the
+    // bound without having to know it exists. There is no configuration for it:
+    // an operator who could raise it could re-open the hole.
+    let lookups = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_LOOKUPS));
     tracing::info!(
         local = ?listener.local_addr().ok(),
         flush_interval = hub.params.flush_interval,
@@ -447,6 +527,7 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
         };
         let hub = hub.clone();
         let options = options.clone();
+        let lookups = lookups.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
             // `.timer()` is load-bearing, not decoration. hyper 1.x defaults
@@ -458,7 +539,9 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
                 .timer(TokioTimer::new())
                 .serve_connection(
                     io,
-                    service_fn(move |req| handle(req, hub.clone(), options.clone())),
+                    service_fn(move |req| {
+                        handle(req, hub.clone(), options.clone(), lookups.clone())
+                    }),
                 )
                 .await
             {
@@ -490,6 +573,7 @@ async fn handle(
     req: Request<Incoming>,
     hub: Hub,
     options: ServeOptions,
+    lookups: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Cloned up front: the handlers below consume `req`, so the method cannot
     // be borrowed from it at the same time. `Method` is cheap to clone.
@@ -500,7 +584,28 @@ async fn handle(
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
         TRANSACTION_PATH => match method {
-            Method::POST => lookup(req, hub).await,
+            // REFUSED, not queued, when every slot is held. Parking it would
+            // rebuild the unbounded pile the bound exists to prevent -- the same
+            // reasoning the mixnet arm records. 503 is the honest answer: the
+            // caller learns to come back, and a shim treats it as a failed
+            // lookup and fails closed, which is the correct outcome.
+            Method::POST => match lookups.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    let response = lookup(req, hub).await;
+                    drop(permit);
+                    response
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        limit = MAX_CONCURRENT_HTTP_LOOKUPS,
+                        "clearnet lookup refused: every lookup slot is held"
+                    );
+                    Ok(text(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "too many lookups in flight",
+                    ))
+                }
+            },
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
         NYM_ADDRESS_PATH => match method {

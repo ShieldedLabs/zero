@@ -271,6 +271,38 @@ pub async fn run_driver(
     // second queue growing out of sight.
     let mut in_flight: Option<InFlight> = None;
 
+    /// Report what a teardown is about to abandon, as COUNTS ONLY.
+    ///
+    /// None of these paths can save the frames: there is no drain-then-disconnect
+    /// in the SDK, so `disconnect()` discards its one-slot input, its 8-deep batch
+    /// channel and its unbounded transmission buffer, and some of those frames are
+    /// SUBMITS ALREADY ANSWERED SUCCESS to a wallet. What was missing was any
+    /// record that it happened: every teardown was silent, so a migration
+    /// acknowledged and then destroyed left no trace at all (Hornby review,
+    /// 2026-08-19).
+    ///
+    /// Counts only, never a txid, never a body, never a per-entry identifier. In
+    /// an enclave this output reaches the parent host, which is exactly who the
+    /// system withholds those from. A count says "some were lost"; it cannot say
+    /// which.
+    macro_rules! report_abandoned {
+        ($why:expr, $queued:expr, $sending:expr) => {{
+            let queued = $queued;
+            let sending = $sending;
+            if queued > 0 || sending {
+                tracing::warn!(
+                    reason = $why,
+                    queued_frames = queued,
+                    send_in_flight = sending,
+                    "mixnet client torn down with work outstanding; these frames are \
+                     discarded and MAY INCLUDE SUBMITS ALREADY ANSWERED SUCCESS to a wallet"
+                );
+            } else {
+                tracing::debug!(reason = $why, "mixnet client torn down cleanly");
+            }
+        }};
+    }
+
     // The select decides WHAT happened; the client lifecycle (which consumes the
     // client to disconnect, or replaces it on rebuild) is handled AFTER the
     // select, where none of its futures still borrow the client.
@@ -410,6 +442,7 @@ pub async fn run_driver(
         match step {
             Step::Ferried => {}
             Step::Stop => {
+                report_abandoned!("stop", out_frames.len(), in_flight.is_some());
                 client.disconnect().await;
                 return;
             }
@@ -434,6 +467,7 @@ pub async fn run_driver(
                 // deferral ran out -- while its buffer is non-empty; that window
                 // is real, bounded by the drain rate, and recorded in
                 // PRODUCTION.md rather than papered over here.
+                report_abandoned!("rebuild", out_frames.len(), in_flight.is_some());
                 in_flight = None;
                 // A live rotation: disconnect the current identity to completion
                 // (D12: disconnect is not cancel-safe), then mint a fresh one.
@@ -474,6 +508,7 @@ pub async fn run_driver(
                 silent_rounds = 0;
             }
             Step::Died => {
+                report_abandoned!("died", out_frames.len(), in_flight.is_some());
                 // Dropped with the client it was addressed to, for the same reason
                 // as the rebuild path above.
                 in_flight = None;

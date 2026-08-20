@@ -110,6 +110,25 @@ async fn main() -> Result<(), BoxError> {
     }
 
     let selection = config.hub_selection().map_err(|err| err.to_string())?;
+
+    // SAY IT OUT LOUD when more than one hub is configured. Every migration goes
+    // to EVERY address in the list, in plaintext, unconditionally -- that is the
+    // replicate-never-fail-over rule and it is deliberate. But it means anyone
+    // who can add an address to this list receives a real-time plaintext copy of
+    // every migration, with nothing erroring and no counter moving (Hornby
+    // review, 2026-08-19). A list is a decision; it should not be a quiet one.
+    //
+    // Addresses only, never a migration: this names configuration, which is
+    // already public in the measured `unit.env`, and says nothing about traffic.
+    if let HubSelection::Nym(addresses) = &selection {
+        if addresses.len() > 1 {
+            tracing::warn!(
+                hubs = addresses.len(),
+                addresses = addresses.join(", "),
+                "MULTIPLE HUBS: every migration is sent to ALL of these in plaintext.                  Each one holds every migration this shim diverts"
+            );
+        }
+    }
     let diversion = match selection {
         HubSelection::Http(hub_addr) => {
             // new_http1, NOT new: the hub's submission endpoint is a plain

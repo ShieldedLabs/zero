@@ -404,7 +404,15 @@ async fn a_queued_transaction_is_served_from_the_queue_with_height_zero() {
     let (status, height, body) = lookup(&hub.addr, wire_hash(&txid)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(height, Some(0), "a queued tx is mempool: height 0");
-    assert_eq!(body, V6_ORCHARD_ONLY);
+    // The BYTES are withheld, deliberately. This assertion used to be
+    // `body == V6_ORCHARD_ONLY`, which is what made an unauthenticated lookup a
+    // way to obtain an unpublished migration and broadcast it first. The
+    // existence-and-height signal is what the stateless shim needs and is what
+    // remains; the body is not.
+    assert!(
+        body.is_empty(),
+        "a queued, unpublished migration must not be handed to an unauthenticated caller"
+    );
     assert!(
         looked_up.lock().unwrap().is_empty(),
         "the queue answered, so the indexer was never queried"
@@ -412,6 +420,48 @@ async fn a_queued_transaction_is_served_from_the_queue_with_height_zero() {
     assert!(
         broadcast.lock().unwrap().is_empty(),
         "and nothing was broadcast"
+    );
+}
+
+/// The queue answers that a migration EXISTS, and nothing more.
+///
+/// Pre-publication bytes are the one thing a third party could act on: take
+/// them, broadcast first, and the batch that was supposed to hide the
+/// transaction never gets the chance to form.
+#[tokio::test]
+async fn a_queued_migration_is_never_handed_to_an_unauthenticated_caller() {
+    let broadcast = Arc::new(Mutex::new(Vec::new()));
+    let looked_up = Arc::new(Mutex::new(Vec::new()));
+    let indexer = spawn_mock_indexer_full(
+        0,
+        "unused",
+        GetTx::NotFound,
+        broadcast.clone(),
+        looked_up.clone(),
+    )
+    .await;
+    let hub = spawn_hub(indexer).await;
+
+    let txid = post_json(&hub.addr, V6_ORCHARD_ONLY.to_vec()).await["txid"]
+        .as_str()
+        .expect("a computed txid")
+        .to_owned();
+
+    let (status, height, body) = lookup(&hub.addr, wire_hash(&txid)).await;
+
+    // Still answerable: the shim stays stateless because this says "yes, 0".
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(height, Some(0));
+
+    // But the migration itself does not leave the enclave before it is published.
+    assert!(body.is_empty(), "the body must be withheld");
+    assert_ne!(
+        body, V6_ORCHARD_ONLY,
+        "the queued transaction's bytes must never be served"
+    );
+    assert!(
+        broadcast.lock().unwrap().is_empty(),
+        "and it must still be unpublished at this point"
     );
 }
 

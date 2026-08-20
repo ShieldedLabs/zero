@@ -6,6 +6,14 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
+## Unreleased
+
+### CI
+- cargo vet supply-chain gate: every Rust dependency change must land with a
+  matching audit or exemption diff under the component's `supply-chain/`
+  directory (new stores for zaino and orchard; zebra's and zcashd's brought
+  back in sync with their trees; enforced by `cargo-vet.yml`).
+
 ## v26 - 2026-08-11
 
 ### Added

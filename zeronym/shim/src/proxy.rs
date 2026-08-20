@@ -203,6 +203,25 @@ const DIAL_BACKOFF: Duration = Duration::from_millis(100);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the accept loop pauses after a file-descriptor exhaustion error, so
+/// How many wallet connections may be in flight at once.
+///
+/// The per-request buffer is already capped at `MAX_SEND_TX_BYTES` (4 MiB), but
+/// nothing capped the AGGREGATE: the accept loop spawned a task per socket with
+/// no semaphore, no counter and no admission control, so the ceiling was however
+/// many sockets an attacker cared to open (Hornby review, 2026-08-19). Against a
+/// fixed 2048 MB enclave that is roughly 512 concurrent 4 MiB bodies before the
+/// process is killed, and it takes the mixnet client, its identity, and any
+/// acknowledged-but-unemitted submit with it.
+///
+/// 256 keeps the worst case near 1 GB with headroom for everything else the
+/// enclave holds, while being far above what honest wallet traffic reaches: a
+/// wallet opens one connection and reuses it for streamed gRPC.
+///
+/// A connection over the limit is CLOSED, not queued. Holding it would rebuild
+/// the same unbounded pile one layer up, and a wallet that is refused retries,
+/// which is the behaviour it already has for any dropped connection.
+const MAX_INFLIGHT_CONNECTIONS: usize = 256;
+
 /// it does not spin at full tilt while the process is out of descriptors.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
@@ -485,6 +504,9 @@ where
     // nothing is ever sent, so `recv()` resolves to `None` exactly when the last
     // connection has finished.
     let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // Bounds how many wallet connections are alive at once. Created here so the
+    // budget is shared across the whole listener rather than per-connection.
+    let inflight = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_CONNECTIONS));
     tokio::pin!(shutdown);
 
     loop {
@@ -519,6 +541,21 @@ where
                 // performance bug rather than the kernel default it is. Best
                 // effort: a failure here is not worth refusing the connection.
                 let _ = stream.set_nodelay(true);
+
+                // Taken BEFORE the connection task is spawned and held for its
+                // whole life, so the bound covers the buffered body and not just
+                // the handshake.
+                let permit = match inflight.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!(
+                            %peer,
+                            limit = MAX_INFLIGHT_CONNECTIONS,
+                            "connection refused: every in-flight slot is held"
+                        );
+                        continue;
+                    }
+                };
                 let live = live_tx.clone();
                 let backend = backend.clone();
                 let tls = tls.clone();
@@ -527,6 +564,7 @@ where
                 let status = status.clone();
                 tokio::spawn(async move {
                     let _live = live;
+                    let _permit = permit;
                     match tls {
                         None => {
                             serve_connection(stream, peer, backend, diversion, caution, status)

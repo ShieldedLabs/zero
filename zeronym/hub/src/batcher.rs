@@ -184,7 +184,15 @@ impl TipTracker {
                     "chain tip moved backwards within the reorg allowance; following it"
                 );
                 state.height = height;
-                state.last_advance = Instant::now();
+                // `last_advance` is NOT refreshed here. It means "the last time
+                // the tip moved FORWARD", which is what staleness is asking
+                // about, and a reorg is not the chain advancing. Refreshing it
+                // let a tip oscillating inside the reorg allowance -- 999, 1000,
+                // 999, 1000 -- look like liveness forever: `is_stale` never
+                // fired, so the flush cadence froze and nothing ever said why
+                // (Hornby review, 2026-08-19). A genuine reorg followed by
+                // genuine progress refreshes it on the next forward observation,
+                // which is the only thing that should.
             } else {
                 // Beyond any plausible reorg: a lagging or hostile node won the
                 // max, or a node is lying. Do not follow it.
@@ -194,6 +202,15 @@ impl TipTracker {
                 );
             }
         }
+    }
+
+    /// Age `last_advance` by `by`, so a test can reach a staleness threshold
+    /// without waiting for it. Test-only: there is no other way to observe that
+    /// a code path did or did not refresh the advance clock.
+    #[cfg(test)]
+    pub fn age_last_advance_for_test(&self, by: Duration) {
+        let mut state = self.write();
+        state.last_advance -= by;
     }
 
     /// True once a tip has ever been observed.
@@ -425,6 +442,28 @@ pub async fn flush(
             "indexer could not be reached for part of the batch; held for the next flush"
         );
     }
+    // A SHAPE WITH NO BENIGN EXPLANATION, when there is only one endpoint.
+    //
+    // The batch goes out as `k` simultaneous requests to the same indexer. If it
+    // is up, they all reach it; if it is down, none do. So "some placed, some
+    // held" from a SINGLE endpoint is not an outage -- it is that endpoint
+    // choosing which members of the batch reach the chain, which sets the
+    // on-chain batch size regardless of how large the hub's batch was (Hornby
+    // review, 2026-08-19). Every other defence in this file protects the
+    // DECISION to publish; nothing protected what happens after.
+    //
+    // Only meaningful with one endpoint. With several, a partial failure is
+    // ordinary and this would cry wolf on every routine outage.
+    if chain.endpoint_count() == 1 && achieved >= 1 && requeued.held >= 1 {
+        tracing::error!(
+            achieved_batch_size = achieved,
+            requeued = requeued.held,
+            "SELECTIVE HOLD-BACK: one indexer placed part of a simultaneous batch and \
+             held the rest. An outage cannot do this; the endpoint is choosing what \
+             reaches the chain, and the on-chain batch is smaller than this hub's"
+        );
+    }
+
     // Louder than the requeue, because this is where a migration stops existing.
     // A wallet was told these were on their way and nothing else holds a copy,
     // so a non-zero count here is the signal that someone has lost a migration,
@@ -525,6 +564,30 @@ mod tests {
         tip.observe(1000);
         tip.observe(995);
         assert_eq!(tip.observed_height(), 995, "a real reorg must be followed");
+    }
+
+    #[test]
+    fn a_reorg_does_not_count_as_the_tip_advancing() {
+        // An oscillating tip inside the reorg allowance used to refresh
+        // `last_advance` on every backward step, so a chain that was not
+        // advancing at all looked live forever and the flush cadence froze.
+        let tip = TipTracker::new();
+        tip.observe(1000);
+        tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
+        assert!(tip.is_stale(), "precondition: the tip is stale before the reorg");
+
+        tip.observe(999);
+        assert_eq!(tip.observed_height(), 999, "the reorg is still followed");
+        assert!(
+            tip.is_stale(),
+            "following a reorg must not reset the staleness clock"
+        );
+
+        tip.observe(1001);
+        assert!(
+            !tip.is_stale(),
+            "real forward progress is what clears staleness"
+        );
     }
 
     #[test]

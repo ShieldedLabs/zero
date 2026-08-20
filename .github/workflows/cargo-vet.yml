@@ -1,0 +1,186 @@
+name: cargo vet
+
+# Supply-chain gate for the six Rust workspaces. Every third-party crate that
+# reaches a build must be covered by an audit (our own, or imported from
+# organizations we trust: Mozilla, Google, Bytecode Alliance, ISRG, Embark,
+# Fermyon, ECC's rust-ecosystem) or by an exemption recorded in the
+# component's supply-chain/ directory. The gate turns a dependency change --
+# a subtree bump, a lockfile edit, a crate slipped into a Cargo.toml -- into
+# a reviewable diff under supply-chain/ instead of a silent grant of
+# build-time code execution to a new upstream.
+#
+# `cargo vet --locked` reads only the committed lockfile and the committed
+# audit store (imports.lock pins the imported audits), so a green run is
+# reproducible and cannot be changed from outside the repo. Maintainer flow
+# for a red run: MAINTENANCE.md, "Supply-chain audits (cargo vet)".
+
+on:
+  # Deliberately no `paths:` filter; the equivalent list lives in the
+  # `changes` job below. Same reasoning as z3-smoke.yml: a dropped
+  # pull_request event on a path-filtered workflow is indistinguishable from
+  # a pass. This workflow registers on every PR, the path decision is made in
+  # a job where it is logged, and `required` reports on every PR either way.
+  pull_request:
+  # Direct pushes to main bypass PR CI entirely; this is the backstop.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Path gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.gate.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # On pull_request, HEAD is the merge commit GitHub built from the
+          # PR; depth 2 is enough to diff it against the base it was merged
+          # onto.
+          fetch-depth: 2
+
+      - name: Decide whether this change can alter a dependency graph
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Every non-PR event vets unconditionally; the job is cheap enough
+          # that only PR noise is worth filtering.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "Event \`$EVENT_NAME\`: vetting unconditionally." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Anything that can change what code cargo resolves: any manifest
+          # (deps, [patch] sections), any lockfile, and the audit stores
+          # themselves. zcashd keeps its store at qa/supply-chain (see
+          # [package.metadata.vet] in zcashd/Cargo.toml).
+          specs=(
+            ':(glob).github/workflows/cargo-vet.yml'
+            ':(glob)zcashd/Cargo.toml'
+            ':(glob)zcashd/**/Cargo.toml'
+            ':(glob)zcashd/Cargo.lock'
+            ':(glob)zcashd/qa/supply-chain/**'
+            ':(glob)zebra/Cargo.toml'
+            ':(glob)zebra/**/Cargo.toml'
+            ':(glob)zebra/Cargo.lock'
+            ':(glob)zebra/supply-chain/**'
+            ':(glob)zaino/Cargo.toml'
+            ':(glob)zaino/**/Cargo.toml'
+            ':(glob)zaino/Cargo.lock'
+            ':(glob)zaino/supply-chain/**'
+            ':(glob)zallet/Cargo.toml'
+            ':(glob)zallet/**/Cargo.toml'
+            ':(glob)zallet/Cargo.lock'
+            ':(glob)zallet/supply-chain/**'
+            ':(glob)orchard/Cargo.toml'
+            ':(glob)orchard/**/Cargo.toml'
+            ':(glob)orchard/Cargo.lock'
+            ':(glob)orchard/supply-chain/**'
+            ':(glob)librustzcash/Cargo.toml'
+            ':(glob)librustzcash/**/Cargo.toml'
+            ':(glob)librustzcash/Cargo.lock'
+            ':(glob)librustzcash/supply-chain/**'
+          )
+
+          # Fail open: if the merge commit is not there to diff, vet rather
+          # than skip. "We could not tell" must never silently mean "no CI".
+          if ! git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::could not diff the merge commit against its base; vetting unconditionally"
+            echo "Could not diff the merge commit; vetting unconditionally." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if git diff --name-only HEAD^1 HEAD -- "${specs[@]}" | grep -q .; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency-relevant paths changed; vetting." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No manifest, lockfile, or supply-chain change; skipping." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  vet:
+    name: Vet Rust dependencies
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # cargo vet only runs `cargo metadata`, which any current stable can do
+      # for every workspace here. Overriding the per-component
+      # rust-toolchain.toml pins avoids downloading a separate toolchain per
+      # subtree for what is a manifest parse.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Update stable toolchain
+        run: rustup update --no-self-update stable
+
+      # Same recipe as the upstream ECC repos' audits.yml. ~0.10 tracks
+      # cargo-vet patch releases; the store format ("0.10" in each
+      # config.toml) is what has to match.
+      - name: Install cargo-vet
+        run: cargo install --locked cargo-vet --version '~0.10'
+
+      - name: Vet zcashd
+        working-directory: zcashd
+        run: cargo vet --locked
+
+      - name: Vet zebra
+        working-directory: zebra
+        run: cargo vet --locked
+
+      - name: Vet zaino
+        working-directory: zaino
+        run: cargo vet --locked
+
+      - name: Vet zallet
+        working-directory: zallet
+        run: cargo vet --locked
+
+      - name: Vet orchard
+        working-directory: orchard
+        run: cargo vet --locked
+
+      - name: Vet librustzcash
+        working-directory: librustzcash
+        run: cargo vet --locked
+
+  # The single check to require in branch protection. It reports on every PR,
+  # including the ones the gate skipped, so "the workflow never ran" can never
+  # be indistinguishable from "the workflow passed". A skipped vet is a pass
+  # here; only a real failure or a cancellation fails it.
+  required:
+    name: cargo vet result
+    needs: [changes, vet]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collect job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          bad=$(jq -r 'to_entries[]
+                       | select(.value.result == "failure" or .value.result == "cancelled")
+                       | .key' <<< "$NEEDS" | paste -sd, -)
+          if [ -n "$bad" ]; then
+            echo "::error::cargo-vet jobs failed or were cancelled: ${bad}"
+            exit 1
+          fi

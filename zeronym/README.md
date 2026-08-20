@@ -31,7 +31,8 @@ Under the [ZIP 307](https://zips.z.cash/zip-0307) light-client protocol a wallet
 
 **Not protected**
 
-- **Transparent-pool queries.** `GetTaddressTxids`, `GetTaddressBalance` and `GetAddressUtxos` are not intercepted and still reach the operator.
+- **Transparent-pool queries.** `GetTaddressTxids`, `GetTaddressBalance` and `GetAddressUtxos` are not intercepted and still reach the operator. Say the consequence plainly: the reference light-client SDK hands the operator's own indexer the wallet's whole transparent address set, and from those the operator can recover a diverted transaction's txid **and its value**. So "the operator does not learn the amount" is not a claim this design supports for a wallet that touches the transparent pool.
+- **The size of a wallet's submission.** TLS terminates inside the enclave, so the operator never sees plaintext -- but TLS hides content, not length. The wallet-to-shim leg is unpadded, so the operator observes `|tx|` and the instant it arrived. Transaction sizes are public on-chain, so that pair can be matched against the published batch, and for an unusually sized transaction it identifies which member is which. The shim-to-hub leg was padded to a fixed frame in August 2026; this leg was not, and it cannot be fixed in the shim, because padding has to happen at the sender.
 - **Physical security is delegated to AWS.** Nitro's memory isolation and hardware root of trust are what keep the operator out of the enclave, which means the guarantees above hold against everyone except AWS itself.
 
 ### Reporting
@@ -65,7 +66,9 @@ Four audiences, four different answers.
 - **Wallet users** install nothing and change no setting. Point your wallet at the same endpoint URL as before.
 - **Wallet developers** have exactly one requirement, and it is a hard one: choose **aligned anchors and expiry heights** within a migration epoch, the [ZIP 318](https://zips.z.cash/zip-0318) behavior. A latest-anchor wallet is timestamped by its anchor, which re-links it inside the revealed batch and undoes the protection. Note also that a diverted broadcast is delayed up to ~25 minutes and the shim answers before the hub has confirmed receipt, so a wallet is told "accepted" ahead of the chain and a failed migration can fail silently.
 - **Operators** run the shim in front of their indexer, and optionally a hub. Orchard-touching transactions and `GetTransaction` lookups stop being yours to see; everything else passes through as today.
-- **Auditors** verify an endpoint without trusting its operator: fetch its attestation, check the PCRs against the AWS Nitro root, reproduce the build and compare hashes, and check Certificate Transparency for a shadow certificate.
+- **Auditors** verify an endpoint without trusting its operator, in two independent halves. **Reproduce the build**: two builds of a commit yield the same binary, which is what `EXPECTED_SHA256` records. **Verify the attestation**, from a fresh clone of the public app-source repo: `caution verify --attestation-url https://<domain>/attestation` rebuilds the EIF and compares PCR0, PCR1 and PCR2 against the live attestation, plus the TLS certificate binding. Require **all three PCRs** -- hub and shim produce byte-identical PCR2, so PCR2 alone identifies the platform, not the code. **Two further steps, without which a PASS proves less than it appears to.** (a) `caution verify` rebuilds from the repository the OPERATOR nominated in the manifest, so a clean PASS proves the enclave runs *their* published code, not zero-indexer. Re-run `assemble-caution.sh` from `github.com/ShieldedLabs/zero` at the commit the endpoint's provenance names, with the parameters the published `caution.hcl` shows, and `diff -r` the result against the repository `caution verify` cloned. (b) Resolve the domain and confirm it points at the Caution-managed target for the app id in the published artefacts -- one `dig`, and it turns an invisible layer-4 interposition into an observable one, because every other check on this list passes through a plain TCP forwarder.
+
+Two things this list used to get wrong (corrected 2026-08-19): there is no binary hash inside any attestation to "compare hashes" against, and Certificate Transparency is not the certificate check -- the attestation binds the TLS certificate directly, which is stronger and is what `caution verify` checks.
 
 ## How it works
 
@@ -80,7 +83,7 @@ Green boxes are attested enclaves, the only things that see a migration in clear
 
 **Deployed:** classify and divert; the stateless shim; hub queue, batch and flush; `GetTransaction` served by the hub; attested Nitro enclaves (since 2026-08-01, first third-party operator 2026-08-10); in-enclave TLS termination; and the **Nym transport**, running on the public mixnet since 2026-08-14, with the hub publishing its address at `GET /nym-address`.
 
-**Partly built:** multi-hub failover. The shim rotates which hub address each submit targets; holding a migration across requests does not exist.
+**Partly built:** multi-hub REPLICATION -- not failover, which is forbidden (Taylor Hornby's rule, 2026-08-17: replicate, never fail over; `REVIEW.md` #6 independently). A shim choosing its hub by health hands an attacker the ability to isolate one migration by briefly downing a hub during its retry. This line described failover and also described the code wrongly (corrected 2026-08-19): the shim does not rotate which hub a submit targets, it sends every migration to EVERY configured hub, unconditionally. The rotating cursor only varies where the sweep of the address list STARTS, so load spreads across a multi-homed hub's gateways. What is genuinely missing is holding a migration across requests.
 
 **Designed, no code yet:** the STEVE handshake, the encrypt-to-hub-key layer, the keymaker quorum and consortium governance, and confirmation tracking.
 

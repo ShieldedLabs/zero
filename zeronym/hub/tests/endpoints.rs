@@ -36,6 +36,39 @@ use zero_indexer_hub::server::{self, Hub, NymAddress, ServeOptions};
 const ADDRESS: &str = "41pY2atgQD2iQkvC2TnKaxkUDGkqfxU9XBtQEk2GmJqD.\
 HdjEPfnu2u5DV3jbZqZ6NJEhr1U5u9r41Gt8qncoByHx@tUiLPjz5nkPn5ZJT5ZXLPGDcZ3caQsfkMAp1epoAuSQ";
 
+/// Start a hub whose lookups dial `indexer`, so a test can hold them open.
+async fn spawn_with_indexer(options: ServeOptions, indexer: std::net::SocketAddr) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let tip = Arc::new(TipTracker::new());
+    tip.observe(100);
+    tokio::spawn(server::serve(
+        listener,
+        Hub {
+            queue: Arc::new(Queue::new()),
+            tip,
+            params: BatchParams::default(),
+            chain: Arc::new(ChainClient::new(vec![indexer], None).unwrap()),
+        },
+        options,
+    ));
+    addr
+}
+
+/// A listener that accepts and then never answers, so every lookup dialling it
+/// stays in flight and keeps holding its concurrency slot.
+async fn hanging_indexer() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream); // keep it open; never respond
+        }
+    });
+    addr
+}
+
 /// Start a hub with the given options and return its address.
 async fn spawn(options: ServeOptions) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -461,4 +494,92 @@ async fn a_malformed_frame_is_refused_rather_than_read_as_a_transaction() {
         StatusCode::BAD_REQUEST,
         "a frame that does not decode is a bad request, not a transaction"
     );
+}
+
+
+/// The clearnet lookup arm is bounded, and says so rather than queueing.
+///
+/// A ~100-byte unauthenticated `POST /transaction` used to buy an unbounded
+/// spawned task and a fresh dial to the indexer, while the sibling mixnet arm
+/// had capped exactly this at 64 since it was written. Descriptor exhaustion
+/// then reaches the flush's own `broadcast_batch`, so a lookup flood degraded
+/// PUBLICATION and not merely lookups (Hornby review, 2026-08-19).
+#[tokio::test]
+async fn the_clearnet_lookup_arm_refuses_rather_than_queueing_when_full() {
+    const LIMIT: usize = 64; // hub::server::MAX_CONCURRENT_HTTP_LOOKUPS
+
+    let indexer = hanging_indexer().await;
+    let hub = spawn_with_indexer(
+        ServeOptions {
+            nym_address: NymAddress::unknown(),
+            http_submit: false,
+        },
+        indexer,
+    )
+    .await;
+
+    // Fill every slot. Each of these misses the empty queue, dials the hanging
+    // indexer, and stays there holding its permit.
+    let mut held = Vec::new();
+    for _ in 0..LIMIT {
+        let hub = hub.clone();
+        held.push(tokio::spawn(async move {
+            post(&hub, "/transaction", vec![7u8; 32]).await
+        }));
+    }
+
+    // Let them all reach the dial. Without this the assertion below races the
+    // requests it is meant to queue behind.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+    let status = post(&hub, "/transaction", vec![9u8; 32]).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a lookup arriving with every slot held must be refused, not parked"
+    );
+
+    for task in held {
+        task.abort();
+    }
+}
+
+/// The bound is on the lookup arm ONLY.
+///
+/// Admission does no I/O, so a ceiling on it would buy nothing and would cost
+/// the one property the listener has to keep: that a migration is admitted while
+/// lookups are stuck. This is the mixnet arm's stated rule, now enforced on both.
+#[tokio::test]
+async fn a_saturated_lookup_arm_does_not_block_the_health_endpoint() {
+    const LIMIT: usize = 64;
+
+    let indexer = hanging_indexer().await;
+    let hub = spawn_with_indexer(
+        ServeOptions {
+            nym_address: NymAddress::unknown(),
+            http_submit: false,
+        },
+        indexer,
+    )
+    .await;
+
+    let mut held = Vec::new();
+    for _ in 0..LIMIT {
+        let hub = hub.clone();
+        held.push(tokio::spawn(async move {
+            post(&hub, "/transaction", vec![7u8; 32]).await
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+    let (status, _) = get(&hub, "/healthz").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the lookup bound must not reach anything but lookups"
+    );
+
+    for task in held {
+        task.abort();
+    }
 }

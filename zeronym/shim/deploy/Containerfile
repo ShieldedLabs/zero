@@ -30,10 +30,18 @@
 # every rocksdb / libzcash_script workaround SUBTRACTED, because the shim's
 # dependency graph contains neither.
 #
-# WHY THIS EXISTS: the Zeronym trust model gives the auditor the job of
-# rebuilding from source, getting the same hash, and matching it against the
-# hash bound into the enclave attestation. Without that, an attestation proves
-# only that SOME binary runs inside a genuine enclave, which collapses the whole
+# WHY THIS EXISTS: to make the build DETERMINISTIC, so a given commit yields a
+# given hash on any machine.
+#
+# Corrected 2026-08-19: this used to say the auditor's job was to match that hash
+# "against the hash bound into the enclave attestation". No attestation this
+# platform produces contains a binary hash -- the Containerfile deploy path
+# passes `None` for the manifest's `binary` field -- so that comparison was not
+# available to anyone. The enclave is bound to the code by `caution verify`,
+# which rebuilds the EIF from the manifest's app-source repo and compares
+# PCR0/1/2 plus the TLS certificate binding. Reproducibility is the precondition
+# that makes that comparison meaningful, not the comparison itself. Without it an
+# attestation proves only that SOME enclave is running, which collapses the whole
 # design back into trusting whoever compiled it.
 #
 # Build context = a partial mirror of the zero repo (assemble via assemble.sh):

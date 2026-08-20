@@ -52,6 +52,32 @@ pub struct Config {
     #[arg(long = "indexer-tls", env = "ZIH_INDEXER_TLS")]
     pub indexer_tls: Option<String>,
 
+    /// Run with an UNAUTHENTICATED hop to the indexer. Off by default, and it
+    /// must stay that way in any real deployment.
+    ///
+    /// Without `--indexer-tls` the hub speaks cleartext h2c to the indexer, so
+    /// the enclave's parent host reads every flushed batch minutes before it is
+    /// public -- which is the whole exposure the hub exists to remove. That case
+    /// used to fail OPEN behind a `warn!` the operator of an attested enclave
+    /// cannot even read, there being no console (Hornby review, 2026-08-19).
+    ///
+    /// It is a flag rather than a hard refusal because a local run against a
+    /// plaintext lightwalletd is legitimate. It is safe as a flag because the
+    /// manifest's `unit.env` -- every `ZIH_*` value AND their absence -- is
+    /// measured into PCR0/PCR1, so a deployment that sets this cannot hide it
+    /// from anyone running `caution verify`.
+    /// Takes an explicit `true`/`false` for the same reason `--http-submit`
+    /// does: it is usually set from the environment, where a bare flag would
+    /// read as set whenever the variable merely exists -- which for THIS flag
+    /// would silently turn the protection off.
+    #[arg(
+        long = "allow-plaintext-indexer",
+        env = "ZIH_ALLOW_PLAINTEXT_INDEXER",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
+    pub allow_plaintext_indexer: bool,
+
     /// Also accept submissions over the Nym mixnet (M5), alongside the clearnet
     /// `--listen` socket. The hub's mixnet address is logged at startup; publish
     /// it to shims as `--hub-nym`. Requires a build with the `mixnet-driver`
@@ -105,11 +131,82 @@ impl Config {
             None => Ok(None),
         }
     }
+
+    /// Refuse to start with an unauthenticated hop to the indexer unless it was
+    /// asked for by name.
+    ///
+    /// This used to be a `warn!`, which fails OPEN twice over: the deployment
+    /// runs, and the warning goes to a log the operator of an ATTESTED enclave
+    /// cannot read, because attestation is what closes the console. So the one
+    /// signal that every flushed batch was readable by the parent host reached
+    /// nobody (Hornby review, 2026-08-19).
+    ///
+    /// Whitespace counts as unset. `ZIH_INDEXER_TLS=` templated in by a deploy
+    /// script is the shape this is most likely to arrive in, and treating it as
+    /// "configured" would reintroduce exactly the silence being removed.
+    pub fn check_indexer_tls(&self) -> Result<(), BoxError> {
+        let configured = self
+            .indexer_tls
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|name| !name.is_empty());
+
+        match (configured, self.allow_plaintext_indexer) {
+            (true, _) => Ok(()),
+            (false, true) => {
+                tracing::warn!(
+                    "--allow-plaintext-indexer: the hop to the indexer is PLAINTEXT and the \
+                     parent host can read every batch before it is public. Never deploy this."
+                );
+                Ok(())
+            }
+            (false, false) => Err("refusing to start: no --indexer-tls, so the hop to the \
+                 indexer would be plaintext h2c and the enclave's parent host would read \
+                 every flushed batch minutes before it is public. Set --indexer-tls to the \
+                 name the indexer's certificate carries, or pass --allow-plaintext-indexer \
+                 to say you meant it."
+                .into()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a config with only the fields these tests care about.
+    fn cfg(indexer_tls: Option<&str>, allow_plaintext: bool) -> Config {
+        let mut c = Config::parse_from(["zero-indexer-hub", "--indexer", "127.0.0.1:1"]);
+        c.indexer_tls = indexer_tls.map(str::to_owned);
+        c.allow_plaintext_indexer = allow_plaintext;
+        c
+    }
+
+    #[test]
+    fn an_unset_indexer_tls_refuses_to_start() {
+        // It used to warn and continue, into a console attestation has closed,
+        // so nobody learned the parent host could read every batch.
+        assert!(cfg(None, false).check_indexer_tls().is_err());
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_indexer_tls_counts_as_unset() {
+        // `ZIH_INDEXER_TLS=` templated in by a deploy script is the shape this
+        // arrives in most often. Treating it as configured would reintroduce
+        // exactly the silence being removed.
+        assert!(cfg(Some(""), false).check_indexer_tls().is_err());
+        assert!(cfg(Some("   "), false).check_indexer_tls().is_err());
+    }
+
+    #[test]
+    fn a_configured_indexer_tls_starts() {
+        assert!(cfg(Some("na.zec.rocks"), false).check_indexer_tls().is_ok());
+    }
+
+    #[test]
+    fn plaintext_is_allowed_only_when_asked_for_by_name() {
+        assert!(cfg(None, true).check_indexer_tls().is_ok());
+    }
 
     #[test]
     fn a_comma_separated_indexer_list_splits() {

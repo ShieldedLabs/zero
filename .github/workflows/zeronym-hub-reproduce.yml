@@ -17,6 +17,25 @@ name: zeronym-hub-reproduce
 
 on:
   workflow_dispatch:
+  # PUSH, not just pull_request. This branch takes direct pushes, so gating
+  # only on PRs meant the one automated check on the attested binaries had
+  # never run on a commit that published a hash (Hornby review, 2026-08-19).
+  # A hash could therefore be published, deployed and verified by a third
+  # party without this job ever confirming it reproduces. Keep both path
+  # lists identical.
+  push:
+    paths:
+      - ".github/workflows/zeronym-hub-reproduce.yml"
+      - "zeronym/hub/**"
+      # The vendored path dependencies. These are what assemble.sh archives into
+      # the build context, so a subtree pull touching any of them changes the
+      # compiled binary and stales the published hash. Keep in sync with the
+      # archive list in zeronym/hub/deploy/assemble.sh.
+      - "zebra/Cargo.toml"
+      - "zebra/zebra-chain/**"
+      - "zebra/zebra-test/**"
+      - "zaino/Cargo.toml"
+      - "zaino/packages/zaino-proto/**"
   pull_request:
     paths:
       - ".github/workflows/zeronym-hub-reproduce.yml"

@@ -76,6 +76,37 @@ pub struct Config {
     #[arg(long, env = "ZIS_HUB_NYM", value_delimiter = ',')]
     pub hub_nym: Vec<String>,
 
+    /// Refuse to start unless a hub transport is configured.
+    ///
+    /// Without this, a shim whose hub configuration is missing, empty, or
+    /// whitespace resolves to [`HubSelection::ForwardOnly`] -- "No privacy" in
+    /// the enum's own words -- and starts normally, serving wallets and
+    /// diverting nothing. The failure is invisible from outside: the shim
+    /// answers, lookups work, and every migration goes straight to the operator,
+    /// which is the exact exposure this component exists to remove (Hornby
+    /// review, 2026-08-19).
+    ///
+    /// `ZIS_HUB_NYM=` templated in as an empty string is the shape this arrives
+    /// in most often, and it is indistinguishable from "not configured" by
+    /// design (see `hub_selection`), so no amount of care in a deploy script
+    /// closes it. Set this on any deployment whose purpose is privacy.
+    ///
+    /// Forward-only remains a legitimate mode -- it is the merged
+    /// proof-of-concept behaviour and it is useful for a pass-through test --
+    /// which is why this is opt-in rather than the default. The manifest's
+    /// `unit.env` is measured into PCR0/PCR1, so whether a deployment set it is
+    /// visible to anyone running `caution verify`.
+    /// Takes an explicit `true`/`false`: it is usually set from the
+    /// environment, where a bare flag would read as set whenever the variable
+    /// merely exists. Same discipline as the hub's `--http-submit`.
+    #[arg(
+        long = "require-diversion",
+        env = "ZIS_REQUIRE_DIVERSION",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
+    pub require_diversion: bool,
+
     /// Rotate the mixnet client's identity every N seconds (D11): the window
     /// within which the hub can link one shim's submissions under a single
     /// sender tag. Unset means NEVER rotate, which leaves that window at the
@@ -226,6 +257,10 @@ pub enum ConfigError {
     /// The same hub address appears twice. Harmless to send to, but it means
     /// the operator believes there is redundancy that does not exist.
     DuplicateNymAddress(String),
+    /// `--require-diversion` was set and no hub transport resolved, so this
+    /// shim would have run forward-only: serving wallets, diverting nothing,
+    /// and looking healthy while doing it.
+    DiversionRequired,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -241,6 +276,12 @@ impl std::fmt::Display for ConfigError {
             ConfigError::DuplicateNymAddress(addr) => {
                 write!(f, "--hub-nym lists the same address twice: {addr}")
             }
+            ConfigError::DiversionRequired => f.write_str(
+                "--require-diversion is set but no hub transport is configured: this shim \
+                 would forward every migration to the operator's indexer while appearing \
+                 healthy. Set --hub (clearnet) or --hub-nym (mixnet), or drop \
+                 --require-diversion to run deliberately in forward-only mode.",
+            ),
         }
     }
 }
@@ -269,6 +310,11 @@ impl Config {
         match (self.hub, addresses.is_empty()) {
             (Some(_), false) => Err(ConfigError::BothTransports),
             (Some(addr), true) => Ok(HubSelection::Http(addr)),
+            // Checked HERE rather than at the call site so that every path that
+            // resolves a transport gets it, including tests and any future
+            // caller. Forward-only is only reachable when nobody asked for
+            // privacy.
+            (None, true) if self.require_diversion => Err(ConfigError::DiversionRequired),
             (None, true) => Ok(HubSelection::ForwardOnly),
             (None, false) => {
                 let mut seen: Vec<&str> = Vec::new();
@@ -311,6 +357,76 @@ fn is_nym_address(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config with no transport configured at all.
+    fn forward_only() -> Config {
+        Config::parse_from(["zero-indexer-shim", "--backend", "127.0.0.1:1"])
+    }
+
+    #[test]
+    fn require_diversion_refuses_a_shim_that_would_divert_nothing() {
+        // Without this the shim starts, serves wallets, answers lookups, and
+        // sends every migration straight to the operator -- indistinguishable
+        // from working, from outside.
+        let mut cfg = forward_only();
+        cfg.require_diversion = true;
+        assert_eq!(cfg.hub_selection(), Err(ConfigError::DiversionRequired));
+    }
+
+    #[test]
+    fn require_diversion_refuses_an_empty_hub_list_too() {
+        // `ZIS_HUB_NYM=` reaches clap as one EMPTY value, which `hub_selection`
+        // deliberately treats as "not configured". That is the case this flag
+        // exists for: no deploy script can distinguish it.
+        let mut cfg = forward_only();
+        cfg.require_diversion = true;
+        cfg.hub_nym = vec![String::new(), "   ".to_owned()];
+        assert_eq!(cfg.hub_selection(), Err(ConfigError::DiversionRequired));
+    }
+
+    #[test]
+    fn require_diversion_is_satisfied_by_either_transport() {
+        let mut clearnet = forward_only();
+        clearnet.require_diversion = true;
+        clearnet.hub = Some("127.0.0.1:443".parse().unwrap());
+        assert!(matches!(clearnet.hub_selection(), Ok(HubSelection::Http(_))));
+    }
+
+    #[test]
+    fn require_diversion_takes_an_explicit_value_not_mere_presence() {
+        // The flag is normally set from the manifest's env, where a BARE clap
+        // bool reads as true whenever the variable merely exists -- so
+        // `ZIS_REQUIRE_DIVERSION=false` would have turned the check ON, and the
+        // mirror-image mistake on the hub's `--allow-plaintext-indexer` would
+        // have turned a protection OFF. Both take an explicit value for that
+        // reason; this pins it.
+        let off = Config::parse_from([
+            "zero-indexer-shim",
+            "--backend",
+            "127.0.0.1:1",
+            "--require-diversion",
+            "false",
+        ]);
+        assert!(!off.require_diversion);
+        assert_eq!(off.hub_selection(), Ok(HubSelection::ForwardOnly));
+
+        let on = Config::parse_from([
+            "zero-indexer-shim",
+            "--backend",
+            "127.0.0.1:1",
+            "--require-diversion",
+            "true",
+        ]);
+        assert!(on.require_diversion);
+        assert_eq!(on.hub_selection(), Err(ConfigError::DiversionRequired));
+    }
+
+    #[test]
+    fn forward_only_still_works_when_nobody_asked_for_privacy() {
+        // It is the merged proof-of-concept behaviour and a legitimate
+        // pass-through test mode, which is why the check is opt-in.
+        assert_eq!(forward_only().hub_selection(), Ok(HubSelection::ForwardOnly));
+    }
 
     #[test]
     fn defaults_parse_and_differ() {

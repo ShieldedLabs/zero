@@ -16,9 +16,24 @@ rocksdb and no libzcash_script.
 
 ## Why reproducibility is the whole point
 
-The Zeronym trust model is detection-based, and it hands the auditor one job:
-rebuild from source, get the same hash, and check that hash against the one
-bound into the enclave attestation.
+The Zeronym trust model is detection-based, and it hands the auditor TWO jobs,
+not one. This section used to describe a single job -- rebuild, get the same
+hash, and check it "against the one bound into the enclave attestation" --
+and that second half was not possible: no attestation this platform produces
+contains a binary hash (corrected 2026-08-19).
+
+1. **Reproduce the build.** Two independent builds of a commit yield the same
+   binary. That is what this directory is for, and what `EXPECTED_SHA256`
+   records. Nothing in the enclave ever sees that value.
+2. **Verify the attestation**, from a fresh clone of the public app-source repo:
+   `caution verify` rebuilds the EIF from it and compares PCR0, PCR1 and PCR2
+   against the live attestation, plus the TLS certificate binding. Require all
+   three PCRs; PCR2 alone is identical across different binaries.
+
+The two are separate checks that need each other. Reproducibility without the
+attestation says nothing about what runs; the attestation without
+reproducibility compares a measurement against a build that might land somewhere
+different every time.
 
 Without that chain, an attestation proves only that *some* binary is running
 inside a genuine enclave. It says nothing about *which* binary. The design would
@@ -1179,5 +1194,11 @@ If your hash differs, check these in order:
 
 If the **binary** matches but the **OCI tar** does not, that is a packaging-layer
 difference (Docker or BuildKit version), not a build-determinism failure. The
-binary hash is the load-bearing claim, because that is what an enclave
-attestation binds.
+binary hash is the load-bearing claim of THIS check -- it is what determinism
+means here.
+
+It is not, however, what an enclave attestation binds; that sentence used to say
+so and was wrong (corrected 2026-08-19). An attestation carries PCR measurements
+of the loaded image, never a binary hash. The binary hash matters because a
+non-deterministic build would make the PCR comparison meaningless, not because
+anything compares the hash itself.
