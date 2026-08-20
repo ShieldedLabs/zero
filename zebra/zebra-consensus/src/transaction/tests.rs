@@ -31,7 +31,7 @@ use zebra_chain::{
             insert_fake_orchard_shielded_data, test_transactions, transactions_from_blocks,
             v5_transactions,
         },
-        zip317, Hash, HashType, JoinSplitData, LockTime, Transaction,
+        zip317, Hash, HashType, JoinSplitData, LockTime, Transaction, UnminedTx,
     },
     transparent::{self, CoinbaseSpendRestriction},
 };
@@ -40,7 +40,7 @@ use zebra_node_services::mempool;
 use zebra_state::ValidateContextError;
 use zebra_test::mock_service::MockService;
 
-use crate::{error::TransactionError, transaction::POLL_MEMPOOL_DELAY};
+use crate::{error::TransactionError, transaction::POLL_MEMPOOL_DELAY, BoxError};
 
 use super::{check, BlockRequest, BlockTxVerifier, MempoolRequest, MempoolTxVerifier};
 
@@ -1109,10 +1109,13 @@ async fn block_verification_does_not_use_mempool_verified_state() {
     };
 
     // The mempool has already verified this transaction, and it is now submitted twice as a block
-    // request. Each request runs full block verification independently, which for this transaction
-    // means fetching the spent UTXO from the state service, so two AwaitUtxo responses are queued
-    // below. Reuse of the mempool's result — or of the first block request's result — is prevented
-    // structurally: BlockTxVerifier holds no mempool handle and caches nothing across requests.
+    // request. Each request fetches the spent UTXO from the state service fresh (spent-UTXO
+    // lookups are never cached, and BlockTxVerifier holds no mempool handle), so two AwaitUtxo
+    // responses are queued below. The second request's script checks may be answered by the
+    // transparent script cache; every state-dependent check still reruns per request.
+    //
+    // The mempool attempt itself recorded nothing in the script cache: this transaction spends a
+    // mempool output, which the mempool-site insert guard excludes.
     let utxo_clone = utxo.clone();
     tokio::spawn(async move {
         state
@@ -3659,6 +3662,791 @@ fn mock_transparent_transfer(
     known_utxos.insert(previous_outpoint, previous_utxo);
 
     (input, output, known_utxos)
+}
+
+// Transparent script verification cache tests.
+//
+// The cache is process-global, so these tests must not observe each other's
+// entries. Their transaction ids are NOT unique across tests (the fund amount
+// only varies the spent UTXO, never the transaction bytes, and several tests
+// build byte-identical transactions); isolation comes from the key's
+// spent-outputs digest, which differs whenever the UTXO data differs. Tests
+// that need a fully unique key vary the fund amount for exactly that reason.
+
+/// The transparent script cache must key on the witnessed transaction id, not the txid.
+///
+/// A v5 txid deliberately excludes authorizing data (scriptSigs), so a valid
+/// transaction and a corrupted twin can share a txid while differing in the
+/// ZIP-244 authorizing-data digest. A txid-keyed cache would answer the twin
+/// from the valid transaction's verification and accept an invalid block:
+/// CVE-2026-34377 (GHSA-3vmh-33xr-9cqh), driven here through the production
+/// block verifier.
+#[tokio::test]
+async fn v5_script_cache_rejects_an_authorizing_data_twin() {
+    let network = Network::new_default_testnet();
+    let network_upgrade = NetworkUpgrade::Nu5;
+
+    let block_height = (network_upgrade
+        .activation_height(&network)
+        .expect("NU5 activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (block_height - 1).expect("fake source fund block height is too small");
+
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        true,
+        0,
+        Amount::try_from(10_101).expect("invalid value"),
+    );
+
+    let transaction = Transaction::V5 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::Height(block::Height(0)),
+        expiry_height: (block_height + 1).expect("expiry height is too large"),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        network_upgrade,
+    };
+
+    // The twin corrupts only authorizing data: its scriptSig no longer satisfies
+    // the P2SH lock script, while all effecting data stays identical.
+    let mut twin = transaction.clone();
+    let Transaction::V5 { inputs, .. } = &mut twin else {
+        unreachable!("twin is V5");
+    };
+    let transparent::Input::PrevOut { unlock_script, .. } = &mut inputs[0] else {
+        panic!("test input is a PrevOut");
+    };
+    *unlock_script = transparent::Script::new(&[0]);
+
+    assert_eq!(
+        transaction.hash(),
+        twin.hash(),
+        "the twin must share the valid transaction's txid"
+    );
+    assert_ne!(
+        transaction.auth_digest(),
+        twin.auth_digest(),
+        "the twin must differ in its authorizing-data digest"
+    );
+
+    // Verify the valid transaction, which records its scripts in the cache.
+    let state_service =
+        service_fn(|_| async { unreachable!("State service should not be called") });
+    let verifier = BlockTxVerifier::new(&network, state_service);
+
+    let result = verifier
+        .oneshot(BlockRequest {
+            transaction_hash: transaction.hash(),
+            transaction: Arc::new(transaction),
+            known_utxos: Arc::new(known_utxos.clone()),
+            height: block_height,
+            time: DateTime::<Utc>::MAX_UTC,
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "the valid transaction must verify: {result:?}"
+    );
+
+    // The twin's witnessed id differs, so it must be re-verified and rejected,
+    // never answered from the valid transaction's cache entry.
+    let state_service =
+        service_fn(|_| async { unreachable!("State service should not be called") });
+    let verifier = BlockTxVerifier::new(&network, state_service);
+
+    let result = verifier
+        .oneshot(BlockRequest {
+            transaction_hash: twin.hash(),
+            transaction: Arc::new(twin),
+            known_utxos: Arc::new(known_utxos),
+            height: block_height,
+            time: DateTime::<Utc>::MAX_UTC,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "the authorizing-data twin must fail script verification, not hit the cache"
+    );
+}
+
+/// A failed script verification must never be recorded: re-verifying the same
+/// failing transaction must fail again, not be answered from the cache.
+#[tokio::test]
+async fn failed_script_verification_is_not_recorded() {
+    let network = Network::new_default_testnet();
+    let network_upgrade = NetworkUpgrade::Nu5;
+
+    let block_height = (network_upgrade
+        .activation_height(&network)
+        .expect("NU5 activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (block_height - 1).expect("fake source fund block height is too small");
+
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        false,
+        0,
+        Amount::try_from(10_102).expect("invalid value"),
+    );
+
+    let transaction = Arc::new(Transaction::V5 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::Height(block::Height(0)),
+        expiry_height: (block_height + 1).expect("expiry height is too large"),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        network_upgrade,
+    });
+    let known_utxos = Arc::new(known_utxos);
+
+    for attempt in 1..=2 {
+        let state_service =
+            service_fn(|_| async { unreachable!("State service should not be called") });
+        let verifier = BlockTxVerifier::new(&network, state_service);
+
+        let result = verifier
+            .oneshot(BlockRequest {
+                transaction_hash: transaction.hash(),
+                transaction: transaction.clone(),
+                known_utxos: known_utxos.clone(),
+                height: block_height,
+                time: DateTime::<Utc>::MAX_UTC,
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "attempt {attempt}: the failing script must be rejected every time"
+        );
+    }
+}
+
+/// A v4 legacy id hashes the whole serialized transaction, so a scriptSig
+/// change produces a different id: an authorizing-data twin cannot share a v4
+/// cache entry by construction.
+#[tokio::test]
+async fn v4_script_cache_key_binds_the_scriptsigs() {
+    let network = Network::Mainnet;
+
+    let block_height = (NetworkUpgrade::Canopy
+        .activation_height(&network)
+        .expect("Canopy activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (block_height - 1).expect("fake source fund block height is too small");
+
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        true,
+        0,
+        Amount::try_from(10_103).expect("invalid value"),
+    );
+
+    let transaction = Transaction::V4 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::Height(block::Height(0)),
+        expiry_height: (block_height + 1).expect("expiry height is too large"),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    };
+
+    let mut twin = transaction.clone();
+    let Transaction::V4 { inputs, .. } = &mut twin else {
+        unreachable!("twin is V4");
+    };
+    let transparent::Input::PrevOut { unlock_script, .. } = &mut inputs[0] else {
+        panic!("test input is a PrevOut");
+    };
+    *unlock_script = transparent::Script::new(&[0]);
+
+    // Unlike v5, the v4 txid commits to the scriptSigs directly.
+    assert_ne!(
+        transaction.hash(),
+        twin.hash(),
+        "a v4 scriptSig change must change the legacy transaction id"
+    );
+
+    let state_service =
+        service_fn(|_| async { unreachable!("State service should not be called") });
+    let verifier = BlockTxVerifier::new(&network, state_service);
+
+    let result = verifier
+        .oneshot(BlockRequest {
+            transaction_hash: transaction.hash(),
+            transaction: Arc::new(transaction),
+            known_utxos: Arc::new(known_utxos.clone()),
+            height: block_height,
+            time: DateTime::<Utc>::MAX_UTC,
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "the valid transaction must verify: {result:?}"
+    );
+
+    let state_service =
+        service_fn(|_| async { unreachable!("State service should not be called") });
+    let verifier = BlockTxVerifier::new(&network, state_service);
+
+    let result = verifier
+        .oneshot(BlockRequest {
+            transaction_hash: twin.hash(),
+            transaction: Arc::new(twin),
+            known_utxos: Arc::new(known_utxos),
+            height: block_height,
+            time: DateTime::<Utc>::MAX_UTC,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "the v4 twin has a different id, so it must be re-verified and rejected"
+    );
+}
+
+/// A repeat verification is answered from the cache, and removing the entry
+/// forces a real re-verification.
+///
+/// Observed through the cache's test-only per-key hit counter, which is keyed
+/// exactly as production keys are (witnessed id, network upgrade, and the
+/// spent-outputs digest), so the count below can only come from this test's
+/// transaction.
+#[tokio::test]
+async fn cached_verification_skips_script_checks_until_removed() {
+    let network = Network::new_default_testnet();
+    let network_upgrade = NetworkUpgrade::Nu5;
+
+    let block_height = (network_upgrade
+        .activation_height(&network)
+        .expect("NU5 activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (block_height - 1).expect("fake source fund block height is too small");
+
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        true,
+        0,
+        Amount::try_from(10_104).expect("invalid value"),
+    );
+
+    // The spent output, in input order, exactly as the block verifier fetches it.
+    let spent_outputs: Vec<transparent::Output> = known_utxos
+        .values()
+        .map(|ordered| ordered.utxo.output.clone())
+        .collect();
+
+    let transaction = Arc::new(Transaction::V5 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::Height(block::Height(0)),
+        expiry_height: (block_height + 1).expect("expiry height is too large"),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        network_upgrade,
+    });
+
+    let cache_key = super::script_cache::ScriptCacheKey::new(
+        transaction.unmined_id(),
+        network_upgrade,
+        &spent_outputs,
+    );
+    let known_utxos = Arc::new(known_utxos);
+
+    let verify = || async {
+        let state_service =
+            service_fn(|_| async { unreachable!("State service should not be called") });
+        let verifier = BlockTxVerifier::new(&network, state_service);
+        verifier
+            .oneshot(BlockRequest {
+                transaction_hash: transaction.hash(),
+                transaction: transaction.clone(),
+                known_utxos: known_utxos.clone(),
+                height: block_height,
+                time: DateTime::<Utc>::MAX_UTC,
+            })
+            .await
+    };
+
+    // A real verification populates the cache without hitting it.
+    let result = verify().await;
+    assert!(
+        result.is_ok(),
+        "the valid transaction must verify: {result:?}"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&cache_key),
+        0,
+        "the first verification must run for real"
+    );
+
+    // The repeat is answered from the cache.
+    let result = verify().await;
+    assert!(result.is_ok(), "the repeat must succeed: {result:?}");
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&cache_key),
+        1,
+        "the repeat verification must be answered from the cache"
+    );
+
+    // Removing the entry forces a real re-verification: same successful result,
+    // no new hit. The removal is key-scoped, so concurrently running tests
+    // never lose their own entries.
+    super::script_cache::verified_scripts().remove(&cache_key);
+
+    let result = verify().await;
+    assert!(
+        result.is_ok(),
+        "the re-verification after removal must succeed: {result:?}"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&cache_key),
+        1,
+        "after removal, verification must run for real instead of hitting"
+    );
+}
+
+/// Exercises the wild-path shape end to end, deterministically, in bounded time.
+///
+/// A pool-consolidation-shaped transaction (1001 standard P2SH inputs) is
+/// admitted through the production mempool verifier, then verified through the
+/// production block verifier with every spent UTXO served by the state service,
+/// the way the same transaction flows through a real node.
+///
+/// Determinism and bounds:
+/// * No sleeps, no randomness, no network, no disk: the state service is an
+///   in-process mock, and all serialization, hashing, and script work is the
+///   production code.
+/// * The block-path state mock releases `AwaitUtxo` responses only when the
+///   expected batch of concurrent lookups is pending, so a regression back to
+///   serial per-input lookups deadlocks and fails the timeout instead of
+///   passing slowly.
+/// * The whole test must finish within 10 seconds, enforced by a timeout.
+#[tokio::test]
+async fn wild_path_fat_p2sh_mempool_admission_then_block_verification() {
+    const FAT_TX_INPUTS: usize = 1001;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let network = Network::new_default_testnet();
+        let network_upgrade = NetworkUpgrade::Nu5;
+
+        let block_height = (network_upgrade
+            .activation_height(&network)
+            .expect("NU5 activation height is specified")
+            + 10)
+            .expect("transaction block height is too large");
+        let fund_height = (block_height - 1).expect("fund height is too small");
+
+        // The same standard P2SH pattern as `mock_transparent_transfer`: an
+        // OP_TRUE redeem script spend, standard for the mempool gate and valid
+        // for the interpreter, with no signatures so the test stays fast.
+        const OP_TRUE: u8 = 0x51;
+        let unlock_script = transparent::Script::new(&[0x01, OP_TRUE]);
+        let mut p2sh_lock_bytes = vec![0xa9, 0x14];
+        p2sh_lock_bytes.extend_from_slice(&[
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ]);
+        p2sh_lock_bytes.push(0x87);
+        let lock_script = transparent::Script::new(&p2sh_lock_bytes);
+
+        let source_hash = Hash([7u8; 32]);
+        let spent_output = transparent::Output {
+            value: Amount::try_from(10_000).expect("valid amount"),
+            lock_script,
+        };
+
+        let inputs: Vec<transparent::Input> = (0..FAT_TX_INPUTS)
+            .map(|index| transparent::Input::PrevOut {
+                outpoint: transparent::OutPoint {
+                    hash: source_hash,
+                    // Bounded by FAT_TX_INPUTS, so the cast cannot truncate.
+                    index: index as u32,
+                },
+                unlock_script: unlock_script.clone(),
+                sequence: 0,
+            })
+            .collect();
+
+        // One consolidated output; the large remainder is the miner fee, which
+        // comfortably clears the ZIP-317 conventional fee for this size.
+        let output = transparent::Output {
+            value: Amount::try_from(5_000).expect("valid amount"),
+            lock_script: transparent::Script::new(&[0]),
+        };
+
+        let transaction = Transaction::V5 {
+            inputs,
+            outputs: vec![output],
+            lock_time: LockTime::unlocked(),
+            expiry_height: (block_height + 1).expect("expiry height is too large"),
+            sapling_shielded_data: None,
+            orchard_shielded_data: None,
+            network_upgrade,
+        };
+        let unmined_transaction: UnminedTx = transaction.clone().into();
+        let transaction = Arc::new(transaction);
+
+        // Phase 1: mempool admission, with every spent UTXO answered from the
+        // mocked best chain.
+        let mempool_state = {
+            let spent_output = spent_output.clone();
+            service_fn(move |request: zebra_state::Request| {
+                let spent_output = spent_output.clone();
+                async move {
+                    match request {
+                        zebra_state::Request::UnspentBestChainUtxo(_) => {
+                            Ok::<_, BoxError>(zebra_state::Response::UnspentBestChainUtxo(Some(
+                                transparent::Utxo::new(spent_output, fund_height, false),
+                            )))
+                        }
+                        zebra_state::Request::CheckBestChainTipNullifiersAndAnchors(_) => {
+                            Ok(zebra_state::Response::ValidBestChainTipNullifiersAndAnchors)
+                        }
+                        other => unreachable!("unexpected mempool state request: {other:?}"),
+                    }
+                }
+            })
+        };
+
+        let mempool_verifier = MempoolTxVerifier::new_for_tests(&network, mempool_state);
+        let mempool_response = mempool_verifier
+            .oneshot(MempoolRequest {
+                transaction: unmined_transaction,
+                height: block_height,
+            })
+            .await
+            .expect("mempool admission of the consolidation transaction succeeds");
+        assert!(
+            mempool_response.spent_mempool_outpoints.is_empty(),
+            "all spends come from the mocked best chain"
+        );
+
+        // Phase 2: the mined block arrives. Every spent UTXO is served through
+        // `AwaitUtxo`, behind a batch barrier: responses are released only when
+        // the expected number of lookups is pending at once, so serial lookups
+        // deadlock (failing the timeout) instead of passing slowly.
+        let pending: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let block_state = {
+            let spent_output = spent_output.clone();
+            let pending = pending.clone();
+            let released = released.clone();
+            service_fn(move |request: zebra_state::Request| {
+                let spent_output = spent_output.clone();
+                let pending = pending.clone();
+                let released = released.clone();
+                async move {
+                    match request {
+                        zebra_state::Request::AwaitUtxo(_) => {
+                            let (sender, receiver) = tokio::sync::oneshot::channel();
+                            {
+                                let mut pending = pending.lock().expect("not poisoned");
+                                pending.push(sender);
+
+                                let released_so_far =
+                                    released.load(std::sync::atomic::Ordering::SeqCst);
+                                let batch = super::MAX_CONCURRENT_UTXO_LOOKUPS
+                                    .min(FAT_TX_INPUTS - released_so_far);
+                                if pending.len() == batch {
+                                    released.fetch_add(batch, std::sync::atomic::Ordering::SeqCst);
+                                    for waiter in pending.drain(..) {
+                                        let _ = waiter.send(());
+                                    }
+                                }
+                            }
+                            receiver
+                                .await
+                                .expect("the barrier always releases a full batch");
+
+                            Ok::<_, BoxError>(zebra_state::Response::Utxo(transparent::Utxo::new(
+                                spent_output,
+                                fund_height,
+                                false,
+                            )))
+                        }
+                        other => unreachable!("unexpected block state request: {other:?}"),
+                    }
+                }
+            })
+        };
+
+        let block_verifier = BlockTxVerifier::new(&network, block_state);
+        let block_response = block_verifier
+            .oneshot(BlockRequest {
+                transaction_hash: transaction.hash(),
+                transaction: transaction.clone(),
+                known_utxos: Arc::new(HashMap::new()),
+                height: block_height,
+                time: DateTime::<Utc>::MAX_UTC,
+            })
+            .await
+            .expect("block verification of the mempool-admitted transaction succeeds");
+
+        assert_eq!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            FAT_TX_INPUTS,
+            "every spent UTXO must be fetched from the state exactly once"
+        );
+
+        let expected_fee = (10_000 * FAT_TX_INPUTS as i64 - 5_000)
+            .try_into()
+            .expect("valid fee");
+        assert_eq!(
+            block_response.miner_fee,
+            Some(expected_fee),
+            "the block verifier must compute the consolidation fee from the fetched UTXOs"
+        );
+
+        // The block verification must have been answered from the mempool
+        // admission's cache entry: this is the mempool-to-block reuse the cache
+        // exists for. The key is unique to this test's transaction, and entry
+        // removal is key-scoped, so this count is deterministic under parallel
+        // test execution.
+        let spent_outputs = vec![spent_output; FAT_TX_INPUTS];
+        let cache_key = super::script_cache::ScriptCacheKey::new(
+            transaction.unmined_id(),
+            network_upgrade,
+            &spent_outputs,
+        );
+        assert_eq!(
+            super::script_cache::verified_scripts().hits_for(&cache_key),
+            1,
+            "block verification must reuse the mempool admission's script verification"
+        );
+    })
+    .await
+    .expect("the wild path must complete within 10 seconds");
+}
+
+/// A mempool script failure is never recorded, so it cannot poison block
+/// verification of the same transaction.
+///
+/// This drives the failure through the mempool call site specifically: the
+/// transaction passes every earlier mempool gate (standardness, fees, lock
+/// time) and fails only inside the async script checks, so an
+/// insert-before-success mutation at the mempool site would record it. The
+/// block verification afterwards uses the exact key the mempool attempt would
+/// have poisoned; it must re-verify and reject.
+#[tokio::test]
+async fn mempool_script_failure_cannot_poison_block_verification() {
+    let network = Network::new_default_testnet();
+    let network_upgrade = NetworkUpgrade::Nu5;
+
+    let block_height = (network_upgrade
+        .activation_height(&network)
+        .expect("NU5 activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (block_height - 1).expect("fake source fund block height is too small");
+
+    // A standard P2SH spend whose pushed redeem script does not hash to the
+    // lock script's commitment: push-only and low-sigop, so it passes the
+    // mempool standardness gate, and fails only in the script interpreter.
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        true,
+        0,
+        Amount::try_from(2_000_105).expect("invalid value"),
+    );
+    let transparent::Input::PrevOut {
+        outpoint, sequence, ..
+    } = input
+    else {
+        panic!("mock input is a PrevOut");
+    };
+    let input = transparent::Input::PrevOut {
+        outpoint,
+        // A push of OP_2: standard, zero sigops, wrong redeem script hash.
+        unlock_script: transparent::Script::new(&[0x01, 0x52]),
+        sequence,
+    };
+
+    let transaction = Arc::new(Transaction::V5 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::unlocked(),
+        expiry_height: (block_height + 1).expect("expiry height is too large"),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        network_upgrade,
+    });
+
+    let spent_outputs: Vec<transparent::Output> = known_utxos
+        .values()
+        .map(|ordered| ordered.utxo.output.clone())
+        .collect();
+    let cache_key = super::script_cache::ScriptCacheKey::new(
+        transaction.unmined_id(),
+        network_upgrade,
+        &spent_outputs,
+    );
+
+    // Mempool admission must fail in the script checks and record nothing.
+    let spent_output = spent_outputs[0].clone();
+    let mempool_state = service_fn(move |request: zebra_state::Request| {
+        let spent_output = spent_output.clone();
+        async move {
+            match request {
+                zebra_state::Request::UnspentBestChainUtxo(_) => {
+                    Ok::<_, BoxError>(zebra_state::Response::UnspentBestChainUtxo(Some(
+                        transparent::Utxo::new(spent_output, fund_height, false),
+                    )))
+                }
+                zebra_state::Request::CheckBestChainTipNullifiersAndAnchors(_) => {
+                    Ok(zebra_state::Response::ValidBestChainTipNullifiersAndAnchors)
+                }
+                other => unreachable!("unexpected mempool state request: {other:?}"),
+            }
+        }
+    });
+    let mempool_verifier = MempoolTxVerifier::new_for_tests(&network, mempool_state);
+    let result = mempool_verifier
+        .oneshot(MempoolRequest {
+            transaction: UnminedTx::from(transaction.as_ref().clone()),
+            height: block_height,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "the wrong redeem script must fail mempool script verification"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&cache_key),
+        0,
+        "the failed mempool verification must not be answered from the cache"
+    );
+
+    // Block verification of the same transaction, against the same spent
+    // output data, must re-verify and reject rather than hit a poisoned entry.
+    let state_service =
+        service_fn(|_| async { unreachable!("State service should not be called") });
+    let block_verifier = BlockTxVerifier::new(&network, state_service);
+    let result = block_verifier
+        .oneshot(BlockRequest {
+            transaction_hash: transaction.hash(),
+            transaction: transaction.clone(),
+            known_utxos: Arc::new(known_utxos),
+            height: block_height,
+            time: DateTime::<Utc>::MAX_UTC,
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "block verification must re-run and reject the failing script, never hit a cache entry seeded by a failed mempool attempt"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&cache_key),
+        0,
+        "no phase of a failing transaction's verification may be answered from the cache"
+    );
+}
+
+/// Cache entries are scoped to the network upgrade through the production
+/// call sites, not just the key type.
+///
+/// A v4 transaction carries no branch id, so the same bytes verify at a
+/// Canopy height and at an NU5 height. The NU5 verification must not be
+/// answered by the Canopy entry; each upgrade earns its own.
+#[tokio::test]
+async fn script_cache_entries_are_scoped_to_the_network_upgrade() {
+    let network = Network::Mainnet;
+
+    let canopy_height = (NetworkUpgrade::Canopy
+        .activation_height(&network)
+        .expect("Canopy activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let nu5_height = (NetworkUpgrade::Nu5
+        .activation_height(&network)
+        .expect("NU5 activation height is specified")
+        + 10)
+        .expect("transaction block height is too large");
+    let fund_height = (canopy_height - 1).expect("fake source fund block height is too small");
+
+    let (input, output, known_utxos) = mock_transparent_transfer(
+        fund_height,
+        true,
+        0,
+        Amount::try_from(10_106).expect("invalid value"),
+    );
+
+    // No lock time and an expiry beyond both heights, so the same transaction
+    // is valid at Canopy and at NU5.
+    let transaction = Arc::new(Transaction::V4 {
+        inputs: vec![input],
+        outputs: vec![output],
+        lock_time: LockTime::unlocked(),
+        expiry_height: (nu5_height + 1).expect("expiry height is too large"),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    });
+
+    let spent_outputs: Vec<transparent::Output> = known_utxos
+        .values()
+        .map(|ordered| ordered.utxo.output.clone())
+        .collect();
+    let key_for =
+        |nu| super::script_cache::ScriptCacheKey::new(transaction.unmined_id(), nu, &spent_outputs);
+    let known_utxos = Arc::new(known_utxos);
+
+    let verify_at = |height| {
+        let transaction = transaction.clone();
+        let known_utxos = known_utxos.clone();
+        let network = network.clone();
+        async move {
+            let state_service =
+                service_fn(|_| async { unreachable!("State service should not be called") });
+            let verifier = BlockTxVerifier::new(&network, state_service);
+            verifier
+                .oneshot(BlockRequest {
+                    transaction_hash: transaction.hash(),
+                    transaction: transaction.clone(),
+                    known_utxos,
+                    height,
+                    time: DateTime::<Utc>::MAX_UTC,
+                })
+                .await
+        }
+    };
+
+    let result = verify_at(canopy_height).await;
+    assert!(
+        result.is_ok(),
+        "the transaction must verify at the Canopy height: {result:?}"
+    );
+
+    // The NU5 verification runs for real: the Canopy entry must not answer it.
+    let result = verify_at(nu5_height).await;
+    assert!(
+        result.is_ok(),
+        "the transaction must verify at the NU5 height: {result:?}"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&key_for(NetworkUpgrade::Canopy)),
+        0,
+        "an entry earned under Canopy must not answer an NU5 verification"
+    );
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&key_for(NetworkUpgrade::Nu5)),
+        0,
+        "the first NU5 verification must run for real"
+    );
+
+    // Sanity: repeats under the upgrade that earned the entry do hit.
+    let result = verify_at(canopy_height).await;
+    assert!(result.is_ok(), "the Canopy repeat must succeed: {result:?}");
+    assert_eq!(
+        super::script_cache::verified_scripts().hits_for(&key_for(NetworkUpgrade::Canopy)),
+        1,
+        "a repeat under the same upgrade must be answered from the cache"
+    );
 }
 
 /// Create a mock coinbase input with a transparent output.
