@@ -52,6 +52,9 @@ permissions:
 env:
   BASE_BRANCH: copilot-review-base
   REVIEW_TIMEOUT_SECONDS: "420"
+  # Applied to every scratch pull request so they can be filtered out of, or
+  # into, a search: `is:pr label:automated-review`.
+  REVIEW_LABEL: automated-review
 
 jobs:
   review:
@@ -171,11 +174,21 @@ jobs:
             "" \
             "**This pull request is scratch and is closed automatically. Do not merge it.**")
 
+          # Ensure the label exists before it is applied. This errors once the
+          # label is present, which is the normal case, so the failure is
+          # tolerated rather than treated as a problem.
+          gh label create "$REVIEW_LABEL" \
+            --repo "$REPO" \
+            --color 0E8A16 \
+            --description "Scratch PR opened by the push-review workflow; auto-closed, never merged" \
+            >/dev/null 2>&1 || true
+
           pr_url=$(gh pr create \
             --repo "$REPO" \
             --base "$BASE_BRANCH" \
             --head "$head_branch" \
             --title "Copilot review: main ${short_base}..${short_after}" \
+            --label "$REVIEW_LABEL" \
             --body "$body")
 
           pr_number=$(basename "$pr_url")
