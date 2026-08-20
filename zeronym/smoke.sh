@@ -681,12 +681,31 @@ try:
         else:
             print("ERR\tunexpected wire type %d" % wire)
             raise SystemExit
-    if data != want:
-        print("ERR\tthe %d bytes returned are not the %d-byte fixture" % (len(data), len(want)))
-    elif height != 0:
+    # HEIGHT 0 is the proof, not the bytes.
+    #
+    # This used to require the returned body to equal the fixture. That check
+    # only worked because the hub served a queued migration's raw bytes to
+    # anyone who asked, which is exactly what an unauthenticated pre-publication
+    # lookup should not do -- a third party could take them and broadcast first.
+    # From 2026-08-19 the hub answers "found, height 0" with an EMPTY body.
+    #
+    # The privacy proof is undamaged, and is arguably sharper now. Only the hub
+    # knows this txid before publication: the fixture is consensus-invalid and
+    # was never broadcast, so the operator's indexer cannot answer for it at all,
+    # and a height of 0 is the mempool sentinel that ONLY a queue hit carries. A
+    # forward-only shim fails this check exactly as it did before.
+    #
+    # A non-empty body is not an error here: a hub deployed before this change
+    # still returns the fixture, and this check runs against live deployments.
+    if height != 0:
         print("ERR\theight=%d, expected 0 (the mempool sentinel a queue hit carries)" % height)
+    elif data and data != want:
+        print("ERR\tthe %d bytes returned are neither empty nor the %d-byte fixture"
+              % (len(data), len(want)))
+    elif data:
+        print("OK\theight=0 from the hub's queue (body served: pre-2026-08-19 hub)")
     else:
-        print("OK\t%d bytes byte-identical, height=0" % len(data))
+        print("OK\theight=0 from the hub's queue, body withheld")
 except SystemExit:
     raise
 except Exception as exc:

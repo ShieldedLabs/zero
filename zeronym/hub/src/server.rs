@@ -409,10 +409,35 @@ impl Hub {
     /// broadcast returns would extend how long the hub remembers a txid, which
     /// is the wrong trade.
     pub async fn lookup(&self, wire_hash: &[u8]) -> LookupOutcome {
-        if let Some(bytes) = self.queue.find_by_txid(wire_hash) {
+        if self.queue.find_by_txid(wire_hash).is_some() {
+            // FOUND, HEIGHT 0, AND NO BYTES.
+            //
+            // This used to return the queued transaction's raw bytes to whoever
+            // asked. The lookup is unauthenticated on both transports by design
+            // -- the mixnet address is published at `/nym-address` and clearnet
+            // `POST /transaction` is served unconditionally -- so those bytes
+            // were available to anyone, for a migration that has not been
+            // broadcast anywhere yet. A third party could take them and publish
+            // first, which destroys the batching this hub exists to provide, and
+            // does it before the batch that was supposed to hide the transaction
+            // ever forms (Hornby review, 2026-08-19).
+            //
+            // What the design actually needs from this path is preserved. The
+            // shim is stateless BECAUSE the hub can answer "yes, height 0" for a
+            // diverted migration; that is the existence-and-status signal, and a
+            // wallet renders "pending" from it. The BYTES were never the
+            // load-bearing part -- the wallet that sent the transaction already
+            // has them, and nobody else has any business with them before
+            // publication.
+            //
+            // What this does NOT close: the 200-versus-NotFound distinction
+            // still discloses that a given txid is queued here. Closing that too
+            // means answering NotFound, which costs a wallet the ability to tell
+            // "pending" from "never seen". That is a product decision, not a
+            // code one, and it is left open deliberately.
             tracing::debug!(source = "queue", "transaction lookup answered");
             return LookupOutcome::Found {
-                data: bytes,
+                data: Zeroizing::new(Vec::new()),
                 height: 0,
             };
         }

@@ -267,7 +267,15 @@ async fn a_lookup_hits_the_queue_first_at_the_mempool_sentinel() {
     match verdict {
         LookupReply::Found { height, tx } => {
             assert_eq!(height, 0, "a queued entry is at the mempool sentinel");
-            assert_eq!(tx.as_slice(), V6_MIGRATION);
+            // The BYTES are withheld on this transport too. The mixnet lookup is
+            // as unauthenticated as the clearnet one -- the hub's address is
+            // published at `/nym-address` -- so serving an unpublished
+            // migration's bytes here would hand a third party the same
+            // broadcast-first opportunity.
+            assert!(
+                tx.is_empty(),
+                "a queued, unpublished migration must not be served over the mixnet either"
+            );
         }
         other => panic!("expected found, got {other:?}"),
     }
@@ -506,7 +514,9 @@ async fn submits_and_lookups_interleave_on_one_listener() {
                 assert_eq!(reply.sender_tag, poller);
                 match verdict {
                     LookupReply::Found { height: 0, tx } => {
-                        assert_eq!(tx.as_slice(), V6_MIGRATION)
+                        // Interleaving is what this test is about; the body is
+                        // withheld pre-publication on both transports.
+                        assert!(tx.is_empty(), "the queued body must not be served")
                     }
                     other => panic!("expected a mempool-sentinel found, got {other:?}"),
                 }
