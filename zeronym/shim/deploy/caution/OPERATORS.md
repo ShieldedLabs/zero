@@ -264,10 +264,17 @@ supports it):
 
 Shielded Labs supply the hub address; it is also readable from the hub itself at
 `https://<hub-domain>/nym-address`, which is the authoritative copy (see
-"Operating" for why it can change). The `--nym-egress` rules are the enclave's
-entire allowlist for reaching the mixnet: two of the SDK's three built-in
-nym-api endpoints (the third, Fastly, is deliberately excluded — shared CDN
-edges), a gateway, and a DNS resolver. Forward-only stays the default: no
+"Operating" for why it can change). The `--nym-egress` rules DECLARE what the
+enclave needs for the mixnet: two of the SDK's three built-in nym-api endpoints
+(the third, Fastly, is deliberately excluded — shared CDN edges), a gateway, and
+a DNS resolver.
+
+They are not an allowlist, and this passage used to call them one (corrected
+2026-08-19). Caution does not enforce `egress` rules: the whole list is reduced
+to whether it is empty, and a non-empty list yields unrestricted outbound plus
+DNS. Getting these rules right still matters, because the declaration is what the
+enclave is *supposed* to need and is what a reader audits — but it constrains
+nothing today, so do not treat a narrow list as containment. Forward-only stays the default: no
 `--hub-nym` and no `--hub`, no diversion.
 
 **What clearnet mode gives up.** Both modes keep batching, the operator's

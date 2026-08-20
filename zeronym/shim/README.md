@@ -178,10 +178,16 @@ compression itself (`grpc-encoding`) is relayed untouched.
 
 The `cargo build` above is for development. The **audited** artifact is the
 static-musl binary produced by `deploy/`, whose whole purpose is that two
-independent builds of a commit yield the same hash, so an auditor can match it
-against the hash bound into an enclave attestation. Without that, an attestation
-proves only that some binary runs in a genuine enclave, not that it is the
-binary anyone reviewed.
+independent builds of a commit yield the same hash.
+
+Corrected 2026-08-19: that hash is NOT matched against anything in the
+attestation, because no attestation this platform produces contains a binary
+hash. What binds the enclave to the code is `caution verify`, which rebuilds the
+EIF from the manifest's app-source repo and compares PCR0/1/2 plus the TLS
+certificate binding. Determinism is the precondition that makes that comparison
+meaningful -- a build that landed somewhere different each time could not be
+compared to a measurement -- but the two are separate checks and no tool performs
+the one this paragraph used to describe.
 
 That coupling runs both ways, and it is the reason the predicate and the deploy
 directory move together. Widening the predicate changed `src/classify.rs`,

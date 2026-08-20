@@ -1,9 +1,43 @@
 # zero-indexer-hub on Caution (attested Nitro enclave)
 
 The hub receives diverted migrations in plaintext and broadcasts them to the
-Zcash network. That is exactly why it runs as an attested enclave: the
-attestation binds the running binary to `../EXPECTED_SHA256`, so an auditor who
-reproduces the build knows the code holding the plaintext is the code they read.
+Zcash network. That is exactly why it runs as an attested enclave.
+
+**How that actually works, corrected 2026-08-19.** This used to say the
+attestation "binds the running binary to `../EXPECTED_SHA256`". It does not, and
+no attestation this platform produces contains a binary hash at all: the
+Containerfile deploy path passes `None` for the manifest's `binary` field, and
+`EXPECTED_SHA256` appears nowhere in the Caution platform source. There was
+nothing for an auditor to compare the rebuilt hash against, so the one job the
+trust model handed them could not be done.
+
+The chain that does exist has two independent halves:
+
+1. **`EXPECTED_SHA256` proves the BUILD is deterministic** -- that this commit
+   yields this binary, on any machine. That is what `reproduce.sh` and the CI
+   reproduce gate check. Nothing in the enclave ever sees this value.
+2. **The ATTESTATION binds the enclave to a rebuild of the app-source repo.**
+   `caution verify` clones the repository named in the manifest's `app_sources`,
+   rebuilds the EIF from it, and compares PCR0, PCR1 and PCR2 against the live
+   attestation, along with the TLS certificate binding.
+
+Reproducibility is what makes the second check meaningful -- a rebuild that did
+not land in the same place every time could not be compared to anything -- but
+the hash itself is never compared by any tool, and an auditor should not go
+looking for it.
+
+**What an auditor should actually do**, verified against this deployment on
+2026-08-18 with `Attestation verification PASSED` on both components:
+
+```
+git clone <the app_sources repo> && cd <it>
+caution verify --attestation-url https://<domain>/attestation
+```
+
+Run it from a FRESH CLONE of the public repo, never from a deploying tree.
+Require **all three PCRs and the TLS binding**. Do not accept a PCR2 match alone:
+hub and shim, two entirely different binaries, produce byte-identical PCR2
+(`21b9efbc...`), so PCR2 identifies the platform, not the code.
 
 Sibling of `zeronym/shim/deploy/caution/`. The shim's README covers the platform
 mechanics (in-enclave TLS termination on 8083, the FIDO2 login, Let's Encrypt
