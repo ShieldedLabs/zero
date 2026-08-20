@@ -30,7 +30,7 @@ other.
 | `Containerfile` | The build itself. StageX bases pinned by digest, static musl, export stage, busybox runtime. |
 | `build.sh` | One deterministic build: extracts the binary and packages the OCI image, printing both hashes. |
 | `reproduce.sh` | The proof: two cold builds, compared against each other **and** against `EXPECTED_SHA256`, then assert `zebra/` and `zaino/` are still clean. |
-| `EXPECTED_SHA256` | The published binary hash. Re-baseline it (and this list) whenever a determinism ingredient changes. |
+| `EXPECTED_SHA256` | The published binary hash **of the source in this repository** -- not of any deployed enclave. Re-baseline it (and this list) whenever a determinism ingredient changes, which includes any change to `src/`. |
 | `caution/` | The attested Nitro-enclave deploy (see `caution/README.md`). |
 
 ## What differs from the shim recipe
@@ -74,3 +74,9 @@ sh zeronym/hub/deploy/reproduce.sh
 Two cold `linux/amd64` builds (Rosetta on an arm64 Mac is fine), compared to each
 other and to `EXPECTED_SHA256`. `.github/workflows/zeronym-hub-reproduce.yml`
 runs the same script on a native x86_64 runner as the independent second machine.
+
+`EXPECTED_SHA256` tracks `main`, so between deploys it is AHEAD of the fleet and
+is meant to be. Nothing verifies a running enclave against it: `caution verify`
+rebuilds from the app-source snapshot that deploy pushed, and that snapshot's
+`PROVENANCE` carries the hash of the binary actually inside the enclave. Which
+deployment carries which binary is recorded per deploy, not here.
