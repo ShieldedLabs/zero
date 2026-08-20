@@ -382,7 +382,7 @@ async fn send_transaction_reaches_the_indexer_byte_for_byte() {
     let mut sender = connect(shim).await;
 
     let message = RawTransaction {
-        data: V6_MIGRATION.to_vec(),
+        data: V6_MIGRATION.to_vec().into(),
         height: 0,
     }
     .encode_to_vec();
