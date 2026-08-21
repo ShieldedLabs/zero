@@ -993,8 +993,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn multi_note_crossing_is_not_bucketed() {
-        testing::pool::multi_note_crossing_is_not_bucketed()
+    fn multi_note_crossing_is_bucketed_but_not_canonical() {
+        testing::pool::multi_note_crossing_is_bucketed_but_not_canonical()
+    }
+
+    #[test]
+    fn orchard_payment_falls_back_when_notes_are_too_new() {
+        testing::pool::orchard_payment_falls_back_when_notes_are_too_new()
     }
 
     #[test]

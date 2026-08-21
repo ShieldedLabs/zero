@@ -11,7 +11,7 @@ use crate::{
 };
 use zcash_client_backend::data_api::{
     WalletWrite,
-    anchor_retention::AnchorRetentionInterval,
+    anchor_retention::{AnchorRetentionInterval, CHECKPOINT_RETENTION_DEPTH},
     chain::{ChainState, error::Error},
     testing::{
         AddressType,
@@ -405,8 +405,16 @@ pub(crate) fn canonical_crossing_prefers_single_note() {
 }
 
 #[cfg(feature = "orchard")]
-pub(crate) fn multi_note_crossing_is_not_bucketed() {
-    zcash_client_backend::data_api::testing::pool::multi_note_crossing_is_not_bucketed(
+pub(crate) fn orchard_payment_falls_back_when_notes_are_too_new() {
+    zcash_client_backend::data_api::testing::pool::orchard_payment_falls_back_when_notes_are_too_new(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "orchard")]
+pub(crate) fn multi_note_crossing_is_bucketed_but_not_canonical() {
+    zcash_client_backend::data_api::testing::pool::multi_note_crossing_is_bucketed_but_not_canonical(
         TestDbFactory::default(),
         BlockCache::new(),
     )
@@ -519,9 +527,9 @@ pub(crate) fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester>() {
 /// one captured from a second wallet that scanned the same number of blocks with different note
 /// values, so it has the same tree shape but conflicting node hashes.
 pub(crate) fn truncate_to_chain_state_commitment_tree_error<T: ShieldedPoolTester>() {
-    // `zcash_client_backend::data_api::ll::wallet::PRUNING_DEPTH` is crate-private; mirror it
-    // here. Scanning this far past the captured height guarantees its checkpoint is pruned.
-    const PRUNING_DEPTH: u32 = 100;
+    // Scanning past `CHECKPOINT_RETENTION_DEPTH` blocks guarantees the captured height's checkpoint
+    // is pruned: the commitment tree's checkpoint budget, not the wallet's shallower rewind bound,
+    // is what decides when a historical checkpoint is discarded.
 
     // Wallet A: scan blocks to populate the note commitment tree, capture a consistent chain
     // state, then scan well past the pruning depth so that the captured height's checkpoint is
@@ -561,7 +569,7 @@ pub(crate) fn truncate_to_chain_state_commitment_tree_error<T: ShieldedPoolTeste
         .clone();
     assert_eq!(captured.block_height(), capture_height);
 
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         wallet_a.generate_next_block(
             &fvk_a,
