@@ -39,8 +39,14 @@ const SCRIPT_CACHE_CAPACITY: usize = 30_000;
 
 /// The process-wide cache, shared by the mempool and block verifiers so a
 /// mempool admission can answer the block verification that follows it.
-static VERIFIED_SCRIPTS: Lazy<VerifiedScripts> =
-    Lazy::new(|| VerifiedScripts::new(SCRIPT_CACHE_CAPACITY, rand::thread_rng().gen()));
+static VERIFIED_SCRIPTS: Lazy<VerifiedScripts> = Lazy::new(|| {
+    #[cfg(test)]
+    let seed: [u8; 16] = [7; 16];
+    #[cfg(not(test))]
+    let seed: [u8; 16] = rand::thread_rng().gen();
+
+    VerifiedScripts::new(SCRIPT_CACHE_CAPACITY, seed)
+});
 
 /// Returns the process-wide transparent script verification cache.
 pub(super) fn verified_scripts() -> &'static VerifiedScripts {
