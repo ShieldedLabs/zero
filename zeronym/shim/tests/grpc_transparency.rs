@@ -413,7 +413,7 @@ async fn a_non_migration_send_transaction_is_forwarded_unchanged() {
 
     let mut stack = Stack::up().await;
     let raw = RawTransaction {
-        data: V6_IRONWOOD_ONLY.to_vec(),
+        data: V6_IRONWOOD_ONLY.to_vec().into(),
         height: 0,
     };
 
@@ -442,7 +442,7 @@ async fn a_migration_send_transaction_is_also_forwarded_unchanged() {
 
     let mut stack = Stack::up().await;
     let raw = RawTransaction {
-        data: V6_MIGRATION.to_vec(),
+        data: V6_MIGRATION.to_vec().into(),
         height: 0,
     };
 

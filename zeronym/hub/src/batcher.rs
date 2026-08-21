@@ -726,7 +726,7 @@ mod tests {
                                         return Ok::<_, Infallible>(grpc_ok(info.encode_to_vec()));
                                     }
                                     if let Ok(raw) = RawTransaction::decode(message) {
-                                        sent.lock().unwrap().push(raw.data);
+                                        sent.lock().unwrap().push(raw.data.to_vec());
                                     }
                                     on_send.notify_one();
                                     let answer = {

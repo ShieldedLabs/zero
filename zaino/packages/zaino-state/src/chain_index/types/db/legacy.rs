@@ -42,7 +42,7 @@ use crate::chain_index::encoding::{
 };
 use crate::chain_index::types::{BlockContext, ChainWork, CompactDifficulty};
 
-use super::commitment::{CommitmentTreeData, CommitmentTreeRoots, CommitmentTreeSizes};
+use super::commitment::CommitmentTreeData;
 
 // =============================================================================
 // LEGACY TYPES AWAITING MIGRATION
@@ -793,28 +793,6 @@ pub struct BlockData {
 }
 
 impl BlockData {
-    /// Creates a new  BlockData instance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        version: u32,
-        time: i64,
-        merkle_root: [u8; 32],
-        block_commitments: [u8; 32],
-        bits: CompactDifficulty,
-        nonse: [u8; 32],
-        solution: EquihashSolution,
-    ) -> Self {
-        Self {
-            version,
-            time,
-            merkle_root,
-            block_commitments,
-            bits,
-            nonce: nonse,
-            solution,
-        }
-    }
-
     /// Convert zebra block commitment to 32-byte array
     pub fn commitment_to_bytes(commitment: zebra_chain::block::Commitment) -> [u8; 32] {
         match commitment {
@@ -908,15 +886,15 @@ impl ZainoVersionedSerde for BlockData {
 
         let solution = EquihashSolution::deserialize(&mut r)?;
 
-        Ok(BlockData::new(
+        Ok(BlockData {
             version,
             time,
             merkle_root,
             block_commitments,
             bits,
-            nonse,
+            nonce: nonse,
             solution,
-        ))
+        })
     }
 }
 
@@ -1097,11 +1075,9 @@ impl IndexedBlock {
 
     /// Converts this `IndexedBlock` into a CompactBlock protobuf message using proto v4 format.
     ///
-    /// NOTE: This method currently includes transparent tx data in the compact block produced,
-    ///       `zaino-state::local_cache::compact_block_with_pool_types` should be used to selectively
-    ///       remove tx data by pool type. Alternatively this method could be updated to take a
-    ///       `zaino-proto::proto::utils::PoolTypeFilter` could be  added as an input to this method,
-    ///       with tx data being added selectively here.
+    /// The block produced is unfiltered: it carries every pool's tx data,
+    /// transparent included. Callers serving a pool-filtered request apply
+    /// `zaino_proto::proto::utils::prune_compact_block` to the result.
     pub fn to_compact_block(&self) -> zaino_proto::proto::compact_formats::CompactBlock {
         // NOTE: Returns u64::MAX if the block is not in the best chain.
         let height: u64 = self.height().0.into();
@@ -1133,201 +1109,6 @@ impl IndexedBlock {
                 ironwood_commitment_tree_size,
             }),
         }
-    }
-}
-
-impl ZainoVersionedSerde for IndexedBlock {
-    const VERSION: u8 = version::V1;
-
-    fn encode_latest<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        Self::encode_v1(self, w)
-    }
-
-    fn decode_latest<R: Read>(r: &mut R) -> io::Result<Self> {
-        Self::decode_v1(r)
-    }
-
-    fn encode_v1<W: Write>(&self, mut w: &mut W) -> io::Result<()> {
-        PersistentBlockContext::from_business(&self.context).serialize_with_version(&mut w, 1)?;
-        self.data.serialize_with_version(&mut w, 1)?;
-        write_vec(&mut w, &self.transactions, |w, tx| {
-            tx.serialize_with_version(w, 1)
-        })?;
-        self.commitment_tree_data.serialize_with_version(&mut w, 1)
-    }
-
-    fn decode_v1<R: Read>(r: &mut R) -> io::Result<Self> {
-        let mut r = r;
-        let context = PersistentBlockContext::deserialize(&mut r)?.into_business()?;
-        let data = BlockData::deserialize(&mut r)?;
-        let tx = read_vec(&mut r, |r| CompactTxData::deserialize(r))?;
-        let ctd = CommitmentTreeData::deserialize(&mut r)?;
-
-        Ok(IndexedBlock::new(context, data, tx, ctd))
-    }
-}
-/// TryFrom inputs:
-/// - FullBlock:
-///   - Holds block data.
-/// - parent_block_chain_work:
-///   - Used to calculate cumulative chain work.
-/// - Final sapling root:
-///  - Must be fetched from separate RPC.
-/// - Final orchard root:
-///  - Must be fetched from separate RPC.
-/// - parent_block_sapling_tree_size:
-///   - Used to calculate sapling tree size.
-/// - parent_block_orchard_tree_size:
-///   - Used to calculate sapling tree size.
-impl
-    TryFrom<(
-        zaino_fetch::chain::block::FullBlock,
-        Option<ChainWork>,
-        [u8; 32],
-        [u8; 32],
-        Option<[u8; 32]>,
-        u32,
-        u32,
-        u32,
-    )> for IndexedBlock
-{
-    type Error = String;
-
-    fn try_from(
-        (
-            full_block,
-            parent_chainwork,
-            final_sapling_root,
-            final_orchard_root,
-            final_ironwood_root,
-            parent_sapling_size,
-            parent_orchard_size,
-            parent_ironwood_size,
-        ): (
-            zaino_fetch::chain::block::FullBlock,
-            Option<ChainWork>,
-            [u8; 32],
-            [u8; 32],
-            Option<[u8; 32]>,
-            u32,
-            u32,
-            u32,
-        ),
-    ) -> Result<Self, Self::Error> {
-        // --- Block Header Info ---
-        let header = full_block.header();
-        let height = Height::try_from(full_block.height() as u32)
-            .map_err(|e| format!("Invalid block height: {e}"))?;
-
-        let hash: [u8; 32] = header
-            .cached_hash()
-            .try_into()
-            .map_err(|_| "Block hash must be 32 bytes")?;
-        let parent_hash: [u8; 32] = header
-            .hash_prev_block()
-            .try_into()
-            .map_err(|_| "Parent block hash must be 32 bytes")?;
-
-        let merkle_root: [u8; 32] = header
-            .hash_merkle_root()
-            .try_into()
-            .map_err(|v: Vec<u8>| format!("merkle root must be 32 bytes, got {}", v.len()))?;
-
-        let block_commitments: [u8; 32] = header
-            .final_sapling_root()
-            .try_into()
-            .map_err(|v: Vec<u8>| format!("block commitment must be 32 bytes, got {}", v.len()))?;
-
-        let n_bits_bytes = header.n_bits_bytes();
-        if n_bits_bytes.len() != 4 {
-            return Err("nBits must be 4 bytes".to_string());
-        }
-        let bits_raw = u32::from_le_bytes(
-            n_bits_bytes
-                .try_into()
-                .map_err(|_| "nBits must be 4 bytes".to_string())?,
-        );
-        let bits = CompactDifficulty::try_from_bits(bits_raw)
-            .map_err(|e| format!("invalid nBits: {e}"))?;
-
-        let nonse: [u8; 32] = header
-            .nonce()
-            .try_into()
-            .map_err(|v: Vec<u8>| format!("nonse must be 32 bytes, got {}", v.len()))?;
-
-        let solution = EquihashSolution::try_from(header.solution()).map_err(|_| {
-            format!(
-                "solution must be 32 or 1344 bytes, got {}",
-                header.solution().len()
-            )
-        })?;
-
-        // --- Convert transactions ---
-        let mut sapling_note_count = 0;
-        let mut orchard_note_count = 0;
-        let mut ironwood_note_count = 0;
-
-        let full_transactions = full_block.transactions();
-        let mut tx = Vec::with_capacity(full_transactions.len());
-
-        for (i, ftx) in full_transactions.into_iter().enumerate() {
-            let txdata = CompactTxData::try_from((i as u64, ftx))
-                .map_err(|e| format!("TxData conversion failed at index {i}: {e}"))?;
-
-            sapling_note_count += txdata.sapling().outputs().len();
-            orchard_note_count += txdata.orchard().actions().len();
-            ironwood_note_count += txdata.ironwood().actions().len();
-
-            tx.push(txdata);
-        }
-
-        // --- Compute commitment trees ---
-        let sapling_root = final_sapling_root;
-        let orchard_root = final_orchard_root;
-        let ironwood_root = final_ironwood_root;
-
-        let commitment_tree_data = CommitmentTreeData::new(
-            CommitmentTreeRoots::new(sapling_root, orchard_root, ironwood_root),
-            CommitmentTreeSizes::new(
-                parent_sapling_size + sapling_note_count as u32,
-                parent_orchard_size + orchard_note_count as u32,
-                parent_ironwood_size + ironwood_note_count as u32,
-            ),
-        );
-
-        // --- Compute chainwork ---
-        let block_data = BlockData::new(
-            header.version() as u32,
-            header.time() as i64,
-            merkle_root,
-            block_commitments,
-            bits,
-            nonse,
-            solution,
-        );
-
-        let block_work = block_data.bits.to_work();
-        let chainwork = match parent_chainwork {
-            Some(parent) => parent
-                .add(&block_work)
-                .map_err(|e| format!("chainwork overflow: {e}"))?,
-            None => block_work,
-        };
-
-        // --- Final block-context and block data ---
-        let context = BlockContext::new(
-            BlockHash::from(hash),
-            BlockHash::from(parent_hash),
-            chainwork,
-            height,
-        );
-
-        Ok(IndexedBlock::new(
-            context,
-            block_data,
-            tx,
-            commitment_tree_data,
-        ))
     }
 }
 
@@ -1400,7 +1181,7 @@ impl CompactTxData {
     }
 
     /// Returns compact ironwood tx data.
-    pub(crate) fn ironwood(&self) -> &OrchardCompactTx {
+    pub fn ironwood(&self) -> &OrchardCompactTx {
         &self.ironwood
     }
 
@@ -1454,207 +1235,6 @@ impl CompactTxData {
             vin,
             vout,
         }
-    }
-}
-
-/// Converts one RPC action tuple `(nullifier, cmx, ephemeral_key, ciphertext)` into a
-/// [`CompactOrchardAction`], naming `pool` in each rejection so orchard and ironwood
-/// failures are distinguishable.
-fn compact_orchard_action_from_parts(
-    pool: &str,
-    (nf, cmx, epk, ct): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
-) -> Result<CompactOrchardAction, String> {
-    let nf: [u8; 32] = nf
-        .try_into()
-        .map_err(|_| format!("{pool} nullifier must be 32 bytes"))?;
-    let cmx: [u8; 32] = cmx
-        .try_into()
-        .map_err(|_| format!("{pool} cmx must be 32 bytes"))?;
-    let epk: [u8; 32] = epk
-        .try_into()
-        .map_err(|_| format!("{pool} ephemeral_key must be 32 bytes"))?;
-    let ct: [u8; 52] = ct
-        .get(..52)
-        .ok_or_else(|| format!("{pool} ciphertext must be at least 52 bytes"))?
-        .try_into()
-        .map_err(|_| format!("{pool} ciphertext must be 52 bytes"))?;
-    Ok(CompactOrchardAction::new(nf, cmx, epk, ct))
-}
-
-/// TryFrom inputs:
-/// - Transaction Index
-/// - Full Transaction
-impl TryFrom<(u64, zaino_fetch::chain::transaction::FullTransaction)> for CompactTxData {
-    type Error = String;
-
-    fn try_from(
-        (index, tx): (u64, zaino_fetch::chain::transaction::FullTransaction),
-    ) -> Result<Self, Self::Error> {
-        let txid_vec = tx.tx_id();
-        // NOTE: Is this byte order correct?
-        let txid: [u8; 32] = txid_vec
-            .try_into()
-            .map_err(|_| "txid must be 32 bytes".to_string())?;
-
-        let (sapling_balance, orchard_balance, ironwood_balance) = tx.value_balances();
-
-        let vin: Vec<TxInCompact> = tx
-            .transparent_inputs()
-            .into_iter()
-            .map(|(prev_txid, prev_index, _)| {
-                let prev_txid_arr: [u8; 32] = prev_txid
-                    .try_into()
-                    .map_err(|_| "prev_txid must be 32 bytes".to_string())?;
-                Ok::<_, String>(TxInCompact::new(prev_txid_arr, prev_index))
-            })
-            .collect::<Result<_, _>>()?;
-
-        //TODO: We should error handle on these, a failure here should probably be
-        // reacted to
-        let vout: Vec<TxOutCompact> = tx
-            .transparent_outputs()
-            .into_iter()
-            .filter_map(|(value, script)| {
-                if let Some((hash20, stype)) = parse_standard_script(&script) {
-                    TxOutCompact::new(value, hash20, stype as u8)
-                } else {
-                    let mut fallback = [0u8; 20];
-                    let copy_len = script.len().min(20);
-                    fallback[..copy_len].copy_from_slice(&script[..copy_len]);
-                    TxOutCompact::new(value, fallback, ScriptType::NonStandard as u8)
-                }
-            })
-            .collect();
-
-        let transparent = TransparentCompactTx::new(vin, vout);
-
-        let spends: Vec<CompactSaplingSpend> = tx
-            .shielded_spends()
-            .into_iter()
-            .map(|nf| {
-                let arr: [u8; 32] = nf
-                    .try_into()
-                    .map_err(|_| "sapling nullifier must be 32 bytes".to_string())?;
-                Ok::<_, String>(CompactSaplingSpend::new(arr))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let outputs: Vec<CompactSaplingOutput> = tx
-            .shielded_outputs()
-            .into_iter()
-            .map(|(cmu, epk, ct)| {
-                let cmu: [u8; 32] = cmu
-                    .try_into()
-                    .map_err(|_| "cmu must be 32 bytes".to_string())?;
-                let epk: [u8; 32] = epk
-                    .try_into()
-                    .map_err(|_| "ephemeral_key must be 32 bytes".to_string())?;
-                let ct: [u8; 52] = ct
-                    .get(..52)
-                    .ok_or("ciphertext must be at least 52 bytes")?
-                    .try_into()
-                    .map_err(|_| "ciphertext must be 52 bytes".to_string())?;
-                Ok::<_, String>(CompactSaplingOutput::new(cmu, epk, ct))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let sapling = SaplingCompactTx::new(sapling_balance, spends, outputs);
-
-        let orchard_actions: Vec<CompactOrchardAction> = tx
-            .orchard_actions()
-            .into_iter()
-            .map(|action| compact_orchard_action_from_parts("orchard", action))
-            .collect::<Result<_, _>>()?;
-
-        let orchard = OrchardCompactTx::new(orchard_balance, orchard_actions);
-
-        let ironwood_actions: Vec<CompactOrchardAction> = tx
-            .ironwood_actions()
-            .into_iter()
-            .map(|action| compact_orchard_action_from_parts("ironwood", action))
-            .collect::<Result<_, _>>()?;
-
-        let ironwood = OrchardCompactTx::new(ironwood_balance, ironwood_actions);
-
-        Ok(CompactTxData::new(
-            index,
-            // NOTE: do we need to use from_bytes_in_display_order here?
-            txid.into(),
-            transparent,
-            sapling,
-            orchard,
-            ironwood,
-        ))
-    }
-}
-
-impl ZainoVersionedSerde for CompactTxData {
-    const VERSION: u8 = version::V2;
-
-    fn encode_latest<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        Self::encode_v2(self, w)
-    }
-
-    fn decode_latest<R: Read>(r: &mut R) -> io::Result<Self> {
-        Self::decode_v2(r)
-    }
-
-    fn encode_v1<W: Write>(&self, mut w: &mut W) -> io::Result<()> {
-        write_u64_le(&mut w, self.index)?;
-
-        self.txid.serialize_with_version(&mut w, 1)?;
-        self.transparent.serialize_with_version(&mut w, 1)?;
-        self.sapling.serialize_with_version(&mut w, 1)?;
-        self.orchard.serialize_with_version(&mut w, 1)
-    }
-
-    fn decode_v1<R: Read>(r: &mut R) -> io::Result<Self> {
-        let mut r = r;
-        let index = read_u64_le(&mut r)?;
-
-        let txid = TransactionHash::deserialize(&mut r)?;
-        let transparent = TransparentCompactTx::deserialize(&mut r)?;
-        let sapling = SaplingCompactTx::deserialize(&mut r)?;
-        let orchard = OrchardCompactTx::deserialize(&mut r)?;
-
-        Ok(CompactTxData::new(
-            index,
-            txid,
-            transparent,
-            sapling,
-            orchard,
-            OrchardCompactTx::empty(),
-        ))
-    }
-
-    fn encode_v2<W: Write>(&self, mut w: &mut W) -> io::Result<()> {
-        write_u64_le(&mut w, self.index)?;
-
-        self.txid.serialize_with_version(&mut w, 1)?;
-        self.transparent.serialize_with_version(&mut w, 1)?;
-        self.sapling.serialize_with_version(&mut w, 1)?;
-        self.orchard.serialize_with_version(&mut w, 1)?;
-        self.ironwood.serialize_with_version(&mut w, 1)
-    }
-
-    fn decode_v2<R: Read>(r: &mut R) -> io::Result<Self> {
-        let mut r = r;
-        let index = read_u64_le(&mut r)?;
-
-        let txid = TransactionHash::deserialize(&mut r)?;
-        let transparent = TransparentCompactTx::deserialize(&mut r)?;
-        let sapling = SaplingCompactTx::deserialize(&mut r)?;
-        let orchard = OrchardCompactTx::deserialize(&mut r)?;
-        let ironwood = OrchardCompactTx::deserialize(&mut r)?;
-
-        Ok(CompactTxData::new(
-            index,
-            txid,
-            transparent,
-            sapling,
-            orchard,
-            ironwood,
-        ))
     }
 }
 
@@ -1908,7 +1488,7 @@ impl FixedEncodedLen for ScriptType {
 
 /// Try to recognise a standard P2PKH / P2SH locking script.
 /// Returns (payload-hash, ScriptType) on success.
-pub(crate) fn parse_standard_script(script: &[u8]) -> Option<([u8; 20], ScriptType)> {
+pub fn parse_standard_script(script: &[u8]) -> Option<([u8; 20], ScriptType)> {
     // P2PKH 76 a9 14 <20-B hash> 88 ac
     const P2PKH_PREFIX: &[u8] = &[0x76, 0xa9, 0x14];
     const P2PKH_SUFFIX: &[u8] = &[0x88, 0xac];

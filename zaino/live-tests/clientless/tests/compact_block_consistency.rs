@@ -9,7 +9,6 @@
 //! send: an empty `poolTypes` filter.
 
 use zaino_common::network::ActivationHeights;
-use zaino_fetch::jsonrpsee::response::GetBlockResponse;
 #[allow(deprecated)]
 use zaino_state::ZcashIndexer as _;
 use zaino_testutils::{
@@ -107,29 +106,34 @@ async fn unfiltered_compact_blocks_match_chain_metadata_zebrad() {
         // Verbosity 1: txids-as-strings plus the `trees` field the oracle needs
         // (verbosity 2 returns full transaction objects, which BlockObject's
         // string-typed `tx` field rejects).
-        let oracle_trees = match connector
-            .get_block(block.height.to_string(), Some(1))
-            .await
-            .expect("validator serves verbose blocks")
-        {
-            GetBlockResponse::Object(block_object) => block_object.trees,
-            other => panic!("verbosity-2 getblock must return a block object, got {other:?}"),
-        };
+        let oracle_trees = connector
+            .call(
+                "getblock",
+                vec![
+                    serde_json::json!(block.height.to_string()),
+                    serde_json::json!(1),
+                ],
+            )
+            .await["trees"]
+            .clone();
+        // Zebra omits a pool's entry entirely while its tree is empty, so an
+        // absent entry is a size of zero rather than a missing answer.
+        let oracle_tree_size = |pool: &str| oracle_trees[pool]["size"].as_u64().unwrap_or(0);
         assert_eq!(
             u64::from(metadata.sapling_commitment_tree_size),
-            oracle_trees.sapling(),
+            oracle_tree_size("sapling"),
             "served sapling tree size must match the validator's own at height {}",
             block.height
         );
         assert_eq!(
             u64::from(metadata.orchard_commitment_tree_size),
-            oracle_trees.orchard(),
+            oracle_tree_size("orchard"),
             "served orchard tree size must match the validator's own at height {}",
             block.height
         );
         assert_eq!(
             u64::from(metadata.ironwood_commitment_tree_size),
-            oracle_trees.ironwood(),
+            oracle_tree_size("ironwood"),
             "served ironwood tree size must match the validator's own at height {}",
             block.height
         );
@@ -157,20 +161,42 @@ async fn unfiltered_compact_blocks_match_chain_metadata_zebrad() {
     test_manager.close().await;
 }
 
-/// Class-1 (consensus) predicate: in the NU5-through-NU6.2 era, a shielded
-/// (orchard-receiver) miner's coinbase carries the reward as Orchard actions.
+/// The shielded pool a miner's coinbase routes the reward to: Orchard in the
+/// NU5-through-NU6.2 era (transaction v5), Ironwood from NU6.3 (v6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoinbaseRewardPool {
+    Orchard,
+    Ironwood,
+}
+
+/// Shared body of the class-1 (consensus) coinbase predicates: the first
+/// transaction is a coinbase of the era's version, carries the reward as at least
+/// one action in `pool`, and has an empty sapling component and an empty
+/// other-shielded-pool component.
 ///
 /// The action count uses `>= 1` rather than the padded exact count so the predicate
 /// does not couple to the Orchard bundle-padding rule.
-fn is_valid_orchard_coinbase(block: &zebra_chain::block::Block) -> bool {
+fn is_valid_shielded_coinbase(block: &zebra_chain::block::Block, pool: CoinbaseRewardPool) -> bool {
     let Some(coinbase) = block.transactions.first() else {
         return false;
     };
+    let orchard_actions = coinbase.orchard_actions().count();
+    let ironwood_actions = coinbase.ironwood_actions().count();
+    let (version, rewarded_pool_actions, other_pool_actions) = match pool {
+        CoinbaseRewardPool::Orchard => (5, orchard_actions, ironwood_actions),
+        CoinbaseRewardPool::Ironwood => (6, ironwood_actions, orchard_actions),
+    };
     coinbase.is_coinbase()
-        && coinbase.version() == 5
+        && coinbase.version() == version
         && coinbase.sapling_outputs().count() == 0
-        && coinbase.orchard_actions().count() >= 1
-        && coinbase.ironwood_actions().count() == 0
+        && rewarded_pool_actions >= 1
+        && other_pool_actions == 0
+}
+
+/// Class-1 (consensus) predicate: in the NU5-through-NU6.2 era, a shielded
+/// (orchard-receiver) miner's coinbase carries the reward as Orchard actions.
+fn is_valid_orchard_coinbase(block: &zebra_chain::block::Block) -> bool {
+    is_valid_shielded_coinbase(block, CoinbaseRewardPool::Orchard)
 }
 
 /// Class-1 (consensus) predicate: from NU6.3 the same miner's coinbase must have an
@@ -182,14 +208,7 @@ fn is_valid_orchard_coinbase(block: &zebra_chain::block::Block) -> bool {
 /// builder off-by-one vs missing routing vs a zaino pool-swap). This predicate over
 /// raw validator blocks is that issue's disambiguator.
 fn is_valid_ironwood_coinbase(block: &zebra_chain::block::Block) -> bool {
-    let Some(coinbase) = block.transactions.first() else {
-        return false;
-    };
-    coinbase.is_coinbase()
-        && coinbase.version() == 6
-        && coinbase.sapling_outputs().count() == 0
-        && coinbase.orchard_actions().count() == 0
-        && coinbase.ironwood_actions().count() >= 1
+    is_valid_shielded_coinbase(block, CoinbaseRewardPool::Ironwood)
 }
 
 /// One-line coinbase summary for assertion messages, so a predicate failure names the
@@ -260,17 +279,20 @@ async fn assert_coinbase_routing(
     let connector = test_manager.full_node_jsonrpc_connector().await;
     let mut violations: Vec<String> = Vec::new();
     for height in 0..=tip {
-        let block = match connector
-            .get_block(height.to_string(), Some(0))
-            .await
-            .unwrap()
-        {
-            GetBlockResponse::Raw(raw) => {
-                zebra_chain::block::Block::zcash_deserialize(raw.as_ref())
-                    .expect("validator serves deserializable blocks")
-            }
-            other => panic!("verbosity-0 getblock must return a raw block, got {other:?}"),
-        };
+        // Verbosity 0 is the serialised block as a hex string.
+        let raw = connector
+            .call(
+                "getblock",
+                vec![serde_json::json!(height.to_string()), serde_json::json!(0)],
+            )
+            .await;
+        let raw = hex::decode(
+            raw.as_str()
+                .expect("verbosity-0 getblock returns a hex string"),
+        )
+        .expect("verbosity-0 getblock returns valid hex");
+        let block = zebra_chain::block::Block::zcash_deserialize(raw.as_slice())
+            .expect("validator serves deserializable blocks");
 
         let expected = expected_era(height);
         let (want_orchard, want_ironwood) = match expected {

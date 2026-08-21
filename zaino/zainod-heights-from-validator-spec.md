@@ -34,7 +34,7 @@ zebrad launch config. The wallet derives them via
 `WalletNetwork::from_validator`; zainod adopts them via this spec; no
 test-side constant needs to mirror anything. Expect the zcash_local_net
 pin bump to be loud: `ZainodConfig.network` narrows to a payload-free
-kind (Mainnet/Testnet/Regtest), `ZcashDevtoolConfig::faucet()/recipient()`
+kind (Mainnet / PubTestnet / Regtest), `ZcashDevtoolConfig::faucet()/recipient()`
 take a `WalletNetwork` parameter, and any test that assigned heights into
 a wallet config stops compiling — the fix is always to launch the
 validator first and derive.
@@ -71,8 +71,8 @@ ever match caller-chosen heights. The only correct source is the running
 zebrad — and it already publishes its schedule: `getblockchaininfo` returns
 an `upgrades` map with per-upgrade `activationheight`, which zaino already
 parses (`GetBlockchainInfoResponse.upgrades`,
-`zaino-fetch/src/jsonrpsee/response.rs:356-359`, round-trip tested at
-`response.rs:530+`). Both backends already call the validator at startup
+`zaino-source-zebra-rpc/src/parse.rs` since ADR-0008, tested alongside it;
+was `zaino-fetch/src/jsonrpsee/response.rs:356-359` when this was written). Both backends already call the validator at startup
 (`get_info` at `state.rs:198`, `get_blockchain_info` in the tip-wait loop at
 `state.rs:226`). The handshake exists; the heights are simply never adopted
 from it.
@@ -88,7 +88,7 @@ from it.
    (`state.rs:190-196`), so the ordering is achievable without restructuring.
 2. **Learned heights are the only source.** `ZEBRAD_DEFAULT_ACTIVATION_HEIGHTS`
    ceases to exist as a truth source. Recommended shape: the *config-level*
-   network type degrades to a kind (Mainnet / Testnet / Regtest, no payload),
+   network type degrades to a kind (Mainnet / PubTestnet / Regtest, no payload),
    and only the *runtime* type constructed after the handshake carries
    heights — making pre-handshake height reads unrepresentable. A minimal
    variant (populate the existing payload from the handshake before first
@@ -157,7 +157,7 @@ nu5 = 2, nu6 = 2, nu6_1 = 2, nu6_2 = 2, nu6_3 = 6
 
 ## Out of scope
 
-- Mainnet / Testnet: compiled zebra network parameters are correct there; no
+- Mainnet / The Public Testnet: compiled zebra network parameters are correct there; no
   handshake is needed and none should be added.
 - The infras-side client guard lift (Provider heights) — lands on
   `infrastructure#278` independently.
