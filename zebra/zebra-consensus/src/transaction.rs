@@ -32,7 +32,7 @@ use zebra_chain::{
     primitives::Groth16Proof,
     serialization::DateTime32,
     transaction::{
-        self, HashType, SigHash, Transaction, UnminedTx, UnminedTxId, VerifiedUnminedTx,
+        self, HashType, SigHash, Transaction, UnminedTx, UnminedTxId, VerifiedUnminedTx, WtxId,
     },
     transparent,
 };
@@ -44,6 +44,7 @@ use zebra_state as zs;
 use crate::{error::TransactionError, primitives, script, BoxError};
 
 pub mod check;
+mod script_cache;
 #[cfg(test)]
 mod tests;
 
@@ -296,6 +297,15 @@ where
                 auth_digest,
             }),
         };
+        // The script cache key trusts the caller-supplied hash; re-derive it
+        // in debug builds to catch a mismatched `BlockRequest`.
+        debug_assert_eq!(req.transaction_hash, tx.hash());
+        // Pre-v5 ids don't commit to the consensus branch id, so only
+        // witnessed (v5+) transactions are cached; see the `script_cache` docs.
+        let cache_key = match tx_id {
+            UnminedTxId::Witnessed(wtx_id) => Some(wtx_id),
+            UnminedTxId::Legacy(_) => None,
+        };
         let height = req.height;
         let time = req.time;
         let known_utxos = req.known_utxos.clone();
@@ -372,6 +382,7 @@ where
             let async_checks = dispatch_version_verification(
                 tx.as_ref(),
                 nu,
+                cache_key,
                 script_verifier,
                 cached_ffi_transaction.clone()
             )?;
@@ -605,10 +616,23 @@ where
 
             tracing::trace!(?tx_id, "got state UTXOs");
 
+            // A verification against mempool-paired prevout data must never
+            // populate a cache entry the block path could hit (the pairing has
+            // a bug history, zebra#10346), so transactions spending unmined
+            // outputs bypass the cache. Pre-v5 ids don't commit to the
+            // consensus branch id and are never cached.
+            let cache_key = match tx_id {
+                UnminedTxId::Witnessed(wtx_id) if spent_mempool_outpoints.is_empty() => {
+                    Some(wtx_id)
+                }
+                _ => None,
+            };
+
             // Select version-specific async verification pipeline
             let mut async_checks = dispatch_version_verification(
                 tx.as_ref(),
                 nu,
+                cache_key,
                 script_verifier,
                 cached_ffi_transaction.clone()
             )?;
@@ -982,6 +1006,7 @@ fn check_maturity_height(
 fn dispatch_version_verification(
     tx: &Transaction,
     nu: NetworkUpgrade,
+    cache_key: Option<WtxId>,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
 ) -> Result<AsyncChecks, TransactionError> {
@@ -993,15 +1018,16 @@ fn dispatch_version_verification(
         Transaction::V4 { joinsplit_data, .. } => verify_v4_transaction(
             tx,
             nu,
+            cache_key,
             script_verifier,
             cached_ffi_transaction,
             joinsplit_data,
         ),
         Transaction::V5 { .. } => {
-            verify_v5_transaction(tx, nu, script_verifier, cached_ffi_transaction)
+            verify_v5_transaction(tx, nu, cache_key, script_verifier, cached_ffi_transaction)
         }
         Transaction::V6 { .. } => {
-            verify_v6_transaction(tx, nu, script_verifier, cached_ffi_transaction)
+            verify_v6_transaction(tx, nu, cache_key, script_verifier, cached_ffi_transaction)
         }
     }
 }
@@ -1019,6 +1045,7 @@ fn dispatch_version_verification(
 ///
 /// - the `tx` transaction to verify
 /// - the `nu` network upgrade active at the transaction's verification height
+/// - the `cache_key` naming `tx` in the script cache, when it is cacheable
 /// - the `script_verifier` to use for verifying the transparent transfers
 /// - the prepared `cached_ffi_transaction` used by the script verifier
 /// - the Sprout `joinsplit_data` shielded data in the transaction
@@ -1026,6 +1053,7 @@ fn dispatch_version_verification(
 fn verify_v4_transaction(
     tx: &Transaction,
     nu: NetworkUpgrade,
+    cache_key: Option<WtxId>,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
     joinsplit_data: &Option<transaction::JoinSplitData<Groth16Proof>>,
@@ -1038,11 +1066,14 @@ fn verify_v4_transaction(
         .sighasher()
         .sighash(HashType::ALL, None);
 
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sprout_shielded_data(joinsplit_data, &sighash)?)
-            .and(verify_sapling_bundle(sapling_bundle, &sighash)),
+    Ok(make_transparent_input_and_output_checks(
+        tx,
+        cache_key,
+        script_verifier,
+        cached_ffi_transaction,
     )
+    .and(verify_sprout_shielded_data(joinsplit_data, &sighash)?)
+    .and(verify_sapling_bundle(sapling_bundle, &sighash)))
 }
 
 /// Verifies if a V4 `transaction` is supported by `network_upgrade`.
@@ -1105,12 +1136,14 @@ fn verify_v4_transaction_network_upgrade(
 ///
 /// - the `tx` transaction to verify
 /// - the `nu` network upgrade active at the transaction's verification height
+/// - the `cache_key` naming `tx` in the script cache, when it is cacheable
 /// - the `script_verifier` to use for verifying the transparent transfers
 /// - the prepared `cached_ffi_transaction` used by the script verifier
 #[allow(clippy::unwrap_in_result)]
 fn verify_v5_transaction(
     tx: &Transaction,
     nu: NetworkUpgrade,
+    cache_key: Option<WtxId>,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
 ) -> Result<AsyncChecks, TransactionError> {
@@ -1123,11 +1156,14 @@ fn verify_v5_transaction(
         .sighasher()
         .sighash(HashType::ALL, None);
 
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sapling_bundle(sapling_bundle, &sighash))
-            .and(verify_orchard_bundle(orchard_bundle, &sighash, nu)),
+    Ok(make_transparent_input_and_output_checks(
+        tx,
+        cache_key,
+        script_verifier,
+        cached_ffi_transaction,
     )
+    .and(verify_sapling_bundle(sapling_bundle, &sighash))
+    .and(verify_orchard_bundle(orchard_bundle, &sighash, nu)))
 }
 
 /// Verifies if a V5 `transaction` is supported by `network_upgrade`.
@@ -1180,6 +1216,7 @@ fn verify_v5_transaction_network_upgrade(
 fn verify_v6_transaction(
     tx: &Transaction,
     nu: NetworkUpgrade,
+    cache_key: Option<WtxId>,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
 ) -> Result<AsyncChecks, TransactionError> {
@@ -1195,12 +1232,15 @@ fn verify_v6_transaction(
 
     // The Ironwood bundle reuses the Orchard Action proof system and the NU6.3 circuit key, so
     // it is verified the same way as the v6 Orchard bundle (against the NU6.3 key).
-    Ok(
-        verify_transparent_inputs_and_outputs(tx, script_verifier, cached_ffi_transaction)?
-            .and(verify_sapling_bundle(sapling_bundle, &sighash))
-            .and(verify_orchard_v6_bundle(orchard_bundle, &sighash))
-            .and(verify_orchard_v6_bundle(ironwood_bundle, &sighash)),
+    Ok(make_transparent_input_and_output_checks(
+        tx,
+        cache_key,
+        script_verifier,
+        cached_ffi_transaction,
     )
+    .and(verify_sapling_bundle(sapling_bundle, &sighash))
+    .and(verify_orchard_v6_bundle(orchard_bundle, &sighash))
+    .and(verify_orchard_v6_bundle(ironwood_bundle, &sighash)))
 }
 
 /// Verifies that a V6 `transaction` is supported by `network_upgrade`.
@@ -1234,35 +1274,52 @@ fn verify_v6_transaction_network_upgrade(
     }
 }
 
-/// Verifies if a transaction's transparent inputs are valid using the provided
-/// `script_verifier` and `cached_ffi_transaction`.
+/// Builds the deferred checks that verify `tx`'s transparent input scripts
+/// against their spent outputs. Nothing is verified until the returned checks
+/// are awaited.
 ///
-/// Returns the asynchronous script verification checks for transparent inputs in `tx`.
-fn verify_transparent_inputs_and_outputs(
+/// With a `cache_key`, a previously recorded verification makes the checks a
+/// no-op, and a new successful verification is recorded; see the
+/// [`script_cache`] docs for why the key is sound.
+fn make_transparent_input_and_output_checks(
     tx: &Transaction,
+    cache_key: Option<WtxId>,
     script_verifier: script::Verifier,
     cached_ffi_transaction: Arc<CachedFfiTransaction>,
-) -> Result<AsyncChecks, TransactionError> {
-    if tx.is_coinbase() {
-        // The script verifier only verifies PrevOut inputs and their corresponding UTXOs.
-        // Coinbase transactions don't have any PrevOut inputs.
-        Ok(AsyncChecks::new())
-    } else {
-        // feed all of the inputs to the script verifier
-        let inputs = tx.inputs();
+) -> AsyncChecks {
+    // The script verifier only checks PrevOut inputs against their UTXOs;
+    // coinbase and shielded-only transactions have none, so caching them
+    // would spend a slot on a hit that saves nothing.
+    if tx.is_coinbase() || tx.inputs().is_empty() {
+        return AsyncChecks::new();
+    }
 
-        let script_checks = (0..inputs.len())
-            .map(move |input_index| {
-                let request = script::Request {
-                    cached_ffi_transaction: cached_ffi_transaction.clone(),
-                    input_index,
-                };
-
-                script_verifier.oneshot(request)
+    let input_count = tx.inputs().len();
+    let script_checks = move || {
+        (0..input_count).map(move |input_index| {
+            script_verifier.oneshot(script::Request {
+                cached_ffi_transaction: cached_ffi_transaction.clone(),
+                input_index,
             })
-            .collect();
+        })
+    };
 
-        Ok(script_checks)
+    match cache_key {
+        // Hit: these scripts verified before; skip only these checks.
+        Some(key) if script_cache::verified_scripts().contains(&key) => AsyncChecks::new(),
+        // Miss: verify, then remember the success.
+        Some(key) => {
+            let checks = futures::future::try_join_all(script_checks());
+            let mut checks_then_insert = AsyncChecks::new();
+            checks_then_insert.push(async move {
+                checks.await?;
+                script_cache::verified_scripts().insert(key);
+                Ok(())
+            });
+            checks_then_insert
+        }
+        // Uncacheable (pre-v5, or spending unmined mempool outputs).
+        None => script_checks().collect(),
     }
 }
 

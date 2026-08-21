@@ -7442,6 +7442,7 @@ dependencies = [
  "rayon",
  "sapling-crypto",
  "serde",
+ "siphasher",
  "spandoc",
  "thiserror 2.0.18",
  "tokio",
