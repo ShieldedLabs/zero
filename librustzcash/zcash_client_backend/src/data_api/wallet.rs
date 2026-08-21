@@ -35,7 +35,7 @@ to a wallet-internal shielded address, as described in [ZIP 316](https://zips.z.
 //! [`propose_transfer`]: crate::data_api::wallet::propose_transfer
 
 use nonempty::NonEmpty;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use std::{
     num::NonZeroU32,
     ops::{Add, Sub},
@@ -598,15 +598,15 @@ impl ConfirmationsPolicy {
     ///
     /// The boundary chosen is one interval BELOW the most recent one — an anchor age of 1, the
     /// smallest ZIP 318 admits. Anchoring to the most recent boundary would be an age of 0, which
-    /// no migration transfer uses.
+    /// no migration transfer uses. See [`Self::bucketed_at_age`] for any other age.
     ///
     /// `activation_height` is the activation of the pool being crossed into; the chosen boundary
     /// must lie strictly above it.
     ///
-    /// Returns `None` when no usable boundary is reachable: when the ordinary anchor lies below the
-    /// first boundary after `activation_height`, or where the required confirmations would reach
-    /// back past the genesis block. Reporting that as "unable to bucket" is what lets a caller fall
-    /// back, rather than build a proposal that is bound to fail.
+    /// Returns `None` when no usable boundary is reachable: when the most recent boundary lies
+    /// below the first boundary after `activation_height`, or where the required confirmations
+    /// would reach back past the genesis block. Reporting that as "unable to bucket" is what lets
+    /// a caller fall back, rather than build a proposal that is bound to fail.
     ///
     /// [ZIP 318]: https://zips.z.cash/zip-0318
     pub fn bucketed(
@@ -615,26 +615,46 @@ impl ConfirmationsPolicy {
         target_height: TargetHeight,
         activation_height: BlockHeight,
     ) -> Option<Self> {
-        // ZIP 318 draws an anchor of AGE `a` in `[1, ANCHOR_AGE_CAP]` boundaries behind the most
-        // recent one, so the chosen boundary is always strictly below it. Age 1 is taken here: the
-        // newest admissible boundary, and the modal age under the migration's `Geometric(1/2)`
-        // draw. Anchoring to the most recent boundary instead would be an age of 0, which no
-        // migration transfer ever uses.
-        let most_recent = interval.boundary_at_or_below(self.anchor_height(target_height));
-        let boundary = BlockHeight::from_u32(
-            u32::from(most_recent).checked_sub(interval.block_count().get())?,
-        );
+        self.bucketed_at_age(interval, target_height, activation_height, NonZeroU32::MIN)
+    }
 
-        // The boundary must lie strictly above the activation of the pool being crossed into.
-        // Rounding down can otherwise land on a PRE-ACTIVATION boundary in the window between
-        // activation and the first boundary after it, and ZIP 318's candidate set contains no such
-        // height — anchoring there would be distinguishable rather than shared. Height zero is
-        // excluded by the same bound, its note commitment tree being empty.
-        if boundary <= activation_height {
-            return None;
-        }
-        let bucketed = u32::from(target_height).checked_sub(u32::from(boundary))?;
-        let trusted = NonZeroU32::new(bucketed)?;
+    /// Returns this policy adjusted so that the shielded anchor for `target_height` is the
+    /// boundary of `interval` at anchor `age`: that many boundaries below the most recent one the
+    /// wallet has observed. Returns `None` when that boundary is not reachable (see
+    /// [`Self::bucketed`]).
+    ///
+    /// [ZIP 318] admits ages `1` through `ANCHOR_AGE_CAP`, drawn from a recency-weighted
+    /// `Geometric(1/2)` distribution; age `0` is excluded, so the boundary is always strictly
+    /// below the most recent one.
+    ///
+    /// [ZIP 318]: https://zips.z.cash/zip-0318
+    pub fn bucketed_at_age(
+        &self,
+        interval: AnchorBucketInterval,
+        target_height: TargetHeight,
+        activation_height: BlockHeight,
+        age: NonZeroU32,
+    ) -> Option<Self> {
+        self.anchored_at(
+            target_height,
+            anchor_boundary_at_age(interval, target_height, activation_height, age)?,
+        )
+    }
+
+    /// Returns this policy adjusted so that the shielded anchor for `target_height` is exactly
+    /// `anchor`, or `None` if `anchor` is not below `target_height`.
+    ///
+    /// The adjustment is expressed as a RAISED CONFIRMATION REQUIREMENT rather than as a
+    /// separately lowered anchor, because the anchor and the bound on which notes may be spent are
+    /// the same quantity: `target_height` less the required confirmations. Moving that one number
+    /// moves both together, which is what makes it impossible to select a note having no witness
+    /// at the chosen anchor. Lowering the anchor on its own would leave two numbers free to drift.
+    ///
+    /// The untrusted requirement is raised to match when it would otherwise fall below the trusted
+    /// one, preserving this type's `trusted <= untrusted` invariant.
+    pub fn anchored_at(&self, target_height: TargetHeight, anchor: BlockHeight) -> Option<Self> {
+        let confirmations = u32::from(target_height).checked_sub(u32::from(anchor))?;
+        let trusted = NonZeroU32::new(confirmations)?;
         Self::new(
             trusted,
             core::cmp::max(self.untrusted(), trusted),
@@ -734,6 +754,138 @@ impl ConfirmationsPolicy {
             }
         }
     }
+}
+
+/// The boundary of `interval` at anchor `age` for a transaction targeting `target_height`: `age`
+/// boundaries below the most recent boundary at or below the latest block the wallet has observed
+/// (`target_height - 1`).
+///
+/// Returns `None` when that boundary would fall at or below `activation_height`, or below the
+/// genesis block. The boundary must lie strictly above the activation of the pool being crossed
+/// into: rounding down can otherwise land on a PRE-ACTIVATION boundary in the window between
+/// activation and the first boundary after it, and [ZIP 318]'s candidate set contains no such
+/// height, so anchoring there would be distinguishable rather than shared. Height zero is excluded
+/// by the same bound, its note commitment tree being empty.
+///
+/// The grid is read from the latest OBSERVED block rather than from the anchor an ordinary
+/// confirmation requirement would give, so that every wallet computes the same boundary from the
+/// same chain tip regardless of how many confirmations it requires. Two wallets that disagreed
+/// there would anchor to different boundaries and form two cohorts where there should be one.
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+fn anchor_boundary_at_age(
+    interval: AnchorBucketInterval,
+    target_height: TargetHeight,
+    activation_height: BlockHeight,
+    age: NonZeroU32,
+) -> Option<BlockHeight> {
+    let latest_observed = BlockHeight::from_u32(u32::from(target_height).checked_sub(1)?);
+    let most_recent = u32::from(interval.boundary_at_or_below(latest_observed));
+    let boundary = BlockHeight::from_u32(
+        most_recent.checked_sub(age.get().checked_mul(interval.block_count().get())?)?,
+    );
+
+    (boundary > activation_height).then_some(boundary)
+}
+
+/// The greatest [ZIP 318] anchor age available to a transaction targeting `target_height` that
+/// spends notes mined no later than `min_anchor_height`, or `None` when no admissible boundary
+/// exists.
+///
+/// The candidate boundaries are those at or above `min_anchor_height` (every note the transaction
+/// spends must exist in the anchor's tree state) and strictly above `activation_height`, and the
+/// age is capped at [`ANCHOR_AGE_CAP`].
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+/// [`ANCHOR_AGE_CAP`]: zcash_protocol::zip318::ANCHOR_AGE_CAP
+#[cfg(feature = "orchard")]
+fn max_anchor_age(
+    interval: AnchorBucketInterval,
+    target_height: TargetHeight,
+    activation_height: BlockHeight,
+    min_anchor_height: BlockHeight,
+) -> Option<NonZeroU32> {
+    let latest_observed = BlockHeight::from_u32(u32::from(target_height).checked_sub(1)?);
+    let most_recent = u32::from(interval.boundary_at_or_below(latest_observed));
+    let first_post_activation = u32::from(interval.boundary_at_or_above(activation_height + 1));
+    let lowest_allowed = core::cmp::max(u32::from(min_anchor_height), first_post_activation);
+    let available = most_recent.checked_sub(lowest_allowed)? / interval.block_count().get();
+
+    NonZeroU32::new(core::cmp::min(
+        zcash_protocol::zip318::ANCHOR_AGE_CAP,
+        available,
+    ))
+}
+
+/// Draws a [ZIP 318] anchor age in `[1, max_age]` from the recency-weighted `Geometric(1/2)`
+/// distribution: `P(a) = 2^(max_age - a) / (2^max_age - 1)`, so the modal age is 1 and age 0 is
+/// never produced.
+///
+/// The draw is by rejection — an age beyond `max_age` is discarded and redrawn — which is what
+/// conditions the geometric on the available range. Each bit of a fresh `u64` is one fair coin
+/// flip. Acceptance probability is at least `1/2`, so the loop terminates promptly.
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+#[cfg(feature = "orchard")]
+fn draw_anchor_age<R: RngCore>(max_age: NonZeroU32, rng: &mut R) -> NonZeroU32 {
+    loop {
+        let mut age: u32 = 1;
+        let mut bits = rng.next_u64();
+        for _ in 0..u64::BITS {
+            if bits & 1 == 1 {
+                break;
+            }
+            bits >>= 1;
+            age += 1;
+        }
+
+        if let Some(age) = NonZeroU32::new(age)
+            && age <= max_age
+        {
+            return age;
+        }
+    }
+}
+
+/// Draws a uniform anchor height in `[min_anchor_height, target_height - 1]`, or `None` if that
+/// range is empty.
+///
+/// This is the [ZIP 318] FALLBACK anchor, used only when no boundary is admissible: a wallet whose
+/// notes are all younger than the newest candidate boundary would otherwise have to wait for the
+/// next boundary to settle before it could spend at all. A uniform draw is shared with nobody, but
+/// the alternative on this path is the ordinary anchor, which is a fixed offset from the chain tip
+/// and so times the transaction to the block in which it was created. A draw reveals only a lower
+/// bound on that height.
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+#[cfg(feature = "orchard")]
+fn draw_uniform_anchor<R: RngCore>(
+    target_height: TargetHeight,
+    min_anchor_height: BlockHeight,
+    rng: &mut R,
+) -> Option<BlockHeight> {
+    // The span of `[min_anchor_height, target_height - 1]`, which is empty unless the minimum lies
+    // below the target.
+    let span = u64::from(u32::from(target_height).checked_sub(u32::from(min_anchor_height))?);
+    if span == 0 {
+        return None;
+    }
+
+    // Rejection sampling over whole multiples of `span`, so that the modulo below is unbiased: the
+    // final partial block of the `u64` range is discarded rather than folded onto the low values.
+    let zone = (u64::MAX / span) * span;
+    let draw = loop {
+        let candidate = rng.next_u64();
+        if candidate < zone {
+            break candidate % span;
+        }
+    };
+
+    Some(
+        min_anchor_height
+            + u32::try_from(draw)
+                .expect("a draw below `span` fits in the height it was taken from"),
+    )
 }
 
 /// Select transaction inputs, compute fees, and construct a proposal for a transaction or series
@@ -942,62 +1094,109 @@ where
         Some(Err(other)) => return Err(other.into()),
     };
 
-    // A request that is not a canonical crossing still spends Orchard notes, and its ANCHOR is
-    // the observable worth sharing: proposed against the same boundary, with the caller's own
-    // spend policy and note selection, so that nothing but the anchor — and the confirmations
-    // that anchor implies — differs from what the ordinary attempt would have produced.
+    // A request that is not a canonical crossing still spends Orchard notes, and its ANCHOR is the
+    // observable worth sharing. The ORDINARY proposal is built first here, because the anchor
+    // depends on which notes are spent — the drawn anchor must be at or above the newest of them,
+    // and nothing before input selection knows what those are. That pass is not wasted: it is both
+    // the source of that bound and the fallback taken when no anchor can be drawn or funded.
     #[cfg(feature = "orchard")]
-    let bucketed_proposal = match canonical_proposal {
-        Some(proposal) => Some(proposal),
-        None => match bucketed_policy {
-            Some(bucketed_policy) => match input_selector.propose_transaction(
+    let proposal = match canonical_proposal {
+        Some(proposal) => proposal,
+        None => {
+            let ordinary = input_selector.propose_transaction(
                 params,
                 wallet_db,
                 target_height,
-                bucketed_policy.anchor_height(target_height),
+                anchor_height,
                 &zip318,
-                bucketed_policy,
+                confirmations_policy,
                 spend_from_account,
                 request.clone(),
                 change_strategy,
                 spend_policy,
                 proposed_version,
-            ) {
-                // Kept only when the selection actually reached for Orchard notes. A proposal
-                // funded entirely from another pool has no Orchard anchor to hide, and would have
-                // paid up to one grid interval of extra confirmations on its inputs for nothing.
-                Ok(proposal) => {
-                    (proposal.input_count_in_pool(PoolType::ORCHARD) > 0).then_some(proposal)
+            )?;
+
+            let drawn = drawn_anchor_height(&ordinary, &zip318, params, target_height, &mut OsRng)
+                // Bucketing buys anonymity for an Orchard anchor; if the caller forbids spending
+                // Orchard notes, there is no anchor to hide.
+                .filter(|_| spend_policy.permits_shielded(ShieldedPool::Orchard));
+
+            // An anchor must be COMPUTABLE at the drawn height, not merely admissible: the data
+            // source must be able to produce the tree root there for every pool the transaction
+            // spends from, since one anchor serves them all. A wallet that scanned past NU6.3
+            // activation before boundary checkpointing was repaired is permanently missing the
+            // boundaries whose blocks carried no shielded outputs, and a uniform fallback draw can
+            // land on any height at all. Abandoning the attempt here keeps the ordinary anchor,
+            // rather than proposing a transaction whose build must fail with `AnchorNotFound`.
+            let computable = match drawn {
+                Some(anchor) => {
+                    let mut computable = true;
+                    for (pool, protocol) in [
+                        (PoolType::SAPLING, ShieldedPool::Sapling),
+                        (PoolType::ORCHARD, ShieldedPool::Orchard),
+                        (PoolType::IRONWOOD, ShieldedPool::Ironwood),
+                    ] {
+                        if ordinary.input_count_in_pool(pool) > 0
+                            && !wallet_db
+                                .anchor_computable(protocol, anchor)
+                                .map_err(|e| Error::from(InputSelectorError::DataSource(e)))?
+                        {
+                            computable = false;
+                            break;
+                        }
+                    }
+                    computable.then_some(anchor)
                 }
-                // The wallet cannot fund the payment from notes old enough for the boundary. The
-                // ordinary proposal below is the fallback, exactly as for a missed crossing: an
-                // anchor is worth confirmations, never a payment that cannot be made at all.
-                Err(InputSelectorError::InsufficientFunds { .. }) => None,
-                Err(other) => return Err(other.into()),
-            },
-            None => None,
-        },
+                None => None,
+            };
+
+            // Re-proposed at the drawn anchor with the caller's own spend policy and note
+            // selection, so that nothing but the anchor — and the confirmations that anchor
+            // implies — differs from the proposal above.
+            match computable
+                .and_then(|anchor| confirmations_policy.anchored_at(target_height, anchor))
+            {
+                Some(policy) => match input_selector.propose_transaction(
+                    params,
+                    wallet_db,
+                    target_height,
+                    policy.anchor_height(target_height),
+                    &zip318,
+                    policy,
+                    spend_from_account,
+                    request,
+                    change_strategy,
+                    spend_policy,
+                    proposed_version,
+                ) {
+                    Ok(proposal) => proposal,
+                    // The wallet cannot fund the payment from notes old enough for the drawn
+                    // anchor. The ordinary proposal is the fallback, exactly as for a missed
+                    // crossing: an anchor is worth confirmations, never a payment that cannot be
+                    // made at all.
+                    Err(InputSelectorError::InsufficientFunds { .. }) => ordinary,
+                    Err(other) => return Err(other.into()),
+                },
+                None => ordinary,
+            }
+        }
     };
 
     #[cfg(not(feature = "orchard"))]
-    let bucketed_proposal = None;
-
-    let proposal = match bucketed_proposal {
-        Some(proposal) => proposal,
-        None => input_selector.propose_transaction(
-            params,
-            wallet_db,
-            target_height,
-            anchor_height,
-            &zip318,
-            confirmations_policy,
-            spend_from_account,
-            request,
-            change_strategy,
-            spend_policy,
-            proposed_version,
-        )?,
-    };
+    let proposal = input_selector.propose_transaction(
+        params,
+        wallet_db,
+        target_height,
+        anchor_height,
+        &zip318,
+        confirmations_policy,
+        spend_from_account,
+        request,
+        change_strategy,
+        spend_policy,
+        proposed_version,
+    )?;
     proposal.check_transaction_size()?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
@@ -1032,6 +1231,65 @@ fn canonical_crossing_candidate<ParamsT: consensus::Parameters>(
                 .is_some_and(|amount| zip318.is_canonical_denomination(amount)),
             _ => false,
         }
+}
+
+/// The [ZIP 318] anchor height for `proposal`, drawn afresh for this transaction, or `None` when
+/// the proposal has no Orchard anchor to hide or no anchor can be drawn for it.
+///
+/// A boundary of the anchor bucket grid is drawn when one is admissible: at an age in
+/// `[1, ANCHOR_AGE_CAP]` from the recency-weighted distribution ([`draw_anchor_age`]), among the
+/// boundaries at or above the newest note the proposal spends and strictly above NU6.3 activation.
+/// When no boundary is admissible — every candidate would precede a note the proposal spends — a
+/// uniform height is drawn instead ([`draw_uniform_anchor`]), so that a wallet holding only recent
+/// notes still spends immediately rather than waiting for the next boundary to settle.
+///
+/// Returns `None` before NU6.3 activation, where there is no grid to share.
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+/// [`ANCHOR_AGE_CAP`]: zcash_protocol::zip318::ANCHOR_AGE_CAP
+#[cfg(feature = "orchard")]
+fn drawn_anchor_height<ParamsT, FeeRuleT, NoteRef, R>(
+    proposal: &Proposal<FeeRuleT, NoteRef>,
+    zip318: &PoolMigrationParams,
+    params: &ParamsT,
+    target_height: TargetHeight,
+    rng: &mut R,
+) -> Option<BlockHeight>
+where
+    ParamsT: consensus::Parameters,
+    R: RngCore,
+{
+    if proposal.input_count_in_pool(PoolType::ORCHARD) == 0 {
+        return None;
+    }
+
+    let activation = params.activation_height(NetworkUpgrade::Nu6_3)?;
+    if !params.is_nu_active(NetworkUpgrade::Nu6_3, target_height.into()) {
+        return None;
+    }
+
+    // One anchor serves every shielded pool in the transaction, so it must be at or above the
+    // newest note the proposal spends in ANY of them. A note that is not yet mined has no height
+    // to compare, and could not be witnessed at a past anchor in any case.
+    let min_anchor_height = proposal
+        .steps()
+        .iter()
+        .filter_map(|step| step.shielded_inputs())
+        .flat_map(|inputs| inputs.notes().iter())
+        .try_fold(BlockHeight::from_u32(0), |newest, note| {
+            Some(core::cmp::max(newest, note.mined_height()?))
+        })?;
+
+    let interval = zip318.anchor_bucket_interval();
+    match max_anchor_age(interval, target_height, activation, min_anchor_height) {
+        Some(max_age) => anchor_boundary_at_age(
+            interval,
+            target_height,
+            activation,
+            draw_anchor_age(max_age, rng),
+        ),
+        None => draw_uniform_anchor(target_height, min_anchor_height, rng),
+    }
 }
 
 /// Returns whether `step` is proved against a boundary of the anchor bucket grid `wallet_db`

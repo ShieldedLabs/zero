@@ -10,18 +10,33 @@ workspace.
 
 ## [Unreleased]
 
+### Added - Zero fork
+- `zcash_client_backend::data_api::wallet::ConfirmationsPolicy::bucketed_at_age`
+- `zcash_client_backend::data_api::wallet::ConfirmationsPolicy::anchored_at`
+- `zcash_client_backend::data_api::anchor_retention::CHECKPOINT_RETENTION_DEPTH`
+
 ### Changed - Zero fork
-- `zcash_client_backend::data_api::wallet::propose_transfer` now proves EVERY
-  proposal that spends Orchard notes against a boundary of the wallet's anchor
-  bucket grid, not only a canonical ZIP 318 crossing. When no boundary is
-  reachable, or the wallet cannot fund the payment from notes old enough for
-  one, the proposal falls back to the ordinary anchor as before. The remaining
+- `zcash_client_backend::data_api::wallet::propose_transfer` now draws a ZIP 318
+  anchor for EVERY proposal that spends Orchard notes, not only for a canonical
+  ZIP 318 crossing. The anchor is a boundary of the wallet's anchor bucket grid
+  at an age drawn from the ZIP 318 recency-weighted distribution when one is
+  admissible, and a uniformly drawn height between the newest note the proposal
+  spends and the target height when none is. When the drawn anchor is not
+  computable, or the wallet cannot fund the payment from notes old enough for
+  it, the proposal falls back to the ordinary anchor as before. The remaining
   ZIP 318 crossing properties (canonical denomination, Ironwood bundle padding,
   canonical fee) are unchanged and still apply only to a canonical crossing.
-  Callers should expect an Orchard-spending payment to require up to one grid
-  interval of additional confirmations on its inputs.
+  Callers should expect an Orchard-spending payment to require up to four grid
+  intervals of additional confirmations on its inputs.
 - Any step proved against a bucket boundary now takes the ZIP 318 rolling
   expiry, where previously only a canonical crossing did.
+- `ConfirmationsPolicy::bucketed` now derives the most recent boundary from the
+  latest observed block rather than from the anchor its own confirmation
+  requirement implies, so that wallets with different confirmation requirements
+  agree on the grid.
+- The note commitment trees now retain `CHECKPOINT_RETENTION_DEPTH` ordinary
+  checkpoints rather than as many as the backend's rewind bound allows, so that
+  a uniformly drawn fallback anchor remains witnessable.
 - `zcash_client_backend::data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing`
   has been renamed to `ExpiryHeightConflictsWithBoundaryAnchor`, and is now
   returned for any boundary-anchored step rather than only a canonical crossing.

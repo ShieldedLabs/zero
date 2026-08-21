@@ -32,6 +32,23 @@ use zcash_protocol::consensus::BlockHeight;
 /// which is `AnchorBucketInterval::ZIP_318`.
 pub use zcash_protocol::zip318::AnchorBucketInterval as AnchorRetentionInterval;
 
+/// The number of ORDINARY checkpoints a wallet's note commitment trees retain, beyond which the
+/// oldest are pruned. Checkpoints retained as durable anchors under an [`AnchorRetention`] policy
+/// are exempt from this budget.
+///
+/// This answers a different question from a backend's rewind bound, which governs how far the
+/// wallet may roll back and how far scanning re-verifies; this one governs which historical heights
+/// a note can still be witnessed against, and is deeper. The [ZIP 318] FALLBACK anchor is drawn
+/// uniformly from a window this depth must cover, and that window reaches back at most two anchor
+/// bucket intervals: the fallback is taken only when the newest note a transaction spends postdates
+/// the newest candidate boundary, which places it within one interval of the most recent boundary,
+/// itself within one interval of the chain tip. At [`AnchorRetentionInterval::ZIP_318`] that is 288
+/// blocks; an anchor drawn at a height whose checkpoint had been pruned could not be witnessed
+/// against.
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+pub const CHECKPOINT_RETENTION_DEPTH: u32 = 300;
+
 /// The anchor-retention policy in force while a range of blocks is being added to the wallet: the
 /// set of grids whose boundaries are retained, and the height from which retention applies.
 ///

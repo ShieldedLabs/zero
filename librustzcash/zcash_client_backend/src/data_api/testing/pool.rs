@@ -59,8 +59,8 @@ use crate::{
 
 use super::{DataStoreFactory, Reset, TestCache, TestFvk, TestState};
 
-use crate::data_api::ll::wallet::PRUNING_DEPTH;
 use crate::data_api::wallet::input_selection::GreedyInputSelectorError;
+use crate::data_api::{anchor_retention::CHECKPOINT_RETENTION_DEPTH, ll::wallet::PRUNING_DEPTH};
 use crate::{
     data_api::BlockMetadata,
     scanning::{
@@ -4094,13 +4094,13 @@ where
 
 /// A wallet-level test for note-commitment-tree *anchor retention*: once NU6.3 (Ironwood) is
 /// active, checkpoints on the anchor-retention interval are retained as durable anchors, exempt
-/// from the ordinary `PRUNING_DEPTH`-checkpoint pruning budget, so that their roots and the
+/// from the ordinary `CHECKPOINT_RETENTION_DEPTH`-checkpoint pruning budget, so that their roots and the
 /// witnesses anchored to them remain computable even after they age far behind the chain tip.
 ///
 /// The interval is supplied by the caller (the pruning depth is read from
 /// `crate::data_api::ll::wallet`, so this test tracks whatever value the implementation defines).
 /// Passing a short interval keeps the test cheap: the scan must reach a boundary more than
-/// `PRUNING_DEPTH` checkpoints behind the tip, which at the ZIP 318 interval means generating
+/// `CHECKPOINT_RETENTION_DEPTH` checkpoints behind the tip, which at the ZIP 318 interval means generating
 /// several hundred blocks.
 ///
 /// The test:
@@ -4108,13 +4108,13 @@ where
 ///   floor equals the account birthday.
 /// - Receives a single note early, capturing its note-commitment-tree position.
 /// - Scans forward in a single batch until an interval-aligned anchor has aged *more than
-///   `PRUNING_DEPTH` checkpoints* behind the chain tip — so it would have been pruned to enforce
+///   `CHECKPOINT_RETENTION_DEPTH` checkpoints* behind the chain tip — so it would have been pruned to enforce
 ///   the checkpoint budget had it not been retained.
 /// - Proves survival behaviorally: a witness for the received note *as of that buried anchor* is
 ///   still constructible (it would be `None` if the anchor checkpoint had been pruned).
 /// - Confirms the anchors did not consume the pruning budget: the ordinary checkpoint immediately
 ///   above the buried anchor *was* pruned, exactly the interval-aligned anchors at/above the floor
-///   are retained, and the full `PRUNING_DEPTH` window of checkpoints at the chain tip survives.
+///   are retained, and the full `CHECKPOINT_RETENTION_DEPTH` window of checkpoints at the chain tip survives.
 pub fn anchor_checkpoints_retained_across_deep_scan<
     T: ShieldedPoolTester,
     Dsf: DataStoreFactory,
@@ -4159,9 +4159,13 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
         anchor += interval_blocks;
     }
 
-    // Scan forward in a single batch so the anchor ages more than `PRUNING_DEPTH` checkpoints
-    // behind the tip: without retention it would be pruned to enforce the checkpoint budget.
-    let tip = anchor + PRUNING_DEPTH + 10;
+    // Scan forward in a single batch so the anchor ages more than `CHECKPOINT_RETENTION_DEPTH`
+    // ORDINARY checkpoints behind the tip: without retention it would be pruned to enforce the
+    // checkpoint budget. The window is sized in ordinary blocks, because the boundaries within it
+    // are themselves retained and so consume none of that budget; a window sized in plain blocks
+    // would leave the wallet under budget at the shorter intervals and prune nothing at all.
+    let ordinary_budget = CHECKPOINT_RETENTION_DEPTH + 10;
+    let tip = anchor + ordinary_budget + 1 + ordinary_budget / interval_blocks;
 
     // Fillers pay a non-wallet key, so each block still adds a commitment (and thus a checkpoint)
     // without changing the received note's position or the wallet's spendable set.
@@ -4237,9 +4241,9 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
         "the ordinary checkpoint just above the buried anchor must have been pruned",
     );
 
-    // The anchors did not consume the pruning budget: the full `PRUNING_DEPTH` window of
+    // The anchors did not consume the pruning budget: the full `CHECKPOINT_RETENTION_DEPTH` window of
     // checkpoints at the chain tip is still retained.
-    for h in (tip - PRUNING_DEPTH + 1)..=tip {
+    for h in (tip - CHECKPOINT_RETENTION_DEPTH + 1)..=tip {
         assert!(
             survivors.contains(&BlockHeight::from(h)),
             "checkpoint at tip-window height {h} must be retained",
@@ -5005,7 +5009,7 @@ where
     // 1. Set up test environment with account
     // 2. Generate and scan initial blocks to populate the note commitment tree
     // 3. Capture the chain state at a specific height
-    // 4. Generate and scan blocks beyond PRUNING_DEPTH to ensure early checkpoints are pruned
+    // 4. Generate and scan blocks beyond CHECKPOINT_RETENTION_DEPTH to ensure early checkpoints are pruned
     // 5. Verify that normal truncate_to_height fails due to missing checkpoints
     // 6. Test that truncate_to_chain_state succeeds using the captured chain state
     // 7. Verify wallet state after truncation
@@ -5054,9 +5058,9 @@ where
         .clone();
     assert_eq!(captured_chain_state.block_height(), capture_height);
 
-    // Step 4: Generate and scan blocks well beyond PRUNING_DEPTH so that the checkpoint
+    // Step 4: Generate and scan blocks well beyond CHECKPOINT_RETENTION_DEPTH so that the checkpoint
     // at capture_height is pruned from the note commitment tree.
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(
             &other_fvk,
@@ -5072,7 +5076,7 @@ where
         .unwrap()
         .expect("chain tip should be set");
     assert!(
-        tip >= capture_height + PRUNING_DEPTH,
+        tip >= capture_height + CHECKPOINT_RETENTION_DEPTH,
         "tip should be beyond pruning depth from capture height"
     );
 
@@ -5185,9 +5189,9 @@ pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
     }
     st.scan_cached_blocks(birthday_height, 5);
 
-    // Generate and scan blocks well beyond PRUNING_DEPTH to ensure early checkpoints
+    // Generate and scan blocks well beyond CHECKPOINT_RETENTION_DEPTH to ensure early checkpoints
     // are pruned from the note commitment tree.
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(
             &other_fvk,
@@ -5240,7 +5244,7 @@ pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
 
     let birthday_height = st.test_account().unwrap().birthday().height();
 
-    // Generate and scan initial blocks, then scan beyond PRUNING_DEPTH to ensure
+    // Generate and scan initial blocks, then scan beyond CHECKPOINT_RETENTION_DEPTH to ensure
     // early checkpoints are pruned.
     let other_fvk = T::random_fvk(st.rng_mut());
     let initial_blocks = 5u32;
@@ -5253,7 +5257,7 @@ pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
     }
     st.scan_cached_blocks(birthday_height, initial_blocks as usize);
 
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(
             &other_fvk,
@@ -5389,9 +5393,10 @@ pub fn rewind_to_chain_state_deep<T: ShieldedPoolTester, Dsf>(
     // The rewind target is the tip of the initial range.
     let rewind_target = sapling_activation + initial_block_count - 1;
 
-    // Scan more than PRUNING_DEPTH extra blocks so that the checkpoint at rewind_target is pruned
-    // AND rewind_target is below `tip - PRUNING_DEPTH`.
-    let extra_blocks = PRUNING_DEPTH + 10;
+    // Scan enough extra blocks that the checkpoint at rewind_target is pruned from the commitment
+    // tree — which takes more than `CHECKPOINT_RETENTION_DEPTH`, the deeper of the two bounds — and
+    // that rewind_target is below the wallet's rewind floor at `tip - PRUNING_DEPTH`.
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(
             &other_fvk,
@@ -5676,7 +5681,7 @@ where
     //    so `mark_stabilized_notes` has the `subtree_end_height` it needs to flip
     //    the shard 2 notes' `witness_stabilized` flag once the pruning floor rises
     //    above the shard.
-    // 4. Scan `PRUNING_DEPTH + 10` one-output post-note blocks. They land in shard
+    // 4. Scan `CHECKPOINT_RETENTION_DEPTH + 10` one-output post-note blocks. They land in shard
     //    3 (positions 196608+), pushing the pruning-floor checkpoint's tree
     //    position into shard 3 so `shardtree::truncate_shards(3)` — invoked by the
     //    upcoming rewind — preserves shard 2 and every row it indexes.
@@ -5825,10 +5830,10 @@ where
     )
     .unwrap();
 
-    // Step 4: scan more than `PRUNING_DEPTH` blocks past the note-filled block
+    // Step 4: scan more than `CHECKPOINT_RETENTION_DEPTH` blocks past the note-filled block
     // into shard 3, so the rewind's truncation position is in shard 3 and the
     // ensuing `truncate_shards(3)` leaves shard 2 intact.
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(&not_our_key, AddressType::DefaultExternal, filler_value);
     }
@@ -5912,7 +5917,7 @@ where
     //        finishes shard 1 and fills shard 2, with three A-owned outputs
     //        and three outputs for a not-yet-imported account B, non-wallet
     //        filler elsewhere;
-    //    (c) generate `PRUNING_DEPTH + 10` filler blocks past the note block
+    //    (c) generate `CHECKPOINT_RETENTION_DEPTH + 10` filler blocks past the note block
     //        to push the pruning floor past shard 2;
     //    (d) scan the note block, declare shard 2 complete via
     //        `put_subtree_roots`, then scan the filler blocks — the
@@ -6080,7 +6085,7 @@ where
 
     // Step 1c: filler blocks past the note block, sized to put the pruning
     // floor past shard 2's end height in step 1d.
-    let extra_blocks = PRUNING_DEPTH + 10;
+    let extra_blocks = CHECKPOINT_RETENTION_DEPTH + 10;
     for _ in 0..extra_blocks {
         st.generate_next_block(&not_our_key, AddressType::DefaultExternal, filler_value);
     }
@@ -9125,10 +9130,17 @@ pub fn canonical_crossing_is_bucketed_and_unpadded<Dsf: DataStoreFactory>(
         "an Orchard-spending payment must anchor to a grid boundary even when its shape is not \
          a canonical crossing"
     );
-    assert_eq!(
-        step.anchor_height(),
-        canonical.steps().first().anchor_height(),
-        "and to the SAME boundary as the crossing: one cohort, not two"
+    // At an age the ZIP 318 draw admits, so that it joins one of the cohorts a migration transfer
+    // could have joined rather than forming a cohort of its own. The exact age is drawn, so this
+    // pins the admissible range rather than a single boundary.
+    let most_recent = interval.boundary_at_or_below(BlockHeight::from(
+        u32::from(off_by_one.min_target_height()) - 1,
+    ));
+    let age = (u32::from(most_recent) - u32::from(step.anchor_height().unwrap())) / interval_blocks;
+    assert!(
+        (1..=zcash_protocol::zip318::ANCHOR_AGE_CAP).contains(&age),
+        "the drawn anchor age {age} must lie in 1..={}",
+        zcash_protocol::zip318::ANCHOR_AGE_CAP
     );
 
     // Building the canonical proposal is left until last: it spends the wallet's only note, so the
@@ -9556,27 +9568,35 @@ pub fn orchard_payment_falls_back_when_notes_are_too_new<Dsf: DataStoreFactory>(
         "the change note must be younger than the age-1 boundary for this scenario to be meaningful"
     );
 
-    // The bucketed attempt cannot fund from a note that young, so the payment falls back rather
-    // than waiting for the boundary the change will eventually be old enough for.
+    // No boundary is admissible for a note that young, so the payment takes the uniform fallback
+    // anchor rather than waiting for the boundary the change will eventually be old enough for.
     let second = propose(&mut st).expect("the change must be spendable immediately");
     let step = second.steps().first();
+    let anchor = step
+        .anchor_height()
+        .expect("a shielded step binds an anchor");
+    let most_recent_boundary = interval.boundary_at_or_below(BlockHeight::from_u32(
+        u32::from(second.min_target_height()) - 1,
+    ));
+    let newest_candidate = BlockHeight::from_u32(u32::from(most_recent_boundary) - interval_blocks);
     assert!(
-        !interval.is_boundary(
-            step.anchor_height()
-                .expect("a shielded step binds an anchor")
-        ),
-        "a wallet with no note old enough for the boundary must fall back to the ordinary anchor"
+        anchor > newest_candidate,
+        "an anchor at or below the newest candidate boundary {newest_candidate:?} would have \
+         excluded the change note; the fallback must draw above it, got {anchor:?}"
     );
 
+    // The expiry travels with the anchor either way: the ZIP 318 rolling window exactly when the
+    // drawn height lands on the grid, and the builder's ordinary expiry otherwise. A uniform draw
+    // may land on a boundary by chance, and the two observables must agree when it does.
     let txids = st.create_proposed_expecting(&second, 1);
     let tx = st.get_tx_from_history(txids[0]).unwrap().unwrap();
-    assert_ne!(
-        tx.expiry_height(),
-        Some(zcash_protocol::zip318::expiry_height(BlockHeight::from(
-            second.min_target_height()
-        ))),
-        "and with the ordinary anchor, the ordinary expiry: the two travel together"
-    );
+    let rolling =
+        zcash_protocol::zip318::expiry_height(BlockHeight::from(second.min_target_height()));
+    if interval.is_boundary(anchor) {
+        assert_eq!(tx.expiry_height(), Some(rolling));
+    } else {
+        assert_ne!(tx.expiry_height(), Some(rolling));
+    }
 }
 
 /// A canonical payment is funded from the single oldest covering note even when accumulation
@@ -9815,20 +9835,26 @@ pub fn canonical_crossing_abandoned_without_anchor_checkpoint<Dsf, TC>(
         "no anchor is computable at the boundary after removal"
     );
 
-    // The payment now falls back to an ordinary crossing: proposed against the ordinary anchor,
-    // padded, and — decisively — BUILDABLE. Without the gate the canonical proposal would be
+    // The payment now abandons that boundary and is proposed against another anchor: whichever
+    // the draw yields whose checkpoint the wallet still holds, or the ordinary anchor if none
+    // does. Whether the result keeps the canonical shape is incidental — recovering it at a
+    // provable boundary is a better outcome, not a worse one. What is decisive is that the
+    // proposal is BUILDABLE: without the computability gate the unprovable boundary would be
     // kept and building would fail with `AnchorNotFound`.
     let fallback = propose(&mut st);
     let step = fallback.steps().first();
-    assert!(
-        !step.is_canonical_crossing(&zip318, canonical_fee),
-        "the attempt must be abandoned when its anchor cannot be proved"
-    );
+    let fallback_anchor = step
+        .anchor_height()
+        .expect("a shielded step binds an anchor");
     assert_ne!(
-        step.anchor_height()
-            .expect("a shielded step binds an anchor"),
-        boundary,
-        "the fallback anchors at the ordinary height, not the unprovable boundary"
+        fallback_anchor, boundary,
+        "the fallback must not anchor at the unprovable boundary"
+    );
+    assert!(
+        st.wallet()
+            .anchor_computable(ShieldedPool::Orchard, fallback_anchor)
+            .unwrap(),
+        "the fallback must anchor at a height the wallet can still prove"
     );
     st.create_proposed_expecting(&fallback, 1);
 }
