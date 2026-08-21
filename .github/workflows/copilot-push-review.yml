@@ -27,8 +27,10 @@ name: Copilot review of pushes to main
 # directly, the identical diff into the identical base got no review as the bot
 # (PR #39) and a review in under two minutes as a real user (PR #41). So the
 # pull request is created with COPILOT_REVIEW_PAT, a personal access token
-# belonging to someone holding a Copilot seat (repo scope, or fine-grained with
-# read/write on Contents and Pull requests). Without that secret the workflow
+# belonging to someone holding a Copilot seat. It needs BOTH `repo` and
+# `workflow` scopes: the snapshot branch mirrors whatever landed on main, and a
+# token without `workflow` is refused the moment a pushed range touches
+# .github/workflows/**. Without that secret the workflow
 # still runs and still cleans up, but the review will not arrive, and the job
 # summary says so rather than implying the range came back clean.
 
@@ -50,6 +52,9 @@ permissions:
 env:
   BASE_BRANCH: copilot-review-base
   REVIEW_TIMEOUT_SECONDS: "420"
+  # Applied to every scratch pull request so they can be filtered out of, or
+  # into, a search: `is:pr label:automated-review`.
+  REVIEW_LABEL: automated-review
 
 jobs:
   review:
@@ -62,6 +67,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
         with:
           fetch-depth: 0
+          # The credential git pushes with, not just the one `gh` calls with.
+          # checkout persists whatever it is given, so leaving this at the
+          # default makes every `git push` below act as the GitHub App, and the
+          # App is refused outright when the pushed range touches
+          # .github/workflows/** -- which is exactly what this workflow's own
+          # commits do. GITHUB_TOKEN can never be granted that permission, so
+          # the PAT has to own the push as well as the pull request.
+          token: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
 
       - name: Decide whether this push needs a review
         id: gate
@@ -161,11 +174,21 @@ jobs:
             "" \
             "**This pull request is scratch and is closed automatically. Do not merge it.**")
 
+          # Ensure the label exists before it is applied. This errors once the
+          # label is present, which is the normal case, so the failure is
+          # tolerated rather than treated as a problem.
+          gh label create "$REVIEW_LABEL" \
+            --repo "$REPO" \
+            --color 0E8A16 \
+            --description "Scratch PR opened by the push-review workflow; auto-closed, never merged" \
+            >/dev/null 2>&1 || true
+
           pr_url=$(gh pr create \
             --repo "$REPO" \
             --base "$BASE_BRANCH" \
             --head "$head_branch" \
             --title "Copilot review: main ${short_base}..${short_after}" \
+            --label "$REVIEW_LABEL" \
             --body "$body")
 
           pr_number=$(basename "$pr_url")

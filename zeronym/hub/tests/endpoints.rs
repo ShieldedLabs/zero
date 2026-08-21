@@ -392,7 +392,26 @@ async fn nym_status_separates_a_client_being_rebuilt_from_a_driver_that_is_gone(
 /// transaction and no credentials.
 ///
 /// Time is paused, so this asserts the deadline EXISTS and fires rather than
-/// spending its wall-clock duration proving it.
+/// spending its wall-clock duration proving it. Paused time and a real socket
+/// do not compose by themselves, which is why the read below is paced.
+///
+/// A paused clock advances to the next armed timer whenever the runtime has
+/// nothing to run, and a tokio socket reports `Pending` on its first poll even
+/// when the bytes are already in the kernel buffer, because readiness arrives
+/// as an event and not as data. So a plain `read_to_end` here lets the clock
+/// jump the full 30 s while the head is still unparsed -- and the timer that
+/// fires then is hyper's `header_read_timeout`, also 30 s, which closes the
+/// connection with NO response. The test read an empty string and failed
+/// asserting on a status line: 2 failures in 6 runs of the whole binary,
+/// vanishing when run alone, which is what a heisenbug looks like.
+///
+/// Pacing removes the race rather than narrowing it. While the test holds a
+/// 100 ms timer, that is the nearest one, so auto-advance can only ever creep
+/// 100 ms and every step gives the I/O driver another chance to deliver the
+/// readiness the server is waiting on. The head is therefore always parsed
+/// long before 30 s of virtual time accumulates, leaving the body deadline as
+/// the only timer that can fire. Still costs no wall-clock time: 300 steps of
+/// a virtual sleep is a few milliseconds.
 #[tokio::test(start_paused = true)]
 async fn a_body_that_never_arrives_is_timed_out_rather_than_held() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -408,10 +427,26 @@ async fn a_body_that_never_arrives_is_timed_out_rather_than_held() {
         .unwrap();
     sock.flush().await.unwrap();
 
+    // Read to EOF -- which only happens if something gave up on the body --
+    // stepping the paused clock 100 ms at a time. The step budget is twice the
+    // deadline, so a deadline that never fires fails the test instead of
+    // hanging it.
     let mut response = Vec::new();
-    // Returns when the hub answers and closes, which only happens if something
-    // gave up on the body. Without the deadline this read never completes.
-    sock.read_to_end(&mut response).await.unwrap();
+    let mut buf = [0u8; 1024];
+    let mut steps = 0;
+    loop {
+        tokio::select! {
+            biased;
+            read = sock.read(&mut buf) => match read.unwrap() {
+                0 => break,
+                n => response.extend_from_slice(&buf[..n]),
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                steps += 1;
+                assert!(steps < 600, "no answer within 60 s of virtual time");
+            }
+        }
+    }
     let response = String::from_utf8_lossy(&response);
 
     assert!(
