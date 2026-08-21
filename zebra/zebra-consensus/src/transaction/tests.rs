@@ -3670,7 +3670,7 @@ fn mock_transparent_transfer(
 async fn block_utxo_lookups_overlap() {
     const FAT_TX_INPUTS: usize = 1001;
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    timeout(test_timeout(), async {
         let network = Network::new_default_testnet();
         let network_upgrade = NetworkUpgrade::Nu5;
 
