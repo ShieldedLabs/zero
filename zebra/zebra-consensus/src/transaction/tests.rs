@@ -40,7 +40,7 @@ use zebra_node_services::mempool;
 use zebra_state::ValidateContextError;
 use zebra_test::mock_service::MockService;
 
-use crate::{error::TransactionError, transaction::POLL_MEMPOOL_DELAY};
+use crate::{error::TransactionError, transaction::POLL_MEMPOOL_DELAY, BoxError};
 
 use super::{check, BlockRequest, BlockTxVerifier, MempoolRequest, MempoolTxVerifier};
 
@@ -3659,6 +3659,152 @@ fn mock_transparent_transfer(
     known_utxos.insert(previous_outpoint, previous_utxo);
 
     (input, output, known_utxos)
+}
+
+/// Block-verifies a pool-consolidation-shaped transaction (1001 standard P2SH
+/// inputs) with every spent UTXO served through `AwaitUtxo`, behind a batch
+/// barrier: responses are released only when `MAX_CONCURRENT_UTXO_LOOKUPS`
+/// lookups are pending at once, so a regression to serial per-input lookups
+/// deadlocks and fails the timeout instead of passing slowly.
+#[tokio::test]
+async fn block_utxo_lookups_overlap() {
+    const FAT_TX_INPUTS: usize = 1001;
+
+    timeout(test_timeout(), async {
+        let network = Network::new_default_testnet();
+        let network_upgrade = NetworkUpgrade::Nu5;
+
+        let block_height = (network_upgrade
+            .activation_height(&network)
+            .expect("NU5 activation height is specified")
+            + 10)
+            .expect("transaction block height is too large");
+        let fund_height = (block_height - 1).expect("fund height is too small");
+
+        // The same standard P2SH pattern as `mock_transparent_transfer`: an
+        // OP_TRUE redeem script spend, valid without signatures.
+        const OP_TRUE: u8 = 0x51;
+        let unlock_script = transparent::Script::new(&[0x01, OP_TRUE]);
+        let mut p2sh_lock_bytes = vec![0xa9, 0x14];
+        p2sh_lock_bytes.extend_from_slice(&[
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ]);
+        p2sh_lock_bytes.push(0x87);
+        let lock_script = transparent::Script::new(&p2sh_lock_bytes);
+
+        let source_hash = Hash([7u8; 32]);
+        let spent_output = transparent::Output {
+            value: Amount::try_from(10_000).expect("valid amount"),
+            lock_script,
+        };
+
+        let inputs: Vec<transparent::Input> = (0..FAT_TX_INPUTS)
+            .map(|index| transparent::Input::PrevOut {
+                outpoint: transparent::OutPoint {
+                    hash: source_hash,
+                    // Bounded by FAT_TX_INPUTS, so the cast cannot truncate.
+                    index: index as u32,
+                },
+                unlock_script: unlock_script.clone(),
+                sequence: 0,
+            })
+            .collect();
+
+        let output = transparent::Output {
+            value: Amount::try_from(5_000).expect("valid amount"),
+            lock_script: transparent::Script::new(&[0]),
+        };
+
+        let transaction = Arc::new(Transaction::V5 {
+            inputs,
+            outputs: vec![output],
+            lock_time: LockTime::unlocked(),
+            expiry_height: (block_height + 1).expect("expiry height is too large"),
+            sapling_shielded_data: None,
+            orchard_shielded_data: None,
+            network_upgrade,
+        });
+
+        // Every `AwaitUtxo` waits on a channel; the whole pending batch is
+        // released when the expected number of lookups is in flight at once
+        // (64, 64, ..., then the 41-lookup remainder).
+        let pending: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let block_state = {
+            let spent_output = spent_output.clone();
+            let pending = pending.clone();
+            let released = released.clone();
+            service_fn(move |request: zebra_state::Request| {
+                let spent_output = spent_output.clone();
+                let pending = pending.clone();
+                let released = released.clone();
+                async move {
+                    match request {
+                        zebra_state::Request::AwaitUtxo(_) => {
+                            let (sender, receiver) = tokio::sync::oneshot::channel();
+                            {
+                                let mut pending = pending.lock().expect("not poisoned");
+                                pending.push(sender);
+
+                                let released_so_far =
+                                    released.load(std::sync::atomic::Ordering::SeqCst);
+                                let batch = super::MAX_CONCURRENT_UTXO_LOOKUPS
+                                    .min(FAT_TX_INPUTS - released_so_far);
+                                if pending.len() == batch {
+                                    released.fetch_add(batch, std::sync::atomic::Ordering::SeqCst);
+                                    for waiter in pending.drain(..) {
+                                        let _ = waiter.send(());
+                                    }
+                                }
+                            }
+                            receiver
+                                .await
+                                .expect("the barrier always releases a full batch");
+
+                            Ok::<_, BoxError>(zebra_state::Response::Utxo(transparent::Utxo::new(
+                                spent_output,
+                                fund_height,
+                                false,
+                            )))
+                        }
+                        other => unreachable!("unexpected block state request: {other:?}"),
+                    }
+                }
+            })
+        };
+
+        let block_verifier = BlockTxVerifier::new(&network, block_state);
+        let block_response = block_verifier
+            .oneshot(BlockRequest {
+                transaction_hash: transaction.hash(),
+                transaction: transaction.clone(),
+                known_utxos: Arc::new(HashMap::new()),
+                height: block_height,
+                time: DateTime::<Utc>::MAX_UTC,
+            })
+            .await
+            .expect("block verification of the consolidation transaction succeeds");
+
+        assert_eq!(
+            released.load(std::sync::atomic::Ordering::SeqCst),
+            FAT_TX_INPUTS,
+            "every spent UTXO must be fetched from the state exactly once"
+        );
+
+        let expected_fee = (10_000 * FAT_TX_INPUTS as i64 - 5_000)
+            .try_into()
+            .expect("valid fee");
+        assert_eq!(
+            block_response.miner_fee,
+            Some(expected_fee),
+            "the miner fee must be computed from the fetched UTXOs"
+        );
+    })
+    .await
+    .expect("the test must complete within 10 seconds");
 }
 
 /// Create a mock coinbase input with a transparent output.
