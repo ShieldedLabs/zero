@@ -40,6 +40,7 @@ halo2 = { package = "halo2_proofs", version = "0.3" }
 jubjub = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+siphasher = { workspace = true }
 mset.workspace = true
 
 chrono = { workspace = true, features = ["clock", "std"] }
@@ -111,6 +112,10 @@ harness = false
 
 [[bench]]
 name = "sapling"
+harness = false
+
+[[bench]]
+name = "script"
 harness = false
 
 [lints]
