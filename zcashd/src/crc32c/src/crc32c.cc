@@ -7,8 +7,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#if HAVE_ARM64_CRC32C
 #include "./crc32c_arm64.h"
+#if !defined(__APPLE__)
 #include "./crc32c_arm64_linux_check.h"
+#endif
+#endif
+
 #include "./crc32c_internal.h"
 #include "./crc32c_sse42.h"
 #include "./crc32c_sse42_check.h"
@@ -20,8 +25,14 @@ uint32_t Extend(uint32_t crc, const uint8_t* data, size_t count) {
   static bool can_use_sse42 = CanUseSse42();
   if (can_use_sse42) return ExtendSse42(crc, data, count);
 #elif HAVE_ARM64_CRC32C
-  static bool can_use_arm_linux = CanUseArm64Linux();
-  if (can_use_arm_linux) return ExtendArm64(crc, data, count);
+#if defined(__APPLE__)
+  return ExtendArm64(crc, data, count);
+#else
+  static bool can_use_arm64_crc32 = CanUseArm64Linux();
+  if (can_use_arm64_crc32) {
+    return ExtendArm64(crc, data, count);
+  }
+#endif
 #endif  // HAVE_SSE42 && (defined(_M_X64) || defined(__x86_64__))
 
   return ExtendPortable(crc, data, count);
