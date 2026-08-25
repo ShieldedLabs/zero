@@ -179,6 +179,8 @@ pub mod testing;
 /// this delta from the chain tip to be pruned.
 pub(crate) const PRUNING_DEPTH: u32 = 100;
 
+pub(crate) use zcash_client_backend::data_api::anchor_retention::CHECKPOINT_RETENTION_DEPTH;
+
 /// The number of blocks to verify ahead when the chain tip is updated.
 pub(crate) const VERIFY_LOOKAHEAD: u32 = 10;
 
@@ -3096,7 +3098,7 @@ where
     Ok(ShardTree::new(
         SqliteShardStore::from_connection(conn, SAPLING_TABLES_PREFIX)
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?,
-        PRUNING_DEPTH.try_into().unwrap(),
+        CHECKPOINT_RETENTION_DEPTH.try_into().unwrap(),
     ))
 }
 
@@ -3122,7 +3124,7 @@ where
     Ok(ShardTree::new(
         SqliteShardStore::from_connection(conn, ORCHARD_TABLES_PREFIX)
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?,
-        PRUNING_DEPTH.try_into().unwrap(),
+        CHECKPOINT_RETENTION_DEPTH.try_into().unwrap(),
     ))
 }
 
@@ -3154,7 +3156,7 @@ where
     Ok(ShardTree::new(
         SqliteShardStore::from_connection(conn, IRONWOOD_TABLES_PREFIX)
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?,
-        PRUNING_DEPTH.try_into().unwrap(),
+        CHECKPOINT_RETENTION_DEPTH.try_into().unwrap(),
     ))
 }
 
