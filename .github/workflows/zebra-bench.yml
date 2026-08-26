@@ -63,12 +63,21 @@ jobs:
           )
 
           # Fail open: "we could not tell" must never silently mean "no CI".
-          if ! git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
+          base="HEAD^1"
+          if [ "$EVENT_NAME" = "push" ]; then
+            before=$(jq -r '.before // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+              base="$before"
+            fi
+          fi
+
+          if ! git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::could not diff against the parent; benching unconditionally"
+            echo "::warning::could not diff against the base; benching unconditionally"
+            echo "Could not diff against the base; benching unconditionally." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD -- "${specs[@]}" > "$RUNNER_TEMP/matched"
+          git diff --name-only "$base" HEAD -- "${specs[@]}" > "$RUNNER_TEMP/matched"
 
           total=$(( $(wc -l < "$RUNNER_TEMP/changed") ))
           hits=$(( $(wc -l < "$RUNNER_TEMP/matched") ))
