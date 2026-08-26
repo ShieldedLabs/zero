@@ -61,6 +61,17 @@ mod tests;
 ///     chain in the correct order.)
 const UTXO_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 60);
 
+/// The maximum number of in-flight state UTXO lookups per transaction: enough
+/// to overlap the per-lookup latency without flooding the state service's buffer.
+///
+/// Batched lookups start their [`UTXO_LOOKUP_TIMEOUT`] clocks together instead
+/// of serially, so an `AwaitUtxo` answered more than 6 minutes into the phase
+/// now fails it. Accepted narrowing: that case only occurs in out-of-order
+/// sync, it already failed serially whenever such an input was among the first
+/// in flight, and the designed recovery is a sync restart (see the timeout's
+/// docs).
+const MAX_CONCURRENT_UTXO_LOOKUPS: usize = 64;
+
 /// A timeout applied to output lookup requests sent to the mempool. This is shorter than the
 /// timeout for the state UTXO lookups because a block is likely to be mined every 75 seconds
 /// after Blossom is active, changing the best chain tip and requiring re-verification of transactions
@@ -347,9 +358,9 @@ where
             // Load spent UTXOs from the block context and state.
             // The UTXOs are required for almost all the async checks.
             //
-            // This phase is one awaited state round trip per transparent input, so its share of
-            // the total tells operators whether transaction verification is bound by state
-            // lookups or by the cryptographic checks timed below.
+            // This phase overlaps up to `MAX_CONCURRENT_UTXO_LOOKUPS` state lookups, so its
+            // share of the total tells operators whether transaction verification is bound by
+            // state lookups or by the cryptographic checks timed below.
             let utxo_fetch_start = Instant::now();
             let spent_utxos_result =
                 Self::block_spent_utxos(tx.clone(), known_utxos, state.clone()).await;
@@ -448,33 +459,57 @@ where
         // Pre-allocate with None so we can fill each slot by input index, preserving input order.
         let mut spent_outputs: Vec<Option<transparent::Output>> = vec![None; inputs.len()];
 
+        // Serve block-internal spends from `known_utxos` inline; only the
+        // remaining inputs go to the state service. Those lookups run
+        // concurrently: with thousands of transparent inputs, one awaited
+        // round trip per input turns this phase into a serial latency chain.
+        // Results carry their input index, so completion order cannot affect
+        // the `spent_outputs` order, which v5 sighashes commit to.
+        //
+        // The futures are collected eagerly so each owns its captures; a lazy
+        // iterator would hold `&state` inside the stream and require `ZS: Sync`.
+        let mut lookups = Vec::new();
         for (input_idx, input) in inputs.iter().enumerate() {
-            if let transparent::Input::PrevOut { outpoint, .. } = input {
+            let transparent::Input::PrevOut { outpoint, .. } = input else {
+                continue;
+            };
+            let outpoint = *outpoint;
+
+            if let Some(ordered) = known_utxos.get(&outpoint) {
+                tracing::trace!("UTXO in known_utxos, discarding query");
+                spent_outputs[input_idx] = Some(ordered.utxo.output.clone());
+                spent_utxos.insert(outpoint, ordered.utxo.clone());
+                continue;
+            }
+
+            let state = state.clone();
+            lookups.push(async move {
                 tracing::trace!("awaiting outpoint lookup");
 
-                let utxo = if let Some(output) = known_utxos.get(outpoint) {
-                    tracing::trace!("UTXO in known_utxos, discarding query");
-                    output.utxo.clone()
-                } else {
-                    let response = state
-                        .clone()
-                        .oneshot(zebra_state::Request::AwaitUtxo(*outpoint))
-                        .await
-                        .map_err(|boxed_error| match boxed_error.downcast::<Elapsed>() {
-                            Ok(_) => TransactionError::TransparentInputNotFound,
-                            Err(boxed_error) => TransactionError::from(boxed_error),
-                        })?;
+                let response = state
+                    .oneshot(zebra_state::Request::AwaitUtxo(outpoint))
+                    .await
+                    .map_err(|boxed_error| match boxed_error.downcast::<Elapsed>() {
+                        Ok(_) => TransactionError::TransparentInputNotFound,
+                        Err(boxed_error) => TransactionError::from(boxed_error),
+                    })?;
 
-                    if let zebra_state::Response::Utxo(utxo) = response {
-                        utxo
-                    } else {
-                        unreachable!("AwaitUtxo always responds with Utxo")
-                    }
+                let zebra_state::Response::Utxo(utxo) = response else {
+                    unreachable!("AwaitUtxo always responds with Utxo")
                 };
-                tracing::trace!(?utxo, "got UTXO");
-                spent_outputs[input_idx] = Some(utxo.output.clone());
-                spent_utxos.insert(*outpoint, utxo);
-            }
+
+                Ok::<_, TransactionError>((input_idx, outpoint, utxo))
+            });
+        }
+
+        let mut lookups =
+            futures::stream::iter(lookups).buffer_unordered(MAX_CONCURRENT_UTXO_LOOKUPS);
+
+        while let Some(lookup) = lookups.next().await {
+            let (input_idx, outpoint, utxo) = lookup?;
+            tracing::trace!(?utxo, "got UTXO");
+            spent_outputs[input_idx] = Some(utxo.output.clone());
+            spent_utxos.insert(outpoint, utxo);
         }
 
         let spent_outputs: Vec<transparent::Output> = spent_outputs.into_iter().flatten().collect();

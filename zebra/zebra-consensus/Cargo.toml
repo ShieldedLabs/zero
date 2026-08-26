@@ -113,5 +113,9 @@ harness = false
 name = "sapling"
 harness = false
 
+[[bench]]
+name = "utxo_lookup"
+harness = false
+
 [lints]
 workspace = true
