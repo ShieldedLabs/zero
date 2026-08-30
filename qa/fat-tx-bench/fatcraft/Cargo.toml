@@ -1,0 +1,19 @@
+[package]
+name = "fatcraft"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zebra-chain = { path = "../../../zebra/zebra-chain" }
+secp256k1 = "0.29"
+sha2 = "0.10"
+ripemd = "0.1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Mirror the zebra workspace patch: path deps do not inherit the consumer
+# workspace's [patch.crates-io], and zebra-chain needs the vendored orchard.
+[patch.crates-io]
+orchard = { path = "../../../orchard" }

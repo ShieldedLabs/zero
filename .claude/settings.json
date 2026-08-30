@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo build)",
+      "Bash(cargo build *)",
+      "Bash(cargo test)",
+      "Bash(cargo test *)",
+      "Bash(cargo nextest run)",
+      "Bash(cargo nextest run *)",
+      "Bash(cargo fmt)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo metadata *)",
+      "Bash(git fetch)",
+      "Bash(git fetch *)",
+      "Bash(gh run watch *)",
+      "Bash(gh search *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl describe *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl top *)",
+      "Bash(kubectl config current-context)",
+      "Bash(kubectl config get-contexts)",
+      "Bash(kubectl api-resources *)",
+      "Bash(gcloud compute instances list *)",
+      "mcp__Claude_Browser__read_page",
+      "mcp__Claude_Browser__get_page_text",
+      "mcp__Claude_Browser__read_console_messages",
+      "mcp__Claude_Browser__read_network_requests",
+      "mcp__Claude_Browser__tabs_context"
+    ],
+    "ask": [
+      "Bash(gh api -X *)",
+      "Bash(gh api --method *)",
+      "Bash(kubectl delete *)",
+      "Bash(kubectl apply *)"
+    ]
+  }
+}
