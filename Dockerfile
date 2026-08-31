@@ -24,21 +24,32 @@
 
 # --- Stage 1: build ---------------------------------------------------------
 # Digest-pin the base so the build is a function of its inputs only (bump the
-# tag AND the digest together, deliberately). rust 1.91.1 on bookworm matches
+# tag AND the digest together, deliberately). rust 1.95.0 on bookworm matches
 # the runtime base below so the dynamically-linked glibc binary just works.
-FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS builder
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
 
 # Build deps: protobuf (tonic/PROTOC), clang+llvm (bindgen / *-sys C/C++ deps),
-# pkg-config, and git (zaino-state's build.rs embeds the commit). Versions are
-# pinned to the bookworm snapshot that the digest-pinned base resolves to; bump
-# them together with the base digest above.
+# pkg-config, and git (zaino-state's build.rs embeds the commit).
+#
+# These versions are NOT implied by the digest-pinned base: apt resolves them
+# against the live bookworm archive, which only ever serves the CURRENT revision
+# of each package. So a bookworm point release (or a security update) deletes the
+# revision pinned here and the build fails with "Version '...' was not found",
+# even though nothing in this repo changed. When that happens, re-read the
+# candidate versions from the pinned base and bump the offending pin:
+#
+#   docker run --rm rust:1.95.0-slim-bookworm@sha256:d7482085... \
+#     bash -c 'apt-get update -qq && apt-cache policy protobuf-compiler'
+#
+# (Pinning apt to a snapshot.debian.org timestamp would make this immune, at the
+# cost of no longer picking up security updates automatically.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential=12.9 \
         clang=1:14.0-55.7~deb12u1 \
         llvm-dev=1:14.0-55.7~deb12u1 \
         libclang-dev=1:14.0-55.7~deb12u1 \
-        protobuf-compiler=3.21.12-3 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
         pkg-config=1.8.1-1 \
         git=1:2.39.5-0+deb12u3 \
         ca-certificates=20230311+deb12u1 \
@@ -69,11 +80,16 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN set -eux; \
     export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"; \
     cargo build --release --locked \
-      --bin zallet --features rpc-cli,zcashd-import; \
+      --manifest-path backends/zebra/Cargo.toml \
+      --bin zallet-zebra --features rpc-cli,zcashd-import; \
+    # The user-facing `zallet` command is the launcher (root workspace); it
+    # dispatches to the backend binary installed next to it.
+    cargo build --release --locked --bin zallet; \
     install -D -m0755 target/release/zallet /out/zallet; \
+    install -D -m0755 backends/zebra/target/release/zallet-zebra /out/zallet-zebra; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
-    REL="target/release"; \
+    REL="backends/zebra/target/release"; \
     mkdir -p /out/usr/local/share/zallet; \
     for d in completions manpages; do \
       [ -d "$REL/$d" ] && cp -a "$REL/$d" /out/usr/local/share/zallet/ || true; \
@@ -85,6 +101,7 @@ RUN set -eux; \
 # Binary at the root for easy extraction; full share tree alongside it.
 FROM scratch AS export
 COPY --from=builder /out/zallet /zallet
+COPY --from=builder /out/zallet-zebra /zallet-zebra
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 
 # --- Stage 3: minimal runtime -----------------------------------------------
@@ -102,6 +119,7 @@ RUN apt-get update \
     && useradd --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin zallet \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 COPY --from=builder /out/zallet /usr/local/bin/zallet
+COPY --from=builder /out/zallet-zebra /usr/local/bin/zallet-zebra
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 USER 1000:1000
 WORKDIR /var/lib/zallet

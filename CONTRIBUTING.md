@@ -26,6 +26,7 @@ contributions. 🎉
 - [Suggesting Enhancements](#suggesting-enhancements)
 - [Styleguides](#styleguides)
 - [Git Usage](#git-usage)
+- [Changelog Entries](#changelog-entries)
 - [Coding Style](#coding-style)
 
 ## Code of Conduct
@@ -39,7 +40,7 @@ behavior as documented in the code of conduct.
 ## I Have a Question
 
 > If you want to ask a question, please ensure that you have read the available
-> documentation. Documentation is published to the [Zallet Book](https://zcash.github.io/wallet).
+> documentation. Documentation is published to the [Zallet Book](https://zcash.github.io/zallet/).
 
 Before you ask a question, it is best to search for existing [Issues](https://github.com/zcash/zallet/issues)
 that might help you. In case you have found a suitable issue and still need
@@ -244,9 +245,10 @@ conflicts.
   comments) into the relevant earlier commits on the PR branch. We recommend
   the use of the `git revise` tool to help maintain such a clean history within
   the context of a single PR.
-- When a commit alters the public API, fixes a bug, or changes the underlying
-  semantics of existing code, the commit MUST also modify the affected
-  crates' `CHANGELOG.md` files to clearly document the change.
+- When a commit alters Zallet's user-facing surface, fixes a bug, or changes the
+  underlying semantics of existing code, the commit MUST also modify
+  `CHANGELOG.md` to clearly document the change. See
+  [Changelog Entries](#changelog-entries) for what belongs in those entries.
 - Updated or added members of the public API MUST include complete `rustdoc`
   documentation comments.
 - Each commit should be formatted cleanly using `cargo fmt`.
@@ -271,6 +273,17 @@ conflicts.
   clippy warnings need not be resolved, but new ones introduced by a PR will
   block merging. The first case described above for work-in-progress commits is
   excepted from these requirements.
+- The repository contains three cargo workspaces (the root workspace with
+  `zallet-core`, the launcher, and tools; and `backends/zebra` +
+  `backends/zaino`, one per chain backend), each with its own lockfile. Build
+  and lint commands apply per workspace: run them at the root and with
+  `--manifest-path backends/{zebra,zaino}/Cargo.toml`. The backend lockfiles
+  may deliberately diverge on the `zebra-*`/`zaino-*` dependency trees — that
+  is the point of the split — but crates that touch the shared wallet database
+  (the librustzcash `[patch.crates-io]` set, `zcash_client_sqlite`, `rusqlite`)
+  must resolve identically everywhere; `./utils/check-lockstep.sh` enforces
+  this in CI. Keep the `[patch.crates-io]` blocks of the three workspace
+  manifests in sync when updating pins.
 
 #### Pull Requests
 
@@ -370,6 +383,123 @@ organization's forks usually do not allow changes from maintainers (due to
 missing cross-organization permissions); in this case (or if a user's PR has
 "allow maintainers to edit" disabled), we may close the PR and open a new PR
 containing the commits from the original.
+
+### Changelog Entries
+
+Zallet keeps four changelogs, because the things it ships have four different
+audiences. They are how each of those audiences discovers what it must do in
+order to upgrade, so we hold them to the same standard as the code.
+
+| File | Documents | Audience |
+| --- | --- | --- |
+| `CHANGELOG.md` | The `zallet` user interface | People who run Zallet and integrate against it |
+| `zallet-core/CHANGELOG.md` | The `zallet-core` public Rust API | People implementing a chain backend against it |
+| `backends/zebra/CHANGELOG.md` | The `zallet-zebra` binary | Operators running the Zebra read-state backend |
+| `backends/zaino/CHANGELOG.md` | The `zallet-zaino` binary | Operators running the Zaino indexer backend |
+
+All four packages ship in release lockstep under one version number, so every
+release heading appears in every file. A component that saw no changes for its
+own audience gets an empty section for that release; that is expected, and is
+more informative than omitting the heading.
+
+#### Choosing a file
+
+Route an entry by **who needs to read it**, not by which crate the diff touched.
+Most user-visible behavior is implemented in `zallet-core`, but a new JSON-RPC
+method is news for the people calling it, not for the two backends that link the
+crate, so it belongs in the root changelog. Conversely, a change to the `Chain`
+seam is invisible to a wallet user and essential to a backend implementor.
+
+An entry belongs in the **root** changelog if it changes:
+
+- the JSON-RPC methods, or the shape of their requests and responses;
+- the CLI commands, their flags, or their output;
+- the configuration file options;
+- the wallet database format, or which releases can open a given database;
+- the published release artifacts — container images, `.deb` packages, and the
+  standalone binary archives.
+
+An entry belongs in **`zallet-core`'s** changelog if it changes the crate's
+public Rust API: the `Chain` and `ChainView` traits and the types they exchange,
+or the version of a dependency whose types appear in that API — types from two
+semver-incompatible versions of a crate do not unify, so a backend has to upgrade
+in lockstep.
+
+An entry belongs in a **backend's** changelog if it changes what that backend
+requires of its chain source: the `zebrad` or Zaino versions it is built against,
+the on-disk formats it can read, or backend-specific configuration. Write these
+for an operator: say whether existing on-disk data survives the upgrade.
+
+A change that genuinely serves two audiences goes in both files, written
+differently for each. Do not copy one entry verbatim into two files.
+
+In every case an entry is required for any bug fix, and for any change to the
+semantics of existing behavior — including changes that leave every signature
+and field name untouched but alter what a caller can expect, such as stricter
+validation, a different error code, or a previously fixed value becoming
+configurable. Privacy, security, and cost properties count as user-facing in
+this sense even when they are documented only in code comments: a secret that is
+now wiped from memory, or a request that no longer costs a network round-trip,
+is something a user may be relying on.
+
+#### The entry accompanies the change
+
+The entry MUST be part of the same commit that makes the change it describes,
+not a separate "update changelog" commit at the end of a branch. A change is not
+a complete semantic change until the documentation of it exists, and keeping the
+two together means the entry travels with the commit when it is cherry-picked or
+forward-merged. If you have already committed the code, use `git revise` to fold
+the entry into that commit rather than appending a follow-up.
+
+#### Entries describe the change since the last release
+
+An entry describes the difference between the **last released version** and the
+state your change produces — not the difference from the previous commit, and
+not the difference from whatever the affected code last looked like.
+
+This matters whenever something is touched more than once between releases,
+which is common in a stacked-PR workflow. An RPC parameter introduced under one
+name and renamed before release yields a single entry naming the final name; the
+intermediate name was never visible to a user. A flag added and then removed
+again before release leaves no entry at all. A dependency pinned to a git branch
+and later moved to the released crate is one net change, not two. Update an
+existing `## [Unreleased]` entry in place to reflect the new net state rather
+than adding a second entry describing the delta from the first.
+
+#### Entries are written for users
+
+An entry carries only what the file's audience needs in order to adapt. `Added`
+entries are pointers — name the new method or flag and let its documentation
+explain it. `Changed` and `Fixed` entries say what someone must do differently,
+and what went wrong before if that affects wallets already in the field.
+Implementation details, internal refactors, test-fixture reworks, and dependency
+bumps that no audience can observe do not belong in any of the changelogs.
+Documentation-only changes — book pages, rustdoc corrections — do not get
+entries either.
+
+Note that "no user-visible effect" is not the same as "no effect": a dependency
+bump invisible to a wallet user may still force a backend implementor to upgrade
+in lockstep, or change which `zebrad` an operator must run. Before dismissing one,
+check each of the four audiences.
+
+#### Published sections record what shipped
+
+A released `## [x.y.z] - DATE` section is the historical record of what that
+release shipped. Correct an entry there if it was wrong when written — an
+inaccurate record is worse than an edited one — but do not use it to record
+anything that happened afterwards, such as a later fix or a clarification
+prompted by a subsequent change. That belongs under `## [Unreleased]`, where the
+users who need it will look.
+
+This applies to the placement of a published entry as well as its wording. If an
+entry shipped in the wrong file, add a correctly-placed entry going forward
+rather than relocating the published one: moving it would rewrite two files'
+records of what their audience was told at the time.
+
+The `## [Unreleased]` heading itself is permanent: it stays at the top of every
+changelog even when it is empty following a release. At release time
+`utils/bump-version.sh` promotes that section in all four files at once; do not
+hand-roll the promotion.
 
 ### Coding Style
 

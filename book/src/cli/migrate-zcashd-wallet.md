@@ -7,6 +7,24 @@ wallet (`wallet.db`).
 
 [`zallet init-wallet-encryption`] must be run before this command.
 
+> **⚠️ Back up your wallets**
+>
+> **Keep your original `zcashd` `wallet.dat`.** This migration reports (see below) anything
+> it cannot represent in a Zallet wallet rather than migrating it; that key material exists
+> only in `wallet.dat`, so if you lose it those funds are unrecoverable. Do not delete or
+> discard `wallet.dat` after migrating.
+>
+> **Back up the new Zallet wallet, too.** Its `wallet.db` can hold spending keys that a
+> mnemonic backup does **not** cover — keys imported with `z_importkey`, and other
+> standalone key material — so [`zallet export-mnemonic`] is **not** a complete backup, and
+> there is currently no complete backup RPC or command. Keep a secure copy of **both** the
+> `wallet.db` file *and* the age encryption identity file (the file named by the
+> `keystore.encryption_identity` config option). Those spending keys are encrypted to that
+> identity; if you lose it, or forget its passphrase, they cannot be decrypted and those
+> funds are unrecoverable. Note that `wallet.db` itself is **not** encrypted — it also holds
+> your transaction history and viewing keys in the clear — so keep the backup somewhere
+> secure.
+
 Parsing a `zcashd` wallet file requires the `db_dump` utility built for Berkeley DB
 version 6.2 (the version `zcashd` uses). When Zallet is built with the `zcashd-import`
 feature it compiles and uses a vendored copy of this utility automatically, so you
@@ -32,27 +50,40 @@ Additional CLI arguments:
 - `--allow-multiple-wallet-imports`: An optional flag that must be set if a
   user wants to import keys and transactions from multiple `wallet.dat` files
   (not required for the first `wallet.dat` import.)
-- `--buffer-wallet-transactions`: If set, Zallet will eagerly fetch transaction
-  data from the chain as part of wallet migration instead of via ordinary chain
-  sync. This may speed up wallet recovery, but requires all wallet transactions
-  to be buffered in-memory which may cause out-of-memory errors for large
-  wallets.
 - `--allow-warnings`: If set, Zallet will ignore errors in parsing transactions
   extracted from the `wallet.dat` file. This can enable the import of key data
   from wallets that have been used on consensus forks of the Zcash chain.
+- `--allow-partial-import`: If set, Zallet will complete a migration even when
+  some accounts or transparent spending keys in the `zcashd` wallet could not
+  be imported. The skipped items are reported as warnings; they remain
+  accessible only via the original `wallet.dat` file. Without this flag, such
+  a migration fails with an error enumerating what was left behind. A
+  migration that imports nothing at all is an error regardless of this flag.
 
-> For the Zallet alpha releases, the command also currently takes another required flag
-> `--this-is-alpha-code-and-you-will-need-to-redo-the-migration-later`.
+> For the Zallet beta releases, the command also currently takes another required flag
+> `--this-is-beta-code-and-you-will-need-to-redo-the-migration-later`.
 
-When run, Zallet will parse the `zcashd` wallet file, connect to the backing
-full node (to obtain necessary chain information for setting up wallet
-birthdays), create Zallet accounts corresponding to the structure of the
-`zcashd` wallet, and store the key material in the Zallet wallet. Parsing is
-performed using the `db_dump` command-line utility. By default Zallet uses the
-copy it vendors and builds, which is the recommended choice; a `zcashd`-provided
-`db_dump` from the `zcutil/bin` directory of a source installation (via
-`--zcashd-install-dir`), or one on the system `$PATH`, are used otherwise.
+When run, Zallet will parse the `zcashd` wallet file, export its contents to an
+in-memory [ZeWIF] (Zcash Wallet Interchange Format) document, connect to the
+backing full node (to obtain necessary chain information for setting up wallet
+birthdays), and import the document: Zallet accounts are created corresponding
+to the structure of the `zcashd` wallet, spending key material is stored in the
+Zallet keystore, and the account birthdays carry the note commitment tree state
+needed for recovery. Parsing is performed using the `db_dump` command-line
+utility. By default Zallet uses the copy it vendors and builds, which is the
+recommended choice; a `zcashd`-provided `db_dump` from the `zcutil/bin`
+directory of a source installation (via `--zcashd-install-dir`), or one on the
+system `$PATH`, are used otherwise.
+
+Some `zcashd` wallet contents cannot be represented in a Zallet wallet, and are
+reported (with counts) rather than migrated: Sprout spending keys (move any
+Sprout funds using `zcashd` before migrating), address book entries, watch-only
+entries recorded without their public keys or redeem scripts, and entries with
+uncompressed public keys.
+
+[ZeWIF]: https://github.com/zcash/zewif
 
 [`zcashd`]: https://github.com/zcash/zcash
 [`zallet init-wallet-encryption`]: init-wallet-encryption.md
+[`zallet export-mnemonic`]: export-mnemonic.md
 [is started]: start.md

@@ -1,0 +1,635 @@
+# Copyright 2024 The Electric Coin Company
+#
+# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+# http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+# <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+# option. This file may not be copied, modified, or distributed
+# except according to those terms.
+
+### Localization for strings in the zallet binary
+
+## Terms (not to be localized)
+
+-zcash = Zcash
+-zallet = zallet
+-zcashd = zcashd
+-zebrad = zebrad
+
+-systemd = systemd
+
+-zallet-add-rpc-user = {-zallet} add-rpc-user
+
+-allow-warnings = --allow-warnings
+-allow-beta-example = --this-is-beta-code-and-you-will-need-to-recreate-the-example-later
+-allow-beta-migration = --this-is-beta-code-and-you-will-need-to-redo-the-migration-later
+-account = --account
+-allow-multiple-wallet-imports = --allow-multiple-wallet-imports
+-allow-partial-import = --allow-partial-import
+-datadir = --datadir
+-no-rescan = --no-rescan
+-db_dump = db_dump
+-zcashd-install-dir = --zcashd-install-dir
+
+-legacy_pool_seed_fingerprint = legacy_pool_seed_fingerprint
+-zallet_toml = zallet.toml
+
+-cfg-keystore-require-backup = keystore.require_backup
+-cfg-rpc-allow-insecure-remote-bind = rpc.allow_insecure_remote_bind
+-cfg-rpc-auth = rpc.auth
+-cfg-rpc-auth-password = rpc.auth.password
+-cfg-rpc-auth-pwhash = rpc.auth.pwhash
+
+## Usage
+
+usage-header = Usage
+
+flags-header = Options
+
+## Command prompts & output
+
+cmd-add-rpc-user-prompt = Enter password:
+rpc-cli-param-prompt = Enter parameter value:
+cmd-add-rpc-user-password-empty = Password must not be empty.
+cmd-add-rpc-user-reserved = The username '{$user}' is reserved for the cookie credential that {-zallet} generates at startup; choose a different username.
+cmd-add-rpc-user-instructions = Add this to your {-zallet_toml} file:
+cmd-seed-fingerprint = Seed fingerprint: {$seedfp}
+cmd-import-mnemonic-prompt = Enter mnemonic:
+
+cmd-generate-encryption-identity-public-key = Public key: {$pubkey}
+cmd-generate-encryption-identity-written = Encryption identity written to {$path}
+cmd-generate-encryption-identity-write-failed = Failed to write encryption identity to {$path}: {$error}
+cmd-generate-encryption-identity-exists = An encryption identity already exists at {$path}; refusing to overwrite it to avoid irrecoverable key loss.
+cmd-generate-encryption-identity-passphrase-prompt = Enter passphrase to encrypt the identity:
+cmd-generate-encryption-identity-passphrase-confirm = Confirm passphrase:
+cmd-generate-encryption-identity-passphrase-mismatch = Passphrases do not match
+cmd-generate-encryption-identity-passphrase-empty = Passphrase must not be empty; an empty passphrase would leave the identity effectively unencrypted.
+cmd-generate-encryption-identity-passphrase-file-failed = Failed to read passphrase from {$path}: {$error}
+
+cmd-generate-mnemonic-confirm-backup-next =
+    This phrase exists nowhere but this wallet. Run '{-zallet} confirm-backup' to record
+    it somewhere durable; until you do, {-zallet} will not derive accounts or addresses
+    from it.
+
+cmd-confirm-backup-already-confirmed = This phrase’s backup has already been confirmed.
+cmd-confirm-backup-how-to-obtain =
+    {-zallet} never displays a recovery phrase. To confirm this one’s backup you need
+    your own decrypted copy of it:
+
+        zallet export-mnemonic --armor --seedfp {$seedfp} >mnemonic.age
+        age -d -i {$identity} mnemonic.age
+
+    Write the phrase down, including the numbering of the words, on something durable
+    that you will keep somewhere secure, and delete the decrypted copy afterwards. Then
+    read the words requested below back from what you wrote down.
+cmd-confirm-backup-word-prompt = Enter word #{$position}:{" "}
+cmd-confirm-backup-confirmed = Backup confirmed.
+cmd-confirm-backup-not-complete-backup =
+    Note that this phrase is not a complete backup of your wallet. It covers only funds
+    derived from this seed; spending keys imported into the wallet separately are not
+    included, and recovering from the phrase alone will not restore them. Keep secure
+    copies of both your wallet database and your age encryption identity file as well.
+
+cmd-migrate-wallet-passphrase-prompt = Enter the passphrase for the encrypted zcashd wallet:
+cmd-migrate-wallet-passphrase-wrong = The passphrase was incorrect; please try again.
+
+## Startup messages
+
+warn-config-unused = Config option '{$option}' is not yet implemented in {-zallet}; ignoring its value.
+
+rpc-bare-password-auth-info = Using '{-cfg-rpc-auth-password}' authorization
+rpc-bare-password-auth-warn =
+    The use of '{-cfg-rpc-auth-password}' is less secure, because credentials are
+    configured in plain text. It is recommended that locally-run instances switch to
+    cookie-based auth, or otherwise to use '{-cfg-rpc-auth-pwhash}' credentials generated with
+    '{-zallet-add-rpc-user}'.
+rpc-pwhash-auth-info = Using '{-cfg-rpc-auth-pwhash}' authorization
+
+rpc-cookie-generated = Generated RPC authentication cookie {$path}
+rpc-cookie-read-failed = Failed to read cookie file: {$error}
+
+## zallet.toml example messages
+
+example-beta-code =
+    This command is not stable. You will need to rerun this command again once {-zallet}
+    is stable to migrate your config correctly. To confirm you are aware of this, use
+    '{-allow-beta-example}'.
+
+## zcash.conf migration messages
+
+migrate-warnings = Some {-zcashd} options are not supported by {-zallet}:
+migrate-warn-daemon =
+    {-zallet} does not support the {-zcashd} option '{$option}'; instead you should
+    use {-systemd} or similar to manage {-zallet} as a background service.
+migrate-warn-disablewallet =
+    The {-zcashd} config file has '{$option}' enabled, meaning that this {-zcashd}
+    node's wallet was not being used. Check that you do intend to migrate its
+    configuration to {-zallet}.
+migrate-warn-paytxfee = '{$option}' is set, but {-zallet} only supports ZIP 317 fees.
+migrate-warn-rpcport =
+    {-zcashd} used the same port for both node and wallet RPC methods. {-zallet}
+    has its own port for wallet RPC methods separate from the underlying {-zebrad}
+    node, so the '{$option}' setting is not being migrated. If you want to change
+    the default {-zallet} port, set '{$port}' in the {$rpc} section of the {-zallet}
+    config file.
+migrate-warn-sprout-migration =
+    {-zallet} does not support Sprout, so the Sprout-to-Sapling migration option
+    '{$option}' will not be migrated over.
+migrate-warn-cli-only =
+    {-zcashd} supported configuring '{$option}' via both a CLI flag and a config
+    file entry. {-zallet} does not support it as a config file entry; you will
+    instead need to start {-zallet} with the CLI flag '{$flag}'.
+migrate-warn-unsupported =
+    {-zallet} does not support an equivalent of the {-zcashd} option '{$option}',
+    so its configured value '{$value}' is not being migrated. If this option is
+    required for your use case, please get in touch with the {-zcash} developers
+    as soon as possible to discuss alternatives.
+
+migrate-beta-code =
+    This command is not stable, and parts of your {-zcashd} data may not get
+    migrated correctly. You will need to rerun this command again once {-zallet}
+    is stable to migrate your config correctly. To confirm you are aware of
+    this, use '{-allow-beta-migration}'.
+
+migrate-config-written = {-zallet} config written to {$conf}
+
+migrate-wallet-minted-seed =
+    The {-zcashd} wallet contains no HD seed, so a new BIP 39 mnemonic seed phrase
+    has been generated for the migrated wallet. This seed phrase never existed in
+    {-zcashd}: backups of your original wallet.dat do NOT cover it or any addresses
+    that will be derived from it, so be sure to back up your new {-zallet} wallet
+    as described below.
+
+migrate-wallet-legacy-seed-fp =
+    The zcashd legacy account is derived from the seed with fingerprint '{$seed_fp}'.
+    If you wish to enable legacy zcashd semantics for wallet RPC methods, you should
+    set '{-legacy_pool_seed_fingerprint}' to this value in '{-zallet_toml}'.
+
+## General errors
+
+err-kind-generic = Error
+err-kind-init = Failed to initialize {-zallet}
+err-kind-chain = An error occurred while accessing chain data.
+err-kind-sync = Failed to synchronize {-zallet}
+
+err-init-cannot-find-home-dir =
+    Cannot find home directory for the default datadir. Use '{-datadir}' to set
+    the datadir directly.
+err-init-failed-to-create-lockfile = Failed to create a lockfile at {$path}: {$error}
+err-init-failed-to-restrict-permissions = Failed to restrict permissions on {$path}: {$error}
+err-init-failed-to-read-lockfile = Failed to read lockfile at {$path}: {$error}
+err-init-zallet-already-running =
+    Cannot obtain a lock on data directory {$datadir}. {-zallet} is probably already running.
+
+err-init-config-db-mismatch =
+    The wallet database at {$db_path} was created for network type
+    {$db_network_type}, but the config is using network type
+    {$config_network_type}. A wallet database is permanently tied to one network;
+    set 'network' back to {$db_network_type}, or use a different data directory to
+    create a fresh {$config_network_type} wallet.
+err-init-db-incompatible-alpha =
+    This wallet database was created by an incompatible earlier version of {-zallet}.
+    To use this {-zallet} release, start again with a fresh Zallet wallet or a
+    new data directory.
+err-init-db-invalid-zallet-version =
+    The wallet database recorded an invalid {-zallet} version '{$version}':
+    {$err}
+
+err-init-identity-not-found = Encryption identity file could not be located at {$path}. An identity can be generated using generate-encryption-identity.
+err-init-identity-not-passphrase-encrypted = {$path} is not encrypted with a passphrase
+err-init-path-not-utf8 = {$path} is not currently supported (not UTF-8)
+err-init-identity-not-usable = Identity file at {$path} is not usable: {$error}
+err-init-rpc-auth-invalid = Invalid '{-cfg-rpc-auth}' configuration
+err-init-rpc-auth-cookie-user-reserved =
+    The '{-cfg-rpc-auth}' username '{$user}' is reserved for the cookie credential that
+    {-zallet} generates at startup. Remove that '{-cfg-rpc-auth}' entry, or choose a
+    different username for it.
+err-init-rpc-bind-not-loopback =
+    Refusing to open the JSON-RPC endpoint on non-loopback address {$addr}: the RPC
+    interface is served over plaintext HTTP, so RPC credentials and wallet
+    passphrases would be readable by anyone on the network path. Bind to a loopback
+    address and use an authenticated, encrypted tunnel (such as SSH port forwarding
+    or a VPN) for remote access, or set '{-cfg-rpc-allow-insecure-remote-bind} = true'
+    to accept the risk.
+warn-init-rpc-bind-insecure-remote =
+    SECURITY WARNING: serving plaintext JSON-RPC on non-loopback address {$addr}
+    because '{-cfg-rpc-allow-insecure-remote-bind}' is enabled. RPC credentials and
+    wallet passphrases sent to this endpoint can be read and replayed by anyone on
+    the network path. Prefer a loopback bind plus an authenticated, encrypted tunnel
+    (such as SSH port forwarding or a VPN).
+err-config-file-not-found = Configuration file at {$path} does not exist.
+err-config-output-exists =
+    Refusing to overwrite the existing config file at {$path}. To replace it, name
+    the target explicitly: '-o {$path} --force'.
+err-config-file-invalid = Failed to parse configuration file at {$path}: {$error}
+err-init-incompatible-consensus =
+    The backing full node follows consensus rules that this {-zallet} build cannot
+    interpret correctly, so {-zallet} cannot maintain a correct view of the chain.
+    Either the full node follows a network upgrade that this build does not recognize,
+    or it activates a recognized upgrade at a height that differs from what this build
+    expects.
+    Incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node.
+warn-init-pending-incompatible-consensus =
+    The backing full node is scheduled to activate consensus rules that this {-zallet}
+    build cannot interpret correctly. {-zallet} will operate normally until the chain
+    reaches height {$height}, then shut down to avoid presenting an incorrect view of the
+    chain.
+    Pending incompatible network upgrades: {$upgrades}.
+    Upgrade {-zallet} to a release whose consensus rules match the full node before then.
+warn-init-consensus-divergence-reached =
+    The chain has reached height {$height}, where the backing full node's consensus rules
+    diverge from what this {-zallet} build can interpret. Shutting down to avoid an
+    incorrect view of the chain. Upgrade {-zallet} to a release whose consensus rules match
+    the full node.
+err-config-backend-mismatch = The config file selects the '{$configured}' chain backend, but this binary provides the '{$provided}' backend. Run the `zallet` launcher (or the matching backend binary) instead, or change the config file's `backend` key.
+
+## Keystore errors
+
+err-keystore-missing-recipients = The wallet has not been set up to store key material securely.
+rec-keystore-missing-recipients = Have you run '{$init_cmd}'?
+err-keystore-already-initialized = Keystore age recipients already initialized
+err-keystore-empty-recipients = No age recipients were derived from the encryption identity file.
+err-keystore-recipient-indirection =
+    Refusing to store the age recipient entry '{$entry}': '@'-prefixed indirection is not
+    supported in the wallet's recipient set.
+err-keystore-key-material-mismatch =
+    Decrypted key material does not match the fingerprint it is stored under. The wallet
+    database is corrupted or has been tampered with.
+err-keystore-no-such-mnemonic = The wallet holds no mnemonic phrase with seed fingerprint {$seedfp}.
+err-keystore-incorrect-passphrase = The wallet passphrase entered was incorrect.
+err-keystore-timeout-too-large = The requested unlock timeout is too large.
+err-wallet-locked = Wallet is locked
+
+## Seed selection errors
+
+err-seed-selection-no-mnemonics =
+    The wallet holds no mnemonic phrases. Run '{-zallet} generate-mnemonic' or
+    '{-zallet} import-mnemonic' first.
+err-seed-selection-seedfp-required =
+    The wallet holds more than one mnemonic phrase; pass --seedfp to choose which one.
+err-seed-selection-unknown-seedfp =
+    The given seed fingerprint does not match any mnemonic phrase in the wallet.
+
+## Backup confirmation errors
+
+err-backup-not-confirmed =
+    The backup of this wallet's mnemonic phrase has not been confirmed. Run
+    '{-zallet} confirm-backup' first, or set '{-cfg-keystore-require-backup}' to false.
+err-confirm-backup-wrong-word =
+    That is not the word at this position in the phrase. The backup has NOT been
+    confirmed; check your written copy and run this command again.
+
+## Account errors
+
+err-account-not-found = Account does not exist
+err-account-no-payment-source = Account has no payment source.
+
+err-legacy-pool-disabled =
+    The legacy pool of funds is disabled. To enable it, set
+    '{-legacy_pool_seed_fingerprint}' in the Zallet config file to the seed
+    fingerprint of the {-zcashd} wallet migrated into this wallet.
+err-legacy-pool-not-found =
+    This wallet holds no legacy account for seed fingerprint {$seed_fp}. Check
+    that '{-legacy_pool_seed_fingerprint}' names a {-zcashd} wallet migrated
+    into it.
+
+## `import-address` command errors
+
+err-import-address-unrecognized =
+    Import data is not a transparent address, a hex-encoded public key, or a
+    hex-encoded redeem script.
+err-import-address-not-key-or-script =
+    Import data is not a valid public key or redeem script.
+err-import-address-legacy-disabled =
+    No legacy {-zcashd} account is configured for this wallet. Pass '{-account}' to
+    name the target account, or set '{-legacy_pool_seed_fingerprint}' in the Zallet
+    config file to the seed fingerprint of the {-zcashd} wallet migrated into it.
+err-import-address-legacy-not-found =
+    This wallet holds no legacy account for seed fingerprint {$seed_fp}. Pass
+    '{-account}' to name the target account, or check that
+    '{-legacy_pool_seed_fingerprint}' names a {-zcashd} wallet migrated into it.
+err-import-address-no-chain-state =
+    The chain state needed to queue a rescan is unavailable. Retry once the chain
+    backend has synced, or pass '{-no-rescan}' to import without a rescan.
+
+## Transaction verification errors
+
+err-transparent-output-not-wallet-derived =
+    The built transaction pays a transparent output ({$output}) that is neither a requested
+    payment nor an address derived from the account's own key. The wallet database is
+    corrupted or has been tampered with. The transaction has not been broadcast.
+err-transparent-payment-missing =
+    The built transaction is missing a requested payment output (to {$address}). The wallet
+    database is corrupted or has been tampered with. The transaction has not been broadcast.
+
+## PCZT errors
+
+# In each of these, {$error} is the failure reported by the `pczt` crate. It is
+# diagnostic text from a dependency and is not itself translated.
+err-pczt-parse = Invalid PCZT: {$error}
+err-pczt-serialize = Failed to serialize PCZT: {$error}
+err-pczt-combine = Failed to combine PCZTs: {$error}
+err-pczt-prove-sapling = Failed to create Sapling proofs: {$error}
+err-pczt-prove-orchard = Failed to create Orchard proof: {$error}
+err-pczt-finalize-spends = Failed to finalize PCZT spends: {$error}
+err-pczt-extract = Failed to extract transaction: {$error}
+err-pczt-signer-init = Failed to initialize signer: {$error}
+err-pczt-record-signing-hints = Failed to record transparent signing hints: {$error}
+# {$task} is the name of the blocking task that panicked or was cancelled, such
+# as `pczt_prove`; it is an internal identifier and is not translated.
+err-pczt-task-failed = The {$task} task failed: {$error}
+
+## PCZT request errors
+
+err-pczt-combine-none-given = At least one PCZT is required
+err-pczt-combine-too-many =
+    Too many PCZTs to combine: {$given} exceeds maximum of {$maximum}
+# Identifies which PCZT in the submitted array failed to decode. {$index} is its
+# zero-based position and {$error} is the decoding failure.
+err-pczt-combine-indexed = PCZT {$index}: {$error}
+err-pczt-too-large = PCZT exceeds maximum size limit
+err-pczt-invalid-base64 = Invalid base64 encoding: {$error}
+err-pczt-too-many-recipients =
+    Too many recipients: {$given} exceeds maximum of {$maximum}
+err-pczt-create-failed = Failed to create PCZT: {$error}
+err-pczt-transparent-metadata-lookup =
+    Failed to look up transparent address metadata: {$error}
+err-pczt-transparent-input-count-mismatch =
+    Internal error: transparent input count mismatch
+err-pczt-serialize-transaction = Failed to serialize transaction: {$error}
+err-pczt-prove-ironwood = Failed to create Ironwood proof: {$error}
+err-pczt-extract-store = Failed to extract and store transaction: {$error}
+err-pczt-stored-transaction-missing =
+    The extracted transaction was stored but could not be read back
+err-pczt-from-invalid =
+    Invalid from parameter: expected an address or an account UUID.
+err-pczt-fund-source-requires-account =
+    fund_source may only be given when `from` is an account UUID.
+# {$address} is the TEX address the caller asked to pay; it is not translated.
+# “z_sendmany” is an RPC method name, so it is not translated either.
+err-pczt-tex-recipient =
+    Cannot pay the TEX address {$address}: paying a TEX address takes two
+    transactions, and a PCZT holds only one. Use z_sendmany instead.
+err-pczt-multi-step-proposal =
+    This payment requires more than one transaction, which a PCZT cannot
+    represent. Use z_sendmany instead.
+
+## fund_source errors
+
+# “orchard”, “sapling” and “any_transparent” are the literal values the
+# parameter accepts, so they are not translated. {$given} is what the caller
+# supplied instead.
+err-fund-source-unknown =
+    Invalid fund_source: expected "orchard", "sapling", "any_transparent", or
+    an array of transparent addresses, got "{$given}".
+err-fund-source-empty-array =
+    Invalid fund_source: the array of transparent addresses is empty.
+err-fund-source-non-string-entry =
+    Invalid fund_source: array entries must be transparent address strings.
+# {$address} is the address the caller supplied; it is not translated.
+err-fund-source-not-transparent =
+    Invalid fund_source: "{$address}" is not a transparent address.
+err-fund-source-not-a-source =
+    Invalid fund_source: expected a string or an array of transparent addresses.
+
+## PCZT signing errors
+
+err-pczt-invalid-seed-fingerprint = Invalid seed fingerprint: expected 32 bytes
+err-pczt-invalid-account-index = Invalid account index: expected 4 bytes
+err-pczt-account-index-out-of-range =
+    Invalid account index: {$index} is out of range
+err-pczt-derive-spending-key = Failed to derive spending key: {$error}
+err-pczt-strict-unsigned =
+    Strict mode: {$transparent} transparent, {$sapling} sapling, {$orchard}
+    orchard, {$ironwood} ironwood inputs remain unsigned
+# {$required} and {$acknowledged} are privacy-policy names such as
+# `AllowRevealedAmounts`; they are not translated.
+err-pczt-policy-not-acknowledged =
+    This transaction requires the privacy policy {$required}, which the
+    supplied policy {$acknowledged} does not acknowledge.
+err-pczt-invalid-recorded-policy =
+    The privacy policy recorded in the PCZT is unrecognized.
+
+## Transaction proposal errors
+
+err-propose-transaction-failed = Failed to propose transaction: {$error}
+err-invalid-from-address =
+    Invalid from address: should be a taddr, zaddr, or UA.
+err-from-address-no-payment-source =
+    Invalid from address, no payment source found for address.
+# “Zallet” here is the product name, so it is not the lowercase `{-zallet}`
+# command-name term.
+err-privacy-policy-legacy-compat =
+    LegacyCompat privacy policy is unsupported in Zallet
+err-privacy-policy-unknown = Unknown privacy policy {$policy}
+err-confirmations-policy-invalid =
+    Configuration error: minimum confirmations for spending trusted TXOs cannot
+    exceed that for untrusted TXOs.
+
+# errors in migration of configuration data from the zcashd `zcash.conf` config file format
+
+err-migrate-allow-warnings = To allow a migration with warnings, use '{-allow-warnings}'
+err-migrate-duplicate-zcashd-option =
+    {-zcashd} option '{$option}' does not support multiple values,
+    but appears multiple times in {$conf}
+    Remove or comment out any duplicates so that it is only set once,
+    then re-run this command.
+err-migrate-invalid-line = Invalid line '{$line}' in {$conf}
+err-migrate-invalid-zcashd-option = Invalid value '{$value}' for {-zcashd} option '{$option}'
+err-migrate-multiple-related-zcashd-options =
+    {-zcashd} option '{$option}' collides with '{$prev}', but both appear in
+    {$conf}
+    Remove one of the conflicting options, then re-run this command.
+err-migrate-unknown-zcashd-option = Unknown {-zcashd} option '{$option}'
+
+# errors in migration of wallet data from the zcashd `wallet.dat` database format
+
+err-failed-seed-fingerprinting =
+    Zallet was unable to import invalid seed data, likely due to the seed having
+    an invalid length.
+err-migrate-wallet-multi-import-disabled =
+    The {-allow-multiple-wallet-imports} flag must be provided to allow the
+    import of more than a single {-zcashd} `wallet.dat` file into {-zallet}.
+err-migrate-wallet-duplicate-import =
+    The {-zcashd} wallet containing seed with fingerprint '{$seed_fp}' has
+    already been imported.
+err-migrate-wallet-bdb-parse =
+    An error occurred in parsing the {-zcashd} wallet file at '{$path}': '{$err}'
+err-migrate-wallet-db-dump-not-found =
+    The {-db_dump} command line utility was not found. Either set the
+    {-zcashd-install-dir} command-line argument to the local zcashd installation
+    root (which must contain the `zcutil/bin/` utilities) or ensure that {-db_dump}
+    is available on the system `$PATH`.
+err-migrate-wallet-db-dump =
+    An error occurred in extracting wallet data from '{$path}': '{$err}'
+err-migrate-wallet-seed-absent =
+    The {-zcashd} wallet file did not contain HD seed information. Wallets from
+    prior to the Sapling network upgrade are not supported by this migration
+    tool.
+err-migrate-wallet-invalid-mnemonic =
+    The {-zcashd} wallet file contained invalid mnemonic seed phrase data and
+    may be corrupt: '{$err}'
+err-migrate-wallet-key-decoding=
+    The {-zcashd} wallet file contained invalid mnemonic transparent secret key
+    data and may be corrupt: '{$err}'
+err-migrate-wallet-key-data=
+    The {-zcashd} wallet file contained invalid key data and may be corrupt:
+    '{$err}'
+err-migrate-wallet-network-mismatch =
+    The {-zcashd} wallet being imported is for the '{$wallet_network}' network,
+    but this {-zallet} instance is configured for '{$zallet_network}'
+err-migrate-wallet-storage =
+    An database error occurred in wallet migration. This is indicative of a
+    programming error; please report the following error to (TBD): '{$err}'
+err-migrate-wallet-invalid-chain-data =
+    Invalid chain data was encountered in wallet migration. This is indicative of a
+    programming error; please report the following error to (TBD): '{$err}'
+err-migrate-wallet-key-decoding =
+    An error occurred decoding key material: '{$err}'.
+err-migrate-wallet-tx-fetch =
+    An error occurred fetching transaction data: '{$err}'.
+err-migrate-wallet-data-parse=
+    An error occurred parsing zcashd wallet data: '{$err}'.
+err-migrate-wallet-invalid-account-id =
+    Error encountered in wallet migration: '{$account_id}' is not a valid ZIP
+    32 account identifier.
+err-migrate-wallet-all-unmined =
+    All transactions in the wallet are unmined; cannot determine effective
+    consensus branch ID for pre-v5 transactions.
+err-migrate-secret-non-english-mnemonic =
+    The wallet contains a mnemonic seed phrase using a wordlist other than
+    English; only English mnemonics can be imported.
+err-migrate-secret-fingerprint-encoding =
+    The wallet records an invalid seed fingerprint '{$fingerprint}'.
+err-migrate-secret-fingerprint-mismatch =
+    A stored seed does not match the fingerprint '{$fingerprint}' it was
+    recorded under; the wallet data may be corrupt.
+err-migrate-secret-transparent-key-decoding =
+    The wallet contains a transparent secret key that is not a valid WIF
+    encoding for this network.
+err-migrate-secret-transparent-key-mismatch =
+    A transparent secret key does not correspond to the public key it was
+    recorded under; the wallet data may be corrupt.
+err-migrate-secret-sapling-key-decoding =
+    An error occurred decoding a Sapling spending key: '{$err}'.
+err-migrate-secret-sapling-key-mismatch =
+    A Sapling spending key does not correspond to the viewing key it was
+    recorded under; the wallet data may be corrupt.
+err-migrate-wallet-export =
+    An error occurred exporting the {-zcashd} wallet to a ZeWIF document: '{$err}'
+err-migrate-wallet-import =
+    An error occurred importing the ZeWIF document into the wallet database: '{$err}'
+err-migrate-wallet-secret-store =
+    An error occurred storing wallet secrets in the keystore: '{$err}'
+err-migrate-wallet-encrypted-secrets =
+    The ZeWIF document's secret material is encrypted; decrypt it before import.
+err-migrate-wallet-nothing-imported =
+    None of the accounts in the {-zcashd} wallet (it contains {$account_count})
+    could be imported: NOTHING WAS MIGRATED, and your funds remain accessible only
+    through the original `wallet.dat` file, so keep it safe. See the preceding
+    log output for the reason each account was skipped. No accounts were
+    created in the {-zallet} wallet, although the keystore may now hold key
+    material that no account references; this is harmless, and it is safe to
+    re-run this migration after addressing the cause (secrets already present
+    in the keystore are stored idempotently).
+err-migrate-wallet-partial-import =
+    The migration could not import the following; each exists ONLY in the
+    original {-zcashd} `wallet.dat` file, so keep it safe:
+    {$skipped}
+    The accounts that were imported, and their key material, have already been
+    written to the {-zallet} wallet and keystore (the keystore may also hold
+    keys for the items listed above, unreferenced by any account), so re-running
+    this migration against the same {-zallet} wallet is not supported and will
+    fail. To accept a migration that leaves this material behind,
+    redo the migration against a fresh {-zallet} wallet with the
+    {-allow-partial-import} flag.
+migrate-wallet-skipped-account-sprout =
+    account '{$name}': its viewing capability is a Sprout viewing key, and
+    {-zallet} cannot represent the Sprout pool; move any Sprout funds using
+    {-zcashd} before migrating
+migrate-wallet-skipped-account-no-seed =
+    account '{$name}': a bare set of transparent addresses with no seed from
+    which its contents could be re-derived
+migrate-wallet-skipped-key-uncompressed =
+    a transparent spending key: the recorded public key is uncompressed, and
+    {-zallet} derives addresses only from compressed public keys
+migrate-wallet-skipped-key-no-account =
+    the transparent spending key for '{$address}': its address does not appear
+    under any imported account
+migrate-wallet-unknown-address = unknown address
+
+err-ux-A = Did {-zallet} not do what you expected? Could the error be more useful?
+err-ux-B = Tell us
+# Put (len(A) - len(B) - 41) spaces here.
+err-ux-C = {"                    "}
+
+## Limit errors
+
+err-excess-recipients =
+    Sending to {$count} recipients would exceed the current limit of {$limit}
+    actions, which exists to prevent memory exhaustion, because every recipient
+    needs at least one output. Restart with '{$config}' where {$bound} to allow
+    the wallet to attempt to construct this transaction.
+err-excess-shielded-actions =
+    Including {$count} {$pool} {$kind} would exceed the current limit of
+    {$limit} actions, which exists to prevent memory exhaustion. Restart with
+    '{$config}' where {$bound} to allow the wallet to attempt to construct this
+    transaction.
+
+## Privacy policy errors
+
+err-privpol-no-privacy-not-allowed =
+    This transaction would have no privacy, which is not enabled by default.
+    THIS WILL AFFECT YOUR PRIVACY. Resubmit with the '{$parameter}' parameter
+    set to '{$policy}' if you wish to allow this transaction to proceed anyway.
+err-privpol-linking-addrs-not-allowed =
+    This transaction would spend transparent funds received by multiple unified
+    addresses within the same account, which is not enabled by default because
+    it will publicly link those addresses together.
+err-privpol-fully-transparent-not-allowed =
+    This transaction would both spend transparent funds and have transparent
+    recipients or change, which is not enabled by default because it will
+    publicly reveal transaction participants and amounts.
+err-privpol-transparent-sender-not-allowed =
+    This transaction would spend transparent funds, which is not enabled by
+    default because it will publicly reveal transaction senders and amounts.
+err-privpol-transparent-recipient-not-allowed =
+    This transaction would have transparent recipients, which is not enabled by
+    default because it will publicly reveal transaction recipients and amounts.
+err-privpol-transparent-change-not-allowed =
+    This transaction would have transparent change, which is not enabled by
+    default because it will publicly reveal the change address and amounts.
+err-privpol-revealing-amount-not-allowed =
+    Could not send to the {$pool} shielded pool without spending non-{$pool}
+    funds, which would reveal transaction amounts.
+err-privpol-transparent-receiver-not-allowed =
+    This transaction would send to a transparent receiver of a unified address,
+    which is not enabled by default because it will publicly reveal transaction
+    recipients and amounts.
+err-privpol-revealing-receiver-amounts-not-allowed =
+    Could not send to a shielded receiver of a unified address without spending
+    funds from a different pool, which would reveal transaction amounts.
+rec-privpol-privacy-weakening =
+    THIS MAY AFFECT YOUR PRIVACY. Resubmit with the '{$parameter}' parameter set
+    to '{$policy}' or weaker if you wish to allow this transaction to proceed
+    anyway.
+
+## RPC method errors
+
+err-rpc-convert-tex-invalid-address = Invalid address
+err-rpc-convert-tex-not-p2pkh = Address is not a transparent p2pkh address
+
+## RPC CLI errors
+
+err-rpc-cli-conn-failed = Failed to connect to the Zallet wallet's JSON-RPC port.
+err-rpc-cli-invalid-param = Invalid parameter '{$parameter}'
+err-rpc-cli-param-read-failed = Failed to read parameter from {$path}: {$error}
+err-rpc-cli-no-server = No JSON-RPC port is available.
+err-rpc-cli-request-failed = JSON-RPC request failed: {$error}
+
+## zallet manpage
+
+man-zallet-about = A {-zcash} wallet.
+
+man-zallet-description =
+    {-zallet} is a {-zcash} wallet.

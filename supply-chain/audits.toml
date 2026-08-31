@@ -627,6 +627,18 @@ criteria = "safe-to-deploy"
 delta = "0.11.1 -> 0.11.2"
 notes = "Only changes to generated code are clippy lints."
 
+[[trusted.age]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2019-10-06"
+end = "2027-07-17"
+
+[[trusted.age-core]]
+criteria = "safe-to-deploy"
+user-id = 6289 # Jack Grigg (str4d)
+start = "2020-02-02"
+end = "2027-07-17"
+
 [[trusted.equihash]]
 criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
@@ -637,7 +649,7 @@ end = "2026-03-22"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2025-02-21"
-end = "2026-03-04"
+end = "2027-07-12"
 
 [[trusted.f4jumble]]
 criteria = "safe-to-deploy"
@@ -671,6 +683,12 @@ end = "2026-04-09"
 
 [[trusted.orchard]]
 criteria = "safe-to-deploy"
+user-id = 1244 # Sean Bowe (ebfull)
+start = "2022-10-19"
+end = "2027-07-28"
+
+[[trusted.orchard]]
+criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
 start = "2021-01-07"
 end = "2027-03-17"
@@ -680,6 +698,12 @@ criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-12"
 end = "2027-07-03"
+
+[[trusted.pczt]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2024-12-17"
+end = "2027-07-28"
 
 [[trusted.pinentry]]
 criteria = "safe-to-deploy"
@@ -716,6 +740,18 @@ criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2022-12-15"
 end = "2026-03-04"
+
+[[trusted.tower-batch-control]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.tower-fallback]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
 
 [[trusted.windows-core]]
 criteria = "safe-to-deploy"
@@ -835,7 +871,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-03-25"
-end = "2026-03-04"
+end = "2027-07-12"
 
 [[trusted.zcash_client_sqlite]]
 criteria = "safe-to-deploy"
@@ -847,19 +883,25 @@ end = "2027-02-19"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-03-25"
-end = "2026-03-04"
+end = "2027-07-12"
 
 [[trusted.zcash_encoding]]
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-19"
-end = "2026-03-04"
+end = "2027-07-12"
 
 [[trusted.zcash_history]]
 criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
 start = "2024-03-01"
 end = "2026-04-08"
+
+[[trusted.zcash_history]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2026-07-01"
+end = "2027-07-12"
 
 [[trusted.zcash_keys]]
 criteria = "safe-to-deploy"
@@ -873,6 +915,12 @@ user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-01-15"
 end = "2027-07-03"
 
+[[trusted.zcash_pool_migration]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2026-07-24"
+end = "2027-07-28"
+
 [[trusted.zcash_primitives]]
 criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
@@ -895,7 +943,7 @@ end = "2026-09-26"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-08-20"
-end = "2026-04-08"
+end = "2027-07-12"
 
 [[trusted.zcash_protocol]]
 criteria = "safe-to-deploy"
@@ -945,6 +993,60 @@ user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-12-17"
 end = "2027-07-03"
 
+[[trusted.zebra-chain]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-consensus]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-network]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-node-services]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-rpc]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-script]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zebra-state]]
+criteria = "safe-to-deploy"
+user-id = 235397 # Marek (upbqdn)
+start = "2023-10-17"
+end = "2027-07-28"
+
+[[trusted.zewif]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2025-05-30"
+end = "2027-07-11"
+
+[[trusted.zewif-zcashd]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2025-05-30"
+end = "2027-07-11"
+
 [[trusted.zip32]]
 criteria = "safe-to-deploy"
 user-id = 6289 # Jack Grigg (str4d)
@@ -961,4 +1063,4 @@ end = "2026-03-04"
 criteria = "safe-to-deploy"
 user-id = 169181 # Kris Nuttycombe (nuttycom)
 start = "2024-01-15"
-end = "2026-03-04"
+end = "2027-07-12"
