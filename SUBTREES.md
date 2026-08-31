@@ -26,12 +26,13 @@ Notes:
   date; it is not intended for long-term reliance.
 - **librustzcash** is the shared Rust crate workspace (`zcash_primitives`,
   `zcash_client_backend`, `zcash_keys`, `zip32`, and friends) that the Z3 stack
-  (zaino, zallet) builds on. Tracks `main`; pin to a release tag once one covers
-  what we need.
+  (zaino, zallet) builds on. Tracks `main`, pinned to a release cohort: it
+  publishes per-crate tags cut together, so pull the anchor tag
+  (`zcash_client_sqlite-<version>`) rather than the branch tip. Currently the
+  2026-08-19 cohort, which is what zallet builds against.
 - **lightwalletd** is the original Go light client server (Zaino serves the same
   protocol in the Z3 stack). Vendored as the platform for private-lookup (PIR)
-  experimentation. Upstream cuts release tags, but `master` was 167 commits ahead
-  of the newest tag (v0.4.9) at import; pin to a tag once one covers what we need.
+  experimentation. Tracks `master`, pinned to a release tag (currently `v0.5.4`).
 
 ## Why subtrees (not submodules)
 
