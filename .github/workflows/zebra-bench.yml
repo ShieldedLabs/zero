@@ -1,9 +1,10 @@
 name: Zebra consensus benchmarks
 
 # Runs the zebra-consensus criterion benches on every zebra-touching commit:
-# the transparent script cache bench (benches/script.rs) and the block-path
-# UTXO lookup bench (benches/utxo_lookup.rs). Informational, not a required
-# check: absolute times on shared runners are noisy, but the ratios the
+# the transparent script cache bench (benches/script.rs), the block-path
+# UTXO lookup bench (benches/utxo_lookup.rs), and the worst-case tx
+# verification bench (benches/worst_case_tx_verification.rs). Informational,
+# not a required check: absolute times on shared runners are noisy, but the ratios the
 # benches exist to watch (cache miss vs hit, serial vs overlapped lookups)
 # are measured within one run on one box, and an order-of-magnitude
 # regression is visible through the noise.
@@ -146,5 +147,24 @@ jobs:
             echo "### utxo_lookup bench"
             echo '```'
             grep -B1 -A2 "time:" "$RUNNER_TEMP/utxo.out" || echo "no timings parsed"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Worst-case tx verification bench
+        working-directory: zebra
+        run: |
+          set -euo pipefail
+          if [ ! -f zebra-consensus/benches/worst_case_tx_verification.rs ]; then
+            echo "benches/worst_case_tx_verification.rs not on this branch yet; skipping" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cargo bench -p zebra-consensus --bench worst_case_tx_verification 2>&1 | tee "$RUNNER_TEMP/wctv.out"
+          {
+            echo "### worst_case_tx_verification bench"
+            echo '```'
+            grep -B1 -A2 "time:" "$RUNNER_TEMP/wctv.out" || echo "no timings parsed"
+            echo '```'
+            echo '```'
+            sed -n '/worst_case_tx_verification_summary_csv/,$p' "$RUNNER_TEMP/wctv.out" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
