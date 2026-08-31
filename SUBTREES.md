@@ -12,16 +12,16 @@ still pull upstream updates or split changes back out when useful.
 | `zebra/`  | https://github.com/ZcashFoundation/zebra.git  | `main`   | `up-zebra`  |
 | `zaino/`  | https://github.com/zingolabs/zaino.git        | `dev`    | `up-zaino`  |
 | `zallet/` | https://github.com/zcash/wallet.git           | `main`   | `up-zallet` |
-| `orchard/`| https://github.com/zcash/orchard.git          | `feat/ironwood` | `up-orchard` |
+| `orchard/`| https://github.com/zcash/orchard.git          | `main`   | `up-orchard` |
 | `librustzcash/` | https://github.com/zcash/librustzcash.git | `main` | `up-librustzcash` |
 | `lightwalletd/` | https://github.com/zcash/lightwalletd.git | `master` | `up-lightwalletd` |
 
 Notes:
 - **zaino** tracks `dev` (its active default), not `stable`.
 - **zallet** is the `zallet` crate, which lives in the `zcash/wallet` repo.
-- **orchard** tracks the `feat/ironwood` feature branch (not a release tag),
-  because the Ironwood work we need only lives there. Pull it deliberately, not
-  routinely; switch to a tag once upstream cuts an Ironwood release.
+- **orchard** tracks `main` and is pinned to a release tag. The `feat/ironwood`
+  branch it used to track was merged into `main` and shipped as the 0.15.x line,
+  so orchard is now an ordinary tagged dependency with no special handling.
 - **zcashd** is a supported fork on a transition path with a hardcoded end-of-life
   date; it is not intended for long-term reliance.
 - **librustzcash** is the shared Rust crate workspace (`zcash_primitives`,

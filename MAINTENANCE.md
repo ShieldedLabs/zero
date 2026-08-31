@@ -50,7 +50,7 @@ The rule is not uniform. Bias differs by how alive the upstream is.
 | `zebra`   | Active (ZF)                               | Upstream-first, strongly                       |
 | `zaino`   | Active (Zingo)                            | Upstream-first, strongly                       |
 | `zallet`  | Active (ZODL)                             | Upstream-first, strongly                       |
-| `orchard` | Active (ZODL); Ironwood on `feat/ironwood` | Upstream-first, strongly                      |
+| `orchard` | Active (ZODL); Ironwood released on `main` | Upstream-first, strongly                       |
 | `librustzcash` | Active (ZODL)                        | Upstream-first, strongly                       |
 | `lightwalletd` | Active (ZODL), low churn             | Upstream-first for fixes; PIR experiments start Zero-only |
 | `zcashd`  | Winding down; we hardcode EOL             | Mostly Zero-only; upstream only clear bugfixes |
