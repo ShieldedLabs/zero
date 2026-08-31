@@ -91,7 +91,7 @@ jobs:
                 || ''
               )
             }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: msrv
           # NU7 has a distinct RUSTFLAGS-derived cache key.
@@ -146,7 +146,7 @@ jobs:
                 || ''
               )
             }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: ${{ github.event_name == 'pull_request' }}
         with:
           shared-key: msrv
@@ -210,7 +210,7 @@ jobs:
         uses: ./.github/actions/prepare
         with:
           all-features: true
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: msrv
           save-if: ${{ matrix.state == 'all-features' || matrix.state == 'NU7' }}
@@ -267,7 +267,7 @@ jobs:
         with:
           all-pools: true
           extra-features: pczt-tests
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: msrv
           save-if: "false"
@@ -303,7 +303,7 @@ jobs:
       TEST_RESULT: ${{ needs.test-slow.result }}
     steps:
       - name: Notify Slack
-        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
           errors: true
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -329,7 +329,7 @@ jobs:
           persist-credentials: false
       - id: prepare
         uses: ./.github/actions/prepare
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: latest
       # macOS-latest pre-installs a system `rustc` that is not a rustup proxy
