@@ -10,6 +10,31 @@ command-line shell.
 - `zallet rpc <method>` will call that JSON-RPC method. Parameters can be provided via
   additional CLI arguments (`zallet rpc <method> <param>`).
 
+## Secret parameters
+
+Command-line arguments are visible to other users through process listings, and your
+shell records them in its history. Some JSON-RPC methods take secrets as parameters —
+the spending key given to `z_importkey`, the passphrase given to `walletpassphrase` —
+which should not be passed that way.
+
+Write such a parameter as `@PATH` instead. Zallet reads the first line of `PATH` and
+sends it as a JSON string, so no quoting is needed:
+
+```
+# Read the key from a pipe.
+$ get-key-from-vault | zallet rpc z_importkey @- '"whenkeyisnew"'
+
+# Read the key from a file descriptor, without it ever touching disk.
+$ zallet rpc z_importkey @/dev/fd/3 3<<<"$KEY"
+
+# Prompt for the key without echoing it.
+$ zallet rpc z_importkey @-
+Enter parameter value:
+```
+
+`@-` reads from standard input, prompting without echo when standard input is a
+terminal. Prefer a pipe or file descriptor over a regular file on disk.
+
 ## Authentication
 
 When Zallet starts its JSON-RPC server, it generates a random cookie credential and
@@ -19,6 +44,11 @@ access.
 
 If `[[rpc.auth]]` users are configured in `zallet.toml`, `zallet rpc` will prefer
 those credentials over the cookie file. Cookie-based auth and configured users coexist.
+
+The username `__cookie__` is reserved for the cookie credential, so it cannot be used
+for a `[[rpc.auth]]` user. Zallet refuses to start if a configured user claims it,
+rather than letting a configured password grant access under the name that clients
+treat as the cookie credential.
 
 ## Comparison to `zcash-cli`
 
@@ -30,7 +60,7 @@ below:
 |-----------------------------------|------------------------------------|
 | `zcash-cli -conf=<file>`          | `zallet --config <file> rpc`       |
 | `zcash-cli -datadir=<dir>`        | `zallet --datadir <dir> rpc`       |
-| `zcash-cli -stdin`                | Not implemented                    |
+| `zcash-cli -stdin`                | `@-` parameter (see above)         |
 | `zcash-cli -rpcconnect=<ip>`      | `rpc.bind` setting in config file  |
 | `zcash-cli -rpcport=<port>`       | `rpc.bind` setting in config file  |
 | `zcash-cli -rpcwait`              | Not implemented                    |
@@ -40,7 +70,7 @@ below:
 | Hostname, domain, or IP address   | Only IP address                    |
 | `zcash-cli <method> [<param> ..]` | `zallet rpc <method> [<param> ..]` |
 
-For parameter parsing, `zallet rpc` is (as of the alpha releases) both more and less
+For parameter parsing, `zallet rpc` is (as of the beta releases) both more and less
 flexible than `zcash-cli`:
 
 - It is more flexible because `zcash-cli` implements type-checking on method parameters,
