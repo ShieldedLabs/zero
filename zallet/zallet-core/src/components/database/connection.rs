@@ -215,6 +215,34 @@ impl DbConnection {
             })
         })
     }
+
+    /// Stores a batch of decrypted transactions.
+    ///
+    /// Equivalent to calling [`WalletWrite::store_decrypted_tx`] once per item, but takes the
+    /// wallet write lock and opens the SQLite transaction once for the whole batch instead of
+    /// once per transaction. Storing a busy address's history one transaction at a time was
+    /// measured in production at roughly one transaction per second, which turns a walk of
+    /// tens of thousands of transactions into days.
+    ///
+    /// Only the address-based spend-detection path (`spend-index` off) walks a whole address
+    /// history like this; with `spend-index` the wallet resolves spends per outpoint.
+    #[cfg(all(not(feature = "spend-index"), feature = "zcashd-import"))]
+    pub(crate) fn store_decrypted_txs(
+        &mut self,
+        received_txs: Vec<DecryptedTransaction<'_, Transaction, AccountUuid>>,
+    ) -> Result<
+        (),
+        <WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> as WalletRead>::Error,
+    > {
+        self.with_mut(|mut db_data| {
+            db_data.transactionally(|wdb| {
+                for received_tx in received_txs {
+                    wdb.store_decrypted_tx(received_tx)?;
+                }
+                Ok(())
+            })
+        })
+    }
 }
 
 impl WalletRead for DbConnection {

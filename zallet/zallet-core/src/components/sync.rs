@@ -46,10 +46,9 @@ use std::collections::HashSet;
 use std::ops::Range;
 use tokio::{sync::Notify, task::AbortHandle, time};
 #[cfg(not(feature = "spend-index"))]
-use zcash_client_backend::data_api::{
-    CoinbaseFilter, InputSource, TransactionsInvolvingAddress,
-    wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
-};
+use zcash_client_backend::data_api::TransactionsInvolvingAddress;
+#[cfg(all(not(feature = "spend-index"), feature = "zcashd-import"))]
+use zcash_client_backend::decrypt_transaction;
 use zcash_client_backend::{
     data_api::{
         TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
@@ -61,6 +60,8 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::AccountUuid;
 use zcash_client_sqlite::error::SqliteClientError;
+#[cfg(not(feature = "spend-index"))]
+use zcash_keys::encoding::AddressCodec as _;
 use zcash_primitives::block::BlockHash;
 #[cfg(not(feature = "spend-index"))]
 use zcash_protocol::TxId;
@@ -426,7 +427,13 @@ async fn initialize<C: Chain>(
                 );
                 time::sleep(REORG_RETRY_BACKOFF).await;
             }
-            Err(error) => return Err(error),
+            // Nor may a poisoned range prevent startup outright: back off and loop to
+            // re-derive the scan ranges against a fresh chain view (see
+            // [`NON_RETRYABLE_ERROR_BACKOFF`]).
+            Err(error) => {
+                warn!("Initial scan of {scan_range} failed; will retry: {error}");
+                time::sleep(NON_RETRYABLE_ERROR_BACKOFF).await;
+            }
         }
     };
 
@@ -445,6 +452,16 @@ async fn initialize<C: Chain>(
 /// backend that is briefly unable to serve reads (still syncing its non-finalized state,
 /// or a reorg in progress) is not polled in a tight loop.
 const REORG_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// How long to wait before retrying after an error that re-pinning the chain view will not
+/// fix, so a persistently failing scan range or data request does not spin.
+///
+/// The loops that use this deliberately do not give up: any sync-task exit shuts the whole
+/// wallet down, so a single poisoned row or range would otherwise be a deterministic crash
+/// loop on every start. Several such failures are self-healing once the process survives
+/// them (a stale row's mined height gets recorded by the `GetStatus` sweep, a tree
+/// divergence gets repaired by steady-state sync), which is what the retry is waiting for.
+const NON_RETRYABLE_ERROR_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Whether a sync error reflects a chain view that went stale mid-read — the captured
 /// snapshot referenced a non-finalized block that was reorged away — and so should be
@@ -1152,7 +1169,7 @@ async fn recover_history<C: Chain>(
                 )
                 .await
                 {
-                    Ok(outcome) => break outcome,
+                    Ok(outcome) => break Some(outcome),
                     Err(error)
                         if is_tree_divergence(&error) && attempt < TREE_DIVERGENCE_RETRIES =>
                     {
@@ -1166,8 +1183,26 @@ async fn recover_history<C: Chain>(
                         time::sleep(backoff).await;
                         attempt += 1;
                     }
-                    Err(error) => return Err(error),
+                    // A failing range must not end this task: any sync-task exit shuts the
+                    // whole wallet down, and a single poisoned range would then be a
+                    // deterministic crash loop on every start. Back off and re-derive the
+                    // scan ranges instead, which lets the healing passes elsewhere in the
+                    // engine (the `GetStatus` sweep, steady-state repair) clear the cause.
+                    Err(error) => {
+                        warn!("History recovery of {scan_range} failed; will retry: {error}");
+                        time::sleep(if is_retryable(&error) {
+                            REORG_RETRY_BACKOFF
+                        } else {
+                            NON_RETRYABLE_ERROR_BACKOFF
+                        })
+                        .await;
+                        break None;
+                    }
                 }
+            };
+            let Some(outcome) = outcome else {
+                // Re-derive the scan ranges from scratch after a contained failure.
+                break;
             };
             if outcome.is_break() {
                 // Reached the consensus-divergence height. History recovery operates below
@@ -1245,26 +1280,119 @@ async fn service_address_request<V: ChainView>(
         .map_err(SyncError::Chain)?
         .into_iter()
         .collect();
-    let our_outputs = db_data.get_spendable_transparent_outputs(
-        &address,
-        TargetHeight::from(view_tip + 1),
-        ConfirmationsPolicy::MIN,
-        CoinbaseFilter::AllTransparentOutputs,
-        // This is spend detection, not input selection: we need every tracked output
-        // regardless of lock state to compare against the chain's unspent set, so a
-        // locked output is not mistaken for a spent one.
-        LockFilter::Unfiltered,
-    )?;
-    let any_spent = our_outputs.iter().any(|output| {
-        let outpoint = output.outpoint();
-        !chain_unspent.contains(&(*outpoint.txid(), outpoint.n()))
-    });
+    // The wallet's tracked, mined, spend-unrecorded outputs at this address. This is a raw
+    // query rather than `get_spendable_transparent_outputs` because that is a coin-selection
+    // API: its ZIP 317 marginal-fee floor would hide dust outputs from this diff, leaving an
+    // externally spent dust output undetectable forever. It also ignores lock state, which
+    // spend detection must do so a locked output is not mistaken for a spent one. Unmined
+    // receipts are excluded: they cannot have a mined spend, and
+    // `get_address_unspent_outpoints` never lists them, so they would read as permanently
+    // "missing" and re-trigger the history fetch every pass.
+    let addr_str = address.encode(params);
+    let tracked_unspent: Vec<([u8; 32], u32, u32)> = db_data
+        .with_raw(|conn, _| {
+            let mut stmt = conn.prepare(
+                "SELECT t.txid, tro.output_index, t.mined_height
+             FROM transparent_received_outputs tro
+             JOIN transactions t ON t.id_tx = tro.transaction_id
+             JOIN addresses a ON a.id = tro.address_id
+             WHERE a.cached_transparent_receiver_address = :address
+             AND t.mined_height IS NOT NULL
+             AND tro.id NOT IN (
+                 SELECT transparent_received_output_id
+                 FROM transparent_received_output_spends
+             )",
+            )?;
+            let rows = stmt.query_map(rusqlite::named_params! {":address": addr_str}, |row| {
+                Ok((
+                    row.get::<_, [u8; 32]>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| SyncError::from(SqliteClientError::from(e)))?;
+    // Mined outputs the chain's unspent set no longer contains: spent on chain, spend not yet
+    // recorded by the wallet.
+    let oldest_missing = tracked_unspent
+        .iter()
+        .filter(|(txid, n, _)| !chain_unspent.contains(&(TxId::from_bytes(*txid), *n)))
+        .map(|(_, _, mined_height)| BlockHeight::from_u32(*mined_height))
+        .min();
 
-    if any_spent {
+    if let Some(oldest_missing) = oldest_missing {
+        // The fetch MUST NOT be limited to the request's own block range. Requests are
+        // generated one per tracked output, each windowed from that output's own
+        // observed-unspent watermark, but completing ANY request raises the watermark of
+        // EVERY unspent output at the address (`update_observed_unspent_heights`). Fetching
+        // only the serviced request's window therefore lets a newer receipt's near-tip
+        // request mark an older output's never-fetched spend range as checked, after which
+        // no future window can ever cover that spend. Widen the fetch to start at the oldest
+        // missing output's funding height so every spend a same-address watermark bump could
+        // skip is already recorded before the notification runs; wallets poisoned by the old
+        // behaviour self-heal on their first pass.
+        let fetch_range = std::cmp::min(oldest_missing, range.start)..(view_tip + 1);
         let txids = chain_view
-            .get_address_tx_ids(&address, range)
+            .get_address_tx_ids(&address, fetch_range)
             .await
             .map_err(SyncError::Chain)?;
+        let total = txids.len();
+        if total > 0 {
+            info!(
+                address = %address.encode(params),
+                total,
+                "recording address spend history"
+            );
+        }
+
+        // Fetch with bounded concurrency and store in batched database transactions. The
+        // one-fetch-one-store loop paid a full write-lock acquisition and wallet-db
+        // transaction per transaction (observed in production at roughly one transaction per
+        // second), which turned a busy exchange address's history walk into days; batching
+        // brings it to minutes. `store_decrypted_txs` performs the same per-transaction work
+        // as `decrypt_and_store_transaction` (decrypt + store), including order-independent
+        // transparent spend recording via the spend map, inside one enclosing transaction
+        // per chunk.
+        #[cfg(feature = "zcashd-import")]
+        {
+            let ufvks = db_data.get_unified_full_viewing_keys()?;
+            const CHUNK: usize = 1_000;
+            let mut done = 0usize;
+            for txid_chunk in txids.chunks(CHUNK) {
+                let fetched: Vec<_> = futures::stream::iter(txid_chunk.iter().copied())
+                    .map(|txid| chain_view.get_transaction(txid))
+                    .buffered(8)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(SyncError::Chain)?;
+                let txs: Vec<_> = fetched.into_iter().flatten().collect();
+                let decrypted = txs
+                    .iter()
+                    .map(|tx| {
+                        decrypt_transaction(
+                            params,
+                            tx.mined_height(),
+                            Some(view_tip),
+                            tx.inner(),
+                            &ufvks,
+                        )
+                    })
+                    .collect();
+                let stored = txs.len();
+                db_data.store_decrypted_txs(decrypted)?;
+                done += stored;
+                if total > CHUNK {
+                    info!(
+                        stored = done,
+                        candidates = total,
+                        "address spend history progress"
+                    );
+                }
+            }
+        }
+        // Builds without the batch-store API keep the correct-but-slow path.
+        #[cfg(not(feature = "zcashd-import"))]
         for txid in txids {
             if let Some(tx) = chain_view
                 .get_transaction(txid)
@@ -1306,6 +1434,15 @@ async fn data_requests<C: Chain>(
         info!("{} transaction data requests to service", requests.len());
         for request in requests {
             match request {
+                // A failure to service one request must not kill this task (task exit shuts
+                // down the whole wallet). Upstream already contains the chain-fetch half of
+                // that; the store half needs the same treatment. Storing a transaction
+                // re-parses related stored transactions, and a row whose mined height is not
+                // yet recorded (and which carries no expiry) fails that re-parse with
+                // `CorruptedData("Consensus branch ID not known, ...")`. Skipping lets the
+                // loop reach the `GetStatus` request for the stale row, which records its
+                // mined height and heals the failure for the next pass; propagating instead
+                // made this a deterministic crash loop on every start.
                 TransactionDataRequest::GetStatus(txid) => {
                     if txid.is_null() {
                         continue;
@@ -1313,7 +1450,11 @@ async fn data_requests<C: Chain>(
 
                     info!("Getting status of {txid}");
                     match chain_view.get_transaction_status(txid).await {
-                        Ok(status) => db_data.set_transaction_status(txid, status)?,
+                        Ok(status) => {
+                            if let Err(e) = db_data.set_transaction_status(txid, status) {
+                                warn!("Failed to store status of {txid}; skipping: {e}");
+                            }
+                        }
                         // Invalid data from the chain source indicates a bug, corruption,
                         // or a version mismatch; retrying cannot help.
                         Err(e @ ChainError::InvalidData(_)) => return Err(SyncError::Chain(e)),
@@ -1331,18 +1472,21 @@ async fn data_requests<C: Chain>(
                             // TODO: Route individual-transaction scanning through the batch
                             // decryptor (`Handle::queue_tx`) once a single-tx store path
                             // exists. See zcash/zallet#477.
-                            decrypt_and_store_transaction(
+                            if let Err(e) = decrypt_and_store_transaction(
                                 params,
                                 db_data,
                                 tx.inner(),
                                 tx.mined_height(),
-                            )?;
+                            ) {
+                                warn!("Failed to store enhancement of {txid}; skipping: {e}");
+                            }
                         }
                         Ok(None) => {
-                            db_data.set_transaction_status(
-                                txid,
-                                TransactionStatus::TxidNotRecognized,
-                            )?;
+                            if let Err(e) = db_data
+                                .set_transaction_status(txid, TransactionStatus::TxidNotRecognized)
+                            {
+                                warn!("Failed to store status of {txid}; skipping: {e}");
+                            }
                         }
                         // Invalid data from the chain source indicates a bug, corruption,
                         // or a version mismatch; retrying cannot help.
