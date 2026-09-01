@@ -1,5 +1,10 @@
 # `zcashd` Release Support
 
+> **Note:** `zcashd` is [deprecated](end-of-life.md) and does not support NU6.3. Its
+> 6.20.0 **End-of-Support halt** — block height 3417100, reached 2026-07-18 — has now shut
+> down every `zcashd` 6.20.0 node, ahead of NU6.3 mainnet activation (estimated 2026-07-28).
+> See the [End of Life](end-of-life.md) page for the full timeline and migration guidance.
+
 ## Release cadence and support window
 
 `zcashd` releases happen approximately every six weeks, although this may change if a

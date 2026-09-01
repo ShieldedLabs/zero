@@ -1,1 +1,0 @@
-mod truncate_wallet;

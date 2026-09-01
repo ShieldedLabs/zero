@@ -12,26 +12,27 @@ still pull upstream updates or split changes back out when useful.
 | `zebra/`  | https://github.com/ZcashFoundation/zebra.git  | `main`   | `up-zebra`  |
 | `zaino/`  | https://github.com/zingolabs/zaino.git        | `dev`    | `up-zaino`  |
 | `zallet/` | https://github.com/zcash/wallet.git           | `main`   | `up-zallet` |
-| `orchard/`| https://github.com/zcash/orchard.git          | `feat/ironwood` | `up-orchard` |
+| `orchard/`| https://github.com/zcash/orchard.git          | `main`   | `up-orchard` |
 | `librustzcash/` | https://github.com/zcash/librustzcash.git | `main` | `up-librustzcash` |
 | `lightwalletd/` | https://github.com/zcash/lightwalletd.git | `master` | `up-lightwalletd` |
 
 Notes:
 - **zaino** tracks `dev` (its active default), not `stable`.
 - **zallet** is the `zallet` crate, which lives in the `zcash/wallet` repo.
-- **orchard** tracks the `feat/ironwood` feature branch (not a release tag),
-  because the Ironwood work we need only lives there. Pull it deliberately, not
-  routinely; switch to a tag once upstream cuts an Ironwood release.
+- **orchard** tracks `main` and is pinned to a release tag. The `feat/ironwood`
+  branch it used to track was merged into `main` and shipped as the 0.15.x line,
+  so orchard is now an ordinary tagged dependency with no special handling.
 - **zcashd** is a supported fork on a transition path with a hardcoded end-of-life
   date; it is not intended for long-term reliance.
 - **librustzcash** is the shared Rust crate workspace (`zcash_primitives`,
   `zcash_client_backend`, `zcash_keys`, `zip32`, and friends) that the Z3 stack
-  (zaino, zallet) builds on. Tracks `main`; pin to a release tag once one covers
-  what we need.
+  (zaino, zallet) builds on. Tracks `main`, pinned to a release cohort: it
+  publishes per-crate tags cut together, so pull the anchor tag
+  (`zcash_client_sqlite-<version>`) rather than the branch tip. Currently the
+  2026-08-19 cohort, which is what zallet builds against.
 - **lightwalletd** is the original Go light client server (Zaino serves the same
   protocol in the Z3 stack). Vendored as the platform for private-lookup (PIR)
-  experimentation. Upstream cuts release tags, but `master` was 167 commits ahead
-  of the newest tag (v0.4.9) at import; pin to a tag once one covers what we need.
+  experimentation. Tracks `master`, pinned to a release tag (currently `v0.5.4`).
 
 ## Why subtrees (not submodules)
 

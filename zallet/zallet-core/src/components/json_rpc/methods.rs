@@ -1,0 +1,1530 @@
+// The `#[rpc(server)]` proc macro from jsonrpsee emits `#[must_use]` on the
+// generated trait server methods, which already return `#[must_use]` types
+// (`RpcResult`). Clippy's `double_must_use` lint fires on this upstream macro
+// expansion; allow it module-wide until jsonrpsee ships a fix.
+#![allow(clippy::double_must_use)]
+
+use async_trait::async_trait;
+use jsonrpsee::{
+    core::{JsonValue, RpcResult},
+    proc_macros::rpc,
+};
+#[cfg(zallet_build = "wallet")]
+use zcash_protocol::consensus::Parameters;
+
+use crate::components::{
+    chain::Chain,
+    database::{Database, DbHandle},
+    sync::SyncStatusReader,
+};
+
+#[cfg(zallet_build = "wallet")]
+use {
+    super::asyncop::{OperationId, OperationQueue},
+    crate::components::{
+        json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
+    },
+};
+
+/// The JSON-RPC methods that are only available when Zallet is running on the regtest
+/// network.
+///
+/// These methods return a "method not found" error on other networks, and `help` hides
+/// them there. Every method gated on `NetworkType::Regtest` in its `call` implementation
+/// must be listed here.
+#[cfg(zallet_build = "wallet")]
+const REGTEST_ONLY_METHODS: &[&str] = &["stop"];
+
+mod convert_tex;
+mod decode_raw_transaction;
+mod decode_script;
+#[cfg(zallet_build = "wallet")]
+mod export_key;
+mod get_account;
+mod get_address_for_account;
+#[cfg(zallet_build = "wallet")]
+mod get_balances;
+#[cfg(zallet_build = "wallet")]
+mod get_new_account;
+#[cfg(zallet_build = "wallet")]
+mod get_notes_count;
+#[cfg(zallet_build = "wallet")]
+mod get_operation;
+mod get_raw_transaction;
+#[cfg(zallet_build = "wallet")]
+mod get_wallet_info;
+mod get_wallet_status;
+#[cfg(zallet_build = "wallet")]
+pub(crate) mod help;
+#[cfg(zallet_build = "wallet")]
+mod import_key;
+#[cfg(zallet_build = "wallet")]
+mod import_viewing_key;
+mod list_accounts;
+mod list_addresses;
+#[cfg(zallet_build = "wallet")]
+mod list_operation_ids;
+mod list_transactions;
+mod list_unified_receivers;
+#[cfg(zallet_build = "wallet")]
+mod list_unspent;
+#[cfg(zallet_build = "wallet")]
+mod lock_wallet;
+#[cfg(zallet_build = "wallet")]
+mod openrpc;
+// PCZT methods. The stateless roles (combine, inspect, prove) and their shared
+// helpers are available in every build; create, sign, and extract (which
+// records the extracted transaction) require wallet state.
+mod pczt_combine;
+mod pczt_common;
+#[cfg(zallet_build = "wallet")]
+mod pczt_create;
+mod pczt_error;
+#[cfg(zallet_build = "wallet")]
+mod pczt_extract;
+mod pczt_inspect;
+mod pczt_prove;
+#[cfg(zallet_build = "wallet")]
+mod pczt_sign;
+#[cfg(zallet_build = "wallet")]
+mod recover_accounts;
+#[cfg(zallet_build = "wallet")]
+mod sign_message;
+mod stop;
+#[cfg(zallet_build = "wallet")]
+mod unlock_wallet;
+mod validate_address;
+mod verify_message;
+mod view_transaction;
+#[cfg(zallet_build = "wallet")]
+mod z_export_viewing_key;
+#[cfg(zallet_build = "wallet")]
+mod z_get_balance_for_account;
+#[cfg(zallet_build = "wallet")]
+mod z_get_total_balance;
+#[cfg(zallet_build = "wallet")]
+pub(crate) mod z_import_address;
+#[cfg(zallet_build = "wallet")]
+mod z_send_from_account;
+#[cfg(zallet_build = "wallet")]
+mod z_send_many;
+#[cfg(zallet_build = "wallet")]
+mod z_shieldcoinbase;
+
+pub(crate) use pczt_common::spawn_proving_cache_warmer;
+
+/// The general JSON-RPC interface, containing the methods provided in all Zallet builds.
+#[rpc(server)]
+pub(crate) trait Rpc {
+    /// Returns wallet status information.
+    #[method(name = "getwalletstatus")]
+    async fn get_wallet_status(&self) -> get_wallet_status::Response;
+
+    /// Returns the list of accounts created with `z_getnewaccount` or `z_recoveraccounts`.
+    ///
+    /// # Arguments
+    /// - `include_addresses` (bool, optional, default=true) Also include the addresses
+    ///   known to the wallet for this account.
+    #[method(name = "z_listaccounts")]
+    async fn list_accounts(&self, include_addresses: Option<bool>) -> list_accounts::Response;
+
+    /// Returns details about the given account.
+    ///
+    /// # Arguments
+    /// - `account_uuid` (string, required): The UUID of the wallet account.
+    #[method(name = "z_getaccount")]
+    async fn get_accounts(&self, account_uuid: String) -> get_account::Response;
+
+    /// For the given account, derives a Unified Address in accordance with the remaining
+    /// arguments:
+    ///
+    /// - If no list of receiver types is given (or the empty list `[]`), the best and
+    ///   second-best shielded receiver types, along with the "p2pkh" (i.e. transparent)
+    ///   receiver type, will be used.
+    /// - If no diversifier index is given, then:
+    ///   - If a transparent receiver would be included (either because no list of
+    ///     receiver types is given, or the provided list includes "p2pkh"), the next
+    ///     unused index (that is valid for the list of receiver types) will be selected.
+    ///   - If only shielded receivers would be included (because a list of receiver types
+    ///     is given that does not include "p2pkh"), a time-based index will be selected.
+    ///
+    /// The account parameter must be a UUID or account number that was previously
+    /// generated by a call to the `z_getnewaccount` RPC method. The legacy account number
+    /// is only supported for wallets containing a single seed phrase.
+    ///
+    /// Once a Unified Address has been derived at a specific diversifier index,
+    /// re-deriving it (via a subsequent call to `z_getaddressforaccount` with the same
+    /// account and index) will produce the same address with the same list of receiver
+    /// types. An error will be returned if a different list of receiver types is
+    /// requested, including when the empty list `[]` is provided (if the default receiver
+    /// types don't match).
+    #[method(name = "z_getaddressforaccount")]
+    async fn get_address_for_account(
+        &self,
+        account: JsonValue,
+        receiver_types: Option<Vec<String>>,
+        diversifier_index: Option<u128>,
+    ) -> get_address_for_account::Response;
+
+    /// Lists the addresses managed by this wallet by source.
+    ///
+    /// Sources include:
+    /// - Addresses generated from randomness by a legacy `zcashd` wallet.
+    /// - Sapling addresses generated from the legacy `zcashd` HD seed.
+    /// - Imported watchonly transparent addresses.
+    /// - Shielded addresses tracked using imported viewing keys.
+    /// - Addresses derived from mnemonic seed phrases.
+    ///
+    /// In the case that a source does not have addresses for a value pool, the key
+    /// associated with that pool will be absent.
+    ///
+    /// REMINDER: It is recommended that you back up your wallet files regularly. If you
+    /// have not imported externally-produced keys, it only necessary to have backed up
+    /// the wallet's key storage file.
+    #[method(name = "listaddresses")]
+    async fn list_addresses(&self) -> list_addresses::Response;
+
+    /// Returns a record of the individual receivers contained within the provided UA,
+    /// keyed by receiver type. The UA may not have receivers for some receiver types,
+    /// in which case those keys will be absent.
+    ///
+    /// Transactions that send funds to any of the receivers returned by this RPC
+    /// method will be detected by the wallet as having been sent to the unified
+    /// address.
+    ///
+    /// # Arguments
+    /// - `unified_address` (string, required) The unified address to inspect.
+    #[method(name = "z_listunifiedreceivers")]
+    async fn list_unified_receivers(
+        &self,
+        unified_address: &str,
+    ) -> list_unified_receivers::Response;
+
+    /// Returns a list of the wallet's transactions, optionally filtered by account and block
+    /// range.
+    ///
+    /// # Arguments
+    /// - `account_uuid`: The UUID of the wallet account. If omitted, return transactions for all
+    ///   accounts in the wallet.
+    /// - `start_height`: The inclusive lower bound of block heights for which transactions mined
+    ///   in those blocks should be returned. If omitted, the start height will default to the
+    ///   account birthday height if an account UUID is specified, or the minimum birthday
+    ///   height among accounts in the wallet if no account is specified.
+    /// - `end_height`: The exclusive upper bound of block heights for which transactions mined
+    ///   in those blocks should be returned. If omitted, return all transactions mined or created
+    ///   above the start height.
+    /// - `offset`: An optional number of transactions to skip over before a page of results is
+    ///   returned. Defaults to zero.
+    /// - `limit`: An optional upper bound on the number of results that should be returned in a
+    ///   page.
+    ///
+    /// WARNING: This is currently an experimental feature; arguments and result data may change at
+    /// any time.
+    #[method(name = "z_listtransactions")]
+    async fn list_transactions(
+        &self,
+        account_uuid: Option<String>,
+        start_height: Option<u32>,
+        end_height: Option<u32>,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> list_transactions::Response;
+
+    /// Returns the raw transaction data for the given transaction ID.
+    ///
+    /// NOTE: If `blockhash` is provided, only that block will be searched, and if the
+    /// transaction is in the mempool or other blocks, or if the node backing this wallet
+    /// does not have the given block available, the transaction will not be found.
+    ///
+    /// # Arguments
+    /// - `txid` (string, required) The transaction ID.
+    /// - `verbose` (numeric, optional, default=0) If 0, return a string of hex-encoded
+    ///   data. If non-zero, return a JSON object with information about `txid`.
+    /// - `blockhash` (string, optional) The block in which to look for the transaction.
+    #[method(name = "getrawtransaction")]
+    async fn get_raw_transaction(
+        &self,
+        txid: &str,
+        // TODO: Bitcoin now also allows this to be named `verbosity`.
+        verbose: Option<u64>,
+        blockhash: Option<String>,
+    ) -> get_raw_transaction::Response;
+
+    /// Return a JSON object representing the serialized, hex-encoded transaction.
+    ///
+    /// # Arguments
+    /// - `hexstring` (string, required) The transaction hex string.
+    #[method(name = "decoderawtransaction")]
+    async fn decode_raw_transaction(&self, hexstring: &str) -> decode_raw_transaction::Response;
+
+    /// Returns detailed information about in-wallet transaction `txid`.
+    ///
+    /// This method returns information about spends and outputs within the transaction
+    /// that are visible to the wallet. Importantly, this does not include information
+    /// about spent notes that are not controlled by spending or viewing keys in the
+    /// wallet, and so callers MUST NOT use the `spends` or `outputs` fields to compute
+    /// balances or fees themselves. Use the provided `accounts` and `fee` fields instead.
+    #[method(name = "z_viewtransaction")]
+    async fn view_transaction(&self, txid: &str) -> view_transaction::Response;
+
+    /// Stop the running zallet process.
+    ///
+    /// # Notes
+    ///
+    /// - Works for non windows targets only.
+    /// - Works only if the network of the running zallet process is `Regtest`.
+    #[method(name = "stop")]
+    async fn stop(&self) -> stop::Response;
+
+    /// Validate a transparent Zcash address, returning information about it.
+    ///
+    /// # Arguments
+    /// - `address` (string, required): The transparent address to validate.
+    #[method(name = "validateaddress")]
+    async fn validate_address(&self, address: &str) -> validate_address::Response;
+
+    /// Verify a signed message.
+    ///
+    /// # Arguments
+    /// - `zcashaddress` (string, required): The Zcash transparent address used to sign the message.
+    /// - `signature` (string, required): The signature provided by the signer in base64 encoding.
+    /// - `message` (string, required): The message that was signed.
+    #[method(name = "verifymessage")]
+    async fn verify_message(
+        &self,
+        zcashaddress: &str,
+        signature: &str,
+        message: &str,
+    ) -> verify_message::Response;
+
+    /// Converts a transparent P2PKH Zcash address to a TEX address.
+    ///
+    /// TEX addresses (defined in ZIP 320) are transparent-source-only addresses.
+    ///
+    /// The input address must be valid for the network this node is running on.
+    ///
+    /// # Arguments
+    /// - `transparent_address` (string, required): The transparent P2PKH address to convert.
+    #[method(name = "z_converttex")]
+    async fn convert_tex(&self, transparent_address: &str) -> convert_tex::Response;
+
+    /// Decodes a hex-encoded script.
+    ///
+    /// # Arguments
+    /// - `hexstring` (string, required): The hex-encoded script.
+    #[method(name = "decodescript")]
+    async fn decode_script(&self, hexstring: &str) -> decode_script::Response;
+
+    /// Combines multiple PCZTs (for the same transaction) into one.
+    ///
+    /// This applies the Combiner role, merging the per-party contributions
+    /// (proofs and signatures produced in parallel) into a single PCZT.
+    ///
+    /// # Arguments
+    /// - `pczts` (array, required) The base64-encoded PCZTs to combine.
+    #[method(name = "pczt_combine")]
+    async fn pczt_combine(&self, pczts: Vec<String>) -> pczt_combine::Response;
+
+    /// Adds the zero-knowledge proofs required by a PCZT.
+    ///
+    /// Creates the Sapling, Orchard, and/or Ironwood proofs for the PCZT's
+    /// shielded components. This must be done before the transaction can be
+    /// extracted.
+    ///
+    /// The first call for each circuit version generates and caches the proving
+    /// key, which can take tens of seconds and may exceed the RPC timeout; the
+    /// work completes in the background and a retry reuses the cached key. When
+    /// the RPC server starts, the keys for the current consensus branch are
+    /// warmed in the background, so in steady state this cost is paid before
+    /// the first call arrives.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to add proofs to.
+    #[method(name = "pczt_prove")]
+    async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response;
+
+    /// Decodes a PCZT and describes what it commits to.
+    ///
+    /// Reports the transaction's transparent inputs and outputs, its shielded
+    /// bundles (with the recipient and value data its creator recorded), the
+    /// implied fee, the privacy policy recorded by `pczt_create`, and the
+    /// proof/signature status of each bundle. Use this to review a PCZT before
+    /// signing it — particularly one that has passed through other parties.
+    ///
+    /// Everything reported is read from the PCZT as recorded by its creator;
+    /// nothing is cryptographically verified until `pczt_extract`. Shielded
+    /// output details are creator-side metadata and may have been redacted.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to inspect.
+    #[method(name = "pczt_inspect")]
+    async fn pczt_inspect(&self, pczt: &str) -> pczt_inspect::Response;
+}
+
+/// The wallet-specific JSON-RPC interface, containing the methods only provided in the
+/// wallet build of Zallet.
+#[cfg(zallet_build = "wallet")]
+#[rpc(server)]
+pub(crate) trait WalletRpc {
+    /// List all commands, or get help for a specified command.
+    ///
+    /// Commands that are not available on the network this node is running on (such as
+    /// regtest-only commands) are omitted.
+    ///
+    /// # Arguments
+    /// - `command` (string, optional) The command to get help on.
+    // TODO: Improve the build script so this works with non-wallet Zallet builds.
+    #[method(name = "help")]
+    async fn help(&self, command: Option<&str>) -> help::Response;
+
+    /// Returns an OpenRPC schema as a description of this service.
+    // TODO: Improve the build script so this works with non-wallet Zallet builds.
+    #[method(name = "rpc.discover")]
+    fn openrpc(&self) -> openrpc::Response;
+
+    /// Returns the list of operation ids currently known to the wallet.
+    ///
+    /// # Arguments
+    /// - `status` (string, optional) Filter result by the operation's state e.g. "success".
+    #[method(name = "z_listoperationids")]
+    async fn list_operation_ids(&self, status: Option<&str>) -> list_operation_ids::Response;
+
+    /// Get operation status and any associated result or error data.
+    ///
+    /// The operation will remain in memory.
+    ///
+    /// - If the operation has failed, it will include an error object.
+    /// - If the operation has succeeded, it will include the result value.
+    /// - If the operation was cancelled, there will be no error object or result value.
+    ///
+    /// # Arguments
+    /// - `operationid` (array, optional) A list of operation ids we are interested in.
+    ///   If not provided, examine all operations known to the node.
+    #[method(name = "z_getoperationstatus")]
+    async fn get_operation_status(&self, operationid: Vec<OperationId>) -> get_operation::Response;
+
+    /// Retrieve the result and status of an operation which has finished, and then remove
+    /// the operation from memory.
+    ///
+    /// - If the operation has failed, it will include an error object.
+    /// - If the operation has succeeded, it will include the result value.
+    /// - If the operation was cancelled, there will be no error object or result value.
+    ///
+    /// # Arguments
+    /// - `operationid` (array, optional) A list of operation ids we are interested in.
+    ///   If not provided, retrieve all finished operations known to the node.
+    #[method(name = "z_getoperationresult")]
+    async fn get_operation_result(&self, operationid: Vec<OperationId>) -> get_operation::Response;
+
+    /// Returns wallet state information.
+    #[method(name = "getwalletinfo")]
+    async fn get_wallet_info(&self) -> get_wallet_info::Response;
+
+    /// Stores the wallet decryption key in memory for `timeout` seconds.
+    ///
+    /// If the wallet is locked, this API must be invoked prior to performing operations
+    /// that require the availability of private keys, such as sending funds.
+    ///
+    /// Issuing the `walletpassphrase` command while the wallet is already unlocked will
+    /// set a new unlock time that overrides the old one.
+    #[method(name = "walletpassphrase")]
+    async fn unlock_wallet(
+        &self,
+        passphrase: age::secrecy::SecretString,
+        timeout: u64,
+    ) -> unlock_wallet::Response;
+
+    /// Removes the wallet encryption key from memory, locking the wallet.
+    ///
+    /// After calling this method, you will need to call `walletpassphrase` again before
+    /// being able to call any methods which require the wallet to be unlocked.
+    #[method(name = "walletlock")]
+    async fn lock_wallet(&self) -> lock_wallet::Response;
+
+    /// Prepares and returns a new account.
+    ///
+    /// If the wallet contains more than one UA-compatible HD seed phrase, the `seedfp`
+    /// argument must be provided. Available seed fingerprints can be found in the output
+    /// of the `listaddresses` RPC method.
+    ///
+    /// Within a UA-compatible HD seed phrase, accounts are numbered starting from zero;
+    /// this RPC method selects the next available sequential account number.
+    ///
+    /// Each new account is a separate group of funds within the wallet, and adds an
+    /// additional performance cost to wallet scanning.
+    ///
+    /// Use the `z_getaddressforaccount` RPC method to obtain addresses for an account.
+    #[method(name = "z_getnewaccount")]
+    async fn get_new_account(
+        &self,
+        account_name: &str,
+        seedfp: Option<&str>,
+    ) -> get_new_account::Response;
+
+    /// Tells the wallet to track specific accounts.
+    ///
+    /// Returns the UUIDs within this Zallet instance of the newly-tracked accounts.
+    /// Accounts that are already tracked by the wallet are ignored.
+    ///
+    /// After calling this method, a subsequent call to `z_getnewaccount` will add the
+    /// first account with index greater than all indices provided here for the
+    /// corresponding `seedfp` (as well as any already tracked by the wallet).
+    ///
+    /// Each tracked account is a separate group of funds within the wallet, and adds an
+    /// additional performance cost to wallet scanning.
+    ///
+    /// Use the `z_getaddressforaccount` RPC method to obtain addresses for an account.
+    ///
+    /// # Arguments
+    ///
+    /// - `accounts` (array, required) An array of JSON objects representing the accounts
+    ///   to recover, with the following fields:
+    ///   - `name` (string, required)
+    ///   - `seedfp` (string, required) The seed fingerprint for the mnemonic phrase from
+    ///     which the account is derived. Available seed fingerprints can be found in the
+    ///     output of the `listaddresses` RPC method.
+    ///   - `zip32_account_index` (numeric, required)
+    ///   - `birthday_height` (numeric, required)
+    #[method(name = "z_recoveraccounts")]
+    async fn recover_accounts(
+        &self,
+        accounts: Vec<recover_accounts::AccountParameter<'_>>,
+    ) -> recover_accounts::Response;
+
+    /// Returns the balances available for each independent spending authority held by the
+    /// wallet, and optionally the balances and received amounts associated with imported
+    /// watch-only addresses and viewing keys.
+    ///
+    /// This includes funds held by each HD-derived Unified Account in the wallet,
+    /// spending keys imported with `z_importkey`, and (if enabled) the legacy transparent
+    /// pool of funds.
+    ///
+    /// # Arguments
+    ///
+    /// - `minconf` (numeric, optional, default=1) Only include unspent outputs in
+    ///   transactions confirmed at least this many times.
+    #[method(name = "z_getbalances")]
+    async fn get_balances(&self, minconf: Option<u32>) -> get_balances::Response;
+
+    /// Returns the account's spendable balance for each value pool ("transparent",
+    /// "sapling", and "orchard").
+    ///
+    /// Pools for which the balance is zero are not shown.
+    ///
+    /// # Arguments
+    ///
+    /// - `account` (string or numeric, required) Either the UUID or the ZIP 32 account
+    ///   index of the account, as returned by `z_getnewaccount`.
+    /// - `minconf` (numeric, optional, default=1) Only include outputs in transactions
+    ///   confirmed at least this many times.
+    #[method(name = "z_getbalanceforaccount")]
+    async fn z_get_balance_for_account(
+        &self,
+        account: JsonValue,
+        minconf: Option<u32>,
+    ) -> z_get_balance_for_account::Response;
+
+    /// Imports a transparent address into the wallet for a given account.
+    ///
+    /// The hex data can be either:
+    /// - A compressed or uncompressed public key (imports as P2PKH).
+    /// - A redeem script (imports as P2SH).
+    ///
+    /// Returns the type of address imported and the corresponding transparent address.
+    ///
+    /// # Arguments
+    /// - `account` (string, required) The account UUID.
+    /// - `hex_data` (string, required) Hex-encoded public key or redeem script.
+    /// - `rescan` (boolean, optional, default=true) If true, rescan the chain for UTXOs
+    ///   belonging to all wallet transparent addresses after importing.
+    #[method(name = "z_importaddress")]
+    async fn import_address(
+        &self,
+        account: &str,
+        hex_data: &str,
+        rescan: Option<bool>,
+    ) -> z_import_address::Response;
+
+    /// Imports a Sapling viewing key into the wallet.
+    ///
+    /// Only Sapling extended full viewing keys are supported. The wallet will track
+    /// incoming and outgoing transactions for addresses derived from this key, but
+    /// will not have spending authority.
+    ///
+    /// # Arguments
+    ///
+    /// - `vkey` (string, required) The viewing key (see `z_exportviewingkey`).
+    /// - `rescan` (string, optional, default="whenkeyisnew") Whether to rescan the
+    ///   blockchain for transactions ("yes", "no", or "whenkeyisnew"). When rescan is
+    ///   enabled, the wallet's background sync engine will scan for historical
+    ///   transactions from the given start height.
+    /// - `startHeight` (numeric, optional, default=0) Block height from which to begin
+    ///   the rescan. Only used when rescan is "yes" or "whenkeyisnew" (for a new key).
+    #[method(name = "z_importviewingkey")]
+    async fn import_viewing_key(
+        &self,
+        vkey: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_viewing_key::Response;
+
+    /// Returns the total value of funds stored in the node's wallet.
+    ///
+    /// TODO: Currently watchonly addresses cannot be omitted; `include_watchonly` must be
+    /// set to true.
+    ///
+    /// # Arguments
+    ///
+    /// - `minconf` (numeric, optional, default=1) Only include private and transparent
+    ///   transactions confirmed at least this many times.
+    /// - `include_watchonly` (bool, optional, default=false) Also include balance in
+    ///   watchonly addresses (see 'importaddress' and 'z_importviewingkey').
+    #[method(name = "z_gettotalbalance")]
+    async fn z_get_total_balance(
+        &self,
+        minconf: Option<u32>,
+        include_watchonly: Option<bool>,
+    ) -> z_get_total_balance::Response;
+
+    /// Returns an array of unspent shielded notes with between minconf and maxconf
+    /// (inclusive) confirmations.
+    ///
+    /// Results may be optionally filtered to only include notes sent to specified
+    /// addresses. When `minconf` is 0, unspent notes with zero confirmations are
+    /// returned, even though they are not immediately spendable.
+    ///
+    /// # Arguments
+    /// - `minconf`: Select outputs with at least this many confirmations (default = 1). Must be at
+    ///   least 1 when `as_of_height` is provided.
+    /// - `maxconf`: Select outputs with at most this many confirmations (default = unlimited).
+    /// - `include_watchonly`: Include notes/utxos for which the wallet does not provide spending
+    ///   capability (default = false).
+    /// - `addresses`: A list of addresses for which to retrieve UTXOs. For shielded addresses that
+    ///   correspond to a unified account, unspent notes belonging to that account are returned
+    ///   irrespective of whether the provided address's diversifier corresponds to the diversifier
+    ///   of the address that received the funds. If this parameter is omitted or empty, all notes
+    ///   are returned, irrespective of account. (default = None)
+    /// - `as_of_height`: Execute the query as if it were run when the blockchain was at the height
+    ///   specified by this argument. The default is to use the entire blockchain that the node is
+    ///   aware of. -1 can be used as in other RPC calls to indicate the current height (including
+    ///   the mempool), but this does not support negative values in general. A “future” height will
+    ///   fall back to the current height.
+    #[method(name = "z_listunspent")]
+    async fn list_unspent(
+        &self,
+        minconf: Option<u32>,
+        maxconf: Option<u32>,
+        include_watchonly: Option<bool>,
+        addresses: Option<Vec<String>>,
+        as_of_height: Option<i64>,
+    ) -> list_unspent::Response;
+
+    /// Returns the number of notes available in the wallet for each shielded value pool.
+    ///
+    /// # Arguments
+    /// - `minconf`: Only include notes in transactions confirmed at least this many times
+    ///   (default = 1). Must be at least 1 when `as_of_height` is provided.
+    /// - `as_of_height`: Execute the query as if it were run when the blockchain was at the height
+    ///   specified by this argument. The default is to use the entire blockchain that the node is
+    ///   aware of. -1 can be used as in other RPC calls to indicate the current height (including
+    ///   the mempool), but this does not support negative values in general. A “future” height will
+    ///   fall back to the current height.
+    #[method(name = "z_getnotescount")]
+    async fn get_notes_count(
+        &self,
+        minconf: Option<u32>,
+        as_of_height: Option<i64>,
+    ) -> get_notes_count::Response;
+
+    /// Exports the spending key for a Sapling payment address.
+    ///
+    /// The wallet must be unlocked to use this method.
+    ///
+    /// # Warning
+    ///
+    /// This exports **only** the Sapling spending key. It is **not** a complete backup of
+    /// the funds reachable from this account's root of spending authority: in particular,
+    /// any Orchard funds derived from the same seed are **not** represented by the exported
+    /// key. Do not rely on `z_exportkey` as a wallet backup — use a full seed/wallet backup
+    /// instead, or you may lose access to funds.
+    ///
+    /// # Arguments
+    ///
+    /// - `address` (string, required) The Sapling payment address corresponding to the
+    ///   spending key to export.
+    #[method(name = "z_exportkey")]
+    async fn export_key(&self, address: &str) -> export_key::Response;
+
+    /// Imports a spending key into the wallet.
+    ///
+    /// Only Sapling extended spending keys are supported.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` (string, required) The spending key to import.
+    /// - `rescan` (string, optional, default="whenkeyisnew") Whether to rescan the
+    ///   blockchain for transactions ("yes", "no", or "whenkeyisnew"). When rescan is
+    ///   enabled, the wallet's background sync engine will scan for historical
+    ///   transactions from the given start height.
+    /// - `startHeight` (numeric, optional, default=0) Block height from which to begin
+    ///   the rescan. Only used when rescan is "yes" or "whenkeyisnew" (for a new key).
+    #[method(name = "z_importkey")]
+    async fn import_key(
+        &self,
+        key: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_key::Response;
+
+    /// Send a transaction with multiple recipients.
+    ///
+    /// This is an async operation; it returns an operation ID string that you can pass to
+    /// `z_getoperationstatus` or `z_getoperationresult`.
+    ///
+    /// Amounts are decimal numbers with at most 8 digits of precision.
+    ///
+    /// Change generated from one or more transparent addresses flows to a new transparent
+    /// address, while change generated from a legacy Sapling address returns to itself.
+    /// TODO: <https://github.com/zcash/zallet/issues/138>
+    ///
+    /// When sending from a unified address, change is returned to the internal-only
+    /// address for the associated unified account.
+    ///
+    /// When spending coinbase UTXOs, only shielded recipients are permitted and change is
+    /// not allowed; the entire value of the coinbase UTXO(s) must be consumed.
+    /// TODO: <https://github.com/zcash/zallet/issues/137>
+    ///
+    /// # Arguments
+    ///
+    /// - `fromaddress` (string, required) The transparent or shielded address to send the
+    ///   funds from. The following special strings are also accepted:
+    ///   - `"ANY_TADDR"`: Select non-coinbase UTXOs from any transparent address in the
+    ///     legacy `zcashd` pool of funds. This requires
+    ///     `features.legacy_pool_seed_fingerprint` to be set in the Zallet config file to
+    ///     the seed fingerprint of the `zcashd` wallet that was migrated into this wallet;
+    ///     without it there is no legacy pool to spend from and the call is rejected.
+    ///     Covering the payment from more than one of the pool's addresses links them
+    ///     on-chain, so such a call requires a privacy policy of
+    ///     `AllowLinkingAccountAddresses` (or of `NoPrivacy`, if it also has a transparent
+    ///     recipient or transparent change). Use `z_shieldcoinbase` to shield coinbase
+    ///     UTXOs from multiple transparent addresses.
+    ///   If a unified address is provided for this argument, the TXOs to be spent will be
+    ///   selected from those associated with the account corresponding to that unified
+    ///   address, from value pools corresponding to the receivers included in the UA.
+    /// - `amounts` (array, required) An array of JSON objects representing the amounts to
+    ///   send, with the following fields:
+    ///   - `address` (string, required) A taddr, zaddr, or Unified Address.
+    ///   - `amount` (numeric, required) The numeric amount in ZEC.
+    ///   - `memo` (string, optional) If the address is a zaddr, raw data represented in
+    ///     hexadecimal string format. If the output is being sent to a transparent
+    ///     address, it’s an error to include this field.
+    /// - `minconf` (numeric, optional) Only use funds confirmed at least this many times.
+    /// - `fee` (numeric, optional) If set, it must be null. Zallet always uses a fee
+    ///   calculated according to ZIP 317.
+    /// - `privacy_policy` (string, optional, default=`"FullPrivacy"`) Policy for what
+    ///   information leakage is acceptable. One of the following strings:
+    ///   - `"FullPrivacy"`: Only allow fully-shielded transactions (involving a single
+    ///     shielded value pool).
+    ///   - `"AllowRevealedAmounts"`: Allow funds to cross between shielded value pools,
+    ///     revealing the amount that crosses pools.
+    ///   - `"AllowRevealedRecipients"`: Allow transparent recipients. This also implies
+    ///     revealing information described under `"AllowRevealedAmounts"`.
+    ///   - `"AllowRevealedSenders"`: Allow transparent funds to be spent, revealing the
+    ///     sending addresses and amounts. This implies revealing information described
+    ///     under `"AllowRevealedAmounts"`.
+    ///   - `"AllowFullyTransparent"`: Allow transaction to both spend transparent funds
+    ///     and have transparent recipients. This implies revealing information described
+    ///     under `"AllowRevealedSenders"` and `"AllowRevealedRecipients"`.
+    ///   - `"AllowLinkingAccountAddresses"`: Allow selecting transparent coins from the
+    ///     full account, rather than just the funds sent to the transparent receiver in
+    ///     the provided Unified Address. This implies revealing information described
+    ///     under `"AllowRevealedSenders"`.
+    ///   - `"NoPrivacy"`: Allow the transaction to reveal any information necessary to
+    ///     create it. This implies revealing information described under
+    ///     `"AllowFullyTransparent"` and `"AllowLinkingAccountAddresses"`.
+    #[method(name = "z_sendmany")]
+    async fn z_send_many(
+        &self,
+        fromaddress: String,
+        amounts: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        fee: Option<JsonValue>,
+        privacy_policy: Option<String>,
+    ) -> z_send_many::Response;
+
+    /// Sends funds from an account in one shot, signing and broadcasting the
+    /// transaction.
+    ///
+    /// Unlike `z_sendmany`, the source of funds is an account UUID together
+    /// with an explicit fund source, rather than an address. The transaction is
+    /// assembled through the same pipeline as the `pczt_*` methods (create,
+    /// prove, sign, extract); use those methods directly to inspect a
+    /// transaction before executing it. Unlike `z_sendmany`, the call completes
+    /// synchronously, returning the txid rather than an operation id.
+    ///
+    /// # Arguments
+    /// - `account` (string, required) The UUID of the account to send the funds
+    ///   from.
+    /// - `fund_source` (string or array, required) Where funds may be drawn
+    ///   from. One of the strings `"orchard"`, `"sapling"`,
+    ///   `"any_transparent"`, or an array of transparent address strings. Each
+    ///   source is isolating: a source that cannot cover the payment reports
+    ///   insufficient funds rather than drawing on the account's other funds.
+    ///   `"orchard"` includes the Ironwood pool, where an account's
+    ///   Orchard-receiver funds are held once NU6.3 activates.
+    /// - `recipients` (array, required) An array of JSON objects representing
+    ///   the amounts to send, with the same shape as `z_sendmany`'s `amounts`.
+    /// - `minconf` (numeric, optional) Only use funds confirmed at least this
+    ///   many times.
+    /// - `privacy_policy` (string, required) Policy for what information
+    ///   leakage is acceptable, using the same values as `z_sendmany`.
+    ///   Required: the send is not proposed for review first, so the caller
+    ///   must acknowledge its privacy implications up front.
+    #[method(name = "z_sendfromaccount")]
+    async fn z_send_from_account(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: String,
+    ) -> z_send_from_account::Response;
+
+    /// Shields coinbase UTXOs from a single wallet-owned source into a
+    /// shielded address.
+    ///
+    /// This is an asynchronous operation; it returns an operation id that
+    /// can be used with `z_getoperationstatus` or `z_getoperationresult`.
+    ///
+    /// # Arguments
+    /// - `fromaddress`: Either a single transparent address owned by this
+    ///   wallet, or an account UUID (string) to sweep every coinbase UTXO
+    ///   across that account's transparent receivers. Arrays of addresses
+    ///   are not accepted; pass the account UUID instead if you need to
+    ///   sweep across multiple receivers. Unlike `zcashd`, the wildcard
+    ///   `"*"` (sweep all wallet t-addrs) is rejected with an
+    ///   `InvalidParameter` error: cross-account sweeps would correlate
+    ///   otherwise-unrelated accounts on-chain, so callers must scope the
+    ///   sweep to a single account by passing its UUID.
+    /// - `toaddress`: Any Zcash shielded address (Sapling, Orchard, or
+    ///   Unified with a shielded receiver) that will receive the shielded
+    ///   funds. Need not belong to this wallet. Transparent / TEX
+    ///   destinations are rejected by the backend.
+    /// - `fee` (numeric, optional): If set, it must be null. Zallet always
+    ///   uses a fee calculated according to ZIP 317; the parameter is
+    ///   accepted for positional compatibility with `zcashd`'s
+    ///   `z_shieldcoinbase` only.
+    /// - `limit` (numeric, optional): If supplied, caps the number of
+    ///   selected coinbase UTXOs to the highest-value `n` of those
+    ///   eligible. Recommended for wallets with many eligible coinbase
+    ///   UTXOs: without it, a single transaction is built containing all
+    ///   eligible UTXOs, which can exceed transaction-size limits at
+    ///   broadcast time.
+    /// - `memo` (string, optional): If supplied, stored in the memo field
+    ///   of the resulting shielded payment. Hex-encoded, up to 1024 hex
+    ///   characters (= 512 bytes).
+    /// - `privacy_policy` (string, optional): Policy for what information
+    ///   leakage is acceptable. Coinbase shielding always reveals the
+    ///   source transparent address(es), so only two policy values are
+    ///   accepted:
+    ///   - `"AllowRevealedSenders"`: Allow revealing the source transparent
+    ///     address. Sufficient when sweeping from a single t-addr.
+    ///   - `"AllowLinkingAccountAddresses"`: Additionally allow linking
+    ///     multiple source t-addrs on-chain. Required when sweeping from
+    ///     an account UUID that expands to >1 transparent receiver with
+    ///     eligible coinbase UTXOs.
+    ///
+    ///   When omitted or `null`, the default is chosen from `fromaddress`:
+    ///   `"AllowRevealedSenders"` for a single t-addr, or
+    ///   `"AllowLinkingAccountAddresses"` for an account UUID. Any other
+    ///   policy name (including stricter values like `"FullPrivacy"` and
+    ///   looser ones like `"NoPrivacy"`) is rejected.
+    ///
+    /// # Returns
+    /// An object matching `zcashd`'s `z_shieldcoinbase` shape:
+    /// - `remainingUTXOs` (numeric): Eligible-but-not-selected coinbase UTXO
+    ///   count.
+    /// - `remainingValue` (numeric, ZEC): Total value of those UTXOs.
+    /// - `shieldingUTXOs` (numeric): Number of coinbase UTXOs being
+    ///   shielded by this operation.
+    /// - `shieldingValue` (numeric, ZEC): Total value being shielded.
+    /// - `opid` (string): Operation id.
+    #[method(name = "z_shieldcoinbase")]
+    async fn z_shieldcoinbase(
+        &self,
+        fromaddress: String,
+        toaddress: String,
+        fee: Option<JsonValue>,
+        limit: Option<u32>,
+        memo: Option<String>,
+        privacy_policy: Option<String>,
+    ) -> z_shieldcoinbase::Response;
+
+    /// Reveals the viewing key corresponding to 'zaddr'.
+    ///
+    /// # Arguments
+    ///
+    /// - `zaddr` (string, required) The Sapling payment address or unified
+    ///   address.
+    /// - `ivk` (boolean, optional, default=`false`) When `true`, export the
+    ///   unified incoming viewing key (UIVK) for the account holding `zaddr`
+    ///   instead of the full viewing key.
+    ///
+    /// # Returns
+    /// A string containing the viewing key:
+    /// - For a Sapling payment address, the Sapling extended full viewing key
+    ///   (`zxviews…`).
+    /// - For a unified address, the unified full viewing key (`uview…`) of the
+    ///   account holding the address.
+    /// - When `ivk` is `true`, the unified incoming viewing key (`uivk…`) of
+    ///   the account holding the address, for either address kind. Note that
+    ///   a UIVK grants incoming viewing capability for every pool in the
+    ///   account, even when `zaddr` is a Sapling address.
+    #[method(name = "z_exportviewingkey")]
+    async fn export_viewing_key(
+        &self,
+        zaddr: &str,
+        ivk: Option<bool>,
+    ) -> z_export_viewing_key::Response;
+
+    /// Creates a PCZT from a transaction proposal.
+    ///
+    /// Selects inputs and computes change for the given recipients, producing a
+    /// complete (but unproven and unsigned) PCZT. This is the PCZT-based
+    /// replacement for `createrawtransaction` and `fundrawtransaction`.
+    ///
+    /// The result reports the minimum privacy policy the transaction requires,
+    /// which `pczt_sign` will ask the caller to acknowledge. To see what a
+    /// transaction would reveal before committing to it, create it with the
+    /// `NoPrivacy` policy and inspect the reported requirement.
+    ///
+    /// A PCZT holds a single transaction, so payments that take more than one
+    /// are not supported: a ZIP 320 (TEX) recipient must be paid with
+    /// `z_sendmany`, which performs both steps.
+    ///
+    /// # Arguments
+    /// - `from` (string, required) The address, or the account UUID, to send
+    ///   funds from. An address source spends shielded funds (or, for a
+    ///   transparent address, only that address's UTXOs); an account source
+    ///   spends the funds named by `fund_source`.
+    /// - `amounts` (array, required) An array of recipient amounts with fields:
+    ///   - `address` (string, required) Recipient address.
+    ///   - `amount` (numeric, required) Amount in ZEC.
+    ///   - `memo` (string, optional) Optional memo for shielded recipients.
+    /// - `minconf` (numeric, optional) Minimum confirmations for inputs.
+    /// - `privacy_policy` (string, optional, default=`"FullPrivacy"`) The most
+    ///   the transaction is permitted to reveal, using the same values as
+    ///   `z_sendmany`: `"FullPrivacy"`, `"AllowRevealedAmounts"`,
+    ///   `"AllowRevealedRecipients"`, `"AllowRevealedSenders"`,
+    ///   `"AllowFullyTransparent"`, `"AllowLinkingAccountAddresses"`, or
+    ///   `"NoPrivacy"` (see `z_sendmany` for what each permits). A proposal
+    ///   that would reveal more than this is rejected; the minimum it actually
+    ///   requires is reported back as `privacy_policy`.
+    /// - `fund_source` (string or array, optional) Where funds may be drawn
+    ///   from, when `from` is an account UUID: `"orchard"`, `"sapling"`,
+    ///   `"any_transparent"`, or an array of transparent address strings.
+    ///   Defaults to any shielded pool. Each source is isolating: a source that
+    ///   cannot cover the payment fails rather than drawing on other funds.
+    #[method(name = "pczt_create")]
+    async fn pczt_create(
+        &self,
+        from: String,
+        amounts: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: Option<String>,
+        fund_source: Option<JsonValue>,
+    ) -> pczt_create::Response;
+
+    /// Signs a PCZT with the wallet's keys.
+    ///
+    /// Signs every input the wallet holds keys for. Inputs belonging to other
+    /// keys are left unsigned and reported, unless `strict` is set.
+    ///
+    /// Signing commits to what the transaction reveals, so the caller must
+    /// acknowledge the privacy policy recorded in the PCZT by `pczt_create`;
+    /// omitting `privacy_policy` acknowledges only `FullPrivacy` and refuses to
+    /// sign anything that reveals more.
+    ///
+    /// > ⚠️ A PCZT that this wallet did not create — or that passed through
+    /// > other parties on its way back — carries no recorded policy Zallet can
+    /// > trust. Review what you are about to sign with `pczt_inspect`: a
+    /// > counterparty could have altered the outputs, amounts, or recorded
+    /// > policy of the PCZT.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to sign.
+    /// - `privacy_policy` (string, optional, default=`"FullPrivacy"`) Policy
+    ///   acknowledging what information the transaction may reveal, using the
+    ///   same values as `z_sendmany`: `"FullPrivacy"`,
+    ///   `"AllowRevealedAmounts"`, `"AllowRevealedRecipients"`,
+    ///   `"AllowRevealedSenders"`, `"AllowFullyTransparent"`,
+    ///   `"AllowLinkingAccountAddresses"`, or `"NoPrivacy"`. Must be at least
+    ///   as permissive as the policy reported by `pczt_create`.
+    /// - `strict` (bool, optional) If true, fail if any inputs cannot be signed.
+    #[method(name = "pczt_sign")]
+    async fn pczt_sign(
+        &self,
+        pczt: &str,
+        privacy_policy: Option<String>,
+        strict: Option<bool>,
+    ) -> pczt_sign::Response;
+
+    /// Extracts the final, network-ready transaction from a completed PCZT.
+    ///
+    /// Finalizes the transparent spends and verifies the shielded proofs and
+    /// signatures before returning the hex-encoded transaction. Fails if the
+    /// PCZT is not fully proven and signed. Transparent script signatures are
+    /// not executed here; an invalid one surfaces at broadcast.
+    ///
+    /// If this wallet created the PCZT, the transaction is also recorded in the
+    /// wallet database so its inputs are tracked as pending-spent.
+    ///
+    /// # Arguments
+    /// - `pczt` (string, required) The base64-encoded PCZT to extract from.
+    #[method(name = "pczt_extract")]
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response;
+
+    /// Sign a message with the private key of a transparent address.
+    ///
+    /// # Arguments
+    /// - `t_addr` (string, required): The transparent address to use to look up the private key that will be used to sign the message.
+    /// - `message` (string, required): The message to create a signature of.
+    #[method(name = "signmessage")]
+    async fn sign_message(&self, t_addr: &str, message: &str) -> sign_message::Response;
+}
+
+pub(crate) struct RpcImpl<C: Chain> {
+    wallet: Database,
+    #[cfg(zallet_build = "wallet")]
+    keystore: KeyStore,
+    chain: C,
+    sync_status: SyncStatusReader,
+}
+
+impl<C: Chain> RpcImpl<C> {
+    /// Creates a new instance of the general RPC handler.
+    pub(crate) fn new(
+        wallet: Database,
+        #[cfg(zallet_build = "wallet")] keystore: KeyStore,
+        chain: C,
+        sync_status: SyncStatusReader,
+    ) -> Self {
+        Self {
+            wallet,
+            #[cfg(zallet_build = "wallet")]
+            keystore,
+            chain,
+            sync_status,
+        }
+    }
+
+    async fn wallet(&self) -> RpcResult<DbHandle> {
+        self.wallet
+            .handle()
+            .await
+            .map_err(|_| jsonrpsee::types::ErrorCode::InternalError.into())
+    }
+
+    async fn chain(&self) -> RpcResult<C> {
+        Ok(self.chain.clone())
+    }
+
+    /// Returns an error if the wallet is not synced enough for balance or spend methods to
+    /// operate on a trustworthy view of the chain.
+    #[cfg(zallet_build = "wallet")]
+    fn ensure_synced(&self) -> RpcResult<()> {
+        self.sync_status.ensure_available()
+    }
+}
+
+#[cfg(zallet_build = "wallet")]
+pub(crate) struct WalletRpcImpl<C: Chain> {
+    general: RpcImpl<C>,
+    keystore: KeyStore,
+    decryptor: WalletDecryptorHandle,
+    async_ops: OperationQueue,
+}
+
+#[cfg(zallet_build = "wallet")]
+impl<C: Chain> WalletRpcImpl<C> {
+    /// Creates a new instance of the wallet-specific RPC handler.
+    pub(crate) fn new(
+        wallet: Database,
+        keystore: KeyStore,
+        chain_view: C,
+        decryptor: WalletDecryptorHandle,
+        sync_status: SyncStatusReader,
+        async_operation_limit: usize,
+    ) -> Self {
+        Self {
+            general: RpcImpl::new(wallet, keystore.clone(), chain_view, sync_status),
+            keystore,
+            decryptor,
+            async_ops: OperationQueue::new(async_operation_limit),
+        }
+    }
+
+    async fn wallet(&self) -> RpcResult<DbHandle> {
+        self.general.wallet().await
+    }
+
+    async fn chain(&self) -> RpcResult<C> {
+        self.general.chain().await
+    }
+}
+
+#[async_trait]
+impl<C: Chain> RpcServer for RpcImpl<C> {
+    async fn get_wallet_status(&self) -> get_wallet_status::Response {
+        get_wallet_status::call(
+            self.wallet().await?.as_ref(),
+            self.chain().await?,
+            self.sync_status.clone(),
+        )
+        .await
+    }
+
+    async fn list_accounts(&self, include_addresses: Option<bool>) -> list_accounts::Response {
+        list_accounts::call(self.wallet().await?.as_ref(), include_addresses)
+    }
+
+    async fn get_accounts(&self, account_uuid: String) -> get_account::Response {
+        get_account::call(self.wallet().await?.as_ref(), account_uuid)
+    }
+
+    async fn get_address_for_account(
+        &self,
+        account: JsonValue,
+        receiver_types: Option<Vec<String>>,
+        diversifier_index: Option<u128>,
+    ) -> get_address_for_account::Response {
+        get_address_for_account::call(
+            self.wallet().await?.as_mut(),
+            #[cfg(zallet_build = "wallet")]
+            self.keystore.clone(),
+            account,
+            receiver_types,
+            diversifier_index,
+        )
+        .await
+    }
+
+    async fn list_addresses(&self) -> list_addresses::Response {
+        list_addresses::call(self.wallet().await?.as_ref())
+    }
+
+    async fn list_unified_receivers(
+        &self,
+        unified_address: &str,
+    ) -> list_unified_receivers::Response {
+        list_unified_receivers::call(self.wallet().await?.as_ref(), unified_address)
+    }
+
+    async fn list_transactions(
+        &self,
+        account_uuid: Option<String>,
+        start_height: Option<u32>,
+        end_height: Option<u32>,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> list_transactions::Response {
+        list_transactions::call(
+            self.wallet().await?.as_ref(),
+            account_uuid,
+            start_height,
+            end_height,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    async fn get_raw_transaction(
+        &self,
+        txid: &str,
+        verbose: Option<u64>,
+        blockhash: Option<String>,
+    ) -> get_raw_transaction::Response {
+        get_raw_transaction::call(
+            self.wallet().await?.as_ref(),
+            self.chain().await?,
+            txid,
+            verbose,
+            blockhash,
+        )
+        .await
+    }
+
+    async fn decode_raw_transaction(&self, hexstring: &str) -> decode_raw_transaction::Response {
+        decode_raw_transaction::call(self.wallet().await?.params(), hexstring)
+    }
+
+    async fn view_transaction(&self, txid: &str) -> view_transaction::Response {
+        view_transaction::call(
+            self.wallet().await?.as_ref(),
+            #[cfg(zallet_build = "wallet")]
+            &self.keystore,
+            self.chain().await?,
+            txid,
+        )
+        .await
+    }
+
+    async fn stop(&self) -> stop::Response {
+        stop::call(self.wallet().await?)
+    }
+
+    async fn validate_address(&self, address: &str) -> validate_address::Response {
+        validate_address::call(self.wallet().await?.params(), address)
+    }
+
+    async fn verify_message(
+        &self,
+        zcashaddress: &str,
+        signature: &str,
+        message: &str,
+    ) -> verify_message::Response {
+        verify_message::call(
+            self.wallet().await?.params(),
+            zcashaddress,
+            signature,
+            message,
+        )
+    }
+
+    async fn convert_tex(&self, transparent_address: &str) -> convert_tex::Response {
+        convert_tex::call(self.wallet().await?.params(), transparent_address)
+    }
+
+    async fn decode_script(&self, hexstring: &str) -> decode_script::Response {
+        decode_script::call(self.wallet().await?.params(), hexstring)
+    }
+
+    async fn pczt_combine(&self, pczts: Vec<String>) -> pczt_combine::Response {
+        pczt_combine::call(pczts)
+    }
+
+    async fn pczt_prove(&self, pczt: &str) -> pczt_prove::Response {
+        pczt_prove::call(pczt).await
+    }
+
+    async fn pczt_inspect(&self, pczt: &str) -> pczt_inspect::Response {
+        pczt_inspect::call(self.wallet().await?.params(), pczt)
+    }
+}
+
+#[cfg(zallet_build = "wallet")]
+#[async_trait]
+impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
+    async fn help(&self, command: Option<&str>) -> help::Response {
+        help::call(self.wallet().await?.params().network_type(), command)
+    }
+
+    fn openrpc(&self) -> openrpc::Response {
+        openrpc::call()
+    }
+
+    async fn list_operation_ids(&self, status: Option<&str>) -> list_operation_ids::Response {
+        list_operation_ids::call(&self.async_ops.read().await, status).await
+    }
+
+    async fn get_operation_status(&self, operationid: Vec<OperationId>) -> get_operation::Response {
+        get_operation::status(&self.async_ops.read().await, operationid).await
+    }
+
+    async fn get_operation_result(&self, operationid: Vec<OperationId>) -> get_operation::Response {
+        get_operation::result(&self.async_ops, operationid).await
+    }
+
+    async fn get_wallet_info(&self) -> get_wallet_info::Response {
+        get_wallet_info::call(&self.keystore).await
+    }
+
+    async fn unlock_wallet(
+        &self,
+        passphrase: age::secrecy::SecretString,
+        timeout: u64,
+    ) -> unlock_wallet::Response {
+        unlock_wallet::call(&self.keystore, passphrase, timeout).await
+    }
+
+    async fn lock_wallet(&self) -> lock_wallet::Response {
+        lock_wallet::call(&self.keystore).await
+    }
+
+    async fn get_new_account(
+        &self,
+        account_name: &str,
+        seedfp: Option<&str>,
+    ) -> get_new_account::Response {
+        get_new_account::call(
+            self.wallet().await?.as_mut(),
+            &self.keystore,
+            self.chain().await?,
+            &self.decryptor,
+            account_name,
+            seedfp,
+        )
+        .await
+    }
+
+    async fn recover_accounts(
+        &self,
+        accounts: Vec<recover_accounts::AccountParameter<'_>>,
+    ) -> recover_accounts::Response {
+        recover_accounts::call(
+            self.wallet().await?.as_mut(),
+            &self.keystore,
+            self.chain().await?,
+            &self.decryptor,
+            accounts,
+        )
+        .await
+    }
+
+    async fn get_balances(&self, minconf: Option<u32>) -> get_balances::Response {
+        self.general.ensure_synced()?;
+        get_balances::call(self.wallet().await?.as_ref(), minconf)
+    }
+
+    async fn z_get_balance_for_account(
+        &self,
+        account: JsonValue,
+        minconf: Option<u32>,
+    ) -> z_get_balance_for_account::Response {
+        self.general.ensure_synced()?;
+        z_get_balance_for_account::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            account,
+            minconf,
+        )
+        .await
+    }
+
+    async fn import_address(
+        &self,
+        account: &str,
+        hex_data: &str,
+        rescan: Option<bool>,
+    ) -> z_import_address::Response {
+        z_import_address::call(
+            self.wallet().await?.as_mut(),
+            self.chain().await?,
+            account,
+            hex_data,
+            rescan,
+        )
+        .await
+    }
+
+    async fn import_viewing_key(
+        &self,
+        vkey: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_viewing_key::Response {
+        import_viewing_key::call(
+            self.wallet().await?.as_mut(),
+            self.chain().await?,
+            vkey,
+            rescan,
+            start_height,
+        )
+        .await
+    }
+
+    async fn z_get_total_balance(
+        &self,
+        minconf: Option<u32>,
+        include_watchonly: Option<bool>,
+    ) -> z_get_total_balance::Response {
+        self.general.ensure_synced()?;
+        z_get_total_balance::call(self.wallet().await?.as_ref(), minconf, include_watchonly)
+    }
+
+    async fn list_unspent(
+        &self,
+        minconf: Option<u32>,
+        maxconf: Option<u32>,
+        include_watchonly: Option<bool>,
+        addresses: Option<Vec<String>>,
+        as_of_height: Option<i64>,
+    ) -> list_unspent::Response {
+        self.general.ensure_synced()?;
+        list_unspent::call(
+            self.wallet().await?.as_ref(),
+            minconf,
+            maxconf,
+            include_watchonly,
+            addresses,
+            as_of_height,
+        )
+    }
+
+    async fn get_notes_count(
+        &self,
+        minconf: Option<u32>,
+        as_of_height: Option<i64>,
+    ) -> get_notes_count::Response {
+        self.general.ensure_synced()?;
+        get_notes_count::call(self.wallet().await?.as_ref(), minconf, as_of_height)
+    }
+
+    async fn export_key(&self, address: &str) -> export_key::Response {
+        export_key::call(self.wallet().await?.as_ref(), &self.keystore, address).await
+    }
+
+    async fn import_key(
+        &self,
+        key: &str,
+        rescan: Option<&str>,
+        start_height: Option<u64>,
+    ) -> import_key::Response {
+        import_key::call(
+            self.wallet().await?.as_mut(),
+            &self.keystore,
+            self.chain().await?,
+            &self.decryptor,
+            key,
+            rescan,
+            start_height,
+        )
+        .await
+    }
+
+    async fn z_send_many(
+        &self,
+        fromaddress: String,
+        amounts: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        fee: Option<JsonValue>,
+        privacy_policy: Option<String>,
+    ) -> z_send_many::Response {
+        self.general.ensure_synced()?;
+        // Cheaply reject the request if the operation could not be queued, before
+        // doing the expensive work of constructing a proposal.
+        self.async_ops.check_capacity().await?;
+        let (context, fut) = z_send_many::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            self.chain().await?,
+            fromaddress,
+            amounts,
+            minconf,
+            fee,
+            privacy_policy,
+        )
+        .await?;
+        self.async_ops.insert(context, fut).await
+    }
+
+    async fn z_send_from_account(
+        &self,
+        account: JsonValue,
+        fund_source: JsonValue,
+        recipients: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: String,
+    ) -> z_send_from_account::Response {
+        z_send_from_account::call(
+            self.general.wallet.clone(),
+            self.keystore.clone(),
+            self.chain().await?,
+            account,
+            fund_source,
+            recipients,
+            minconf,
+            privacy_policy,
+        )
+        .await
+    }
+
+    async fn z_shieldcoinbase(
+        &self,
+        fromaddress: String,
+        toaddress: String,
+        fee: Option<JsonValue>,
+        limit: Option<u32>,
+        memo: Option<String>,
+        privacy_policy: Option<String>,
+    ) -> z_shieldcoinbase::Response {
+        self.general.ensure_synced()?;
+        // Cheaply reject the request if the operation could not be queued, before
+        // doing the expensive work of constructing a proposal.
+        self.async_ops.check_capacity().await?;
+        let (preflight, context, fut) = z_shieldcoinbase::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            self.chain().await?,
+            fromaddress,
+            toaddress,
+            fee,
+            limit,
+            memo,
+            privacy_policy,
+        )
+        .await?;
+        let opid = self.async_ops.insert(context, fut).await?;
+        Ok(z_shieldcoinbase::ShieldCoinbaseResult::new(preflight, opid))
+    }
+
+    async fn export_viewing_key(
+        &self,
+        zaddr: &str,
+        ivk: Option<bool>,
+    ) -> z_export_viewing_key::Response {
+        z_export_viewing_key::call(self.wallet().await?.as_ref(), &self.keystore, zaddr, ivk).await
+    }
+
+    async fn pczt_create(
+        &self,
+        from: String,
+        amounts: Vec<AmountParameter>,
+        minconf: Option<u32>,
+        privacy_policy: Option<String>,
+        fund_source: Option<JsonValue>,
+    ) -> pczt_create::Response {
+        self.general.ensure_synced()?;
+        pczt_create::call(
+            self.wallet().await?,
+            from,
+            amounts,
+            minconf,
+            privacy_policy,
+            fund_source,
+        )
+        .await
+    }
+
+    async fn pczt_sign(
+        &self,
+        pczt: &str,
+        privacy_policy: Option<String>,
+        strict: Option<bool>,
+    ) -> pczt_sign::Response {
+        pczt_sign::call(
+            self.wallet().await?,
+            self.keystore.clone(),
+            pczt,
+            privacy_policy,
+            strict,
+        )
+        .await
+    }
+
+    async fn pczt_extract(&self, pczt: &str) -> pczt_extract::Response {
+        self.general.ensure_synced()?;
+        pczt_extract::call(self.wallet().await?, pczt).await
+    }
+
+    async fn sign_message(&self, t_addr: &str, message: &str) -> sign_message::Response {
+        sign_message::call(
+            self.wallet().await?.as_ref(),
+            &self.keystore,
+            t_addr,
+            message,
+        )
+        .await
+    }
+}

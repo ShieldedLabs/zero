@@ -67,7 +67,8 @@ jobs:
             # the default zebra-state backend would require zebrad's indexer
             # gRPC and a shared state volume (see deploy/z3-stack/README.md).
             build_args: |
-              FEATURES=zaino,rpc-cli,zcashd-import
+              BACKEND=zaino
+              FEATURES=rpc-cli,zcashd-import
           - name: zero-lightwalletd
             context: lightwalletd
             # Zero's own Dockerfile, not the vendored lightwalletd/Dockerfile.

@@ -5,7 +5,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.0] 2026-07-09
+## [Unreleased]
+
+## [0.15.5] - 2026-08-02
+
+### Changed
+- The minimum `halo2_proofs` version is now 0.3.5, which provides the
+  match-only fixture exporter used by the random `verifier-fingerprint`
+  captures.
+
+## [0.15.4] - 2026-07-23
+
+### Changed
+- Batched trial decryption (the `zcash_note_encryption::batch` APIs) is
+  significantly faster. Ephemeral keys are now prepared with GLV endomorphism
+  windows built across the whole batch with a single shared normalization, and
+  each viewing key's GLV decomposition is computed once per batch and reused
+  against every ephemeral key. The GLV primitive lives in `pasta_curves::glv`
+  (`Table` / `Decomposed` / `Table::mul_decomposed`); orchard consumes it
+  through the `BatchDomain::batch_ka_agree_dec` hook added in
+  `zcash_note_encryption` 0.4.2. Shared secrets are unchanged (byte-identical
+  to the per-item path), and the per-output decryption entry points are
+  unaffected. Like the existing `group::Wnaf`-based preparation, the new path
+  is variable-time with respect to the (wallet-local) viewing key scalar.
+- MSRV-compatible bump: the minimum `zcash_note_encryption` version is now 0.4.2.
+- MSRV-compatible bump: the minimum `pasta_curves` version is now 0.5.2, and its
+  `glv` feature is now enabled (providing `pasta_curves::glv`).
+
+## [0.15.3] - 2026-07-22
+
+### Changed
+- The `verifier-fingerprint` fixture export now derives each Lean instance
+  commitment from the verifier's public inputs instead of exporting it as an
+  opaque verifying-key field (requires `halo2_proofs 0.3.4`).
+
+## [0.15.2] - 2026-07-21
+
+### Added
+- `orchard::builder::Builder::new_with_anchor_deferred`, constructing a builder whose bundle
+  anchor — and every real spend's Merkle witness — is deferred to proving time, per
+  [ZIP 374](https://zips.z.cash/zip-0374). Spends are added without witnesses via the new
+  `orchard::builder::Builder::add_spend_unwitnessed`; the built PCZT bundle reports the
+  deferral through the new `orchard::pczt::Bundle::anchor_deferred` accessor (its `anchor`
+  field then carries the empty-tree root purely as a placeholder that a PCZT serializer
+  must emit as absent, and the real spends' `witness` fields are `None`), and the real
+  anchor and witnesses are installed through the PCZT Updater role after signing. Only
+  supported for bundle formats whose txid digest — and hence every signature — excludes
+  the anchor (the V6 formats); only `Builder::build_for_pczt` can build such a bundle.
+- `orchard::builder::testing::arb_shared_anchor_notes`, a proptest strategy generating
+  multiple spendable Orchard notes (one per supplied value) witnessed to a single shared
+  anchor, for building shared-anchor multi-spend fixtures. It is the multi-note counterpart
+  to `orchard::builder::testing::arb_spendable_note`.
+- `orchard::builder::BuildError::{AnchorRequired, AnchorDeferralUnsupported}`
+- `orchard::builder::SpendError::{AnchorDeferred, WitnessRequired}`
+- `orchard::pczt::Updater::set_anchor` and
+  `orchard::pczt::ActionUpdater::set_spend_witness`, the PCZT Updater-role setters that
+  install the real bundle anchor and the per-spend Merkle witnesses that a deferred-anchor
+  bundle ([ZIP 374](https://zips.z.cash/zip-0374)) is built without. `set_anchor` replaces
+  the empty-tree placeholder and clears the deferral so the Prover proves against the real
+  anchor; `set_spend_witness` supplies the witness the Prover requires
+  (`orchard::pczt::ProverError::MissingWitness`). The Prover now rejects a bundle whose
+  anchor is still deferred with the new `orchard::pczt::ProverError::AnchorDeferred`.
+
+## [0.15.1] - 2026-07-20
+
+### Added
+- The `verifier-fingerprint` feature flag, enabling
+  `halo2_proofs/unstable-verifier-fingerprint`. It gates test-only capture of
+  canonical Post-NU6.3 verifier fixtures (and Rust-only rejection checks) for
+  cross-checking downstream verifier models, and adds no public API.
+
+## [0.15.0] - 2026-07-09
 
 This release introduces `orchard::bundle::BundleVersion`, the `(value pool, protocol
 version)` of an Orchard bundle, built from the new `orchard::ValuePool` and
