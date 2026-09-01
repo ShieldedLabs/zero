@@ -4,6 +4,12 @@
 # (zallet/book/src/guide/setup.md in this repo), which currently requires the
 # empty sections below to be present.
 
+# Since beta.3 the `zallet` command is a launcher that execs the backend
+# binary this top-level key names; the image ships only zallet-zaino (see
+# BACKEND=zaino in docker-compose.build.yml), and without this the launcher
+# dispatches to the default zebra backend and dies on the missing binary.
+backend = "zaino"
+
 [builder.limits]
 
 [consensus]
