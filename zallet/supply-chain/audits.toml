@@ -743,13 +743,13 @@ end = "2026-03-04"
 
 [[trusted.tower-batch-control]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.tower-fallback]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
@@ -995,43 +995,43 @@ end = "2027-07-03"
 
 [[trusted.zebra-chain]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-consensus]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-network]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-node-services]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-rpc]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-script]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
 [[trusted.zebra-state]]
 criteria = "safe-to-deploy"
-user-id = 235397 # Marek (upbqdn)
+user-id = 235397
 start = "2023-10-17"
 end = "2027-07-28"
 
