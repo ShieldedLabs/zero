@@ -60,6 +60,7 @@ jobs:
             ':(glob)zebra/zebra-script/**'
             ':(glob)zebra/Cargo.toml'
             ':(glob)zebra/Cargo.lock'
+            ':(glob)zebra/rust-toolchain.toml'
             ':(glob).github/workflows/zebra-bench.yml'
           )
 
