@@ -371,7 +371,10 @@ fn worst_case_tx_verification(c: &mut Criterion) {
 /// values, so unique `WtxId`s), so nothing verified in one iteration can be
 /// remembered in the next. Warm replays one fixed workload the verifier has
 /// already seen once. On a tree with no verification cache the two series
-/// coincide; a cache shows up as their gap.
+/// coincide; a process-wide cache shows up as their gap. (Both series build a
+/// fresh verifier per iteration, so a cache scoped to one verifier instance
+/// would not register; the caches this benchmark exists to measure are
+/// process-global.)
 fn bench_transparent_block(
     c: &mut Criterion,
     runtime: &tokio::runtime::Runtime,
@@ -401,26 +404,27 @@ fn bench_transparent_block(
         "tx_verifier_synthetic_block/seven_tx_7000_transparent_inputs_cold",
         |b| {
             b.iter_custom(|iterations| {
-                // Distinct transactions per iteration; generation is untimed.
-                let workloads: Vec<Vec<BlockRequest>> = (0..iterations)
-                    .map(|_| transparent_block_requests())
-                    .collect();
+                // Distinct transactions per iteration, generated outside the
+                // timed section and dropped after each iteration, so memory
+                // stays at one workload regardless of the iteration count.
+                let mut elapsed = Duration::ZERO;
 
-                let start = Instant::now();
+                for _ in 0..iterations {
+                    let requests = transparent_block_requests();
 
-                for requests in &workloads {
+                    let start = Instant::now();
                     let verified = runtime.block_on(async {
                         let verifier = make_transaction_verifier(
                             &network,
                             state.clone(),
                             requests.len().saturating_add(1),
                         );
-                        verify_requests(verifier, requests).await
+                        verify_requests(verifier, &requests).await
                     });
                     black_box(verified);
+                    elapsed += start.elapsed();
                 }
 
-                let elapsed = start.elapsed();
                 let iterations =
                     u32::try_from(iterations).expect("benchmark iterations fit in u32");
                 cold_samples.push(elapsed.as_secs_f64() / f64::from(iterations));
