@@ -65,10 +65,18 @@ qa/regtest-harness/run.sh --keep
 ```
 
 Requirements: `bash`, `curl`, `python3`, `sqlite3` (all present on macOS and
-`ubuntu-latest`). Binaries default to `zebra/target/debug/zebrad` (must be
-built with `--features internal-miner`) and `zallet/target/debug/zallet`
-(must be built with `--no-default-features --features
-zaino,rpc-cli,zcashd-import`); override with `ZEBRAD_BIN` / `ZALLET_BIN`.
+`ubuntu-latest`). Binaries default to `zebra/target/release/zebrad` (must be
+built with `--features internal-miner`) and
+`zallet/backends/zaino/target/release/zallet-zaino` (built from
+`zallet/backends/zaino`, its own workspace, with `--features
+rpc-cli,zcashd-import`); override with `ZEBRAD_BIN` / `ZALLET_BIN`.
+
+The harness drives the **backend binary** directly, not the `zallet` launcher.
+Since beta.3 each chain backend is its own workspace producing a
+`zallet-<name>` binary, and `zallet` only execs the one named by the config's
+`backend` key; a directly-invoked backend accepts a config that leaves the key
+unset. Wallet logic is what this harness tests, so it skips the indirection.
+Launcher dispatch is smoke's business.
 
 On failure the workdir (configs, logs, wallet.db) is preserved and its path
 printed.
