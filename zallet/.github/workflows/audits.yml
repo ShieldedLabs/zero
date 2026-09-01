@@ -9,25 +9,65 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs: a fresh push to a PR aborts the PR's in-flight run.
+# `main` pushes are never cancelled, so every landed commit is fully tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  # Each chain backend lives in its own cargo workspace with its own lockfile
+  # (zcash/zallet#540), so every resolution graph is audited separately.
+  # Audit facts are shared: each backend workspace's supply-chain/audits.toml
+  # is a checked-in symlink to the root's, as is its deny.toml. Policies and
+  # imports are graph-specific, so config.toml and imports.lock are real
+  # per-workspace files (cargo-vet errors on policy entries for crates that
+  # are not in the current graph, so a shared config cannot serve all three).
   cargo-vet:
-    name: Vet Rust dependencies
+    name: Vet Rust dependencies (${{ matrix.workspace }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        workspace: [".", "backends/zebra", "backends/zaino"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         id: toolchain
       - run: rustup override set "${TOOLCHAIN}"
         env:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
       - run: cargo install cargo-vet --version ~0.10
+      # cargo-vet decorates each `user-id` in audits.toml with a `# Name (login)`
+      # comment, but only for publishers it can resolve, and it resolves them
+      # solely from the current workspace's imports.lock -- which in turn only
+      # holds publishers of crates in that workspace's own graph. The shared
+      # audits.toml therefore has no single rendering that satisfies every
+      # workspace: entries trusting a publisher whose crates appear in only some
+      # of the graphs (e.g. the zebra-* and tower-* crates, absent from the root
+      # graph) get the comment from those workspaces and lose it from the others,
+      # and cargo-vet reports the mismatch as a store-format error. Normalise the
+      # store for this graph first so that purely cosmetic difference cannot fail
+      # the run; the audit facts themselves are unaffected, as the comments are
+      # regenerated decor that cargo-vet never reads back.
+      - run: cargo vet fmt
+        working-directory: ${{ matrix.workspace }}
       - run: cargo vet --locked
+        working-directory: ${{ matrix.workspace }}
+      # `cargo vet fmt` above would also mask a hand-edited config.toml or
+      # imports.lock, so keep enforcing formatting on the per-workspace files.
+      # Only the shared audits.toml is exempt.
+      - name: Check per-workspace store files are formatted
+        run: git diff --exit-code -- supply-chain/config.toml supply-chain/imports.lock
+        working-directory: ${{ matrix.workspace }}
 
   cargo-deny:
-    name: Check licenses
+    name: Check licenses (${{ matrix.workspace }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        workspace: [".", "backends/zebra", "backends/zaino"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -35,6 +75,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
         with:
           command: check licenses
+          manifest-path: ${{ matrix.workspace }}/Cargo.toml
 
   required-audits:
     name: Required audits have passed

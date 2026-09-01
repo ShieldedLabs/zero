@@ -84,6 +84,9 @@ proptest-derive = { workspace = true, optional = true }
 
 [dev-dependencies]
 color-eyre = { workspace = true }
+ripemd = { workspace = true }
+secp256k1 = { workspace = true }
+sha2 = { workspace = true }
 
 hex = { workspace = true }
 num-integer = { workspace = true }
@@ -115,6 +118,10 @@ harness = false
 
 [[bench]]
 name = "utxo_lookup"
+harness = false
+
+[[bench]]
+name = "worst_case_tx_verification"
 harness = false
 
 [lints]

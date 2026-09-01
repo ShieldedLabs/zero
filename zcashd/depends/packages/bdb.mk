@@ -19,6 +19,7 @@ ifneq ($(build_os),darwin)
 $(package)_config_opts_darwin=--disable-atomicsupport
 endif
 $(package)_config_opts_aarch64=--disable-atomicsupport
+$(package)_config_opts_aarch64_darwin=--enable-posixmutexes
 $(package)_cxxflags+=-std=c++17
 $(package)_cflags+=-Wno-deprecated-non-prototype
 

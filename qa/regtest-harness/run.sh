@@ -50,7 +50,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # debug orchard proof alone takes minutes and widens every startup-race
 # window this harness has to defend against).
 ZEBRAD_BIN="${ZEBRAD_BIN:-$REPO_ROOT/zebra/target/release/zebrad}"
-ZALLET_BIN="${ZALLET_BIN:-$REPO_ROOT/zallet/target/release/zallet}"
+# The zaino backend binary, not the `zallet` launcher. Since beta.3 each chain
+# backend is its own cargo workspace under zallet/backends/ producing a
+# `zallet-<name>` binary, and `zallet` is a thin launcher that execs the one
+# named by the config's `backend` key. This harness tests wallet logic, so it
+# drives the backend directly; the launcher's dispatch is smoke's business.
+# A directly-invoked backend binary accepts a config with `backend` unset.
+ZALLET_BIN="${ZALLET_BIN:-$REPO_ROOT/zallet/backends/zaino/target/release/zallet-zaino}"
 MINE_PHASE_BLOCKS="${MINE_PHASE_BLOCKS:-105}"
 
 # Public test constants (regtest-only; never reuse where value can exist).
@@ -451,7 +457,7 @@ count_lines() { grep -c . || true; }
 # A stale snapshot that slips through fails the restore verification below
 # and falls back to a full re-mine, so a missed bump costs time, not
 # correctness.
-GOLDEN_EPOCH=1
+GOLDEN_EPOCH=2
 GOLDEN_DIR="${GOLDEN_DIR:-$HOME/.cache/z3-harness-golden}"
 
 golden_key() {
@@ -1331,9 +1337,13 @@ run_scenario() {
 
 main() {
   if [ "$BUILD" = 1 ]; then
-    log "building zebrad (internal-miner) and zallet (zaino backend), release profile"
+    log "building zebrad (internal-miner) and zallet-zaino, release profile"
     (cd "$REPO_ROOT/zebra" && cargo build --release -p zebrad --features internal-miner)
-    (cd "$REPO_ROOT/zallet" && cargo build --release -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import)
+    # The zaino backend is its own workspace with its own lockfile, so it is
+    # built from its own directory rather than selected by feature from the
+    # root workspace (which no longer has a `zaino` feature).
+    (cd "$REPO_ROOT/zallet/backends/zaino" \
+      && cargo build --release --bin zallet-zaino --features rpc-cli,zcashd-import)
   fi
 
   setup

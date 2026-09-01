@@ -252,10 +252,6 @@ criteria = "safe-to-deploy"
 version = "0.1.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.halo2_proofs]]
-version = "0.3.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.hermit-abi]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
@@ -352,17 +348,9 @@ criteria = "safe-to-deploy"
 version = "1.18.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.orchard]]
-version = "0.15.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.parking_lot_core]]
 version = "0.9.8"
 criteria = "safe-to-run"
-
-[[exemptions.pasta_curves]]
-version = "0.5.1"
-criteria = "safe-to-deploy"
 
 [[exemptions.pathfinder_geometry]]
 version = "0.5.1"

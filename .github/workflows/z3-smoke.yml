@@ -124,6 +124,7 @@ jobs:
             ':(glob)zaino/Cargo.toml'
             ':(glob)zaino/Cargo.lock'
             ':(glob)zallet/zallet*/**'
+            ':(glob)zallet/backends/**'
             ':(glob)zallet/Cargo.toml'
             ':(glob)zallet/Cargo.lock'
           )
@@ -211,7 +212,8 @@ jobs:
             context: zallet
             dockerfile: zallet/Dockerfile
             build_args: |
-              FEATURES=zaino,rpc-cli,zcashd-import
+              BACKEND=zaino
+              FEATURES=rpc-cli,zcashd-import
             no_cache_filters: builder
             smoke_image: true
           # Not part of the z3 stack; built here only to keep its build cache

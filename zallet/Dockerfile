@@ -22,21 +22,36 @@
 # `Dockerfile.stagex` (amd64); `flake.nix` gives a bit-for-bit static-musl build
 # for both arches. See book/src/slsa/slsa.md.
 
+# [zero] Backend selection, global so every stage can name the binary.
+# Upstream builds the `zebra` backend unconditionally; this default matches it.
+# The z3-stack bundle overrides BACKEND with `zaino`, which fetches chain data
+# over JSON-RPC and needs no co-located zebrad state or indexer gRPC.
+#
+# Each backend is its own cargo workspace under backends/<name>/ producing a
+# `zallet-<name>` binary, and the `zallet` launcher dispatches to the sibling
+# binary named by the config's `backend` key. Selecting a backend here means
+# choosing which workspace to build, and the name has to survive into the image
+# filename, so each stage below re-declares this ARG to read it.
+ARG BACKEND="zebra"
+
 # --- Stage 1: build ---------------------------------------------------------
 # Digest-pin the base so the build is a function of its inputs only (bump the
-# tag AND the digest together, deliberately). rust 1.91.1 on bookworm matches
+# tag AND the digest together, deliberately). rust 1.95.0 on bookworm matches
 # the runtime base below so the dynamically-linked glibc binary just works.
-FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS builder
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
 
 # Build deps: protobuf (tonic/PROTOC), clang+llvm (bindgen / *-sys C/C++ deps),
-# pkg-config, and git (zaino-state's build.rs embeds the commit). Versions are
-# pinned to the bookworm snapshot that the digest-pinned base resolves to; bump
-# them together with the base digest above.
-# [zero] Unpinned deliberately: Debian point releases delete superseded
-# versions from the suite, so exact pins rot and break every fresh build
-# (same failure as the zaino Dockerfile, 2026-07-17: protobuf-compiler
-# 3.21.12-3 superseded). Builder-stage tools only; binary reproducibility
-# is governed by Cargo.lock, not toolchain patch levels.
+# pkg-config, and git (zaino-state's build.rs embeds the commit).
+#
+# [zero] Deliberately unpinned, against upstream, which pins each version. Those
+# versions are NOT implied by the digest-pinned base: apt resolves them against
+# the live bookworm archive, which only ever serves the CURRENT revision of each
+# package. A bookworm point release or a security update deletes the pinned
+# revision and every fresh build then fails with "Version '...' was not found"
+# though nothing in this repo changed (the zaino Dockerfile hit exactly this on
+# 2026-07-17, protobuf-compiler 3.21.12-3 superseded). These are builder-stage
+# tools only; binary reproducibility is governed by Cargo.lock, not by toolchain
+# patch levels.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -62,11 +77,9 @@ COPY . .
 ARG SOURCE_DATE_EPOCH=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
-# Backend + feature selection. The default matches upstream's stock build
-# (zebra-state backend). The z3-stack bundle overrides this with the `zaino`
-# backend, which fetches chain data over JSON-RPC and needs no co-located
-# zebrad state or indexer gRPC.
-ARG FEATURES="zebra-state,rpc-cli,zcashd-import"
+# [zero] Backend + feature selection (see the global ARG above).
+ARG BACKEND
+ARG FEATURES="rpc-cli,zcashd-import"
 
 # Build NATIVELY for whatever architecture this image is running as. buildx
 # already places the container on the target arch (per --platform), so the
@@ -80,11 +93,16 @@ ARG FEATURES="zebra-state,rpc-cli,zcashd-import"
 RUN set -eux; \
     export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$CARGO_HOME=/cargo"; \
     cargo build --release --locked \
-      --bin zallet --no-default-features --features "${FEATURES}"; \
+      --manifest-path "backends/${BACKEND}/Cargo.toml" \
+      --bin "zallet-${BACKEND}" --features "${FEATURES}"; \
+    # The user-facing `zallet` command is the launcher (root workspace); it
+    # dispatches to the backend binary installed next to it.
+    cargo build --release --locked --bin zallet; \
     install -D -m0755 target/release/zallet /out/zallet; \
+    install -D -m0755 "backends/${BACKEND}/target/release/zallet-${BACKEND}" "/out/zallet-${BACKEND}"; \
     # Collect the build.rs-generated share tree (completions, manpages,
     # debian-copyright), matching the StageX export layout where present.
-    REL="target/release"; \
+    REL="backends/${BACKEND}/target/release"; \
     mkdir -p /out/usr/local/share/zallet; \
     for d in completions manpages; do \
       [ -d "$REL/$d" ] && cp -a "$REL/$d" /out/usr/local/share/zallet/ || true; \
@@ -95,7 +113,9 @@ RUN set -eux; \
 # --- Stage 2: export (parity with Dockerfile.stagex) ------------------------
 # Binary at the root for easy extraction; full share tree alongside it.
 FROM scratch AS export
+ARG BACKEND
 COPY --from=builder /out/zallet /zallet
+COPY --from=builder /out/zallet-${BACKEND} /zallet-${BACKEND}
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 
 # --- Stage 3: minimal runtime -----------------------------------------------
@@ -104,6 +124,7 @@ COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 # a static-musl binary that can live on scratch; this convenience image trades
 # that for a standard, easy-to-extend base. Digest-pinned for reproducibility.
 FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
+ARG BACKEND
 # --shadow-time + dropping the apt/dpkg/ldconfig caches keeps the layer free of
 # wall-clock timestamps that would otherwise drift the image digest day to day.
 # ca-certificates is version-pinned to the digest-pinned base's snapshot.
@@ -113,6 +134,7 @@ RUN apt-get update \
     && useradd --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin zallet \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 COPY --from=builder /out/zallet /usr/local/bin/zallet
+COPY --from=builder /out/zallet-${BACKEND} /usr/local/bin/zallet-${BACKEND}
 COPY --from=builder /out/usr/local/share/zallet /usr/local/share/zallet
 USER 1000:1000
 WORKDIR /var/lib/zallet

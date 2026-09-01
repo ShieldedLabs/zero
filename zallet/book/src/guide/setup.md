@@ -45,26 +45,49 @@ zebra_state_path = "/path/to/zebrad/state/cache"
 bind = ["127.0.0.1:SOMEPORT"]
 ```
 
+> **Security note:** Zallet's own JSON-RPC interface is served over plaintext
+> HTTP. The HTTP Basic authentication it uses does not encrypt anything: an
+> observer on the network path can read the RPC credentials, as well as any
+> wallet passphrase sent to `walletpassphrase`, and replay them — including
+> against fund-moving methods such as `z_sendmany`. Always keep `rpc.bind` on a
+> loopback address (as in the example above). For remote access, use an
+> authenticated, encrypted tunnel to the wallet host, such as SSH port
+> forwarding (`ssh -L 28232:127.0.0.1:28232 wallet-host`) or a VPN. Zallet
+> refuses to start with a non-loopback `rpc.bind` unless you explicitly opt in
+> with `rpc.allow_insecure_remote_bind = true`, which is unsafe on any network
+> path you do not fully trust.
+
 In particular, you currently need to configure the `[indexer]` section to point
 at your full node's JSON-RPC endpoint. The relevant config options in that
 section are:
 - `validator_address` (if not running on localhost at the default port)
-- `validator_cookie_auth = true` and `validator_cookie_path` (if using cookie
-  auth)
+- `validator_cookie_path` (if using cookie authentication): set it to your
+  full node's cookie file. Setting this path is what enables cookie auth;
+  there is no separate on/off flag.
 - `validator_user` and `validator_password` (if using basic auth)
+
+Both the default `zebra` backend and the `zaino` backend use these `[indexer]`
+settings to reach the full node over JSON-RPC. The `zebra` backend reads chain
+state directly from a co-located `zebrad` (see below) — including non-best-chain
+(side-chain) blocks and transactions, which `zebrad`'s local state tracks — so
+it uses JSON-RPC only for the mempool and transaction submission. The `zaino`
+backend uses JSON-RPC for **all** chain data, unless you also configure
+[`[indexer.read_state_service]`](#reading-chain-state-from-a-local-zebrad).
 
 ### Reading chain state from a local zebrad
 
 Zallet supports two chain backends that determine how it reads chain state: the default
-`zebra-state` backend and the `zaino` backend. The backend is selected at compile time;
-see [Choosing a chain backend](installation/README.md#choosing-a-chain-backend) for the
-comparison and for how to build or run with each one.
+`zebra` backend and the `zaino` backend. The backend is selected at runtime by the
+config file's top-level `backend` key, which the `zallet` launcher uses to dispatch to
+the matching backend binary; see
+[Choosing a chain backend](installation/README.md#choosing-a-chain-backend) for the
+comparison and for how to run each one.
 
 Zallet can read finalized chain state directly from a co-located `zebrad`'s state
 database (opened read-only), rather than fetching every block over JSON-RPC. This is
 enabled by the `[indexer.read_state_service]` section.
 
-The default `zebra-state` backend **requires** this section; without one, `zallet
+The default `zebra` backend **requires** this section; without one, `zallet
 start` fails with:
 
 ```
@@ -99,15 +122,16 @@ zebra_state_path = "/home/<username>/.cache/zebra"
 
 Notes:
 - The JSON-RPC `[indexer]` settings above are still required: they are used for the
-  mempool, transaction submission, and non-best-chain block reads.
+  mempool and transaction submission.
 - `zebrad` must be running on the **same machine** (Zallet reads its state files
   directly), built with the `indexer` feature, and configured with an
   `indexer_listen_addr`.
 - zebrad's on-disk state format must match Zallet's `zebra-state` version; a
   mismatch fails fast with a "no zebra-state v… database found" error rather than
   silently creating an empty database.
-- Reading state this way does not support regtest; use the JSON-RPC `zaino` backend
-  (without this section) for regtest.
+- Regtest is supported: the backend builds a Zebra Regtest network from the wallet's
+  configured `regtest_nuparams`, so it interprets zebrad's state under matching
+  consensus rules.
 
 If you have an existing `zcash.conf`, you can use it as a starting point:
 ```
@@ -136,8 +160,9 @@ required):
   Confirm passphrase:
   Public key: age1...
   ```
-  In non-interactive contexts, the passphrase is read from the
-  `ZALLET_IDENTITY_PASSPHRASE` environment variable instead of prompting.
+  In non-interactive contexts, pass `--passphrase-file` to read the
+  passphrase from a pipe, file descriptor, or standard input (`-`) instead
+  of prompting.
 
 > [Reference](../cli/generate-encryption-identity.md)
 

@@ -4,3 +4,4 @@ The `zallet` command-line tool comes bundled with a few commands that are specif
 investigating and repairing broken wallet states:
 
 - [`zallet repair truncate-wallet`](truncate-wallet.md)
+- [`zallet repair check-witnesses`](check-witnesses.md)

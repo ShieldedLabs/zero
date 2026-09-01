@@ -4,6 +4,12 @@
 # (zallet/book/src/guide/setup.md in this repo), which currently requires the
 # empty sections below to be present.
 
+# Since beta.3 the `zallet` command is a launcher that execs the backend
+# binary this top-level key names; the image ships only zallet-zaino (see
+# BACKEND=zaino in docker-compose.build.yml), and without this the launcher
+# dispatches to the default zebra backend and dies on the missing binary.
+backend = "zaino"
+
 [builder.limits]
 
 [consensus]
@@ -44,6 +50,11 @@ require_backup = false
 # it distinct from Zebra's node RPC on 8232 in these docs; your clients can
 # still reach it on 8232 via the host mapping, see docker-compose.yml).
 bind = ["0.0.0.0:28232"]
+# Zallet >= beta.3 refuses a plaintext non-loopback bind without this opt-in.
+# Here the bind is only reachable on the private compose network (no host
+# port is published by default), the same exposure Zebra's 8232 has in this
+# stack, and every request still needs the HTTP basic credentials below.
+allow_insecure_remote_bind = true
 
 # CHANGE the password. Every request must authenticate (HTTP basic); with no
 # entry here, nothing can connect at all. To use a hashed password instead of

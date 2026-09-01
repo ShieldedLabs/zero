@@ -4,9 +4,14 @@ on:
   pull_request:
   push:
     branches: main
-  merge_group:
 
 permissions: {}
+
+# Cancel superseded runs: a fresh push to a PR aborts the PR's in-flight run.
+# `main` pushes are never cancelled, so every landed commit is fully tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test-msrv-required:
@@ -31,20 +36,80 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # The `zaino` and `zebra-state` chain backends are mutually exclusive, so each is
-      # tested separately rather than via `--all-features`.
+      # Each chain backend lives in its own workspace with its own lockfile
+      # (zcash/zallet#540), so each is tested separately alongside the shared
+      # zallet-core workspace.
+      #
+      # The lockfiles may deliberately diverge on the zebra-*/zaino-* trees,
+      # but crates touching the shared wallet database must stay in lockstep.
+      - name: Check wallet-critical dependency lockstep
+        run: ./utils/check-lockstep.sh
+      # Exercise the lockfile-sync helper end to end: it regenerates every
+      # workspace lockfile from its manifest, so on an in-lockstep tree it must be
+      # a no-op. A non-empty diff means the committed lockfiles drifted from what
+      # the manifests resolve to.
+      - name: Verify workspace lockfiles are in sync with the manifests
+        run: |
+          ./utils/sync-lockfiles.sh
+          git diff --exit-code
+      - name: Run tests (zallet-core)
+        run: >
+          cargo test
+          --workspace
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Run tests (zaino backend)
         run: >
           cargo test
-          --workspace
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --manifest-path backends/zaino/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Run tests (zebra-state backend)
         run: >
           cargo test
-          --workspace
-          --no-default-features
-          --features zebra-state,zcashd-import,rpc-cli,tokio-console
+          --manifest-path backends/zebra/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
+      # End-to-end check of the `zallet` launcher: config-driven dispatch to the
+      # backend binaries, and the backend binaries' own backend-key validation.
+      - name: Launcher dispatch smoke test
+        run: |
+          cargo build --bin zallet
+          cargo build --manifest-path backends/zebra/Cargo.toml --bin zallet-zebra
+          cargo build --manifest-path backends/zaino/Cargo.toml --bin zallet-zaino
+          bindir="$(mktemp -d)"
+          datadir="$(mktemp -d)"
+          cp target/debug/zallet "$bindir/"
+          cp backends/zebra/target/debug/zallet-zebra "$bindir/"
+
+          # No config file: the launcher dispatches to the default (zebra-state)
+          # backend, passing arguments through.
+          "$bindir/zallet" --datadir "$datadir" --version
+
+          # Generate a real config through the launcher (also exercises subcommand
+          # and flag passthrough), then point it at the zaino backend. The key must
+          # be prepended: top-level TOML keys precede the first [section] header.
+          "$bindir/zallet" --datadir "$datadir" example-config \
+            -o "$datadir/zallet.toml" \
+            --this-is-beta-code-and-you-will-need-to-recreate-the-example-later
+          sed -i '1i backend = "zaino"' "$datadir/zallet.toml"
+
+          # backend = "zaino" maps to the zallet-zaino binary: with the binary
+          # absent, the launcher must fail and name what it looked for.
+          if out=$("$bindir/zallet" --datadir "$datadir" --version 2>&1); then
+            echo "expected dispatch to a missing zallet-zaino to fail"; exit 1
+          fi
+          echo "$out" | grep -q "zallet-zaino" || { echo "error did not name zallet-zaino: $out"; exit 1; }
+
+          # With the binary present, the same invocation succeeds.
+          cp backends/zaino/target/debug/zallet-zaino "$bindir/"
+          "$bindir/zallet" --datadir "$datadir" --version
+
+          # Belt-and-braces: a backend binary invoked directly against a config
+          # that names the other backend refuses to run.
+          if out=$("$bindir/zallet-zebra" --datadir "$datadir" example-config -o - \
+            --this-is-beta-code-and-you-will-need-to-recreate-the-example-later 2>&1); then
+            echo "expected zallet-zebra to reject a backend=zaino config"; exit 1
+          fi
+          echo "$out" | grep -q "provides the 'zebra' backend" \
+            || { echo "unexpected mismatch error: $out"; exit 1; }
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -89,14 +154,19 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # Cross-platform / NU7 / merchant_terminal coverage tracks the default (`zaino`)
-      # backend; the `zebra-state` backend is Linux-only and covered by `test-msrv-required`.
-      - name: Run tests
+      # Cross-platform / NU7 / merchant_terminal coverage tracks zallet-core and the
+      # zaino backend; the `zebra-state` backend is Linux-only and covered by
+      # `test-msrv-required`.
+      - name: Run tests (zallet-core)
         run: >
           cargo test
           --workspace
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Run tests (zaino backend)
+        run: >
+          cargo test
+          --manifest-path backends/zaino/Cargo.toml
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -110,64 +180,41 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         id: toolchain
       - run: rustup override set ${RUST_TOOLCHAIN}
         shell: bash
         env:
           RUST_TOOLCHAIN: ${{steps.toolchain.outputs.name}}
-      - name: Remove lockfile to build with latest dependencies
-        run: rm Cargo.lock
-      - name: Build crates (zaino backend)
+      - name: Remove lockfiles to build with latest dependencies
+        # Multi-path rm requires bash: the Windows default shell (pwsh) aliases
+        # `rm` to Remove-Item, which rejects multiple positional paths.
+        shell: bash
+        run: rm Cargo.lock backends/zebra/Cargo.lock backends/zaino/Cargo.lock
+      - name: Build crates (zallet-core)
         run: >
           cargo build
           --workspace
           --all-targets
-          --no-default-features
-          --features zaino,zcashd-import,rpc-cli,tokio-console
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Build crates (zaino backend)
+        run: >
+          cargo build
+          --manifest-path backends/zaino/Cargo.toml
+          --all-targets
+          --features zcashd-import,rpc-cli,tokio-console
       - name: Build crates (zebra-state backend)
         if: runner.os == 'Linux'
         run: >
           cargo build
-          --workspace
+          --manifest-path backends/zebra/Cargo.toml
           --all-targets
-          --no-default-features
-          --features zebra-state,zcashd-import,rpc-cli,tokio-console
-      - name: Verify working directory is clean (excluding lockfile)
-        run: git diff --exit-code ':!Cargo.lock'
-
-  trigger-integration:
-    name: Trigger integration tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Generate app token
-        id: app-token
-        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
-        with:
-          app-id: ${{ secrets.DISPATCH_APP_ID }}
-          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
-          owner: zcash
-          repositories: integration-tests
-
-      - name: Get requested test branch, if any
-        id: test-branch
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          TEST_SHA=$(gh pr -R zcash/zallet list --search "${HEAD_SHA}" --json body | jq '.[0].body' | sed '/[^ ]ZIT-Revision/!d' | sed -E 's/.*ZIT-Revision: ([^\\]*)\\.*/\1/')
-          echo "test_sha=${TEST_SHA}" >> $GITHUB_OUTPUT
-
-      - name: Trigger integration tests
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TEST_SHA: ${{ steps.test-branch.outputs.test_sha }}
-        run: >
-          gh api repos/zcash/integration-tests/dispatches
-          --field event_type="zallet-interop-request"
-          --field client_payload[sha]="$GITHUB_SHA"
-          --field client_payload[test_sha]="${TEST_SHA}"
+          --features zcashd-import,rpc-cli,tokio-console
+      - name: Verify working directory is clean (excluding lockfiles)
+        # The `--` is load-bearing: the deleted lockfiles are not regenerated on
+        # platforms that skip a backend build, and git fatals on a pathspec for
+        # a nonexistent path unless the paths are `--`-separated.
+        run: git diff --exit-code -- ':!Cargo.lock' ':!backends/zebra/Cargo.lock' ':!backends/zaino/Cargo.lock'
 
   required-checks:
     name: Required status checks have passed
@@ -179,4 +226,6 @@ jobs:
     steps:
       - name: Determine whether all required-pass steps succeeded
         run: |
-          echo '${{ toJSON(needs) }}' | jq -e '[ .[] | .result == "success" ] | all'
+          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" ] | all'
+        env:
+          NEEDS: ${{ toJSON(needs) }}
