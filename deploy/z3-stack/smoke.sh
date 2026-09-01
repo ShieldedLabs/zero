@@ -246,6 +246,10 @@ fi
 # promptly with well-formed results (the v11 dust sweep hung ~10 minutes on a
 # filtered call), and a bad filter address is a clean error. Fresh wallet,
 # unsynced chain: the contract under test is shape and latency, not content.
+# Since zallet beta.3, balance/spend RPCs are sync-gated: while the wallet
+# trails the node tip they answer a well-defined "still catching up" error
+# instead of empty results. A mainnet smoke wallet is always behind, so each
+# listing probe accepts either shape; both prove a prompt, live RPC.
 # Public test constant (regtest/testnet-derived pubkey; the mainnet encoding
 # of its address is derived by the wallet on import).
 pubkey="0220f133a0751f6a70ce2dc506da68891b827296a0b13fb7883ceea25f7926f5d5"
@@ -265,20 +269,30 @@ if [ -n "$account" ]; then
   else
     fail "watch-only import failed: $imported"
   fi
-  if zallet_rpc z_listunspent | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' 2>/dev/null; then
+  out=$(zallet_rpc z_listunspent 2>&1) || true
+  if printf '%s' "$out" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' 2>/dev/null; then
     pass "unfiltered z_listunspent is a prompt JSON array"
+  elif contains "$out" "still catching up"; then
+    pass "unfiltered z_listunspent answers promptly (sync-gated: catching up)"
   else
-    fail "unfiltered z_listunspent malformed or slow"
+    fail "unfiltered z_listunspent malformed or slow: $out"
   fi
-  if [ -n "$address" ] && zallet_rpc z_listunspent 1 9999999 true "[\"$address\"]" \
-      | python3 -c 'import json,sys; assert json.load(sys.stdin) == []' 2>/dev/null; then
+  out=""
+  [ -n "$address" ] && { out=$(zallet_rpc z_listunspent 1 9999999 true "[\"$address\"]" 2>&1) || true; }
+  if printf '%s' "$out" | python3 -c 'import json,sys; assert json.load(sys.stdin) == []' 2>/dev/null; then
     pass "filtered z_listunspent answers promptly and empty"
+  elif contains "$out" "still catching up"; then
+    pass "filtered z_listunspent answers promptly (sync-gated: catching up)"
   else
-    fail "filtered z_listunspent malformed or slow"
+    fail "filtered z_listunspent malformed or slow: $out"
   fi
   out=$(zallet_rpc z_listunspent 1 9999999 true '["not-an-address"]' 2>&1) || true
   if contains "$out" "Not a valid Zcash address"; then
     pass "invalid filter address is a clean error"
+  elif contains "$out" "still catching up"; then
+    # The gate answers before address validation; the clean-error contract
+    # is regtest's business (qa/regtest-harness `filter` scenario).
+    pass "invalid filter address answers promptly (sync-gated: catching up)"
   else
     fail "invalid filter address: expected clean error, got: $out"
   fi

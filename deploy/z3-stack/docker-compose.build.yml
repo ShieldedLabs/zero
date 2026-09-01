@@ -37,4 +37,5 @@ services:
         # zaino backend: chain data over JSON-RPC (validator_address in
         # zallet.toml). The default zebra-state backend would need zebrad's
         # indexer gRPC and direct read access to zebra's state volume.
-        FEATURES: "zaino,rpc-cli,zcashd-import"
+        BACKEND: "zaino"
+        FEATURES: "rpc-cli,zcashd-import"
