@@ -17,7 +17,8 @@ scripts/wasm-check.sh wasm32-wasip1    # WASI
 
 Those only prove the crates *compile*. For proof that the wallet database also
 *runs* on the target — migrations applied, queries executed, `rarray` working —
-see `zero-wasm-smoke/`.
+and for what proving costs, see `zero-wasm-smoke/`. For whether a threaded build
+is reachable, see `scripts/wasm-atomics-check.sh`.
 
 The script builds each crate/feature combination through a synthetic consumer
 crate rather than building the workspace, because `cargo build --workspace`
@@ -208,7 +209,9 @@ specific and should be understood before it is committed to:
   `std` with `-C target-feature=+atomics,+bulk-memory,+mutable-globals`, which is
   nightly-only, and its own docs recommend pinning an exact nightly. That
   conflicts with this workspace's stable `rust-toolchain.toml` pin, so the
-  threaded build has to be a separate toolchain in a separate crate.
+  threaded build has to be a separate toolchain in a separate crate. It does
+  build: see `scripts/wasm-atomics-check.sh`, which covers the whole stack
+  including `sqlite-wasm-rs`, and passes on nightly 1.95.0.
 - **You ride nightly regressions.** In August 2025 a `std` refactor broke the
   atomics build outright (`cannot find function current_os_id in module imp`,
   rust-lang/rust#145101) until rust-lang/rust#145096 landed. That is the failure
@@ -295,7 +298,18 @@ verified above or a direct consequence of something verified above.
    (item 8) — the only lever that moves both numbers; or move proving off-device,
    which for Orchard means handing out the witness and is a privacy decision, not
    an engineering one.
-8. **Threads, last and optional.** See [Threads](#threads). Everything above
-   works single-threaded on the stable toolchain; adding `wasm-bindgen-rayon`
-   means a second, nightly toolchain and cross-origin isolation, and the SQLite
-   layer stays single-threaded either way.
+8. **Threads.** No longer optional, given item 7 — it is the only lever that
+   moves both Orchard numbers. The build risk is now retired:
+   `scripts/wasm-atomics-check.sh` rebuilds `std` with
+   `+atomics,+bulk-memory,+mutable-globals` and compiles the **whole** stack that
+   way — `orchard` with `multicore`, `rayon`, `wasm-bindgen-rayon`, and
+   `zcash_client_sqlite` with its prebuilt `sqlite-wasm-rs` SQLite. It passes on
+   nightly 1.95.0 (2026-01-25). That was the piece most likely to fail: a
+   non-atomics object cannot link into an atomics module.
+
+   What is left is runtime, and it needs a browser: `wasm-bindgen-rayon` supports
+   only `--target web`, its pool is Web Workers, and `SharedArrayBuffer` needs
+   cross-origin isolation. Measuring a speedup needs a browser driver in CI —
+   the same gap that blocks the OPFS half of item 4. Note the SQLite layer stays
+   single-threaded regardless; threads buy proving and trial decryption, not
+   storage.
