@@ -176,9 +176,27 @@ unsupported and not usable as a wallet storage backend.
 ## Transport
 
 `lightwalletd-tonic` compiles for wasm only because tonic's `transport` feature
-stays off — there is no HTTP/2 socket in a browser. You need either
-`tonic-web-wasm-client` against a lightwalletd (or Zaino) fronted by a grpc-web
-proxy, or your own `fetch`-based transport implementing tonic's service trait.
+stays off — there is no HTTP/2 socket in a browser. The client side is settled on
+this branch: [`tonic-web-wasm-client`] 0.9 (which targets tonic 0.14, the version
+this workspace pins) satisfies every bound `sync::run` imposes on its transport,
+including the `Send + 'static` requirements on the response body that a wasm
+transport usually cannot meet. `zero-wasm-smoke::sync_once` names `sync::run`
+with concrete wasm types, so that stays true or the build breaks.
+
+[`tonic-web-wasm-client`]: https://crates.io/crates/tonic-web-wasm-client
+
+**The open question is server-side, and it is an infrastructure decision.**
+`tonic-web-wasm-client` speaks gRPC-Web; plain gRPC over HTTP/2 will not answer
+it. So the lightwalletd or Zaino the wallet talks to has to be fronted by a
+gRPC-Web proxy (Envoy, or `grpcwebproxy`), or grow a server-side `tonic-web`
+layer. Writing a bespoke `fetch`-based transport instead does not avoid this —
+it is the same wire protocol either way, just reimplemented.
+
+`sync::run` also needs a `BlockCache`, and `zcash_client_backend` ships no
+implementation of that trait. `zero-wasm-smoke::MemoryBlockCache` is one, and
+in-memory is the right shape for a browser: compact blocks are scanned and
+discarded, so there is nothing worth persisting. Note the trait requires
+`Send + Sync`, so a cache holding JS values directly will not satisfy it.
 
 ## Threads
 
@@ -238,10 +256,11 @@ verified above or a direct consequence of something verified above.
    `sahpool`/OPFS inside a dedicated Worker, with the wasm module instantiated
    there so the main thread never blocks. That is browser-only and needs a
    browser driver in CI, which this machine does not have.
-5. **Transport.** `sync::run` is generic over `ChT: GrpcService<TonicBody>`, so
-   this is a matter of supplying an implementation — `tonic-web-wasm-client`
-   against a lightwalletd or Zaino behind a grpc-web proxy, or a `fetch`-based
-   service of your own. No changes to librustzcash.
+5. ~~**Transport.**~~ Client side done: `tonic-web-wasm-client` satisfies
+   `sync::run`'s bounds, and `zero-wasm-smoke` holds the instantiation plus a
+   `BlockCache` implementation. **Still needs a decision from you:** the server
+   must speak gRPC-Web, so lightwalletd/Zaino needs a proxy in front or a
+   `tonic-web` layer. Nothing has been run against a live endpoint.
 6. **Parameter delivery.** Fetch the ~47 MiB of Sapling parameters and hand them
    to `LocalTxProver::from_bytes` (see [Gotchas](#gotchas)); cache them in
    IndexedDB or the Cache API so it is a one-time cost.

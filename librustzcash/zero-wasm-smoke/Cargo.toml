@@ -13,16 +13,23 @@ bench = false
 doctest = false
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+async-trait = "0.1"
 js-sys = "0.3"
 rand_chacha = "0.3"
 rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
 secrecy = "0.8"
 sqlite-wasm-rs = "0.5"
+tonic-web-wasm-client = "0.9"
 uuid = { version = "1", features = ["js"] }
 wasm-bindgen = "0.2"
 # `default-features = false` matters: the default feature set of these crates turns on
 # `multicore`, and `halo2_proofs` hard-errors on wasm32 without atomics.
-zcash_client_backend = { workspace = true, features = ["orchard", "transparent-inputs"] }
+zcash_client_backend = { workspace = true, features = [
+    "lightwalletd-tonic",
+    "orchard",
+    "sync",
+    "transparent-inputs",
+] }
 zcash_client_sqlite = { path = "../zcash_client_sqlite", default-features = false, features = ["orchard", "transparent-inputs"] }
 zcash_protocol.workspace = true
 

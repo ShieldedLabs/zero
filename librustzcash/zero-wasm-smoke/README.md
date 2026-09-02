@@ -11,6 +11,13 @@ registered before a database can be opened, there is exactly one connection, and
 is thread-safe. Separately, `std::time::SystemTime::now` panics on
 `wasm32-unknown-unknown`, so `zcash_client_sqlite::util::SystemClock` cannot be used.
 
+It also pins down the transport: `sync_once` names `zcash_client_backend::sync::run` with
+`tonic_web_wasm_client::Client`, `MemoryBlockCache` and `WalletDb`, so if any of
+`sync::run`'s bounds stop being satisfiable on wasm — the `Send + 'static` requirements on
+the transport's response body are the fragile ones — this crate stops compiling. No sync is
+run: that needs a gRPC-Web endpoint, and reaching for a public one would make this a live
+network dependency rather than a test.
+
 This crate exercises the path a browser wallet actually takes:
 
 1. register a VFS,

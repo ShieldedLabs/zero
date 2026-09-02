@@ -78,3 +78,93 @@ fn js_clock_reads_a_plausible_time() {
     let earliest = UNIX_EPOCH + Duration::from_secs(1_577_836_800);
     assert!(JsClock.now() > earliest);
 }
+
+/// The gRPC-Web client constructs, and the sync state machine's bounds are satisfiable
+/// with it.
+///
+/// The type-level half of this is checked at compile time by `zero_wasm_smoke::sync_once`,
+/// which names `sync::run` with these concrete types. `sync::run`'s bounds require the
+/// transport's response body to be `Send + 'static`, which is where a wasm transport
+/// usually fails to fit; `tonic_web_wasm_client` does fit. What is not checked anywhere is
+/// that a sync actually completes — that needs a gRPC-Web endpoint to talk to.
+#[wasm_bindgen_test]
+fn grpc_web_client_constructs() {
+    let _client = zero_wasm_smoke::connect("https://example.invalid".to_owned());
+}
+
+/// The in-memory block cache honours the `BlockCache` contract.
+#[wasm_bindgen_test]
+async fn block_cache_round_trips() {
+    use zcash_client_backend::{
+        data_api::{
+            chain::{BlockCache, BlockSource},
+            scanning::{ScanPriority, ScanRange},
+        },
+        proto::compact_formats::CompactBlock,
+    };
+    use zcash_protocol::consensus::BlockHeight;
+    use zero_wasm_smoke::MemoryBlockCache;
+
+    let block = |height: u64| CompactBlock {
+        height,
+        ..Default::default()
+    };
+    let range = |start: u32, end: u32| {
+        ScanRange::from_parts(
+            BlockHeight::from_u32(start)..BlockHeight::from_u32(end),
+            ScanPriority::Historic,
+        )
+    };
+
+    let cache = MemoryBlockCache::new();
+    assert!(cache.is_empty());
+    assert_eq!(cache.get_tip_height(None).unwrap(), None);
+
+    // Inserted out of order on purpose: the trait permits non-contiguous inserts, and
+    // reads must come back ordered regardless.
+    cache
+        .insert(vec![block(3), block(1), block(2)])
+        .await
+        .unwrap();
+    assert_eq!(cache.len(), 3);
+    assert_eq!(
+        cache.get_tip_height(None).unwrap(),
+        Some(BlockHeight::from_u32(3))
+    );
+    assert_eq!(
+        cache.get_tip_height(Some(&range(1, 3))).unwrap(),
+        Some(BlockHeight::from_u32(2)),
+        "the range end is exclusive"
+    );
+
+    let read: Vec<u64> = cache
+        .read(&range(1, 4))
+        .await
+        .unwrap()
+        .iter()
+        .map(|b| b.height)
+        .collect();
+    assert_eq!(read, vec![1, 2, 3]);
+
+    // `with_blocks` is what `scan_cached_blocks` drives, and it must yield ascending
+    // heights from `from_height`, honouring `limit`.
+    let mut seen = Vec::new();
+    cache
+        .with_blocks::<_, ()>(Some(BlockHeight::from_u32(2)), Some(1), |b| {
+            seen.push(b.height);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, vec![2]);
+
+    cache.truncate(BlockHeight::from_u32(2)).await.unwrap();
+    assert_eq!(cache.len(), 2);
+    assert_eq!(
+        cache.get_tip_height(None).unwrap(),
+        Some(BlockHeight::from_u32(2))
+    );
+
+    cache.delete(range(1, 3)).await.unwrap();
+    assert!(cache.is_empty());
+    assert_eq!(cache.get_tip_height(None).unwrap(), None);
+}

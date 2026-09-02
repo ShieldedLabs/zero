@@ -10,8 +10,51 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand_chacha::{rand_core::SeedableRng, ChaChaRng};
 use rusqlite::Connection;
+use zcash_client_backend::{
+    proto::service::compact_tx_streamer_client::CompactTxStreamerClient, sync,
+};
 use zcash_client_sqlite::{util::Clock, WalletDb};
 use zcash_protocol::consensus::Network;
+
+pub mod block_cache;
+
+pub use block_cache::MemoryBlockCache;
+
+/// The wallet database type this harness uses.
+pub type SmokeWalletDb = WalletDb<Connection, Network, JsClock, ChaChaRng>;
+
+/// The gRPC transport a browser wallet uses.
+///
+/// `tonic`'s own transport needs an HTTP/2 socket, which a browser does not have, so
+/// `lightwalletd-tonic` is enabled without `lightwalletd-tonic-transport` and the client is
+/// built over `fetch` instead. [`tonic_web_wasm_client::Client`] speaks gRPC-Web, so the
+/// server must too: either `lightwalletd`/Zaino behind a gRPC-Web proxy, or a server-side
+/// `tonic-web` layer. Plain gRPC over HTTP/2 will not answer it.
+pub type SmokeTransport = tonic_web_wasm_client::Client;
+
+/// Connects to a gRPC-Web endpoint.
+pub fn connect(base_url: String) -> CompactTxStreamerClient<SmokeTransport> {
+    CompactTxStreamerClient::new(tonic_web_wasm_client::Client::new(base_url))
+}
+
+/// Runs one pass of the sync state machine.
+///
+/// This exists to pin down that [`sync::run`]'s bounds are all satisfiable on wasm with a
+/// real transport — the `Send + 'static` requirements on the response body are the ones
+/// that most often are not. It is not exercised at runtime: there is no gRPC-Web endpoint
+/// to talk to in the test environment, and reaching out to a public one would be a live
+/// network dependency rather than a test.
+pub async fn sync_once(
+    client: &mut CompactTxStreamerClient<SmokeTransport>,
+    params: &Network,
+    cache: &MemoryBlockCache,
+    db: &mut SmokeWalletDb,
+    batch_size: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sync::run(client, params, cache, db, batch_size)
+        .await
+        .map_err(|e| format!("sync failed: {e:?}").into())
+}
 
 /// A [`Clock`] backed by JavaScript's `Date.now()`.
 ///
