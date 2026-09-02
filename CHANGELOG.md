@@ -6,13 +6,71 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
-## Unreleased
+## v27 - 2026-09-02
+
+### Performance
+
+- Zebra block verification reuses transparent script verification from mempool
+  admission (#45): a transaction verified on entry to the mempool skips the
+  interpreter, ZIP-244 sighash, and signature checks when the block that mines
+  it is verified, keyed by `WtxId` so an authorizing-data twin misses.
+- Zebra block-path UTXO lookups overlap up to 64-way instead of awaiting one
+  state round trip per input (#46).
+- Measured together on a full-block shape of 7 transactions with 1000
+  transparent inputs each, state serving lookups under 1ms of latency: 2.9 s
+  to 59 ms for a block whose transactions were mempool-verified, and the
+  lookup wall alone drops 2.8 s to 0.37 s cold (#49 has the full matrix).
+
+### Added
+
+- A worst-case transaction verification benchmark for zebra-consensus (#49),
+  byte-comparable with Zakura's copy of the same benchmark so the two nodes
+  can be A/B measured on identical inputs, plus Zero-only cold/warm cases for
+  the 7x1000 transparent block shape with configurable state latency.
+- CI runs the zebra-consensus criterion benches on every zebra-touching
+  commit and posts timings to the job summary (#48).
+
+### Subtrees
+
+- zallet re-vendored at v0.1.0-beta.3: upstream split the workspace into a
+  `zallet` launcher plus per-backend crates, and our z_listunspent and sync
+  patches moved onto `zallet-core` (#54 carried the deploy fallout: the
+  z3-stack image builds the zaino backend via `BACKEND=zaino`, `zallet.toml`
+  selects it and opts into the non-loopback RPC bind guard, and the smoke
+  probes accept the new sync-gate answer).
+- zaino updated to upstream 0.8.0 (#37).
+- orchard tracks upstream main now that Ironwood ships in 0.15.x;
+  librustzcash and lightwalletd re-vendored and pinned to recorded tags;
+  zcashd build scripts fixed for arm64 macOS (native arch detection, portable
+  bdb, Apple-Silicon crc32).
+
+### zero-indexer
+
+- The shim and hub embed a Nym mixnet driver end to end: the hub publishes
+  its mixnet address and the clearnet submit path is closed, submissions are
+  padded so size stops fingerprinting a migration, and both sides get
+  reproducible StageX builds with attested deploys and a one-command
+  `deploy.sh`.
+- Hardening wave from the external security review: bounded reads, queues,
+  timeouts and fan-out across shim and hub, fail-closed expiries, ordered
+  shutdown, publish-before-serve for queued migrations, and status endpoints
+  (`/nym-status`) so a dead mixnet client stops reading as healthy.
+- The book renames Zeronym to zero-indexer; operator and failover runbooks
+  rewritten from measured behavior.
 
 ### CI
+
 - cargo vet supply-chain gate: every Rust dependency change must land with a
   matching audit or exemption diff under the component's `supply-chain/`
   directory (new stores for zaino and orchard; zebra's and zcashd's brought
   back in sync with their trees; enforced by `cargo-vet.yml`).
+- z3-smoke hardening (#56, #57): third-party actions pinned by commit SHA,
+  `packages: write` scoped to the one job that pushes build cache, and
+  cache-warm-only build legs can no longer redden the stack gate when a
+  registry throttles a cache pull.
+- Copilot reviews commits pushed straight to main, with custom instructions;
+  the zeronym test jobs actually run their suites (including mixnet-driver
+  tests) and the hub reproduce gate runs on push, not only on PRs.
 
 ## v26 - 2026-08-11
 
