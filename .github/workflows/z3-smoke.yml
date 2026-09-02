@@ -54,12 +54,10 @@ on:
     # the gate below does not watch.
     - cron: "17 6 * * 1"
 
-# packages: write is for pushing the GHCR build cache; on fork PRs GitHub
-# forces the token to read-only, which is fine because PR runs write the
-# ephemeral GHA cache instead (see the cache-to expression below).
+# Least privilege by default; the build job alone adds packages: write for
+# its GHCR build-cache push (see that job's permissions block).
 permissions:
   contents: read
-  packages: write
 
 jobs:
   # What the `paths:` filter used to do, for about 20 seconds of a
@@ -189,6 +187,13 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
+    # packages: write is for pushing the GHCR build cache on main, scheduled,
+    # and dispatched runs. PR runs never use it (their cache-to targets the
+    # ephemeral GHA cache; fork PRs get a force-read-only token anyway), and
+    # no other job in this workflow needs it at all.
+    permissions:
+      contents: read
+      packages: write
     # Cache-warm-only legs (nothing downstream consumes their image) must not
     # be able to redden the stack gate: a GHCR throttle on a cache pull held
     # every PR hostage for an afternoon (2026-09-01, zero-zcashd buildcache).
