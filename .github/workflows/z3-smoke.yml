@@ -276,7 +276,9 @@ jobs:
       # github.repository_owner). PR runs (read-only token) write the GHA
       # cache instead of the registry; every run reads both.
       - name: Build ${{ matrix.name }}
-        uses: docker/build-push-action@v7
+        # Pinned by SHA, not tag: this workflow holds packages:write, and a
+        # tag can be moved under it.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         # Step-level so a cache-warm-only leg's check run stays green when a
         # registry throttle breaks its cache pull; the job-level guard alone
         # keeps the gate green but still shows the leg's check red.
