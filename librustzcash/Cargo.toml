@@ -17,6 +17,9 @@ members = [
     "zcash_primitives",
     "zcash_proofs",
     "zcash_transparent",
+    # [zero] @claude Local build of `schemerz-rusqlite` with a widened `rusqlite`
+    # requirement; see zero-vendor/schemerz-rusqlite/README.md.
+    "zero-vendor/schemerz-rusqlite",
 ]
 
 resolver = "2"
@@ -160,7 +163,11 @@ subtle = { version = "2.2.3", default-features = false }
 #   version required for `rusqlite` is a version that is available through CocoaPods.
 rusqlite = { version = "0.37", features = ["bundled"] }
 schemerz = "0.2"
-schemerz-rusqlite = "0.370"
+# [zero] @claude Pointed at the local build in `zero-vendor/`, which widens the
+# `rusqlite` requirement to `>=0.37, <0.40`. Upstream publishes one release per
+# `rusqlite` minor and has not gone past 0.370.0, which would pin this workspace to
+# `rusqlite 0.37` — before the release that added `wasm32-unknown-unknown` support.
+schemerz-rusqlite = { version = "0.390", path = "zero-vendor/schemerz-rusqlite" }
 time = { version = "0.3.22", default-features = false }
 uuid = "1.1"
 

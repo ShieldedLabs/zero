@@ -1,0 +1,26 @@
+# [zero] @claude A local build of the upstream `schemerz-rusqlite` crate that widens
+# its `rusqlite` requirement. See README.md for why this exists and when to delete it.
+[package]
+name = "schemerz-rusqlite"
+version = "0.390.0"
+authors = ["Andrew S. Champion", "Jack Grigg <jack@electriccoin.co>"]
+description = "SQLite3 adapter for the Schemerz database schema migration library"
+readme = "README.md"
+repository = "https://github.com/zcash/schemerz"
+license = "MIT OR Apache-2.0"
+keywords = ["database", "migration", "sqlite", "sql"]
+categories = ["database"]
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+# The upstream releases pin one `rusqlite` minor each (0.370.0 -> rusqlite 0.37), so no
+# published version spans the range this workspace needs to move across. The adapter's
+# source compiles unchanged against every version in this range.
+rusqlite = ">=0.37, <0.40"
+schemerz = "0.2"
+uuid = "1.1"
+
+[dev-dependencies]
+uuid = { version = "1.1", features = ["v4"] }

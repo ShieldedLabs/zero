@@ -129,9 +129,13 @@ stand between here and the bump:
    `rusqlite >=0.36, <0.40`. With that in place `rusqlite 0.39` resolves
    cleanly. See the comment above `arti-client` in the workspace `Cargo.toml`
    for why 0.43 and not the latest.
-2. **`schemerz-rusqlite` has no release past 0.370.0**, which requires
-   rusqlite 0.37. Its 230 lines compile unchanged against rusqlite 0.38, so this
-   is a version bump and a release from `zcash/schemerz`, not a port.
+2. ~~**`schemerz-rusqlite` has no release past 0.370.0.**~~ **Done on this
+   branch.** Upstream publishes one release per `rusqlite` minor and has not gone
+   past 0.370.0, so nothing published spans the range this workspace needs to move
+   across. `zero-vendor/schemerz-rusqlite` is a local build of that release with
+   the requirement widened to `>=0.37, <0.40`; its suite passes against rusqlite
+   0.37, 0.38 and 0.39. Delete it once `zcash/schemerz` publishes a release for
+   the `rusqlite` version this workspace settles on.
 3. **`zcash_client_sqlite` needs a mechanical migration.** Checked against
    rusqlite 0.38 it produces 85 errors across 10 files, every one of them the
    same cause: rusqlite 0.38 removed the `ToSql`/`FromSql` impls for `u64` and
@@ -214,8 +218,10 @@ verified above or a direct consequence of something verified above.
    resolves. Two follow-ups this leaves behind — `cargo vet` audits for the
    bumped crates, and confirming CI runs on the 1.90 toolchain this branch
    pins.
-2. **Release `schemerz-rusqlite` for rusqlite 0.38+** from `zcash/schemerz`.
-   No code changes needed.
+2. ~~**Release `schemerz-rusqlite` for rusqlite 0.38+.**~~ Done locally via
+   `zero-vendor/schemerz-rusqlite`. Still worth asking `zcash/schemerz` for a real
+   release, and reporting the trailing-comma bug that disables its test suite
+   (see that directory's README).
 3. **Migrate `zcash_client_sqlite` off the `u64`/`usize` SQL conversions**
    (85 sites, 10 files) and make `bundled` target-conditional.
 4. **Pick and wire a VFS.** `sahpool`/OPFS inside a dedicated Worker, with the
