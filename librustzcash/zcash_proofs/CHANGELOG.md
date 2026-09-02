@@ -10,6 +10,15 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_proofs` feature flag `prover`, which exposes the `prover` module (and so
+  `LocalTxProver::new` / `LocalTxProver::from_bytes`) without pulling in any means
+  of locating or downloading the parameters. `local-prover` and `bundled-prover`
+  now both imply it, so their behaviour is unchanged. Hosts that obtain the
+  Sapling parameters themselves — notably `wasm32-unknown-unknown`, where
+  `local-prover`'s transitive `home` dependency fails to build — should enable
+  `prover` alone.
+
 ## [0.30.0] - 2026-07-23
 
 ### Changed

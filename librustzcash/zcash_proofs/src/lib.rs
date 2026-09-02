@@ -29,7 +29,10 @@ pub mod circuit;
 mod hashreader;
 pub mod sprout;
 
-#[cfg(any(feature = "local-prover", feature = "bundled-prover"))]
+// [zero] @claude Gated on `prover` rather than on the two features that supply
+// parameters, so a host that obtains them by other means (e.g. over the network, on
+// wasm) can reach `LocalTxProver::from_bytes` without depending on `directories`.
+#[cfg(feature = "prover")]
 pub mod prover;
 
 #[cfg(feature = "download-params")]

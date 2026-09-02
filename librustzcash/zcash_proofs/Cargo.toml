@@ -49,7 +49,7 @@ default = ["local-prover", "multicore"]
 
 ## Bundles the Sapling proving parameters inside the binary, which will increase its size
 ## by around 50 MiB.
-bundled-prover = ["dep:wagyu-zcash-parameters"]
+bundled-prover = ["prover", "dep:wagyu-zcash-parameters"]
 
 ## Enables APIs for determining the default location on the local filesystem for storing
 ## the Sprout and Sapling proving parameters.
@@ -61,7 +61,14 @@ download-params = ["dep:minreq", "directories"]
 
 ## Enables APIs for loading the Sapling proving parameters from the default location on
 ## the local filesystem.
-local-prover = ["directories"]
+local-prover = ["prover", "directories"]
+
+## [zero] @claude Exposes the `prover` module, including
+## `LocalTxProver::{new, from_bytes}`, without pulling in any means of locating or
+## obtaining the parameters. This is what a host that fetches the parameters itself
+## enables: `local-prover` implies `directories`, which depends on the `home` crate,
+## and `home` does not compile for `wasm32-unknown-unknown`.
+prover = []
 
 ## Enables multithreading support for creating proofs.
 multicore = ["bellman/multicore", "zcash_primitives/multicore"]
