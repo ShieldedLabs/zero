@@ -35,6 +35,13 @@ if [ -z "${HOST-}" ]; then
     HOST="$BUILD"
 fi
 
+case "$HOST" in
+    aarch64-apple-darwin*)
+        MACOSX_DEPLOYMENT_TARGET=11.0
+        export MACOSX_DEPLOYMENT_TARGET
+        ;;
+esac
+
 # Allow users to set arbitrary compile flags. Most users will not need this.
 if [ -z "${CONFIGURE_FLAGS-}" ]; then
     # If the user did not set CONFIGURE_FLAGS, then use "--quiet" unless V=1 was given.

@@ -121,5 +121,13 @@ harness = false
 name = "script"
 harness = false
 
+[[bench]]
+name = "utxo_lookup"
+harness = false
+
+[[bench]]
+name = "worst_case_tx_verification"
+harness = false
+
 [lints]
 workspace = true

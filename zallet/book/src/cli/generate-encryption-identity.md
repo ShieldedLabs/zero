@@ -43,15 +43,18 @@ Public key: age1...
 
 With `-p/--passphrase`, the identity is passphrase-encrypted and ASCII-armored. In
 interactive use you are prompted for the passphrase (with confirmation). In non-interactive
-contexts (for example, automated test setup), the passphrase is read from the
-`ZALLET_IDENTITY_PASSPHRASE` environment variable instead:
+contexts (for example, automated test setup), pass `--passphrase-file` to read the first
+line of a file instead. Use `-` for standard input, or a file descriptor such as
+`/dev/fd/3`:
 
 ```
-$ ZALLET_IDENTITY_PASSPHRASE=... zallet -d /path/to/zallet/datadir generate-encryption-identity -p
+$ echo "$PASSPHRASE" | zallet -d /path/to/zallet/datadir generate-encryption-identity -p --passphrase-file -
 Public key: age1...
 ```
 
-The environment variable, when set, is read once and is not persisted by Zallet.
+Command-line arguments and environment variables are visible to other processes on many
+platforms, so the passphrase itself is never accepted through either; prefer a pipe or
+file descriptor over a regular file on disk.
 
 ## Plugins
 

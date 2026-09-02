@@ -138,7 +138,7 @@ jobs:
           prefix-key: v2-release
           workspaces: |
             zebra -> target
-            zallet -> target
+            zallet/backends/zaino -> target
 
       # Release profile: mining, proving, and scanning are compute-bound;
       # debug binaries ran the harness 5-10x slower and widened its
@@ -148,8 +148,11 @@ jobs:
         run: cargo build --release -p zebrad --features internal-miner
 
       - name: Build zallet (zaino backend)
-        working-directory: zallet
-        run: cargo build --release -p zallet --no-default-features --features zaino,rpc-cli,zcashd-import
+        # Since beta.3 each backend is its own workspace under
+        # zallet/backends/ producing a zallet-<name> binary; the harness
+        # drives the backend binary directly (see qa/regtest-harness/run.sh).
+        working-directory: zallet/backends/zaino
+        run: cargo build --release -p zallet-zaino --features rpc-cli,zcashd-import
 
       - name: Cache the golden chain
         uses: actions/cache@v4

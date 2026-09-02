@@ -1,4 +1,32 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.spin]]
+who = "Mark Henderson <henderson.mark@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.9.8 -> 0.9.9"
+notes = "Manifest normalization, changelog, and a double-drop soundness fix in Once::force_into_inner (ManuallyDrop) with tests; no new unsafe surface."
+
+[[trusted.halo2_proofs]]
+criteria = "safe-to-deploy"
+user-id = 1244 # Sean Bowe (ebfull)
+start = "2022-05-10"
+end = "2027-09-01"
+
+[[trusted.orchard]]
+criteria = "safe-to-deploy"
+user-id = 1244 # Sean Bowe (ebfull)
+start = "2022-10-19"
+end = "2027-09-01"
+
+[[trusted.pasta_curves]]
+criteria = "safe-to-deploy"
+user-id = 1244 # Sean Bowe (ebfull)
+start = "2021-09-02"
+end = "2027-09-01"
+
+[[trusted.zcash_note_encryption]]
+criteria = "safe-to-deploy"
+user-id = 169181 # Kris Nuttycombe (nuttycom)
+start = "2023-03-22"
+end = "2027-09-01"

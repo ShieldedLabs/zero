@@ -29,6 +29,34 @@ user-id = 5946
 user-login = "jrmuizel"
 user-name = "Jeff Muizelaar"
 
+[[publisher.halo2_proofs]]
+version = "0.3.5"
+when = "2026-08-03"
+user-id = 1244
+user-login = "ebfull"
+user-name = "Sean Bowe"
+
+[[publisher.orchard]]
+version = "0.15.5"
+when = "2026-08-03"
+user-id = 1244
+user-login = "ebfull"
+user-name = "Sean Bowe"
+
+[[publisher.pasta_curves]]
+version = "0.5.2"
+when = "2026-07-23"
+user-id = 1244
+user-login = "ebfull"
+user-name = "Sean Bowe"
+
+[[publisher.zcash_note_encryption]]
+version = "0.4.2"
+when = "2026-07-11"
+user-id = 169181
+user-login = "nuttycom"
+user-name = "Kris Nuttycombe"
+
 [[audits.bytecode-alliance.wildcard-audits.bumpalo]]
 who = "Nick Fitzgerald <fitzgen@gmail.com>"
 criteria = "safe-to-deploy"
@@ -1531,11 +1559,4 @@ who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
 delta = "0.2.0 -> 0.2.1"
 notes = "No code changes at all."
-aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"
-
-[[audits.zcash.audits.zcash_note_encryption]]
-who = "Kris Nuttycombe <kris@nutty.land>"
-criteria = "safe-to-deploy"
-version = "0.4.1"
-notes = "Additive-only change that exposes the ability to decrypt by pk_d and esk. No functional changes."
 aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"

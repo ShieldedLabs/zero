@@ -626,6 +626,24 @@ fn classify_publish_error(message: &str) -> Publish {
         || m.contains("already known")
         || m.contains("already in mempool")
         || m.contains("duplicate")
+        // ZEBRA'S VOCABULARY, which shares none of zcashd's spellings. Note in
+        // particular that "already exists in mempool" does NOT contain the
+        // substring "already in mempool" -- the two look alike and match
+        // differently, which is how this was missed.
+        //
+        // These had to land with the Retryable default, not after it. The
+        // review is explicit: "Applying (1) without (2) converts silent
+        // destruction into permanent republication." We shipped (1) in 8fb91b9
+        // and left this, so behind a zebra-backed indexer an already-published
+        // transaction fell through to Retryable and was re-broadcast on every
+        // flush -- bounded to MAX_REQUEUE_ATTEMPTS by d700e90, then recorded as
+        // a migration that "exists nowhere else", which it does. Two costs: the
+        // repeated per-transaction timing signal this branch exists to prevent,
+        // and an error-level report of loss that never happened.
+        || m.contains("already exists in mempool")
+        || m.contains("already queued for download")
+        || m.contains("committed to the best chain")
+        || m.contains("already in state")
     {
         Publish::AlreadyKnown
     } else {
@@ -695,6 +713,43 @@ mod tests {
             classify_publish_error("txn-already-in-mempool"),
             Publish::AlreadyKnown
         );
+    }
+
+    #[test]
+    fn zebras_already_known_vocabulary_is_recognised_too() {
+        // The two vocabularies share NO spellings, and one pair looks alike
+        // while matching differently: "already exists in mempool" does not
+        // contain "already in mempool". That near-miss is how a zebra-backed
+        // hub fell through to Retryable.
+        //
+        // This had to land with the Retryable default rather than after it.
+        // With the default inverted and these missing, an already-published
+        // transaction was re-broadcast on every flush until the attempt cap and
+        // then reported as lost -- the review's "converts silent destruction
+        // into permanent republication", bounded but not avoided.
+        for message in [
+            "transaction already exists in mempool",
+            "already queued for download",
+            "transaction committed to the best chain",
+            "already in state",
+        ] {
+            assert_eq!(
+                classify_publish_error(message),
+                Publish::AlreadyKnown,
+                "zebra reports success as {message:?}; treating it as anything else                  republishes a transaction that is already published"
+            );
+        }
+    }
+
+    #[test]
+    fn a_consensus_rejection_still_wins_over_the_already_known_patterns() {
+        // Rejections are matched FIRST, deliberately: `bad-txns-inputs-duplicate`
+        // contains "duplicate" and was once counted as ACHIEVED. Adding four more
+        // already-known patterns must not reopen that.
+        match classify_publish_error("bad-txns-inputs-duplicate") {
+            Publish::Rejected { .. } => {}
+            other => panic!("a consensus rejection must not read as already-known: {other:?}"),
+        }
     }
 
     #[test]
