@@ -6,6 +6,22 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
+## Unreleased
+
+### Fixed
+
+- zcashd: the mainnet end-of-service halt moves from block 3,471,448
+  (~2026-09-04) to 3,527,448 (~2026-10-23), with the shutdown warning from
+  block 3,511,320 (~2026-10-08). Every release from v20 through v27 embedded
+  the v20 release height, so all of them halt at 3,471,448; there is no
+  runtime override, only a new binary moves it. Testnet and regtest are not
+  affected. (#59)
+- zebra: the mainnet end-of-support halt moves from block 3,545,960
+  (~2026-11-08) to 3,564,960 (~2026-11-24), the horizon of upstream zebra
+  6.3.0, with the warning from block 3,548,832 (~2026-11-10). v26 and v27
+  both reported 3,545,960 because neither re-vendored zebra. Zero now carries
+  the release height and re-sets it at every release. (#59)
+
 ## v27 - 2026-09-02
 
 ### Performance
