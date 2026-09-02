@@ -178,12 +178,23 @@ incrementalmerkletree-testing = "0.3"
 
 # Tor
 # - `arti-client` depends on `rusqlite`, and a version mismatch there causes a compilation
-#   failure due to incompatible `libsqlite3-sys` versions.
-arti-client = { version = "0.35", default-features = false, features = ["compression", "rustls", "tokio"] }
+#   failure due to incompatible `libsqlite3-sys` versions. `libsqlite3-sys` declares
+#   `links = "sqlite3"`, so only one version may appear in the graph, and Cargo resolves
+#   optional dependencies whether or not their feature is enabled — turning `tor` off does
+#   not avoid the conflict. Whatever `rusqlite` this workspace uses must therefore satisfy
+#   `tor-dirmgr`'s requirement as well.
+# - [zero] @claude Held at 0.43 rather than the latest: `arti-client` 0.44 raises its MSRV
+#   to 1.91, and 0.45 pulls `cipher 0.5`, which needs `crypto-common ^0.2.2` and so
+#   conflicts with this workspace's `crypto-common = "=0.2.0-rc.1"` pin.
+# - [zero] @claude Building *with* the `tor` feature requires rustc 1.89 or later
+#   (`arti-client` and `caret` both declare it). Every other feature still builds on the
+#   workspace `rust-version` of 1.88; only `rust-toolchain.toml` was raised, so that
+#   `--all-features` works.
+arti-client = { version = "0.43", default-features = false, features = ["compression", "rustls", "tokio"] }
 dynosaur = "0.3"
-fs-mistrust = "0.12"
+fs-mistrust = "0.14"
 tokio = "1"
-tor-rtcompat = "0.35"
+tor-rtcompat = "0.43"
 tower = "0.5"
 trait-variant = "0.1"
 

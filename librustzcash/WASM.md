@@ -120,13 +120,15 @@ for (`time`, `array`, `uuid`, `hooks`) build clean for
 This workspace pins rusqlite 0.37 (July 2025), which predates that. Three things
 stand between here and the bump:
 
-1. **`arti-client` 0.35 pins rusqlite 0.37.** `libsqlite3-sys` declares
-   `links = "sqlite3"`, so two versions cannot coexist in one graph, and Cargo
-   resolves optional dependencies whether or not their feature is enabled —
-   turning `tor` off does not help. Either arti bumps first, or the wasm build
-   comes from a tree where `zcash_client_backend`'s `arti-client` dependency is
-   removed. This is the constraint the comment above `arti-client` in the
-   workspace `Cargo.toml` is already warning about.
+1. ~~**`arti-client` 0.35 pins rusqlite 0.37.**~~ **Done on this branch.**
+   `libsqlite3-sys` declares `links = "sqlite3"`, so two versions cannot coexist
+   in one graph, and Cargo resolves optional dependencies whether or not their
+   feature is enabled — turning `tor` off does not help, and target-gating the
+   `arti-client` dependency does not either, since resolution covers every
+   target. The fix was to move arti forward to 0.43, whose `tor-dirmgr` accepts
+   `rusqlite >=0.36, <0.40`. With that in place `rusqlite 0.39` resolves
+   cleanly. See the comment above `arti-client` in the workspace `Cargo.toml`
+   for why 0.43 and not the latest.
 2. **`schemerz-rusqlite` has no release past 0.370.0**, which requires
    rusqlite 0.37. Its 230 lines compile unchanged against rusqlite 0.38, so this
    is a version bump and a release from `zcash/schemerz`, not a port.
@@ -208,9 +210,10 @@ is the memory-hungry step. Benchmark proving early.
 Roughly in dependency order. Nothing here is speculative — each item is either
 verified above or a direct consequence of something verified above.
 
-1. **Unblock the rusqlite bump.** Track arti's rusqlite version, or carry a
-   `[zero]` patch removing the `arti-client` dependency for wasm builds. `tor`
-   is not usable in a browser regardless.
+1. ~~**Unblock the rusqlite bump.**~~ Done: arti is at 0.43 and `rusqlite 0.39`
+   resolves. Two follow-ups this leaves behind — `cargo vet` audits for the
+   bumped crates, and confirming CI runs on the 1.90 toolchain this branch
+   pins.
 2. **Release `schemerz-rusqlite` for rusqlite 0.38+** from `zcash/schemerz`.
    No code changes needed.
 3. **Migrate `zcash_client_sqlite` off the `u64`/`usize` SQL conversions**

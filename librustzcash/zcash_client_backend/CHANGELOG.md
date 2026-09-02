@@ -10,6 +10,15 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Migrated to `arti-client 0.43`, `tor-rtcompat 0.43`, `fs-mistrust 0.14`. The
+  `with_permissions` closure taken by `tor::Client::create` and
+  `tor::Client::create_with_timeouts` now receives a
+  `fs_mistrust 0.14` `MistrustBuilder`; callers must upgrade `fs-mistrust` in
+  lockstep. `tor::Error::Tor` likewise wraps an `arti_client 0.43` `Error`.
+- The `tor` feature now requires Rust 1.89 or later, as `arti-client 0.43`
+  declares that MSRV. Every other feature still builds on Rust 1.88.
+
 ## [0.24.0] - 2026-08-18
 
 ### Added
