@@ -7960,6 +7960,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rusqlite",
  "secrecy",
+ "sha2 0.10.8",
  "sqlite-wasm-rs",
  "tonic-web-wasm-client",
  "uuid",
@@ -7967,6 +7968,7 @@ dependencies = [
  "wasm-bindgen-test",
  "zcash_client_backend",
  "zcash_client_sqlite",
+ "zcash_proofs",
  "zcash_protocol",
 ]
 

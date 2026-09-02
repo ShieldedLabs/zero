@@ -17,6 +17,7 @@ use zcash_client_sqlite::{util::Clock, WalletDb};
 use zcash_protocol::consensus::Network;
 
 pub mod block_cache;
+pub mod params;
 
 pub use block_cache::MemoryBlockCache;
 

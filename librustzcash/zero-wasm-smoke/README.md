@@ -34,6 +34,22 @@ cd zero-wasm-smoke
 RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack test --node
 ```
 
+To include the Sapling parameter tests, point `ZCASH_PARAMS_DIR` at a directory holding
+`sapling-spend.params` and `sapling-output.params` (they are 51 MiB and do not belong in
+the repository, so they are fetched separately):
+
+```sh
+mkdir -p ~/.zcash-params && cd ~/.zcash-params
+curl -O https://download.z.cash/downloads/sapling-spend.params
+curl -O https://download.z.cash/downloads/sapling-output.params
+
+ZCASH_PARAMS_DIR=$HOME/.zcash-params \
+  RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack test --node
+```
+
+Without it `real_parameters_load` logs a skip; with it set but the files absent, it fails
+rather than skipping quietly.
+
 The `RUSTFLAGS` is not optional: `getrandom` 0.3 has no default backend for OS-less wasm,
 and without it the build fails in a dependency rather than here.
 

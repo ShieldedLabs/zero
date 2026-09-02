@@ -261,9 +261,16 @@ verified above or a direct consequence of something verified above.
    `BlockCache` implementation. **Still needs a decision from you:** the server
    must speak gRPC-Web, so lightwalletd/Zaino needs a proxy in front or a
    `tonic-web` layer. Nothing has been run against a live endpoint.
-6. **Parameter delivery.** Fetch the ~47 MiB of Sapling parameters and hand them
-   to `LocalTxProver::from_bytes` (see [Gotchas](#gotchas)); cache them in
-   IndexedDB or the Cache API so it is a one-time cost.
+6. ~~**Parameter delivery.**~~ Done, apart from choosing the cache. Real
+   parameters load inside wasm: `zero-wasm-smoke` reads all 51 MiB from the host
+   and builds a working `LocalTxProver`, in **382 ms** including SHA-256
+   verification and Groth16 deserialisation. Parsing is therefore not the cost —
+   the 47 MiB download is, so it wants the Cache API or IndexedDB behind it.
+   Note that `LocalTxProver::from_bytes` **panics** on parameters with unexpected
+   hashes, and a browser cache can serve truncated or stale bytes; use
+   `zero_wasm_smoke::params::verify_sapling_parameters`, which returns an error
+   there so the wallet can drop the cache entry and re-fetch rather than abort
+   the wasm module.
 7. **Benchmark proving before designing around it.** ChainSafe measured 5.4 s for
    a single Halo2 spend and 122 s for twenty, on four threads. If those numbers
    hold, spend construction may need to move off-device or be restructured.

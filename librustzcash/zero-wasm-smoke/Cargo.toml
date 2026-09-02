@@ -18,6 +18,7 @@ js-sys = "0.3"
 rand_chacha = "0.3"
 rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
 secrecy = "0.8"
+sha2 = "0.10"
 sqlite-wasm-rs = "0.5"
 tonic-web-wasm-client = "0.9"
 uuid = { version = "1", features = ["js"] }
@@ -31,8 +32,10 @@ zcash_client_backend = { workspace = true, features = [
     "transparent-inputs",
 ] }
 zcash_client_sqlite = { path = "../zcash_client_sqlite", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_proofs = { workspace = true, default-features = false, features = ["prover"] }
 zcash_protocol.workspace = true
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+js-sys = "0.3"
 secrecy = "0.8"
 wasm-bindgen-test = "0.3.54"
