@@ -15,8 +15,12 @@ scripts/wasm-check.sh                  # wasm32-unknown-unknown (browser)
 scripts/wasm-check.sh wasm32-wasip1    # WASI
 ```
 
-Those only prove the crates *compile*. For proof that the wallet database also
-*runs* on the target — migrations applied, queries executed, `rarray` working —
+`zero/wasm-demo` is a browser demo built on all of this: key derivation and a
+real wallet database in a page, with no server. Start there for a feel of what
+works today.
+
+The scripts above only prove the crates *compile*. For proof that the wallet
+database also *runs* on the target — migrations applied, queries executed, `rarray` working —
 and for what proving costs, see `zero-wasm-smoke/`. For whether a threaded build
 is reachable, see `scripts/wasm-atomics-check.sh`.
 
@@ -154,20 +158,24 @@ The `bundled` feature also had to stop applying to wasm: it is now declared in a
 block in `zcash_client_sqlite/Cargo.toml`, since there is nothing to bundle on
 that target.
 
-Then mind what `sqlite-wasm-rs` actually provides. It is **not thread-safe**
-(SQLite is compiled `-DSQLITE_THREADSAFE=0`, and `JsValue` cannot cross threads)
-and **no VFS supports multiple connections**, so all database access has to stay
-on one thread even if trial decryption is parallelised. Three VFS choices:
+Then mind what `sqlite-wasm-rs` actually provides, because it is less than its
+README suggests. It is **not thread-safe** (SQLite is compiled
+`-DSQLITE_THREADSAFE=0`, and `JsValue` cannot cross threads) and **no VFS
+supports multiple connections**, so all database access stays on one thread even
+if trial decryption is parallelised.
 
-| VFS | Storage | Context | Durability |
-|---|---|---|---|
-| memory (default) | RAM | any | full, but not persistent |
-| `sahpool` | OPFS | dedicated Worker only | full |
-| `relaxed-idb` | IndexedDB | any | relaxed |
+More importantly: **as published, `sqlite-wasm-rs` 0.5.5 ships only the in-memory
+VFS.** The `sahpool` (OPFS) and `relaxed-idb` (IndexedDB) backends its README
+describes were split out after 0.4 — 0.4.x depended on `indexed_db_futures` and
+`web-sys`, 0.5.5 depends only on `js-sys`, `rsqlite-vfs` and `wasm-bindgen`, and
+`rsqlite-vfs` 0.1.1 contains `memvfs` and nothing else. `rusqlite` 0.39 pulls
+`sqlite-wasm-rs` 0.5, so a wallet built through `rusqlite` today gets a database
+that does not survive a page reload.
 
-`sahpool` is the one to want, and it requires running in a dedicated Worker —
-which is where the wasm module needs to live anyway, since the main thread must
-not block.
+That makes persistence a real piece of work rather than a VFS registration call.
+The options are to vendor or revive a persistent VFS against `rsqlite-vfs`'s
+traits, to pin the older `sqlite-wasm-rs` line and give up `rusqlite`'s built-in
+wasm support, or to wait for the backends to reappear upstream.
 
 Do **not** plan around `zcash_client_memory`. It was merged into the workspace in
 August 2025, then extracted to `zcash/zcash_client_memory` and removed from
@@ -252,13 +260,12 @@ verified above or a direct consequence of something verified above.
    Done, via `zcash_client_sqlite/src/sql.rs`. `bundled` is now target-conditional.
    With this, **every crate in the workspace that a browser wallet needs builds
    for `wasm32-unknown-unknown`.** What is left is integration, not porting.
-4. **Pick and wire a VFS.** Partly done: `zero-wasm-smoke` runs the wallet
-   database against `sqlite-wasm-rs`'s in-memory VFS under Node, applying every
-   migration and reading back through `WalletRead`, so the runtime path is
-   proven. What is left is the persistent VFS a real wallet needs —
-   `sahpool`/OPFS inside a dedicated Worker, with the wasm module instantiated
-   there so the main thread never blocks. That is browser-only and needs a
-   browser driver in CI, which this machine does not have.
+4. **Pick and wire a VFS.** The in-memory half is done and proven twice:
+   `zero-wasm-smoke` runs the database under Node, and `zero/wasm-demo` runs it
+   in Chrome — 71 migrations applied in 130 ms, accounts created and read back.
+   The persistent half is harder than "register `sahpool`": the OPFS and
+   IndexedDB VFSes are **not in the `sqlite-wasm-rs` version `rusqlite` depends
+   on** (see [Storage](#storage)). Somebody has to supply one.
 5. ~~**Transport.**~~ Client side done: `tonic-web-wasm-client` satisfies
    `sync::run`'s bounds, and `zero-wasm-smoke` holds the instantiation plus a
    `BlockCache` implementation. **Still needs a decision from you:** the server

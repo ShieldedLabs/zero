@@ -1,0 +1,123 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>librustzcash in the browser</title>
+<style>
+  :root { color-scheme: light dark; --line: color-mix(in oklab, currentColor 18%, transparent); }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 46rem;
+         margin: 3rem auto; padding: 0 1.25rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  h2 { font-size: 1rem; margin: 2rem 0 .6rem; }
+  .sub { opacity: .7; margin-top: 0; }
+  fieldset { border: 1px solid var(--line); border-radius: .5rem; padding: 1rem; margin: 0 0 1rem; }
+  legend { padding: 0 .4rem; opacity: .75; font-size: .85rem; }
+  label { display: block; font-size: .85rem; opacity: .8; margin-bottom: .25rem; }
+  input, select { font: inherit; padding: .4rem .5rem; border-radius: .35rem;
+                  border: 1px solid var(--line); background: transparent; color: inherit; width: 100%; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
+  .row > * { flex: 1 1 12rem; }
+  button { font: inherit; padding: .45rem .9rem; border-radius: .35rem;
+           border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: color-mix(in oklab, currentColor 8%, transparent); }
+  button:disabled { opacity: .45; cursor: default; }
+  pre { background: color-mix(in oklab, currentColor 6%, transparent); padding: .8rem;
+        border-radius: .4rem; overflow-x: auto; font-size: .82rem; margin: 0; }
+  code { font-size: .85em; }
+  .warn { border-left: 3px solid currentColor; padding-left: .8rem; opacity: .8; font-size: .88rem; }
+  #log { white-space: pre-wrap; }
+</style>
+
+<h1>librustzcash in the browser</h1>
+<p class="sub">Key derivation and a real SQLite wallet database, compiled to
+<code>wasm32-unknown-unknown</code>. No server, no network.</p>
+
+<p class="warn" id="caveats">Loading…</p>
+
+<h2>1. Derive an address</h2>
+<fieldset>
+  <legend>pure computation — no database</legend>
+  <div class="row">
+    <div>
+      <label for="seed">Seed (hex, ≥32 bytes)</label>
+      <input id="seed" value="0000000000000000000000000000000000000000000000000000000000000001">
+    </div>
+    <div style="flex: 0 0 8rem">
+      <label for="network">Network</label>
+      <select id="network"><option value="main">main</option><option value="test">test</option></select>
+    </div>
+    <div style="flex: 0 0 7rem">
+      <label for="account">Account</label>
+      <input id="account" type="number" value="0" min="0">
+    </div>
+  </div>
+  <button id="derive">Derive unified address</button>
+</fieldset>
+
+<h2>2. Open a wallet database</h2>
+<fieldset>
+  <legend>SQLite in wasm — applies every migration</legend>
+  <div class="row">
+    <div><label for="name">Account name</label><input id="name" value="Demo account"></div>
+    <div style="flex: 0 0 10rem">
+      <label for="birthday">Birthday height</label>
+      <input id="birthday" type="number" value="2800000" min="1">
+    </div>
+  </div>
+  <button id="open">Create wallet</button>
+  <button id="add" disabled>Add account</button>
+  <button id="refresh" disabled>Read state back</button>
+</fieldset>
+
+<h2>Output</h2>
+<pre id="log">Ready.</pre>
+
+<script type="module">
+import init, { Wallet, deriveAddress, buildInfo } from "./pkg/zero_wasm_demo.js";
+
+const log = document.getElementById("log");
+const $ = (id) => document.getElementById(id);
+let wallet = null;
+
+const write = (label, value) => {
+  const body = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  log.textContent = `${label}\n${"─".repeat(label.length)}\n${body}`;
+};
+const fail = (label, e) => write(`${label} — failed`, String(e?.message ?? e));
+
+const timed = (label, fn) => {
+  const t0 = performance.now();
+  try {
+    const out = fn();
+    write(`${label}  (${(performance.now() - t0).toFixed(1)} ms)`, out);
+    return out;
+  } catch (e) {
+    fail(label, e);
+    return undefined;
+  }
+};
+
+await init();
+
+const info = buildInfo();
+$("caveats").textContent =
+  `SQLite ${info.sqlite} · ${info.note}. ` +
+  `This demo cannot sync: that needs a lightwalletd or Zaino speaking gRPC-Web.`;
+write("Ready", "wasm module loaded.");
+
+$("derive").onclick = () =>
+  timed("Unified address", () =>
+    deriveAddress($("network").value, $("seed").value, Number($("account").value)));
+
+$("open").onclick = () =>
+  timed("Wallet created", () => {
+    wallet = new Wallet($("network").value);
+    $("add").disabled = false;
+    $("refresh").disabled = false;
+    return { migrations_applied: wallet.migrationCount(), ...wallet.summary() };
+  });
+
+$("add").onclick = () =>
+  timed("Account added", () =>
+    wallet.createAccount($("name").value, $("seed").value, Number($("birthday").value)));
+
+$("refresh").onclick = () => timed("Wallet state", () => wallet.summary());
+</script>
