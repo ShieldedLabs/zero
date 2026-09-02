@@ -3851,7 +3851,7 @@ fn uniquely_sourced(
         sequence,
     } = input
     else {
-        panic!("mock input is a PrevOut");
+        panic!("mock_transparent_transfer always builds a PrevOut input");
     };
     let unique_outpoint = transparent::OutPoint {
         hash: Hash([tag; 32]),
@@ -4369,7 +4369,7 @@ async fn mempool_script_failure_cannot_poison_block_verification() {
         outpoint, sequence, ..
     } = input
     else {
-        panic!("mock input is a PrevOut");
+        panic!("mock_transparent_transfer always builds a PrevOut input");
     };
     let input = transparent::Input::PrevOut {
         outpoint,
