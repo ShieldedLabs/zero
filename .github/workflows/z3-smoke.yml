@@ -189,6 +189,10 @@ jobs:
     if: needs.changes.outputs.relevant == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
+    # Cache-warm-only legs (nothing downstream consumes their image) must not
+    # be able to redden the stack gate: a GHCR throttle on a cache pull held
+    # every PR hostage for an afternoon (2026-09-01, zero-zcashd buildcache).
+    continue-on-error: ${{ matrix.cache_warm_only || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -226,6 +230,7 @@ jobs:
             build_args: ""
             no_cache_filters: ""
             smoke_image: false
+            cache_warm_only: true
     steps:
       - name: Checkout
         uses: actions/checkout@v7
