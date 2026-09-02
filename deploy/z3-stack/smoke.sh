@@ -269,23 +269,30 @@ if [ -n "$account" ]; then
   else
     fail "watch-only import failed: $imported"
   fi
-  out=$(zallet_rpc z_listunspent 2>&1) || true
+  # JSON answers arrive on stdout; the sync-gate error and tracing lines are
+  # stderr. Keep the streams apart: parsing them merged broke the JSON check
+  # whenever the wallet answered normally under log output.
+  rpc_err_file=$(mktemp)
+  out=$(zallet_rpc z_listunspent 2>"$rpc_err_file") || true
+  err=$(cat "$rpc_err_file")
   if printf '%s' "$out" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' 2>/dev/null; then
     pass "unfiltered z_listunspent is a prompt JSON array"
-  elif contains "$out" "still catching up"; then
+  elif contains "$out$err" "still catching up"; then
     pass "unfiltered z_listunspent answers promptly (sync-gated: catching up)"
   else
-    fail "unfiltered z_listunspent malformed or slow: $out"
+    fail "unfiltered z_listunspent malformed or slow: $out $err"
   fi
   out=""
-  [ -n "$address" ] && { out=$(zallet_rpc z_listunspent 1 9999999 true "[\"$address\"]" 2>&1) || true; }
+  err=""
+  [ -n "$address" ] && { out=$(zallet_rpc z_listunspent 1 9999999 true "[\"$address\"]" 2>"$rpc_err_file") || true; err=$(cat "$rpc_err_file"); }
   if printf '%s' "$out" | python3 -c 'import json,sys; assert json.load(sys.stdin) == []' 2>/dev/null; then
     pass "filtered z_listunspent answers promptly and empty"
-  elif contains "$out" "still catching up"; then
+  elif contains "$out$err" "still catching up"; then
     pass "filtered z_listunspent answers promptly (sync-gated: catching up)"
   else
-    fail "filtered z_listunspent malformed or slow: $out"
+    fail "filtered z_listunspent malformed or slow: $out $err"
   fi
+  rm -f "$rpc_err_file"
   out=$(zallet_rpc z_listunspent 1 9999999 true '["not-an-address"]' 2>&1) || true
   if contains "$out" "Not a valid Zcash address"; then
     pass "invalid filter address is a clean error"
