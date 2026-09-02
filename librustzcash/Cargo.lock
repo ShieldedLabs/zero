@@ -7957,6 +7957,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "js-sys",
+ "orchard",
  "rand_chacha 0.3.1",
  "rusqlite",
  "secrecy",

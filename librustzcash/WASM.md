@@ -271,9 +271,30 @@ verified above or a direct consequence of something verified above.
    `zero_wasm_smoke::params::verify_sapling_parameters`, which returns an error
    there so the wallet can drop the cache entry and re-fetch rather than abort
    the wasm module.
-7. **Benchmark proving before designing around it.** ChainSafe measured 5.4 s for
-   a single Halo2 spend and 122 s for twenty, on four threads. If those numbers
-   hold, spend construction may need to move off-device or be restructured.
+7. ~~**Benchmark proving before designing around it.**~~ Done, and the numbers
+   are the constraint on this whole effort. Measured in `zero-wasm-smoke`, on
+   wasm under Node on an M-series Mac, single-threaded:
+
+   | operation | time |
+   |---|---|
+   | Sapling parameters, verify and parse (51 MiB) | 0.4 s |
+   | Orchard `VerifyingKey::build` | 7.2 s |
+   | Orchard `ProvingKey::build` | 8.9 s |
+   | Orchard 2-action bundle proof | 12.1 s |
+
+   Sapling is a non-issue: a large download that parses in under half a second.
+   **Orchard is the problem, and the proving key is the sharper half of it.** It
+   has no trusted setup, so there is nothing to download and nothing Rust can
+   cache between page loads — every session pays nine seconds of arithmetic
+   before it can prove anything, and then twelve more for the smallest real
+   bundle. A first Orchard spend is therefore about 21 seconds of blocked CPU.
+   Consistent with ChainSafe's 5.4 s for one spend on four threads.
+
+   Three ways out, and they are not exclusive: build the proving key eagerly in a
+   Worker at startup so it is warm by the time the user spends; enable threads
+   (item 8) — the only lever that moves both numbers; or move proving off-device,
+   which for Orchard means handing out the witness and is a privacy decision, not
+   an engineering one.
 8. **Threads, last and optional.** See [Threads](#threads). Everything above
    works single-threaded on the stable toolchain; adding `wasm-bindgen-rayon`
    means a second, nightly toolchain and cross-origin isolation, and the SQLite

@@ -15,6 +15,8 @@ doctest = false
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 async-trait = "0.1"
 js-sys = "0.3"
+# `circuit` without `multicore`: the Halo2 proving machinery, single-threaded.
+orchard = { workspace = true, features = ["circuit"] }
 rand_chacha = "0.3"
 rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
 secrecy = "0.8"
