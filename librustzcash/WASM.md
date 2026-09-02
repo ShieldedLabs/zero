@@ -15,6 +15,10 @@ scripts/wasm-check.sh                  # wasm32-unknown-unknown (browser)
 scripts/wasm-check.sh wasm32-wasip1    # WASI
 ```
 
+Those only prove the crates *compile*. For proof that the wallet database also
+*runs* on the target — migrations applied, queries executed, `rarray` working —
+see `zero-wasm-smoke/`.
+
 The script builds each crate/feature combination through a synthetic consumer
 crate rather than building the workspace, because `cargo build --workspace`
 pulls in dev-dependencies and `zcash_client_sqlite`, neither of which
@@ -227,8 +231,13 @@ verified above or a direct consequence of something verified above.
    Done, via `zcash_client_sqlite/src/sql.rs`. `bundled` is now target-conditional.
    With this, **every crate in the workspace that a browser wallet needs builds
    for `wasm32-unknown-unknown`.** What is left is integration, not porting.
-4. **Pick and wire a VFS.** `sahpool`/OPFS inside a dedicated Worker, with the
-   wasm module instantiated there so the main thread never blocks.
+4. **Pick and wire a VFS.** Partly done: `zero-wasm-smoke` runs the wallet
+   database against `sqlite-wasm-rs`'s in-memory VFS under Node, applying every
+   migration and reading back through `WalletRead`, so the runtime path is
+   proven. What is left is the persistent VFS a real wallet needs —
+   `sahpool`/OPFS inside a dedicated Worker, with the wasm module instantiated
+   there so the main thread never blocks. That is browser-only and needs a
+   browser driver in CI, which this machine does not have.
 5. **Transport.** `sync::run` is generic over `ChT: GrpcService<TonicBody>`, so
    this is a matter of supplying an implementation — `tonic-web-wasm-client`
    against a lightwalletd or Zaino behind a grpc-web proxy, or a `fetch`-based

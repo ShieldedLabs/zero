@@ -20,6 +20,8 @@ members = [
     # [zero] @claude Local build of `schemerz-rusqlite` with a widened `rusqlite`
     # requirement; see zero-vendor/schemerz-rusqlite/README.md.
     "zero-vendor/schemerz-rusqlite",
+    # [zero] @claude Runtime smoke test for the wasm build; empty on every other target.
+    "zero-wasm-smoke",
 ]
 
 resolver = "2"
