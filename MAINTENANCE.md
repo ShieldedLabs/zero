@@ -117,6 +117,25 @@ A commit may override this in its body if a particular change should yield to
 upstream. To recover the rationale during a conflict, grep the change:
 `git log --grep='^\[zero\]' -- <conflicted-path>`.
 
+## Comment policy
+
+Comments in vendored code are part of the `[zero]` delta: upstream maintainers,
+reviewers, and generated docs all read them. Keep them minimal.
+
+- Say only what the code cannot: the why, the upstream reference, the
+  invariant. Never narrate the next line, and never restate the commit message
+  or a review thread in the code.
+- No agent-isms: no `// @claude` tags, no review-round references such as
+  `(review H3)`, no "Note that", "Importantly", "This ensures". A comment must
+  read as if the upstream maintainer wrote it.
+- Default to a plain line comment (`//` in Rust, C++, and Go). Doc comments
+  (`///`, `//!`, `/** */`) are API documentation and render in generated docs,
+  so they never carry vendor notes.
+- Mark a Zero divergence with one `// [zero]` line at the top of the block, as
+  in `zebra/zebra-state/src/service/check/difficulty.rs`. The comment carries
+  one line of why; the commit body carries the rest (see "Commit-message
+  convention").
+
 ## Pulling upstream (downstream flow)
 
 - **Don't** track moving branches forever. Pin to upstream **release tags** when
