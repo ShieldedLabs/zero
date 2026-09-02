@@ -8,6 +8,8 @@ date) before dispatching the release.
 
 ## Unreleased
 
+## v28 - 2026-09-02
+
 ### Fixed
 
 - zcashd: the mainnet end-of-service halt moves from block 3,471,448
