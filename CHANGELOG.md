@@ -6,7 +6,7 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
-## Unreleased
+## v28 - 2026-09-02
 
 ### Fixed
 
