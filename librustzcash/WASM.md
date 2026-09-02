@@ -104,28 +104,58 @@ gone.
 
 ## Storage
 
-`zcash_client_sqlite` is the real blocker. `libsqlite3-sys` 0.35's bundled build
-dies at
+`zcash_client_sqlite` does not build for wasm today, but the reason is a version
+pin rather than anything architectural, and the fix is smaller than it looks.
 
-```
-sqlite3/sqlite3.c:15049:10: fatal error: 'stdio.h' file not found
-```
+**rusqlite has supported `wasm32-unknown-unknown` since 0.38** (December 2025).
+On `cfg(all(target_family = "wasm", target_os = "unknown"))` it swaps
+`libsqlite3-sys` for [`sqlite-wasm-rs`], which ships SQLite already compiled to
+wasm — so there is no C build, no libc and no sysroot involved. Verified:
+rusqlite 0.38 and 0.40 with exactly the feature set `zcash_client_sqlite` asks
+for (`time`, `array`, `uuid`, `hooks`) build clean for
+`wasm32-unknown-unknown` on stable 1.93.
 
-because `wasm32-unknown-unknown` has no libc at all. On `wasm32-wasip1` the same
-build script does emit the correct flags (`-D_WASI_EMULATED_MMAN`,
-`-D_WASI_EMULATED_GETPID`, `-D_WASI_EMULATED_SIGNAL`,
-`-D_WASI_EMULATED_PROCESS_CLOCKS`, `-DSQLITE_THREADSAFE=0`), so there it is only
-a missing wasi-sdk sysroot — a toolchain install, not a code change.
+[`sqlite-wasm-rs`]: https://github.com/Spxg/sqlite-wasm-rs
 
-For the browser, the options are:
+This workspace pins rusqlite 0.37 (July 2025), which predates that. Three things
+stand between here and the bump:
 
-1. **A new backend implementing `zcash_client_backend`'s `WalletRead` /
-   `WalletWrite` traits over IndexedDB.** The most work, and the most control.
-2. **Keep the SQL schema and swap the driver** — SQLite compiled to wasm
-   (official `sqlite3.wasm`, or wa-sqlite) behind a `rusqlite`-shaped shim, with
-   OPFS or IndexedDB for persistence. Reuses every migration in
-   `zcash_client_sqlite/src/wallet/init/migrations`, which is a lot of tested
-   logic to not rewrite.
+1. **`arti-client` 0.35 pins rusqlite 0.37.** `libsqlite3-sys` declares
+   `links = "sqlite3"`, so two versions cannot coexist in one graph, and Cargo
+   resolves optional dependencies whether or not their feature is enabled —
+   turning `tor` off does not help. Either arti bumps first, or the wasm build
+   comes from a tree where `zcash_client_backend`'s `arti-client` dependency is
+   removed. This is the constraint the comment above `arti-client` in the
+   workspace `Cargo.toml` is already warning about.
+2. **`schemerz-rusqlite` has no release past 0.370.0**, which requires
+   rusqlite 0.37. Its 230 lines compile unchanged against rusqlite 0.38, so this
+   is a version bump and a release from `zcash/schemerz`, not a port.
+3. **`zcash_client_sqlite` needs a mechanical migration.** Checked against
+   rusqlite 0.38 it produces 85 errors across 10 files, every one of them the
+   same cause: rusqlite 0.38 removed the `ToSql`/`FromSql` impls for `u64` and
+   `usize`. The bulk is in `pool_migration/store.rs` (31),
+   `wallet/commitment_tree.rs` (21) and `wallet.rs` (16). These conversions were
+   removed because they were lossy, so each site wants a real `try_from` rather
+   than a blanket `as i64`.
+
+The `bundled` feature also has to stop applying to wasm — move it into a
+`[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]`
+block, since there is nothing to bundle on that target.
+
+Then mind what `sqlite-wasm-rs` actually provides. It is **not thread-safe**
+(SQLite is compiled `-DSQLITE_THREADSAFE=0`, and `JsValue` cannot cross threads)
+and **no VFS supports multiple connections**, so all database access has to stay
+on one thread even if trial decryption is parallelised. Three VFS choices:
+
+| VFS | Storage | Context | Durability |
+|---|---|---|---|
+| memory (default) | RAM | any | full, but not persistent |
+| `sahpool` | OPFS | dedicated Worker only | full |
+| `relaxed-idb` | IndexedDB | any | relaxed |
+
+`sahpool` is the one to want, and it requires running in a dedicated Worker —
+which is where the wasm module needs to live anyway, since the main thread must
+not block.
 
 Do **not** plan around `zcash_client_memory`. It was merged into the workspace in
 August 2025, then extracted to `zcash/zcash_client_memory` and removed from
@@ -172,3 +202,32 @@ activation. Halo2 proving stays expensive — 5.4 s for one spend, 12.2 s for fi
 
 Also note the 32-bit address space: 4 GiB is the hard ceiling and Orchard proving
 is the memory-hungry step. Benchmark proving early.
+
+## Remaining work
+
+Roughly in dependency order. Nothing here is speculative — each item is either
+verified above or a direct consequence of something verified above.
+
+1. **Unblock the rusqlite bump.** Track arti's rusqlite version, or carry a
+   `[zero]` patch removing the `arti-client` dependency for wasm builds. `tor`
+   is not usable in a browser regardless.
+2. **Release `schemerz-rusqlite` for rusqlite 0.38+** from `zcash/schemerz`.
+   No code changes needed.
+3. **Migrate `zcash_client_sqlite` off the `u64`/`usize` SQL conversions**
+   (85 sites, 10 files) and make `bundled` target-conditional.
+4. **Pick and wire a VFS.** `sahpool`/OPFS inside a dedicated Worker, with the
+   wasm module instantiated there so the main thread never blocks.
+5. **Transport.** `sync::run` is generic over `ChT: GrpcService<TonicBody>`, so
+   this is a matter of supplying an implementation — `tonic-web-wasm-client`
+   against a lightwalletd or Zaino behind a grpc-web proxy, or a `fetch`-based
+   service of your own. No changes to librustzcash.
+6. **Parameter delivery.** Fetch the ~47 MiB of Sapling parameters and hand them
+   to `LocalTxProver::from_bytes` (see [Gotchas](#gotchas)); cache them in
+   IndexedDB or the Cache API so it is a one-time cost.
+7. **Benchmark proving before designing around it.** ChainSafe measured 5.4 s for
+   a single Halo2 spend and 122 s for twenty, on four threads. If those numbers
+   hold, spend construction may need to move off-device or be restructured.
+8. **Threads, last and optional.** See [Threads](#threads). Everything above
+   works single-threaded on the stable toolchain; adding `wasm-bindgen-rayon`
+   means a second, nightly toolchain and cross-origin isolation, and the SQLite
+   layer stays single-threaded either way.
