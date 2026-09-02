@@ -69,6 +69,7 @@ use super::{
     },
     get_account_ids, get_account_internal,
 };
+use crate::sql::SqlU64;
 use crate::{
     AccountRef, AccountUuid, AddressRef, TxRef, UtxoId,
     error::SqliteClientError,
@@ -539,11 +540,11 @@ pub(crate) fn select_addrs_to_reserve<P: consensus::Parameters>(
             named_params! {
                 ":account_id": account_id.0,
                 ":key_scope": KeyScope::try_from(key_scope)?.encode(),
-                ":gap_start": gap_start.index(),
+                ":gap_start": SqlU64(u64::from(gap_start.index())),
                 // NOTE: this approach means that the address at index 2^31 - 1 will never be
                 // allocated. I think that's fine.
-                ":gap_end": gap_start.saturating_add(gap_limit).index(),
-                ":n": n
+                ":gap_end": SqlU64(u64::from(gap_start.saturating_add(gap_limit).index())),
+                ":n": SqlU64::from_usize(n)
             },
             |row| {
                 let address_id = row.get("id").map(AddressRef)?;
@@ -1518,7 +1519,7 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     let addresses_ptr = Rc::new(address_values);
 
     let target_height_arg = u32::from(target_height);
-    let min_value = u64::from(zip317::MARGINAL_FEE);
+    let min_value = SqlU64(u64::from(zip317::MARGINAL_FEE));
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":addresses", &addresses_ptr),
@@ -1640,7 +1641,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
 
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
-    let min_value = u64::from(zip317::MARGINAL_FEE);
+    let min_value = SqlU64(u64::from(zip317::MARGINAL_FEE));
     let has_address_allow_list = address_allow_list.is_some();
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![

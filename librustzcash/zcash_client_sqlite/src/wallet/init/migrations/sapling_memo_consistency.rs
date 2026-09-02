@@ -23,6 +23,7 @@ use crate::{
 };
 
 use super::received_notes_nullable_nf;
+use crate::sql::SqlU64;
 
 /// This migration reads the wallet's raw transaction data and updates the `sent_notes` table to
 /// ensure that memo entries are consistent with the decrypted transaction's outputs.
@@ -119,7 +120,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
             for d_out in decrypted_outputs.sapling_outputs() {
                 stmt_update_sent_memo.execute(named_params![
                     ":id_tx": id_tx,
-                    ":output_index": d_out.index(),
+                    ":output_index": SqlU64::from_usize(d_out.index()),
                     ":memo": memo_repr(Some(d_out.memo()))
                 ])?;
             }

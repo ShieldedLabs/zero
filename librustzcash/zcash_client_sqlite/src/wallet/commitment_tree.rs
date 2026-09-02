@@ -36,6 +36,7 @@ use {
 };
 
 use super::common::{TableConstants, table_constants};
+use crate::sql::{RowExt, SqlU64};
 
 /// Errors that can appear in SQLite-back [`ShardStore`] implementation operations.
 #[derive(Debug)]
@@ -422,7 +423,7 @@ pub(crate) fn get_subtree_root<H: HashSer>(
              FROM {table_prefix}_tree_shards
              WHERE shard_index = :shard_index"
         ),
-        named_params![":shard_index": index],
+        named_params![":shard_index": SqlU64(index)],
         |row| row.get::<_, Option<Vec<u8>>>(0),
     )
     .optional()
@@ -443,7 +444,7 @@ pub(crate) fn get_shard<H: HashSer>(
              FROM {table_prefix}_tree_shards
              WHERE shard_index = :shard_index"
         ),
-        named_params![":shard_index": shard_root_addr.index()],
+        named_params![":shard_index": SqlU64(shard_root_addr.index())],
         |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
     )
     .optional()
@@ -481,7 +482,7 @@ pub(crate) fn last_shard<H: HashSer>(
         ),
         [],
         |row| {
-            let shard_index: u64 = row.get(0)?;
+            let shard_index = row.get_u64(0)?;
             let shard_data: Vec<u8> = row.get(1)?;
             Ok((shard_index, shard_data))
         },
@@ -515,8 +516,8 @@ fn check_shard_discontinuity(
             &format!("SELECT MIN(shard_index), MAX(shard_index) FROM {table_prefix}_tree_shards"),
             [],
             |row| {
-                let min = row.get::<_, Option<u64>>(0)?;
-                let max = row.get::<_, Option<u64>>(1)?;
+                let min = row.get_opt_u64(0)?;
+                let max = row.get_opt_u64(1)?;
                 Ok((min, max))
             },
         )
@@ -579,7 +580,7 @@ pub(crate) fn put_shard<H: HashSer>(
 
     stmt_put_shard
         .execute(named_params![
-            ":shard_index": shard_index,
+            ":shard_index": SqlU64(shard_index),
             ":root_hash": subtree_root_hash,
             ":shard_data": subtree_data
         ])
@@ -604,7 +605,7 @@ pub(crate) fn get_shard_roots(
     while let Some(row) = rows.next().map_err(Error::Query)? {
         res.push(Address::from_parts(
             shard_root_level,
-            row.get(0).map_err(Error::Query)?,
+            row.get_u64(0).map_err(Error::Query)?,
         ));
     }
     Ok(res)
@@ -617,7 +618,7 @@ pub(crate) fn truncate_shards(
 ) -> Result<(), Error> {
     conn.execute(
         &format!("DELETE FROM {table_prefix}_tree_shards WHERE shard_index >= ?"),
-        [shard_index],
+        [SqlU64(shard_index)],
     )
     .map_err(Error::Query)
     .map(|_| ())
@@ -757,7 +758,7 @@ pub(crate) fn truncate_tree_to_subtree_roots<
                 named_params![":truncation_height": u32::from(truncation_height)],
                 |row| {
                     Ok((
-                        row.get::<_, u64>(0)?,
+                        row.get_u64(0)?,
                         row.get::<_, u32>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
                     ))
@@ -806,7 +807,7 @@ pub(crate) fn add_checkpoint(
             ),
             named_params![":checkpoint_id": u32::from(checkpoint_id),],
             |row| {
-                row.get::<_, Option<u64>>(0).map(|opt| {
+                row.get_opt_u64(0).map(|opt| {
                     opt.map_or_else(
                         || TreeState::Empty,
                         |pos| TreeState::AtPosition(Position::from(pos)),
@@ -856,7 +857,7 @@ pub(crate) fn add_checkpoint(
             stmt_insert_checkpoint
                 .execute(named_params![
                     ":checkpoint_id": u32::from(checkpoint_id),
-                    ":position": checkpoint.position().map(u64::from)
+                    ":position": checkpoint.position().map(u64::from).map(SqlU64)
                 ])
                 .map_err(Error::Query)?;
 
@@ -871,7 +872,7 @@ pub(crate) fn add_checkpoint(
                 stmt_insert_mark_removed
                     .execute(named_params![
                         ":checkpoint_id": u32::from(checkpoint_id),
-                        ":position": u64::from(*pos)
+                        ":position": SqlU64(u64::from(*pos))
                     ])
                     .map_err(Error::Query)?;
             }
@@ -888,7 +889,7 @@ pub(crate) fn checkpoint_count(
     conn.query_row(
         &format!("SELECT COUNT(*) FROM {table_prefix}_tree_checkpoints"),
         [],
-        |row| row.get::<_, usize>(0),
+        |row| row.get_usize(0),
     )
     .map_err(Error::Query)
 }
@@ -910,7 +911,7 @@ fn get_marks_removed(
         .map_err(Error::Query)?;
 
     mark_removed_rows
-        .mapped(|row| row.get::<_, u64>(0).map(Position::from))
+        .mapped(|row| row.get_u64(0).map(Position::from))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(Error::Query)
 }
@@ -928,10 +929,7 @@ pub(crate) fn get_checkpoint(
                  WHERE checkpoint_id = ?"
             ),
             [u32::from(checkpoint_id)],
-            |row| {
-                row.get::<_, Option<u64>>(0)
-                    .map(|opt| opt.map(Position::from))
-            },
+            |row| row.get_opt_u64(0).map(|opt| opt.map(Position::from)),
         )
         .optional()
         .map_err(Error::Query)?;
@@ -986,10 +984,10 @@ pub(crate) fn get_checkpoint_at_depth(
                 LIMIT 1
                 OFFSET :offset",
             ),
-            named_params![":offset": checkpoint_depth],
+            named_params![":offset": SqlU64::from_usize(checkpoint_depth)],
             |row| {
                 let checkpoint_id: u32 = row.get(0)?;
-                let position: Option<u64> = row.get(1)?;
+                let position = row.get_opt_u64(1)?;
                 Ok((
                     BlockHeight::from(checkpoint_id),
                     position.map(Position::from),
@@ -1008,7 +1006,7 @@ pub(crate) fn get_checkpoint_at_depth(
             let mark_removed_rows = stmt.query([u32::from(checkpoint_id)])?;
 
             let marks_removed = mark_removed_rows
-                .mapped(|row| row.get::<_, u64>(0).map(Position::from))
+                .mapped(|row| row.get_u64(0).map(Position::from))
                 .collect::<Result<BTreeSet<_>, _>>()?;
 
             Ok((
@@ -1049,13 +1047,13 @@ where
         .map_err(Error::Query)?;
 
     let mut rows = stmt_get_checkpoints
-        .query(named_params![":limit": limit])
+        .query(named_params![":limit": SqlU64::from_usize(limit)])
         .map_err(Error::Query)?;
 
     while let Some(row) = rows.next().map_err(Error::Query)? {
         let checkpoint_id = row.get::<_, u32>(0).map_err(Error::Query)?;
         let tree_state = row
-            .get::<_, Option<u64>>(1)
+            .get_opt_u64(1)
             .map(|opt| opt.map_or_else(|| TreeState::Empty, |p| TreeState::AtPosition(p.into())))
             .map_err(Error::Query)?;
 
@@ -1064,7 +1062,7 @@ where
             .map_err(Error::Query)?;
 
         let marks_removed = mark_removed_rows
-            .mapped(|row| row.get::<_, u64>(0).map(Position::from))
+            .mapped(|row| row.get_u64(0).map(Position::from))
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(Error::Query)?;
 
@@ -1316,7 +1314,7 @@ pub(crate) fn put_shard_roots<
             .map_err(|e| ShardTreeError::Storage(Error::Serialization(e)))?;
 
         stmt.execute(named_params![
-            ":shard_index": start_index + i,
+            ":shard_index": SqlU64(start_index + i),
             ":subtree_end_height": u32::from(root.subtree_end_height()),
             ":root_hash": root_hash_data,
             ":shard_data": shard_data,

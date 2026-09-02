@@ -33,6 +33,7 @@ use crate::{
     },
 };
 
+use crate::sql::{RowExt, SqlU64};
 #[cfg(feature = "orchard")]
 use {
     crate::IRONWOOD_TABLES_PREFIX, crate::ORCHARD_TABLES_PREFIX,
@@ -528,7 +529,7 @@ where
 
     let account_uuid = account.0;
     let target_height_arg = u32::from(target_height);
-    let min_value = u64::from(zip317::MARGINAL_FEE);
+    let min_value = SqlU64(u64::from(zip317::MARGINAL_FEE));
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":account_uuid", &account_uuid),
@@ -807,10 +808,10 @@ where
     let account_uuid = account.0;
     let anchor_height_arg = u32::from(anchor_height);
     let target_height_arg = u32::from(target_height);
-    let target_value_arg = u64::from(target_value);
+    let target_value_arg = SqlU64(u64::from(target_value));
     let scanned_priority = priority_code(&ScanPriority::Scanned);
     let tip_unscanned_arg = i64::from(tip_unscanned);
-    let min_value = u64::from(zip317::MARGINAL_FEE);
+    let min_value = SqlU64(u64::from(zip317::MARGINAL_FEE));
     let overridable_owners = overridable_owners_rarray(lock_filter);
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":account_uuid", &account_uuid),
@@ -961,7 +962,7 @@ pub(crate) fn select_unspent_note_meta(
                     txid: row.get("txid").map(TxId::from_bytes)?,
                     output_index: row.get(output_index_col)?,
                     commitment_tree_position: row
-                        .get::<_, u64>("commitment_tree_position")
+                        .get_u64("commitment_tree_position")
                         .map(Position::from)?,
                     value: Zatoshis::from_nonnegative_i64(row.get("value")?)?,
                 })
@@ -1009,7 +1010,7 @@ pub(crate) fn unspent_notes_meta(
     let target_height_arg = u32::from(target_height);
 
     let run_selection = |min_value: Zatoshis| {
-        let min_value = u64::from(min_value);
+        let min_value = SqlU64(u64::from(min_value));
         let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
             (":account_uuid", &account_uuid),
             (":min_value", &min_value),
@@ -1035,7 +1036,7 @@ pub(crate) fn unspent_notes_meta(
             &sql_params[..],
             |row| {
                 Ok((
-                    row.get::<_, usize>(0)?,
+                    row.get_usize(0)?,
                     row.get::<_, Option<i64>>(1)?.map(zatoshis).transpose()?,
                 ))
             },

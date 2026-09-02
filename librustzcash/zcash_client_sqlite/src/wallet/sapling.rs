@@ -28,6 +28,7 @@ use crate::{AccountRef, AccountUuid, AddressRef, ReceivedNoteId, TxRef, error::S
 use super::{
     KeyScope, common::UnspentNoteMeta, get_account, get_account_ref, memo_repr, upsert_address,
 };
+use crate::sql::SqlU64;
 
 pub(crate) fn to_received_note<P: consensus::Parameters>(
     params: &P,
@@ -423,12 +424,12 @@ pub(crate) fn put_received_note<
         ":account_id": account_id.0,
         ":address_id": address_id.map(|a| a.0),
         ":diversifier": &diversifier.0,
-        ":value": output.note().value().inner(),
+        ":value": SqlU64(output.note().value().inner()),
         ":rcm": &rcm,
         ":nf": output.nullifier().map(|nf| nf.0),
         ":memo": memo_repr(output.memo()),
         ":is_change": output.is_change(),
-        ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from),
+        ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from).map(SqlU64),
         ":recipient_key_scope": output.recipient_key_scope().map(|s| KeyScope::from(s).encode()),
     ];
 

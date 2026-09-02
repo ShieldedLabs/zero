@@ -168,6 +168,7 @@ use {
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::{IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT};
 
+use crate::sql::{RowExt, SqlU64};
 use FindAccountForAddressError as E;
 #[cfg(feature = "zcashd-compat")]
 use {
@@ -561,8 +562,8 @@ pub(crate) fn add_account<P: consensus::Parameters>(
                 ":sapling_ivk_item_cache": ivk_cache.sapling,
                 ":p2pkh_ivk_item_cache": ivk_cache.p2pkh,
                 ":birthday_height": u32::from(birthday.height()),
-                ":birthday_sapling_tree_size": birthday_sapling_tree_size,
-                ":birthday_orchard_tree_size": birthday_orchard_tree_size,
+                ":birthday_sapling_tree_size": birthday_sapling_tree_size.map(SqlU64),
+                ":birthday_orchard_tree_size": birthday_orchard_tree_size.map(SqlU64),
                 ":recover_until_height": birthday.recover_until().map(u32::from),
                 ":has_spend_key": i64::from(spending_key_available),
             ],
@@ -2238,7 +2239,7 @@ fn estimate_tree_size<P: consensus::Parameters>(
                 Ok((
                     incrementalmerkletree::Address::from_parts(
                         incrementalmerkletree::Level::new(shard_height),
-                        row.get(0)?,
+                        row.get_u64(0)?,
                     ),
                     BlockHeight::from_u32(row.get(1)?),
                 ))
@@ -2281,7 +2282,7 @@ fn estimate_tree_size<P: consensus::Parameters>(
                          FROM {table_prefix}_tree_shards
                          WHERE shard_index = :shard_index"
                     ),
-                    named_params! {":shard_index": subtree_index},
+                    named_params! {":shard_index": SqlU64(subtree_index)},
                     |row| Ok(row.get::<_, Option<_>>(0)?.map(BlockHeight::from_u32)),
                 )
                 .transpose()
@@ -2401,7 +2402,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                     ":start_height": u32::from(as_of),
                     ":scanned_priority": scanned_priority,
                 ],
-                |row| row.get::<_, Option<u64>>(0),
+                |row| row.get_opt_u64(0),
             )
             .optional()?
             .flatten();
@@ -2418,9 +2419,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                     ":start_height": u32::from(as_of),
                 },
                 |row| {
-                    let min_tree_size = row
-                        .get::<_, Option<u64>>(0)?
-                        .map(|min_idx| min_idx << shard_height);
+                    let min_tree_size = row.get_opt_u64(0)?.map(|min_idx| min_idx << shard_height);
                     Ok(min_tree_size)
                 },
             )
@@ -2444,7 +2443,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                      WHERE birthday_height = :birthday_height",
             ),
             named_params![":birthday_height": u32::from(min_birthday_height)],
-            |row| row.get::<_, Option<u64>>(0),
+            |row| row.get_opt_u64(0),
         )
         .optional()?
         .flatten()
@@ -2468,7 +2467,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                 ":height": u32::from(chain_tip_height),
                 ":scanned_priority": scanned_priority,
             },
-            |row| row.get::<_, Option<u64>>(0),
+            |row| row.get_opt_u64(0),
         )
         .optional()?
         .flatten()
@@ -2495,7 +2494,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                         ":start_height": u32::from(recover_until_height),
                         ":scanned_priority": scanned_priority,
                     ],
-                    |row| row.get::<_, Option<u64>>(0),
+                    |row| row.get_opt_u64(0),
                 )
                 .optional()?
                 .flatten();
@@ -2545,7 +2544,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                     ":end_height": u32::from(end_height),
                     ":scanned_priority": scanned_priority,
                 },
-                |row| row.get::<_, Option<u64>>(0),
+                |row| row.get_opt_u64(0),
             )
         })
         .transpose()?;
@@ -2570,7 +2569,7 @@ fn subtree_scan_progress<P: consensus::Parameters>(
                 ":start_height": u32::from(recover_until_height.unwrap_or(min_birthday_height)),
                 ":scanned_priority": scanned_priority,
             ],
-            |row| row.get::<_, Option<u64>>(0),
+            |row| row.get_opt_u64(0),
         )?;
 
         recover_until_size
@@ -4926,8 +4925,8 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
              WHERE uuid = :uuid AND birthday_height > :new_birthday",
             named_params![
                 ":new_birthday": u32::from(new_birthday),
-                ":new_sapling_tree_size": new_sapling_tree_size,
-                ":new_orchard_tree_size": new_orchard_tree_size,
+                ":new_sapling_tree_size": SqlU64(new_sapling_tree_size),
+                ":new_orchard_tree_size": new_orchard_tree_size.map(SqlU64),
                 ":uuid": uuid.0,
             ],
         )
@@ -5143,7 +5142,7 @@ pub(crate) fn update_tx_fee(
          WHERE id_tx = :transaction_id",
         named_params! {
             ":transaction_id": tx_ref.0,
-            ":fee": u64::from(fee)
+            ":fee": SqlU64(u64::from(fee))
         },
     )?;
 
@@ -5288,7 +5287,7 @@ pub(crate) fn put_tx_data(
         ":created_at": created_at,
         ":expiry_height": u32::from(tx.expiry_height()),
         ":raw": raw_tx,
-        ":fee": fee.map(u64::from),
+        ":fee": fee.map(u64::from).map(SqlU64),
         ":target_height": target_height.map(u32::from),
         ":observed_height": u32::from(observed_height)
     ];
@@ -5877,8 +5876,8 @@ pub(crate) fn get_block_range(
         // to commitment tree positions, so we must add one to the start, and we do not subtract
         // one from the end.
         named_params! {
-            ":min_tree_size": u64::from(commitment_tree_address.position_range_start()) + 1,
-            ":max_tree_size": u64::from(commitment_tree_address.position_range_end()),
+            ":min_tree_size": SqlU64(u64::from(commitment_tree_address.position_range_start()) + 1),
+            ":max_tree_size": SqlU64(u64::from(commitment_tree_address.position_range_end())),
         },
         |row| {
             // The first block to be scanned is known to contain the start of the address range in
@@ -5886,7 +5885,7 @@ pub(crate) fn get_block_range(
             // block.
             let min_height = row.get::<_, Option<u32>>(0)?.map(BlockHeight::from_u32);
             let max_height_inclusive = row.get::<_, Option<u32>>(1)?.map(BlockHeight::from_u32);
-            let end_offset = row.get::<_, Option<u64>>(2)?.map(|max_height_tree_size| {
+            let end_offset = row.get_opt_u64(2)?.map(|max_height_tree_size| {
                 // If the tree size at the end of the max-height block is less than the
                 // end-exclusive maximum position of the address range, this means that the end of
                 // the subtree referred to by that address is somewhere in the next block, so we
@@ -5940,7 +5939,7 @@ pub(crate) fn get_received_outputs(
             named_params![":txid": txid.as_ref()],
             |row| {
                 let pool_type = parse_pool_code(row.get("output_pool")?)?;
-                let output_index = row.get("output_index")?;
+                let output_index = row.get_usize("output_index")?;
                 let value = Zatoshis::from_nonnegative_i64(row.get("value")?)?;
                 let mined_height = row
                     .get::<_, Option<u32>>("tx_mined_height")?
@@ -5993,7 +5992,7 @@ pub mod testing {
     };
 
     use super::common::{TableConstants, table_constants};
-    use crate::{AccountUuid, error::SqliteClientError};
+    use crate::{AccountUuid, error::SqliteClientError, sql::RowExt};
 
     pub(crate) fn get_tx_history(
         conn: &rusqlite::Connection,
@@ -6020,11 +6019,11 @@ pub mod testing {
                     row.get::<_, Option<i64>>("fee_paid")?
                         .map(Zatoshis::from_nonnegative_i64)
                         .transpose()?,
-                    row.get("spent_note_count")?,
+                    row.get_usize("spent_note_count")?,
                     row.get("has_change")?,
-                    row.get("sent_note_count")?,
-                    row.get("received_note_count")?,
-                    row.get("memo_count")?,
+                    row.get_usize("sent_note_count")?,
+                    row.get_usize("received_note_count")?,
+                    row.get_usize("memo_count")?,
                     row.get("expired_unmined")?,
                     row.get("is_shielding")?,
                     row.get::<_, Option<i64>>("pool_crossing_value")?
@@ -6054,7 +6053,7 @@ pub mod testing {
             .query_and_then::<_, SqliteClientError, _, _>([], |row| {
                 Ok((
                     BlockHeight::from(row.get::<_, u32>(0)?),
-                    row.get::<_, Option<u64>>(1)?.map(Position::from),
+                    row.get_opt_u64(1)?.map(Position::from),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -6097,6 +6096,7 @@ mod tests {
     use crate::{
         AccountUuid,
         error::SqliteClientError,
+        sql::RowExt,
         testing::{BlockCache, db::TestDbFactory},
     };
 
@@ -7396,7 +7396,7 @@ mod tests {
                     [],
                     |row| {
                         Ok((
-                            row.get::<_, u64>(0)?,
+                            row.get_u64(0)?,
                             row.get::<_, u32>(1)?,
                             row.get::<_, bool>(2)?,
                         ))

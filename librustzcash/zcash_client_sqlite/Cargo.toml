@@ -101,6 +101,13 @@ ambassador = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 tempfile = { version = "3.5.0", optional = true }
 
+# [zero] @claude `bundled` compiles SQLite from C, which needs a libc.
+# `wasm32-unknown-unknown` has none — there `rusqlite` uses `sqlite-wasm-rs`, which
+# supplies SQLite already compiled to wasm, so nothing needs bundling. Enabling the
+# feature per-target rather than in `[dependencies]` keeps the wasm build buildable.
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }
+
 [dev-dependencies]
 ambassador.workspace = true
 assert_matches.workspace = true

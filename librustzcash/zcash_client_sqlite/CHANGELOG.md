@@ -10,6 +10,24 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- Migrated to `rusqlite 0.39` and `schemerz-rusqlite 0.390`. `rusqlite` types appear
+  throughout this crate's public API (`WalletDb::from_connection`, the
+  `transactionally*` closures, `SqliteClientError::DbError`), so consumers must
+  upgrade in lockstep.
+- The `bundled` feature of `rusqlite` is no longer enabled for
+  `wasm32-unknown-unknown`. On that target `rusqlite` links against
+  `sqlite-wasm-rs`, which supplies SQLite already compiled to WebAssembly; there
+  is no C toolchain to bundle with. Every other target is unaffected.
+- `WalletDb` now builds for `wasm32-unknown-unknown`. Note that the SQLite
+  implementation available there is single-connection and not thread-safe, and
+  that a VFS must be registered before a database can be opened.
+
+### Fixed
+- The result of installing the extension authorizer in
+  `ExtensionTransaction::with_authorizer` was discarded. It is now propagated: a
+  failure there meant extension SQL ran with no table-name policy in force.
+
 ## [0.22.0] - 2026-08-18
 
 ### Added

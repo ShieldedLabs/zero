@@ -55,6 +55,7 @@ use zcash_protocol::value::Zatoshis;
 use crate::AccountRef;
 
 use super::error::Error;
+use crate::sql::{RowExt, SqlU64};
 
 /// The per-pool table and index names a [`Store`] operates over. A concrete migration submodule
 /// supplies a `'static` value of this for its own pool; the generic store interpolates these into
@@ -570,14 +571,14 @@ impl<C: Borrow<Connection>> Store<C> {
                 row.get::<_, uuid::Uuid>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<u32>>(2)?,
-                row.get::<_, u64>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, Option<u64>>(5)?,
-                row.get::<_, u64>(6)?,
-                row.get::<_, u64>(7)?,
-                row.get::<_, u64>(8)?,
-                row.get::<_, u64>(9)?,
-                row.get::<_, u64>(10)?,
+                row.get_u64(3)?,
+                row.get_u64(4)?,
+                row.get_opt_u64(5)?,
+                row.get_u64(6)?,
+                row.get_u64(7)?,
+                row.get_u64(8)?,
+                row.get_u64(9)?,
+                row.get_u64(10)?,
             ))
         })?;
         rows.map(|row| {
@@ -1022,11 +1023,11 @@ fn read_migration_row(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, u64>(2)?,
-                    row.get::<_, Option<u64>>(3)?,
-                    row.get::<_, u64>(4)?,
-                    row.get::<_, u64>(5)?,
-                    row.get::<_, u64>(6)?,
+                    row.get_u64(2)?,
+                    row.get_opt_u64(3)?,
+                    row.get_u64(4)?,
+                    row.get_u64(5)?,
+                    row.get_u64(6)?,
                     row.get::<_, u32>(7)?,
                     row.get::<_, u8>(8)?,
                 ))
@@ -1089,7 +1090,7 @@ fn read_zatoshi_list(
     let mut stmt = conn.prepare(&format!(
         "SELECT value FROM {table} WHERE migration_id = ? ORDER BY ordinal"
     ))?;
-    let rows = stmt.query_map(params![migration_id], |row| row.get::<_, u64>(0))?;
+    let rows = stmt.query_map(params![migration_id], |row| row.get_u64(0))?;
     let mut out = Vec::new();
     for v in rows {
         out.push(Zatoshis::from_u64(v?)?);
@@ -1114,10 +1115,7 @@ fn read_preparation(
             t.prep_inputs, t.prep_outputs
         ))?;
         let rows = stmt.query_map(named_params! { ":id": migration_id }, |row| {
-            Ok((
-                row.get::<_, u64>(0)? as usize,
-                row.get::<_, u64>(1)? as usize,
-            ))
+            Ok((row.get_u64(0)? as usize, row.get_u64(1)? as usize))
         })?;
         rows.collect::<Result<_, _>>()?
     };
@@ -1143,7 +1141,7 @@ fn read_preparation(
             t.prep_direct_funding
         ))?;
         let rows = stmt.query_map(params![migration_id], |row| {
-            Ok((row.get::<_, u64>(0)? as usize, row.get::<_, u64>(1)?))
+            Ok((row.get_u64(0)? as usize, row.get_u64(1)?))
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -1171,15 +1169,15 @@ fn read_prep_inputs(
         t.prep_inputs
     ))?;
     let rows = stmt.query_map(
-        params![migration_id, layer as u64, tx_index as u64],
+        params![migration_id, SqlU64(layer as u64), SqlU64(tx_index as u64)],
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<u64>>(1)?,
-                row.get::<_, Option<u64>>(2)?,
-                row.get::<_, Option<u64>>(3)?,
-                row.get::<_, Option<u64>>(4)?,
-                row.get::<_, u64>(5)?,
+                row.get_opt_u64(1)?,
+                row.get_opt_u64(2)?,
+                row.get_opt_u64(3)?,
+                row.get_opt_u64(4)?,
+                row.get_u64(5)?,
             ))
         },
     )?;
@@ -1221,8 +1219,8 @@ fn read_prep_outputs(
         t.prep_outputs
     ))?;
     let rows = stmt.query_map(
-        params![migration_id, layer as u64, tx_index as u64],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+        params![migration_id, SqlU64(layer as u64), SqlU64(tx_index as u64)],
+        |row| Ok((row.get::<_, String>(0)?, row.get_u64(1)?)),
     )?;
     let mut out = Vec::new();
     for r in rows {
@@ -1254,9 +1252,9 @@ fn read_transactions(
             Ok(TxRow {
                 transfer_id: row.get(0)?,
                 kind: row.get(1)?,
-                kind_layer: row.get(2)?,
-                kind_index: row.get(3)?,
-                kind_crossing: row.get(4)?,
+                kind_layer: row.get_opt_u64(2)?,
+                kind_index: row.get_opt_u64(3)?,
+                kind_crossing: row.get_opt_u64(4)?,
                 pczt: row.get(5)?,
                 scheduled_height: row.get(6)?,
                 expiry_height: row.get(7)?,
@@ -1891,11 +1889,11 @@ fn replace_migration_row(
                 named_params! {
                     ":id": migration_id,
                     ":status": state.status().as_ref(),
-                    ":fee_buffer": ns.note_fee_buffer().into_u64(),
-                    ":change": ns.change().map(Zatoshis::into_u64),
-                    ":prep_fees": ns.prep_fees().into_u64(),
-                    ":total_input": ns.total_input().into_u64(),
-                    ":total_migratable": ns.total_migratable().into_u64(),
+                    ":fee_buffer": SqlU64(ns.note_fee_buffer().into_u64()),
+                    ":change": ns.change().map(Zatoshis::into_u64).map(SqlU64),
+                    ":prep_fees": SqlU64(ns.prep_fees().into_u64()),
+                    ":total_input": SqlU64(ns.total_input().into_u64()),
+                    ":total_migratable": SqlU64(ns.total_migratable().into_u64()),
                     ":anchor_bucket_interval": state.anchor_bucket_interval().block_count().get(),
                     ":replan_threshold": state.replan_threshold().percent(),
                 },
@@ -1921,11 +1919,11 @@ fn replace_migration_row(
                     ":uuid": uuid::Uuid::new_v4(),
                     ":committed_height": crate::wallet::chain_tip_height(tx)?.map(u32::from),
                     ":status": state.status().as_ref(),
-                    ":fee_buffer": ns.note_fee_buffer().into_u64(),
-                    ":change": ns.change().map(Zatoshis::into_u64),
-                    ":prep_fees": ns.prep_fees().into_u64(),
-                    ":total_input": ns.total_input().into_u64(),
-                    ":total_migratable": ns.total_migratable().into_u64(),
+                    ":fee_buffer": SqlU64(ns.note_fee_buffer().into_u64()),
+                    ":change": ns.change().map(Zatoshis::into_u64).map(SqlU64),
+                    ":prep_fees": SqlU64(ns.prep_fees().into_u64()),
+                    ":total_input": SqlU64(ns.total_input().into_u64()),
+                    ":total_migratable": SqlU64(ns.total_migratable().into_u64()),
                     ":anchor_bucket_interval": state.anchor_bucket_interval().block_count().get(),
                     ":replan_threshold": state.replan_threshold().percent(),
                 },
@@ -1943,7 +1941,7 @@ fn replace_migration_row(
                 let (source, wallet_index, prior_layer, prior_transaction, prior_output) =
                     match input {
                         PrepInput::Wallet { index, .. } => {
-                            ("wallet", Some(*index as u64), None, None, None)
+                            ("wallet", Some(SqlU64(*index as u64)), None, None, None)
                         }
                         PrepInput::Prior {
                             layer,
@@ -1953,9 +1951,9 @@ fn replace_migration_row(
                         } => (
                             "prior",
                             None,
-                            Some(*layer as u64),
-                            Some(*transaction as u64),
-                            Some(*output as u64),
+                            Some(SqlU64(*layer as u64)),
+                            Some(SqlU64(*transaction as u64)),
+                            Some(SqlU64(*output as u64)),
                         ),
                     };
                 tx.execute(
@@ -1968,15 +1966,15 @@ fn replace_migration_row(
                     ),
                     named_params! {
                         ":migration_id": migration_id,
-                        ":layer": layer as u64,
-                        ":tx_index": tx_index as u64,
-                        ":ordinal": ordinal as u64,
+                        ":layer": SqlU64(layer as u64),
+                        ":tx_index": SqlU64(tx_index as u64),
+                        ":ordinal": SqlU64(ordinal as u64),
                         ":source": source,
                         ":wallet_index": wallet_index,
                         ":prior_layer": prior_layer,
                         ":prior_transaction": prior_transaction,
                         ":prior_output": prior_output,
-                        ":value": input.value().into_u64(),
+                        ":value": SqlU64(input.value().into_u64()),
                     },
                 )?;
             }
@@ -1989,11 +1987,11 @@ fn replace_migration_row(
                     ),
                     named_params! {
                         ":migration_id": migration_id,
-                        ":layer": layer as u64,
-                        ":tx_index": tx_index as u64,
-                        ":ordinal": ordinal as u64,
+                        ":layer": SqlU64(layer as u64),
+                        ":tx_index": SqlU64(tx_index as u64),
+                        ":ordinal": SqlU64(ordinal as u64),
                         ":role": output.as_ref(),
-                        ":value": output.value().into_u64(),
+                        ":value": SqlU64(output.value().into_u64()),
                     },
                 )?;
             }
@@ -2008,19 +2006,19 @@ fn replace_migration_row(
             ),
             named_params! {
                 ":migration_id": migration_id,
-                ":ordinal": ordinal as u64,
-                ":wallet_index": *wallet_index as u64,
-                ":value": (*value).into_u64(),
+                ":ordinal": SqlU64(ordinal as u64),
+                ":wallet_index": SqlU64(*wallet_index as u64),
+                ":value": SqlU64((*value).into_u64()),
             },
         )?;
     }
 
     for mtx in state.transactions() {
         let kind = mtx.kind();
-        let (kind_layer, kind_index) = kind
-            .preparation_indices()
-            .map_or((None, None), |(l, i)| (Some(l as u64), Some(i as u64)));
-        let kind_crossing = kind.transfer_crossing().map(|c| c as u64);
+        let (kind_layer, kind_index) = kind.preparation_indices().map_or((None, None), |(l, i)| {
+            (Some(SqlU64(l as u64)), Some(SqlU64(i as u64)))
+        });
+        let kind_crossing = kind.transfer_crossing().map(|c| SqlU64(c as u64));
         let tx_state = mtx.state();
         // The mark is one value, split back into its two columns here. Bound to locals so the
         // kind's wire name can be written as a borrowed `&str`, like every other discriminant
@@ -2068,7 +2066,7 @@ fn replace_migration_row(
                 named_params! {
                     ":migration_id": migration_id,
                     ":transfer_id": u32::from(mtx.id()),
-                    ":ordinal": ordinal as u64,
+                    ":ordinal": SqlU64(ordinal as u64),
                     ":depends_on_transfer_id": u32::from(*dep),
                 },
             )?;
@@ -2085,7 +2083,7 @@ fn replace_migration_row(
                 named_params! {
                     ":migration_id": migration_id,
                     ":transfer_id": u32::from(mtx.id()),
-                    ":ordinal": ordinal as u64,
+                    ":ordinal": SqlU64(ordinal as u64),
                     ":nullifier": nf,
                 },
             )?;
@@ -2109,8 +2107,8 @@ fn insert_zatoshi_list(
             ),
             named_params! {
                 ":migration_id": migration_id,
-                ":ordinal": ordinal as u64,
-                ":value": (*value).into_u64(),
+                ":ordinal": SqlU64(ordinal as u64),
+                ":value": SqlU64((*value).into_u64()),
             },
         )?;
     }

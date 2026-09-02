@@ -32,6 +32,7 @@ use crate::{
         init::{WalletMigrationError, migrations::shardtree_support},
     },
 };
+use crate::sql::RowExt;
 
 /// This migration adds decryption key scope to persisted information about received notes.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xee89ed2b_c1c2_421e_9e98_c1e3e54a7fc2);
@@ -146,7 +147,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
         let mut rows = stmt_select_notes.query([])?;
         while let Some(row) = rows.next()? {
             let note_id: i64 = row.get(0)?;
-            let output_index: usize = row.get(1)?;
+            let output_index = row.get_usize(1)?;
             let tx_data_opt: Option<Vec<u8>> = row.get(2)?;
 
             let tx_height = row.get::<_, Option<u32>>(3)?.map(BlockHeight::from);
@@ -280,6 +281,8 @@ mod tests {
     use incrementalmerkletree::Position;
     use rand_core::OsRng;
     use rusqlite::{Connection, OptionalExtension, named_params, params};
+
+    use crate::sql::{RowExt, SqlU64};
     use tempfile::NamedTempFile;
 
     use ::transparent::{
@@ -468,13 +471,13 @@ mod tests {
             ":output_index": i64::try_from(output.index()).expect("output indices are representable as i64"),
             ":account": account.0,
             ":diversifier": &diversifier.0,
-            ":value": output.note().value().inner(),
+            ":value": SqlU64(output.note().value().inner()),
             ":rcm": &rcm,
             ":nf": output.nullifier().map(|nf| nf.0),
             ":memo": memo_repr(output.memo()),
             ":is_change": output.is_change(),
             ":spent": spent_in,
-            ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from),
+            ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from).map(SqlU64),
         ];
 
         stmt_upsert_received_note
@@ -511,7 +514,7 @@ mod tests {
             ":created_at": created_at,
             ":expiry_height": u32::from(tx.expiry_height()),
             ":raw": raw_tx,
-            ":fee": fee.map(u64::from),
+            ":fee": fee.map(u64::from).map(SqlU64),
         ];
 
         stmt_upsert_tx_data
@@ -610,7 +613,7 @@ mod tests {
         let mut row_count = 0;
         while let Some(row) = rows.next().unwrap() {
             row_count += 1;
-            let value: u64 = row.get(0).unwrap();
+            let value = row.get_u64(0).unwrap();
             let scope = KeyScope::decode(row.get(1).unwrap()).unwrap();
             match value {
                 EXTERNAL_VALUE => assert_eq!(scope, KeyScope::EXTERNAL),
@@ -794,7 +797,7 @@ mod tests {
         let mut row_count = 0;
         while let Some(row) = rows.next().unwrap() {
             row_count += 1;
-            let value: u64 = row.get(0).unwrap();
+            let value = row.get_u64(0).unwrap();
             let scope = KeyScope::decode(row.get(1).unwrap()).unwrap();
             match value {
                 EXTERNAL_VALUE => assert_eq!(scope, KeyScope::EXTERNAL),

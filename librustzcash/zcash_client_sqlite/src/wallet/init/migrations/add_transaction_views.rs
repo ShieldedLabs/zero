@@ -13,6 +13,7 @@ use zcash_protocol::{
 
 use super::{add_utxo_account, sent_notes_to_internal};
 use crate::wallet::init::WalletMigrationError;
+use crate::sql::SqlU64;
 
 /// Migration that adds transaction summary views & add fee information to transactions.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x282fad2e_8372_4ca0_8bed_71821320909f);
@@ -111,7 +112,7 @@ impl RusqliteMigration for Migration {
 
                 match fee_paid {
                     Ok(Some(fee_paid)) => {
-                        stmt_set_fee.execute(params![u64::from(fee_paid), id_tx])?;
+                        stmt_set_fee.execute(params![SqlU64(u64::from(fee_paid)), id_tx])?;
                     }
                     Ok(None) => {
                         // The fee and net value will end up being null in the transactions view.

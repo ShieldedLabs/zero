@@ -90,6 +90,7 @@ use uuid::Uuid;
 
 use super::orchard_ironwood_migration_anchor_interval;
 use crate::wallet::init::WalletMigrationError;
+use crate::sql::SqlU64;
 
 /// Renames `tx_id` to `transfer_id`, adds the `unsatisfiable_at`, `unsatisfiable_kind`, and
 /// `broadcast_failure_at` columns to `orchard_ironwood_migration_transactions` and the
@@ -312,7 +313,7 @@ impl RusqliteMigration for Migration {
                     named_params! {
                         ":migration_id": migration_id,
                         ":transfer_id": transfer_id,
-                        ":ordinal": ordinal as u64,
+                        ":ordinal": SqlU64(ordinal as u64),
                         ":nullifier": nullifier,
                     },
                 )?;

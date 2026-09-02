@@ -27,6 +27,7 @@ use crate::{
         scanning::insert_queue_entries,
     },
 };
+use crate::sql::SqlU64;
 
 /// This migration adds tables to the wallet database that are needed to persist Sapling note
 /// commitment tree data using the `shardtree` crate, and migrates existing witness data into these
@@ -146,7 +147,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
                     "Storing Sapling commitment tree size"
                 );
                 stmt_update_block_sapling_tree_size
-                    .execute(params![block_end_tree.size(), block_height])?;
+                    .execute(params![SqlU64::from_usize(block_end_tree.size()), block_height])?;
 
                 // We only need to load frontiers into the ShardTree that are close enough
                 // to the wallet's known chain tip to fill `PRUNING_DEPTH` checkpoints, so
@@ -219,7 +220,7 @@ impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
                 if !updated_note_positions.contains(&witnessed_position) {
                     stmt_set_note_position.execute(named_params![
                         ":note_id": note_id,
-                        ":position": u64::from(witnessed_position)
+                        ":position": SqlU64(u64::from(witnessed_position))
                     ])?;
                     updated_note_positions.insert(witnessed_position);
                 }

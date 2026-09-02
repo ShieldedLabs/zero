@@ -144,6 +144,9 @@ use {
 use zcash_keys::encoding::AddressCodec;
 
 #[cfg(any(test, feature = "test-dependencies"))]
+use crate::sql::RowExt;
+
+#[cfg(any(test, feature = "test-dependencies"))]
 use {
     crate::wallet::encoding::pool_code,
     rusqlite::named_params,
@@ -162,10 +165,11 @@ use {
     crate::chain::{BlockMeta, fsblockdb_with_blocks},
     std::{fs, io, path::PathBuf},
 };
-
 pub mod chain;
 pub mod error;
 pub mod pool_migration;
+// [zero] @claude Checked u64/usize <-> SQLite integer conversions; see sql.rs.
+mod sql;
 pub mod util;
 pub mod wallet;
 #[cfg(feature = "zewif")]
@@ -364,9 +368,19 @@ struct AuthorizerGuard<'conn> {
 
 impl Drop for AuthorizerGuard<'_> {
     fn drop(&mut self) {
-        self.conn.authorizer(
+        // [zero] @claude `Connection::authorizer` returns a `Result` as of `rusqlite` 0.38;
+        // it fails only when the connection is touched from a thread other than the one
+        // that owns it, which cannot happen here — the guard is dropped on the same thread
+        // that installed the authorizer, before that thread releases the connection. A
+        // `Drop` impl has nowhere to propagate an error to, so record it and continue: the
+        // consequence of a failed removal is that the extension authorizer stays installed
+        // and the wallet's own statements start being rejected, which is loud rather than
+        // silent, and fails closed.
+        if let Err(e) = self.conn.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        );
+        ) {
+            tracing::error!("failed to remove the extension authorizer: {e}");
+        }
     }
 }
 
@@ -405,7 +419,11 @@ impl<'conn> ExtensionTransaction<'conn> {
         &self,
         f: impl FnOnce() -> Result<T, rusqlite::Error>,
     ) -> Result<T, rusqlite::Error> {
-        self.conn.authorizer(Some(extension_authorizer));
+        // [zero] @claude Propagate rather than discard: this call is what confines the
+        // caller's statements to `ext_`-prefixed tables, so running `f` after it failed
+        // would run extension SQL with no policy in force. The guard is created only once
+        // the authorizer is actually installed.
+        self.conn.authorizer(Some(extension_authorizer))?;
         let _guard = AuthorizerGuard { conn: self.conn };
         f()
     }
@@ -1531,7 +1549,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
                     ":key_scope": KeyScope::Ephemeral.encode()
                 ],
                 |row| {
-                    let v = row.get(0)?;
+                    let v = row.get_u64(0)?;
                     let to_address = row.get::<_, Option<String>>(1)?;
                     let ephemeral_address = row.get::<_, Option<String>>(2)?;
                     let address_index = row.get::<_, Option<u32>>(3)?;

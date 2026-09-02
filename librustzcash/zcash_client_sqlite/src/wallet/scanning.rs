@@ -28,6 +28,7 @@ use super::{block_max_scanned, common::table_constants, wallet_birthday};
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::{IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT};
 
+use crate::sql::SqlU64;
 use ScanPriority::*;
 #[cfg(not(feature = "orchard"))]
 use zcash_protocol::PoolType;
@@ -346,7 +347,7 @@ fn extend_range(
 
     let mut shard_end = |index: u64| -> Result<Option<BlockHeight>, rusqlite::Error> {
         Ok(shard_end_stmt
-            .query_row(named_params![":shard_index": index], |row| {
+            .query_row(named_params![":shard_index": SqlU64(index)], |row| {
                 row.get::<_, Option<u32>>(0)
                     .map(|opt| opt.map(BlockHeight::from))
             })

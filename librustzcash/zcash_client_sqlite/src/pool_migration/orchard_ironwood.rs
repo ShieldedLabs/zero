@@ -786,6 +786,8 @@ mod retention_follows_the_committed_migration {
 mod check_step_satisfiability {
     use rusqlite::named_params;
 
+    use crate::sql::SqlU64;
+
     use ::orchard::{Anchor, note::Nullifier};
     use zcash_client_backend::data_api::testing::{
         AddressType, TestBuilder, TestState, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
@@ -1551,7 +1553,7 @@ mod check_step_satisfiability {
                  VALUES (:checkpoint_id, :position)",
                 named_params! {
                     ":checkpoint_id": u32::from(as_of_height) - 50,
-                    ":position": u64::from(u32::MAX),
+                    ":position": SqlU64(u64::from(u32::MAX)),
                 },
             )
             .expect("records a checkpoint the tree cannot root");

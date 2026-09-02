@@ -92,6 +92,13 @@ zcash_client_backend = { path = \"$CRATES/zcash_client_backend\", features = [\"
 probe proofs "\
 zcash_proofs = { path = \"$CRATES/zcash_proofs\", default-features = false, features = [\"prover\"] }"
 
+# On wasm32-unknown-unknown `rusqlite` links against `sqlite-wasm-rs` rather than
+# building SQLite from C, so this needs no sysroot. `uuid` needs its own randomness
+# feature, exactly as `getrandom` does.
+probe sqlite "\
+zcash_client_sqlite = { path = \"$CRATES/zcash_client_sqlite\", default-features = false, features = [\"orchard\", \"transparent-inputs\"] }
+uuid = { version = \"1\", features = [\"js\"] }"
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
   echo "all probes passed"

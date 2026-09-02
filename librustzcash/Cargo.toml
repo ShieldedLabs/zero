@@ -161,7 +161,11 @@ subtle = { version = "2.2.3", default-features = false }
 # - Warning: One of the downstream consumers requires that SQLite be available through
 #   CocoaPods, due to being bound to React Native. We need to ensure that the SQLite
 #   version required for `rusqlite` is a version that is available through CocoaPods.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# [zero] @claude The `bundled` feature is NOT enabled here: it compiles SQLite from C,
+# which cannot work on `wasm32-unknown-unknown` (no libc). `rusqlite` substitutes
+# `sqlite-wasm-rs` for `libsqlite3-sys` on that target, so it needs no bundled build.
+# Consumers turn `bundled` on for the targets that want it; see `zcash_client_sqlite`.
+rusqlite = { version = "0.39" }
 schemerz = "0.2"
 # [zero] @claude Pointed at the local build in `zero-vendor/`, which widens the
 # `rusqlite` requirement to `>=0.37, <0.40`. Upstream publishes one release per

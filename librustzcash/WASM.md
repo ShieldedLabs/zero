@@ -30,7 +30,7 @@ cross-compile. Upstream CI does the same thing for `wasm32-wasip1`
 | `zcash_client_backend` + `transparent-inputs`, `pczt` | yes |
 | `zcash_client_backend` + `lightwalletd-tonic`, `sync` | yes (but see [Transport](#transport)) |
 | `zcash_proofs` + `prover` | yes |
-| `zcash_client_sqlite` | **no** — see [Storage](#storage) |
+| `zcash_client_sqlite` + `orchard`, `transparent-inputs` | yes — via `sqlite-wasm-rs`, see [Storage](#storage) |
 | `zcash_client_backend` + `tor` | **no** — arti needs real sockets |
 
 Two things that look like they should be blockers and are not:
@@ -104,8 +104,8 @@ gone.
 
 ## Storage
 
-`zcash_client_sqlite` does not build for wasm today, but the reason is a version
-pin rather than anything architectural, and the fix is smaller than it looks.
+`zcash_client_sqlite` builds for `wasm32-unknown-unknown` on this branch. What
+stood in the way was a version pin rather than anything architectural.
 
 **rusqlite has supported `wasm32-unknown-unknown` since 0.38** (December 2025).
 On `cfg(all(target_family = "wasm", target_os = "unknown"))` it swaps
@@ -117,8 +117,9 @@ for (`time`, `array`, `uuid`, `hooks`) build clean for
 
 [`sqlite-wasm-rs`]: https://github.com/Spxg/sqlite-wasm-rs
 
-This workspace pins rusqlite 0.37 (July 2025), which predates that. Three things
-stand between here and the bump:
+This workspace pinned rusqlite 0.37 (July 2025), which predates that. Three
+things stood between there and the bump; all three are resolved on this branch,
+and the workspace is now on rusqlite 0.39:
 
 1. ~~**`arti-client` 0.35 pins rusqlite 0.37.**~~ **Done on this branch.**
    `libsqlite3-sys` declares `links = "sqlite3"`, so two versions cannot coexist
@@ -136,17 +137,17 @@ stand between here and the bump:
    the requirement widened to `>=0.37, <0.40`; its suite passes against rusqlite
    0.37, 0.38 and 0.39. Delete it once `zcash/schemerz` publishes a release for
    the `rusqlite` version this workspace settles on.
-3. **`zcash_client_sqlite` needs a mechanical migration.** Checked against
-   rusqlite 0.38 it produces 85 errors across 10 files, every one of them the
-   same cause: rusqlite 0.38 removed the `ToSql`/`FromSql` impls for `u64` and
-   `usize`. The bulk is in `pool_migration/store.rs` (31),
-   `wallet/commitment_tree.rs` (21) and `wallet.rs` (16). These conversions were
-   removed because they were lossy, so each site wants a real `try_from` rather
-   than a blanket `as i64`.
+3. ~~**`zcash_client_sqlite` needs a mechanical migration.**~~ **Done on this
+   branch.** rusqlite 0.38 removed the `ToSql`/`FromSql` impls for `u64` and
+   `usize` — they were lossy in both directions — which cost 85 call sites across
+   10 files. `src/sql.rs` is now the single place that conversion happens:
+   `SqlU64` to bind, `RowExt::{get_u64, get_opt_u64, get_usize}` to read, both
+   checked. See [Storage](#storage).
 
-The `bundled` feature also has to stop applying to wasm — move it into a
+The `bundled` feature also had to stop applying to wasm: it is now declared in a
 `[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]`
-block, since there is nothing to bundle on that target.
+block in `zcash_client_sqlite/Cargo.toml`, since there is nothing to bundle on
+that target.
 
 Then mind what `sqlite-wasm-rs` actually provides. It is **not thread-safe**
 (SQLite is compiled `-DSQLITE_THREADSAFE=0`, and `JsValue` cannot cross threads)
@@ -222,8 +223,10 @@ verified above or a direct consequence of something verified above.
    `zero-vendor/schemerz-rusqlite`. Still worth asking `zcash/schemerz` for a real
    release, and reporting the trailing-comma bug that disables its test suite
    (see that directory's README).
-3. **Migrate `zcash_client_sqlite` off the `u64`/`usize` SQL conversions**
-   (85 sites, 10 files) and make `bundled` target-conditional.
+3. ~~**Migrate `zcash_client_sqlite` off the `u64`/`usize` SQL conversions.**~~
+   Done, via `zcash_client_sqlite/src/sql.rs`. `bundled` is now target-conditional.
+   With this, **every crate in the workspace that a browser wallet needs builds
+   for `wasm32-unknown-unknown`.** What is left is integration, not porting.
 4. **Pick and wire a VFS.** `sahpool`/OPFS inside a dedicated Worker, with the
    wasm module instantiated there so the main thread never blocks.
 5. **Transport.** `sync::run` is generic over `ChT: GrpcService<TonicBody>`, so
