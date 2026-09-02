@@ -64,12 +64,13 @@ const UTXO_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// The maximum number of in-flight state UTXO lookups per transaction: enough
 /// to overlap the per-lookup latency without flooding the state service's buffer.
 ///
-/// Batched lookups start their [`UTXO_LOOKUP_TIMEOUT`] clocks together instead
-/// of serially, so an `AwaitUtxo` answered more than 6 minutes into the phase
-/// now fails it. Accepted narrowing: that case only occurs in out-of-order
-/// sync, it already failed serially whenever such an input was among the first
-/// in flight, and the designed recovery is a sync restart (see the timeout's
-/// docs).
+/// A lookup's [`UTXO_LOOKUP_TIMEOUT`] clock starts when it enters the
+/// in-flight window, not when the phase starts: the first
+/// `MAX_CONCURRENT_UTXO_LOOKUPS` clocks start together, and each later
+/// lookup's starts when a slot frees. Serially, every lookup got its full
+/// timeout in sequence; overlapping narrows that for lookups sharing a
+/// window. Accepted narrowing: it only matters in out-of-order sync, and the
+/// designed recovery is a sync restart (see the timeout's docs).
 const MAX_CONCURRENT_UTXO_LOOKUPS: usize = 64;
 
 /// A timeout applied to output lookup requests sent to the mempool. This is shorter than the
