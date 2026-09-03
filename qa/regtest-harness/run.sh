@@ -365,18 +365,26 @@ mine_blocks() {
 
 # mine_with_tx <address> <rawtx-hex> <txid>: mine the transaction into the
 # chain. Zebra never restarts, so a transaction the wallet already broadcast
-# is still in the mempool and lands in the next template; the resubmit
-# covers only a transaction the node no longer holds (zebra rejects a
-# resubmission of one it does). A template can be built before the node
-# finishes verifying a fresh submission, so this mines single blocks until
-# the transaction reports a mined height, bounded.
+# is still in its mempool; one the node no longer holds is resubmitted.
+# Either way mining starts only once the node reports the transaction in
+# its mempool: getrawmempool lists verified entries only, and
+# sendrawtransaction returns after verification, so no block template can
+# be built ahead of admission. The bounded single-block loop then covers a
+# template that leaves an admitted transaction out for any other reason.
 mine_with_tx() {
   local address="$1" rawtx="$2" txid="$3"
   local resp tx_height attempt
-  if ! contains "$(zebra_rpc getrawmempool 2>/dev/null || echo '[]')" "$txid"; then
+  in_mempool() { contains "$(zebra_rpc getrawmempool 2>/dev/null)" "$txid"; }
+  if ! in_mempool; then
     resp=$(zebra_rpc sendrawtransaction "[\"$rawtx\"]" 2>/dev/null) || resp="(rpc failure)"
-    contains "$resp" "$txid" || { echo "::error::sendrawtransaction of $txid failed: $resp" >&2; return 1; }
+    # A rejected resubmission of a transaction the node holds after all (the
+    # mempool query above failed transiently) is fine; anything else is not.
+    if ! contains "$resp" "$txid" && ! in_mempool; then
+      echo "::error::sendrawtransaction of $txid failed: $resp" >&2
+      return 1
+    fi
   fi
+  WAIT_TIMEOUT=60 wait_until "transaction $txid admitted to the mempool" in_mempool || return 1
   for attempt in 1 2 3 4 5; do
     mine_blocks "$address" 1 || return 1
     tx_height=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
