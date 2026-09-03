@@ -241,11 +241,12 @@ jobs:
       # smoke run must never test a stale binary. Only the base and apt
       # layers are cacheable, and every run reads them from the registry
       # cache that main, scheduled, and dispatched runs refresh. PR runs
-      # export nothing: they cannot write the registry, and exporting to the
-      # Actions cache instead filled the repo's 10 GB quota with buildkit
-      # blobs (38 entries, 9.9 GB, one blob of 5.5 GB on 2026-09-02) that
-      # evicted z3-regtest's rust-cache and golden-chain entries on every PR,
-      # while the always-fresh compile stage could never hit them anyway.
+      # export nothing: the registry cache belongs to main (a fork PR's
+      # token could not write it anyway), and exporting to the Actions
+      # cache instead filled the repo's 10 GB quota with buildkit blobs
+      # (38 entries, 9.9 GB, one blob of 5.5 GB on 2026-09-02) that evicted
+      # z3-regtest's rust-cache and golden-chain entries on every PR, while
+      # the always-fresh compile stage could never hit them anyway.
       - name: Build ${{ matrix.name }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
