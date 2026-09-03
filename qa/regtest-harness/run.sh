@@ -201,6 +201,14 @@ wallet_db_at() {
   sqlite3 -cmd '.timeout 5000' "$datadir/wallet.db" "$@"
 }
 
+# stall_window <tip>: seconds to wait for a wallet sync to reach <tip>
+# before treating it as wedged. A full release-profile sync of the ~230-block
+# harness chain takes about 10 s on ubuntu-latest and under 30 s on a slow
+# machine, so one second per block with a 120 s floor is a 10-20x margin.
+# Earlier windows of 3-5 s per block turned every startup-race hit into a
+# 10-19 minute wait before the one restart that clears it.
+stall_window() { local tip="$1"; echo $(( tip > 120 ? tip : 120 )); }
+
 # start_zallet_warm <logfile> <datadir> <expected_tip>: start zallet and wait
 # until BOTH its node view and its wallet scan reach the expected tip. The
 # embedded chain index has a startup window in which historic fetches and
@@ -210,7 +218,7 @@ wallet_db_at() {
 start_zallet_warm() {
   local logfile="$1" datadir="$2" expected_tip="$3"
   start_zallet "$logfile" "$datadir"
-  local restarted="" deadline=$((SECONDS + expected_tip * 3))
+  local restarted="" deadline=$((SECONDS + $(stall_window "$expected_tip")))
   while true; do
     if [ "$(wallet_rpc getwalletstatus | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$expected_tip" ]         && fully_synced "$expected_tip" > /dev/null 2>&1; then
       return 0
@@ -221,7 +229,7 @@ start_zallet_warm() {
         log "zallet warm-up stalled (embedded-index startup race); restarting once"
         stop_zallet
         start_zallet "$logfile" "$datadir"
-        deadline=$((SECONDS + expected_tip * 3))
+        deadline=$((SECONDS + $(stall_window "$expected_tip")))
       else
         return 1
       fi
@@ -947,7 +955,7 @@ for acct in json.load(sys.stdin)["result"]:
   start_zallet "zallet-signer.log" "$signer_dir"
   local signer_tip signer_restarted="" sync_deadline
   signer_tip=$(zebra_height)
-  sync_deadline=$((SECONDS + signer_tip * 3))
+  sync_deadline=$((SECONDS + $(stall_window "$signer_tip")))
   until fully_synced "$signer_tip" > /dev/null 2>&1; do
     if [ "$SECONDS" -ge "$sync_deadline" ]; then
       if [ -z "$signer_restarted" ]; then
@@ -955,7 +963,7 @@ for acct in json.load(sys.stdin)["result"]:
         log "signer sync stalled (embedded-index startup race); restarting signer once"
         stop_zallet
         start_zallet "zallet-signer.log" "$signer_dir"
-        sync_deadline=$((SECONDS + signer_tip * 3))
+        sync_deadline=$((SECONDS + $(stall_window "$signer_tip")))
       else
         fail "spend-poison: signer never synced"
         stop_zallet; start_zallet "zallet.log"; return
@@ -1118,7 +1126,7 @@ for acct in json.load(sys.stdin)["result"]:
     stop_zallet; start_zallet "zallet.log"; return
   }
   local fresh_restarted=""
-  sync_deadline=$((SECONDS + poison_tip * 5))
+  sync_deadline=$((SECONDS + $(stall_window "$poison_tip")))
   until fully_synced "$poison_tip" > /dev/null 2>&1; do
     if [ "$SECONDS" -ge "$sync_deadline" ]; then
       if [ -z "$fresh_restarted" ]; then
@@ -1126,7 +1134,7 @@ for acct in json.load(sys.stdin)["result"]:
         log "recovery sync stalled (embedded-index startup race); restarting once"
         stop_zallet
         start_zallet "zallet-fresh.log" "$fresh_dir"
-        sync_deadline=$((SECONDS + poison_tip * 5))
+        sync_deadline=$((SECONDS + $(stall_window "$poison_tip")))
       else
         fail "spend-poison: recovery never synced"
         stop_zallet; start_zallet "zallet.log"; return
