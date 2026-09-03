@@ -12,8 +12,9 @@ on:
         required: false
         type: string
 
+# Read-only token by default; only the job that creates the release writes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # 1. Compute the version once, so nothing double-increments.
@@ -24,7 +25,7 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Refuse to release a pre-release zebra
         # Zebra's end-of-support check gives release candidates a 10-day fuse
         # (EOS_PANIC_AFTER in zebrad/src/components/sync/end_of_support.rs):
@@ -43,6 +44,69 @@ jobs:
               "subtree to a final release before cutting a Zero release."
             exit 1
           fi
+      - name: Refuse to release a node that halts soon
+        # Both nodes auto-halt on mainnet at a hand-edited height: zcashd at
+        # APPROX_RELEASE_HEIGHT + RELEASE_TO_DEPRECATION_WEEKS of blocks
+        # (zcashd/src/deprecation.h), zebra at ESTIMATED_RELEASE_HEIGHT +
+        # EOS_PANIC_AFTER days of blocks (zebrad/src/components/sync/
+        # end_of_support.rs, a [zero] carry of the newest upstream release's
+        # value). v20 through v27 all shipped v20's zcashd value and shared one
+        # halt block (3,471,448, ~2026-09-04), caught two days ahead. Fail when
+        # either halt is under 4 weeks of blocks past the mainnet tip. The tip
+        # is estimated from a fixed anchor and the wall clock, not fetched:
+        # DigiShield holds the long-run average at the 75-second target
+        # (observed +0.1% over the 48 days before the anchor), so the estimate
+        # drifts by hours over months and the anchor never needs refreshing
+        # for the check to stay correct.
+        env:
+          # Mainnet block 3,469,914 carried timestamp 2026-09-03T00:35:44Z.
+          ANCHOR_HEIGHT: "3469914"
+          ANCHOR_EPOCH: "1788395744"
+        run: |
+          set -euo pipefail
+          zcashd_h=zcashd/src/deprecation.h
+          zebra_rs=zebra/zebrad/src/components/sync/end_of_support.rs
+          zcashd_release=$(sed -n 's/^static const int APPROX_RELEASE_HEIGHT = \([0-9]*\);.*/\1/p' "$zcashd_h")
+          zcashd_weeks=$(sed -n 's/^static const int RELEASE_TO_DEPRECATION_WEEKS = \([0-9]*\);.*/\1/p' "$zcashd_h")
+          zebra_release=$(sed -n 's/^pub const ESTIMATED_RELEASE_HEIGHT: u32 = \([0-9_]*\);.*/\1/p' "$zebra_rs" | tr -d _)
+          zebra_days=$(sed -n 's/^pub const EOS_PANIC_AFTER: u32 = \([0-9]*\);.*/\1/p' "$zebra_rs")
+          if ! [[ "$zcashd_release" =~ ^[0-9]{1,9}$ && "$zcashd_weeks" =~ ^[0-9]{1,2}$ ]]; then
+            echo "::error::Could not parse APPROX_RELEASE_HEIGHT and RELEASE_TO_DEPRECATION_WEEKS from ${zcashd_h}"
+            exit 1
+          fi
+          if ! [[ "$zebra_release" =~ ^[0-9]{1,9}$ && "$zebra_days" =~ ^[0-9]{1,3}$ ]]; then
+            echo "::error::Could not parse ESTIMATED_RELEASE_HEIGHT and EOS_PANIC_AFTER from ${zebra_rs}"
+            exit 1
+          fi
+          blocks_per_day=$(( 24 * 60 * 60 / 75 ))   # post-Blossom block spacing
+          zcashd_halt=$(( zcashd_release + zcashd_weeks * 7 * blocks_per_day ))
+          zebra_halt=$(( zebra_release + zebra_days * blocks_per_day ))
+          min_runway=$(( 4 * 7 * blocks_per_day ))
+          now=$(date +%s)
+          if (( now < ANCHOR_EPOCH )); then
+            echo "::error::ANCHOR_EPOCH (${ANCHOR_EPOCH}) is in the future relative to the" \
+              "runner clock (${now}); the tip estimate would be invalid."
+            exit 1
+          fi
+          tip=$(( ANCHOR_HEIGHT + ( ( now - ANCHOR_EPOCH ) + 74 ) / 75 ))
+          echo "estimated mainnet tip ${tip}; minimum runway ${min_runway} blocks"
+          echo "zcashd halts at ${zcashd_halt}: $(( zcashd_halt - tip )) blocks of runway"
+          echo "zebra halts at ${zebra_halt}: $(( zebra_halt - tip )) blocks of runway"
+          fail=0
+          if (( zcashd_halt - tip < min_runway )); then
+            echo "::error::zcashd halts at ${zcashd_halt}, under 4 weeks past the estimated mainnet" \
+              "tip (${tip}). Bump APPROX_RELEASE_HEIGHT in ${zcashd_h} (MAINTENANCE.md," \
+              "Pre-release checklist), push, then re-dispatch."
+            fail=1
+          fi
+          if (( zebra_halt - tip < min_runway )); then
+            echo "::error::zebra halts at ${zebra_halt}, under 4 weeks past the estimated mainnet" \
+              "tip (${tip}). Re-set ESTIMATED_RELEASE_HEIGHT in ${zebra_rs} to the newest" \
+              "upstream zebra release's value, or pull that tag (MAINTENANCE.md," \
+              "Pre-release checklist), push, then re-dispatch."
+            fail=1
+          fi
+          exit "$fail"
       - name: Determine version
         id: ver
         env:
@@ -111,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
       - name: Build component archives
@@ -125,7 +189,7 @@ jobs:
               -o "dist/${c}-${TAG}.zip" "HEAD:${c}"
           done
           ls -lh dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: source-zips
           path: dist/*.zip
@@ -155,7 +219,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
       - name: Install build deps
@@ -163,7 +227,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt }}
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ matrix.component }}
       - name: Build ${{ matrix.bin }}
@@ -184,7 +248,7 @@ jobs:
           strip "dist/${out}"
           ( cd dist && sha256sum "${out}" > "${out}.sha256" )
           ls -lh dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.bin }}-${{ matrix.target_label }}
           path: dist/*
@@ -196,13 +260,15 @@ jobs:
   release:
     needs: [version, smoke, source, binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
