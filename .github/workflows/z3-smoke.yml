@@ -103,7 +103,7 @@ jobs:
           rows="$RUNNER_TEMP/rows"; : > "$rows"
           row() { echo "| $1 | $2 | $3 |" >> "$rows"; }
           changed() { jq -e --arg n "$1" 'any(. == $n)' <<< "$CHANGED" > /dev/null; }
-          first() { jq -r --arg k "${1}_files" '.[$k] | fromjson | .[0]' <<< "$FILTER"; }
+          first() { jq -r --arg k "${1}_files" '.[$k] | fromjson | .[0] | gsub("[|\\r\\n]"; " ")' <<< "$FILTER"; }
           if [ "$EVENT_NAME" = pull_request ]; then zjob="build (non-gating)"; else zjob="warm cache"; fi
 
           if [ "$FILTER_OUTCOME" != success ]; then
