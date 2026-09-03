@@ -76,7 +76,7 @@ jobs:
             echo "::error::ANCHOR_EPOCH (${ANCHOR_EPOCH}) is in the future relative to the runner clock (${now}); tip estimate would be invalid."
             exit 1
           fi
-          tip=$(( ANCHOR_HEIGHT + ( now - ANCHOR_EPOCH ) / 75 ))
+          tip=$(( ANCHOR_HEIGHT + ( ( now - ANCHOR_EPOCH ) + 74 ) / 75 ))
           echo "zcashd halt height ${halt_height}, estimated mainnet tip ${tip}:" \
             "$(( halt_height - tip )) blocks of runway (minimum ${min_runway})"
           if (( halt_height - tip < min_runway )); then
