@@ -8,6 +8,12 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### CI
+
+- `release.yml` refuses to dispatch when zcashd's mainnet halt is under
+  4 weeks past the current tip (skips with a warning when the tip API is
+  unreachable); MAINTENANCE.md gains the matching pre-release checklist.
+
 ## v28 - 2026-09-02
 
 ### Fixed
