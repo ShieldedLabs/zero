@@ -1,7 +1,7 @@
 name: Z3 regtest wallet tests
 
 # Deterministic wallet-behavior regression tests (qa/regtest-harness/):
-# zebrad (regtest, internal miner) + zallet (zaino backend) as plain
+# zebrad (regtest, blocks mined on demand) + zallet (zaino backend) as plain
 # processes, driven through the stateful wallet scenarios that have failed in
 # production and that z3-smoke's fresh-wallet liveness checks structurally
 # cannot exercise: dust-value listing, per-address filtering, multi-address
@@ -115,12 +115,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    # First uncached run builds two large Rust workspaces (~40 min); cached
-    # runs are dominated by mining (~10 min).
-    # CI runners mine the regtest chain ~2.5x slower than dev hardware; the
-    # harness mines ~230 blocks total (the spend-poison scenario reuses the
-    # setup's maturity window), for a measured full run of ~60 minutes
-    # including builds.
+    # First uncached run builds two large Rust workspaces (~25 min). Mining
+    # is instant (generatetoaddress), so a cached run is dominated by wallet
+    # convergence and the spend-poison wallet lifecycles (~10 min).
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -143,9 +140,9 @@ jobs:
       # Release profile: mining, proving, and scanning are compute-bound;
       # debug binaries ran the harness 5-10x slower and widened its
       # startup-race retry windows.
-      - name: Build zebrad (internal miner)
+      - name: Build zebrad
         working-directory: zebra
-        run: cargo build --release -p zebrad --features internal-miner
+        run: cargo build --release -p zebrad
 
       - name: Build zallet (zaino backend)
         # Since beta.3 each backend is its own workspace under

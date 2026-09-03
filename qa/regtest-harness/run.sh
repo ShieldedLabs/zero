@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Z3 regtest harness: deterministic wallet-behavior regression tests.
 #
-# Runs zebrad (regtest, internal miner) and zallet (zaino backend) as local
-# processes against a throwaway datadir, drives them through the wallet
+# Runs zebrad (regtest, blocks mined on demand) and zallet (zaino backend) as
+# local processes against a throwaway datadir, drives them through the wallet
 # scenarios that have failed in production, and asserts on RPC responses and
 # wallet-database state. No network access is required or performed: regtest
 # never dials peers, and both keypairs below are public test constants that
@@ -30,7 +30,7 @@
 #   qa/regtest-harness/run.sh [--build] [--only <name>[,<name>...]] [--keep]
 #
 #   --build   cargo-build the required binaries first (otherwise the script
-#             expects ZEBRAD_BIN / ZALLET_BIN, defaulting to target/debug).
+#             expects ZEBRAD_BIN / ZALLET_BIN, defaulting to target/release).
 #   --only    run a subset of scenarios (comma-separated names). Setup always
 #             runs.
 #   --keep    leave the stack running and the workdir in place on exit.
@@ -38,7 +38,7 @@
 # Environment:
 #   ZEBRAD_BIN, ZALLET_BIN   binary paths (defaults below)
 #   HARNESS_WORKDIR          working directory (default: mktemp -d)
-#   MINE_PHASE_BLOCKS        blocks mined per funding phase (default 120)
+#   MINE_PHASE_BLOCKS        blocks mined per funding phase (default 105)
 #   ZEBRA_RPC_PORT           zebra RPC port (default 18232)
 #   ZALLET_RPC_PORT          zallet RPC port (default 28232)
 
@@ -201,6 +201,14 @@ wallet_db_at() {
   sqlite3 -cmd '.timeout 5000' "$datadir/wallet.db" "$@"
 }
 
+# stall_window <tip>: seconds to wait for a wallet sync to reach <tip>
+# before treating it as wedged. A full release-profile sync of the ~230-block
+# harness chain takes about 10 s on ubuntu-latest and under 30 s on a slow
+# machine, so one second per block with a 120 s floor is a 10-20x margin.
+# Earlier windows of 3-5 s per block turned every startup-race hit into a
+# 10-19 minute wait before the one restart that clears it.
+stall_window() { local tip="$1"; echo $(( tip > 120 ? tip : 120 )); }
+
 # start_zallet_warm <logfile> <datadir> <expected_tip>: start zallet and wait
 # until BOTH its node view and its wallet scan reach the expected tip. The
 # embedded chain index has a startup window in which historic fetches and
@@ -210,7 +218,7 @@ wallet_db_at() {
 start_zallet_warm() {
   local logfile="$1" datadir="$2" expected_tip="$3"
   start_zallet "$logfile" "$datadir"
-  local restarted="" deadline=$((SECONDS + expected_tip * 3))
+  local restarted="" deadline=$((SECONDS + $(stall_window "$expected_tip")))
   while true; do
     if [ "$(wallet_rpc getwalletstatus | json_field "['result']['node_tip']['height']" 2>/dev/null)" = "$expected_tip" ]         && fully_synced "$expected_tip" > /dev/null 2>&1; then
       return 0
@@ -221,7 +229,7 @@ start_zallet_warm() {
         log "zallet warm-up stalled (embedded-index startup race); restarting once"
         stop_zallet
         start_zallet "$logfile" "$datadir"
-        deadline=$((SECONDS + expected_tip * 3))
+        deadline=$((SECONDS + $(stall_window "$expected_tip")))
       else
         return 1
       fi
@@ -316,64 +324,116 @@ zallet_alive() {
   [ -n "$ZALLET_PID" ] && kill -0 "$ZALLET_PID" 2>/dev/null
 }
 
-# mine_to <address> <target-height>: (re)start zebra with the internal miner
-# paying <address> until the chain reaches <target-height>, then restart it
-# without the miner so the chain is static for assertions.
-mine_to() {
-  local address="$1" target="$2"
-  stop_zebra
-  write_zebra_config "$address" true
-  start_zebra "zebra-mine.log"
-  local deadline=$((SECONDS + 1800))
-  until [ "$(zebra_height 2>/dev/null || echo 0)" -ge "$target" ]; do
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "::error::mining to height $target timed out" >&2
-      exit 1
+# --- Mining ------------------------------------------------------------------
+# Blocks are mined on demand with the `generatetoaddress` RPC of the single,
+# always-serving zebra (upstream zebra #10952, vendored since 6.2.3). It runs
+# the same block-template and submit path as `generate`, so it needs no
+# internal miner, no config rewrite, and no restart: the mempool and zebra's
+# in-memory fork state survive every mining step, and the chain is static
+# between calls. Regtest has proof of work disabled, so a block costs one
+# template and one submit. Throughput is accumulated for report_mining.
+MINED_BLOCKS=0
+MINED_MS=0
+
+# CLOCK_MONOTONIC rather than time.monotonic(): each call is a fresh
+# process, and on macOS Python's monotonic() is not comparable across
+# processes (it read 5 ms in every one), while CLOCK_MONOTONIC is system-wide
+# on both Linux and macOS and immune to wall-clock steps.
+now_ms() { python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1000))'; }
+
+# mine_blocks <address> <count>: mine exactly <count> blocks paying their
+# coinbase to <address>, in bounded chunks so a wedged node is a red harness
+# error rather than a hung job. Verifies the tip moved by exactly <count>:
+# there is no overshoot and no dropped block, so every phase boundary is
+# deterministic. Returns non-zero after a ::error line on any failure;
+# callers outside `assert` abort under errexit.
+mine_blocks() {
+  local address="$1" count="$2"
+  local start remaining n resp got tip t0 t1
+  start=$(zebra_height) || { echo "::error::mine_blocks: zebra height unavailable" >&2; return 1; }
+  t0=$(now_ms)
+  remaining=$count
+  while [ "$remaining" -gt 0 ]; do
+    n=$(( remaining < 25 ? remaining : 25 ))
+    resp=$(zebra_rpc generatetoaddress "[$n, \"$address\"]" 300) \
+      || { echo "::error::generatetoaddress $n blocks for $address failed at height $(zebra_height 2>/dev/null || echo '?')" >&2; return 1; }
+    got=$(printf '%s' "$resp" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["result"]))' 2>/dev/null) || got=0
+    if [ "$got" != "$n" ]; then
+      echo "::error::generatetoaddress returned $got block hashes, wanted $n: $resp" >&2
+      return 1
     fi
-    sleep 5
+    remaining=$((remaining - n))
+    log "mined $n blocks for $address (height $((start + count - remaining)))"
   done
-  stop_zebra
-  write_zebra_config "$address" false
-  start_zebra "zebra-serve.log"
+  t1=$(now_ms)
+  MINED_BLOCKS=$((MINED_BLOCKS + count))
+  MINED_MS=$((MINED_MS + t1 - t0))
+  tip=$(zebra_height 2>/dev/null || echo '?')
+  if [ "$tip" != "$((start + count))" ]; then
+    echo "::error::mined $count blocks from height $start but the tip is $tip" >&2
+    return 1
+  fi
 }
 
-# mine_with_tx <address> <target-height> <rawtx-hex> <txid>: like mine_to,
-# but resubmits the given raw transaction as soon as the mining node's RPC
-# answers (a zebra restart empties the mempool, so a transaction submitted
-# before the restart would otherwise never be mined). Does not stop until the
-# transaction is MINED (not merely accepted: a block template built before
-# acceptance would leave it in the mempool for the next restart to wipe) AND
-# the target height is reached.
+# mine_with_tx <address> <rawtx-hex> <txid>: mine the transaction into the
+# chain. Zebra never restarts, so a transaction the wallet already broadcast
+# is still in its mempool; one the node no longer holds is resubmitted.
+# Either way mining starts only once the node reports the transaction in
+# its mempool: getrawmempool lists verified entries only, and
+# sendrawtransaction returns after verification, so no block template can
+# be built ahead of admission. The bounded single-block loop then covers a
+# template that leaves an admitted transaction out for any other reason. A
+# transaction already in the chain (a retried call) is reported mined as is.
 mine_with_tx() {
-  local address="$1" target="$2" rawtx="$3" txid="$4"
-  stop_zebra
-  write_zebra_config "$address" true
-  start_zebra "zebra-mine.log"
-  local sent="" mined="" resp submitted_txid tx_height
-  local deadline=$((SECONDS + 1800))
-  until [ -n "$mined" ] && [ "$(zebra_height 2>/dev/null || echo 0)" -ge "$target" ]; do
-    if [ -z "$sent" ]; then
-      resp=$(zebra_rpc sendrawtransaction "[\"$rawtx\"]" 2>/dev/null) || resp=""
-      submitted_txid=$(printf '%s' "$resp" | json_field "['result']" 2>/dev/null) || submitted_txid=""
-      if printf '%s' "$submitted_txid" | grep -Eiq '^[0-9a-f]{64}$'; then
-        sent=1
-      fi
-    elif [ -z "$mined" ]; then
-      tx_height=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
-        | json_field "['result'].get('height', -1)" 2>/dev/null) || tx_height=-1
-      if [ "${tx_height:--1}" -ge 0 ]; then
-        mined=1
-      fi
+  local address="$1" rawtx="$2" txid="$3"
+  local resp attempt
+  tx_mined() {
+    local h
+    h=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
+      | json_field "['result'].get('height', -1)" 2>/dev/null) || h=-1
+    [ "${h:--1}" -ge 0 ]
+  }
+  # `|| true` for readability only: a failed substitution used as an
+  # argument never trips errexit, and every call below is a condition.
+  in_mempool() { contains "$(zebra_rpc getrawmempool 2>/dev/null || true)" "$txid"; }
+  if tx_mined; then
+    return 0
+  fi
+  if ! in_mempool; then
+    resp=$(zebra_rpc sendrawtransaction "[\"$rawtx\"]" 2>/dev/null) || resp="(rpc failure)"
+    # A rejected resubmission of a transaction the node holds after all (the
+    # mempool query above failed transiently) is fine; anything else is not.
+    if ! contains "$resp" "$txid" && ! in_mempool; then
+      echo "::error::sendrawtransaction of $txid failed: $resp" >&2
+      return 1
     fi
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "::error::mining to height $target with tx inclusion timed out (sent: ${sent:-no}, mined: ${mined:-no})" >&2
-      exit 1
+  fi
+  WAIT_TIMEOUT=60 wait_until "transaction $txid admitted to the mempool" in_mempool || return 1
+  for attempt in 1 2 3 4 5; do
+    mine_blocks "$address" 1 || return 1
+    if tx_mined; then
+      return 0
     fi
-    sleep 2
+    log "transaction $txid not in block $(zebra_height 2>/dev/null || echo '?') (attempt $attempt); mining another"
   done
-  stop_zebra
-  write_zebra_config "$address" false
-  start_zebra "zebra-serve.log"
+  echo "::error::transaction $txid was never mined ($attempt blocks)" >&2
+  return 1
+}
+
+# Mining throughput, the number the move to generatetoaddress is measured
+# by: logged always, appended to the job's step summary in CI.
+report_mining() {
+  local line
+  if [ "$MINED_BLOCKS" = 0 ]; then
+    line="mining: no blocks mined this run"
+  else
+    line=$(python3 -c "b = $MINED_BLOCKS; ms = $MINED_MS
+print('mining: %d blocks in %.1fs (%.1f blocks/s)' % (b, ms / 1000, b * 1000 / max(ms, 1)))")
+  fi
+  log "$line"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '%s\n' "$line" >> "$GITHUB_STEP_SUMMARY"
+  fi
 }
 
 json_field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
@@ -446,10 +506,11 @@ for u in json.load(sys.stdin)["result"]:
 count_lines() { grep -c . || true; }
 
 # --- Golden chain -----------------------------------------------------------
-# Mining and wallet convergence dominate setup (~4 minutes even at release
-# profile), and their output is fully determined by the constants below, so
-# it is mined once and snapshotted. BUMP GOLDEN_EPOCH whenever a change
-# invalidates old snapshots that the key cannot see on its own:
+# Wallet convergence dominates setup (mining the chain takes seconds; the
+# walk, restart, and rescan kick take minutes), and the result is fully
+# determined by the constants below, so it is mined once and snapshotted.
+# BUMP GOLDEN_EPOCH whenever a change invalidates old snapshots that the key
+# cannot see on its own:
 #   - zallet wallet-db migrations (schema changes)
 #   - zebra state format changes (cache version)
 #   - any change to setup()'s logic, the config templates, or scenario
@@ -457,7 +518,9 @@ count_lines() { grep -c . || true; }
 # A stale snapshot that slips through fails the restore verification below
 # and falls back to a full re-mine, so a missed bump costs time, not
 # correctness.
-GOLDEN_EPOCH=2
+# 3: blocks mined with generatetoaddress (exact phase boundaries, no restart
+#    drift), see mine_blocks.
+GOLDEN_EPOCH=3
 GOLDEN_DIR="${GOLDEN_DIR:-$HOME/.cache/z3-harness-golden}"
 
 golden_key() {
@@ -534,7 +597,7 @@ golden_save() {
 
 setup() {
   log "workdir: $WORKDIR"
-  [ -x "$ZEBRAD_BIN" ] || { echo "::error::zebrad not found at $ZEBRAD_BIN (need --features internal-miner)" >&2; exit 1; }
+  [ -x "$ZEBRAD_BIN" ] || { echo "::error::zebrad not found at $ZEBRAD_BIN" >&2; exit 1; }
   [ -x "$ZALLET_BIN" ] || { echo "::error::zallet not found at $ZALLET_BIN" >&2; exit 1; }
   mkdir -p "$WORKDIR/zallet-data" "$WORKDIR/zebra-cache"
 
@@ -591,24 +654,25 @@ EOF
   contains "$resp" '"address"' || { echo "::error::import A failed: $resp" >&2; exit 1; }
   resp=$(wallet_rpc z_importaddress "[\"$ACCOUNT\", \"$PUBKEY_B\", false]") || resp="(rpc failure)"
   contains "$resp" '"address"' || { echo "::error::import B failed: $resp" >&2; exit 1; }
-  # Stop zallet while zebra bounces for the mining phases (its chain-indexer
-  # watchdog treats a vanishing validator as fatal, by design).
+  # Stop zallet for the mining phases. Zebra no longer restarts to mine, so
+  # the wallet could stay up; the convergence sequence below is tuned for a
+  # wallet that first meets the finished chain, so it stays stopped until
+  # that sequence is re-derived for live scanning.
   stop_zallet
 
-  log "funding phase 1: mining to height $MINE_PHASE_BLOCKS for $ADDR_A"
-  mine_to "$ADDR_A" "$MINE_PHASE_BLOCKS"
-  # The internal miner can produce a block or two between the height check
-  # and shutdown, so every expectation below derives from the ACTUAL mined
-  # boundaries, never from the requested targets.
+  log "funding phase 1: mining $MINE_PHASE_BLOCKS blocks for $ADDR_A"
+  mine_blocks "$ADDR_A" "$MINE_PHASE_BLOCKS"
+  # Every expectation below derives from the boundaries zebra reports, never
+  # from the requested counts.
   PHASE1_TIP=$(zebra_height)
   # One coinbase for the spend-poison scenario's derived address: phase 2's
   # blocks mature it for free, so the scenario never mines a maturity window.
-  log "funding poison address: mining to height $((PHASE1_TIP + 1)) for $ADDR_C_POISON"
-  mine_to "$ADDR_C_POISON" $((PHASE1_TIP + 1))
+  log "funding poison address: mining 1 block for $ADDR_C_POISON"
+  mine_blocks "$ADDR_C_POISON" 1
   C_TIP=$(zebra_height)
   X_COUNT=$((C_TIP - PHASE1_TIP))
-  log "funding phase 2: mining to height $((C_TIP + MINE_PHASE_BLOCKS)) for $ADDR_B"
-  mine_to "$ADDR_B" $((C_TIP + MINE_PHASE_BLOCKS))
+  log "funding phase 2: mining $MINE_PHASE_BLOCKS blocks for $ADDR_B"
+  mine_blocks "$ADDR_B" "$MINE_PHASE_BLOCKS"
   TIP=$(zebra_height)
 
   # Coinbase outputs need 100 confirmations and z_listunspent evaluates
@@ -857,7 +921,7 @@ for acct in json.load(sys.stdin)["result"]:
   stop_zallet
   local signer_dir="$WORKDIR/zallet-signer" fresh_dir="$WORKDIR/zallet-fresh"
   local resp seedfp addr_c opid opstatus
-  local s_height b_height poison_tip
+  local poison_tip
   if [ -z "$ua_main" ]; then
     fail "spend-poison: could not capture the main wallet's shielded address"
     start_zallet "zallet.log"
@@ -905,7 +969,7 @@ for acct in json.load(sys.stdin)["result"]:
   start_zallet "zallet-signer.log" "$signer_dir"
   local signer_tip signer_restarted="" sync_deadline
   signer_tip=$(zebra_height)
-  sync_deadline=$((SECONDS + signer_tip * 3))
+  sync_deadline=$((SECONDS + $(stall_window "$signer_tip")))
   until fully_synced "$signer_tip" > /dev/null 2>&1; do
     if [ "$SECONDS" -ge "$sync_deadline" ]; then
       if [ -z "$signer_restarted" ]; then
@@ -913,7 +977,7 @@ for acct in json.load(sys.stdin)["result"]:
         log "signer sync stalled (embedded-index startup race); restarting signer once"
         stop_zallet
         start_zallet "zallet-signer.log" "$signer_dir"
-        sync_deadline=$((SECONDS + signer_tip * 3))
+        sync_deadline=$((SECONDS + $(stall_window "$signer_tip")))
       else
         fail "spend-poison: signer never synced"
         stop_zallet; start_zallet "zallet.log"; return
@@ -970,8 +1034,8 @@ for acct in json.load(sys.stdin)["result"]:
       log "shielding op reported '$opstatus' (${op_error:-no error}); recovered tx $shield_txid from the mempool"
     fi
   fi
-  # Capture the raw bytes from the mempool: the mining restart below wipes
-  # the mempool, so the transaction must be resubmitted after it.
+  # Capture the raw bytes too: mine_with_tx resubmits the transaction if the
+  # mempool no longer holds it when mining starts.
   if [ -n "$shield_txid" ]; then
     shield_rawtx=$(zebra_rpc getrawtransaction "[\"$shield_txid\", 0]" | json_field "['result']") || true
   fi
@@ -986,9 +1050,8 @@ for acct in json.load(sys.stdin)["result"]:
   # recipient's new orchard note clears any default spend-confirmation policy.
   # The signer's role ends here.
   rm -rf "$signer_dir"
-  mine_with_tx "$ADDR_B" $(( $(zebra_height) + 1 )) "$shield_rawtx" "$shield_txid"
-  s_height=$(zebra_height)
-  mine_to "$ADDR_B" $((s_height + 10))
+  mine_with_tx "$ADDR_B" "$shield_rawtx" "$shield_txid"
+  mine_blocks "$ADDR_B" 10
 
   # The newer receipt on the address: the MAIN wallet (which received the
   # shielded value; the poison seed cannot decrypt that tx by design)
@@ -1024,11 +1087,10 @@ for acct in json.load(sys.stdin)["result"]:
     return
   fi
 
-  # Mine the deshield (the newer receipt), then a small margin tolerant of
-  # zebra dropping a non-finalized block across the serve restart.
-  mine_with_tx "$ADDR_B" $(( $(zebra_height) + 1 )) "$deshield_rawtx" "$deshield_txid"
-  b_height=$(zebra_height)
-  mine_to "$ADDR_B" $((b_height + 3))
+  # Mine the deshield (the newer receipt), then three more blocks so the
+  # recovery below scans it under a few confirmations.
+  mine_with_tx "$ADDR_B" "$deshield_rawtx" "$deshield_txid"
+  mine_blocks "$ADDR_B" 3
   poison_tip=$(zebra_height)
 
   # Sanity: the chain agrees X is spent; only the deshielded receipt remains.
@@ -1078,7 +1140,7 @@ for acct in json.load(sys.stdin)["result"]:
     stop_zallet; start_zallet "zallet.log"; return
   }
   local fresh_restarted=""
-  sync_deadline=$((SECONDS + poison_tip * 5))
+  sync_deadline=$((SECONDS + $(stall_window "$poison_tip")))
   until fully_synced "$poison_tip" > /dev/null 2>&1; do
     if [ "$SECONDS" -ge "$sync_deadline" ]; then
       if [ -z "$fresh_restarted" ]; then
@@ -1086,7 +1148,7 @@ for acct in json.load(sys.stdin)["result"]:
         log "recovery sync stalled (embedded-index startup race); restarting once"
         stop_zallet
         start_zallet "zallet-fresh.log" "$fresh_dir"
-        sync_deadline=$((SECONDS + poison_tip * 5))
+        sync_deadline=$((SECONDS + $(stall_window "$poison_tip")))
       else
         fail "spend-poison: recovery never synced"
         stop_zallet; start_zallet "zallet.log"; return
@@ -1156,10 +1218,10 @@ print(len(rows))') || true
 # wedged node precisely because fork recovery is never exercised. Depth 10
 # stays well inside zebra's non-finalized window (100 blocks on regtest), so
 # invalidateblock can always reach the branch point, while going beyond the
-# trivial depth-1 tip swap. The whole reorg runs on the LIVE serving node:
-# `generate` needs no miner restart, so the in-memory invalidation state
-# cannot be lost to a restart, and zallet stays up throughout (production
-# wallets live through reorgs; a crash here is a finding, not harness noise).
+# trivial depth-1 tip swap. The whole reorg runs on the live node: mining
+# never restarts it, so the in-memory invalidation state cannot be lost, and
+# zallet stays up throughout (production wallets live through reorgs; a
+# crash here is a finding, not harness noise).
 scenario_reorg() {
   local depth=10 depth_offline=13
   local old_tip inv_height inv_hash new_tip new_hash pre_count post_count want_count resp
@@ -1218,9 +1280,9 @@ sys.exit(1 if bad else 0)'
   wait_until "tip rolled back to $((inv_height - 1))" at_height "$((inv_height - 1))"
 
   # Replacement branch: depth + 2 blocks, strictly more work than the
-  # invalidated branch, paying the serving config's miner address (ADDR_B).
-  resp=$(zebra_rpc generate "[$((depth + 2))]" 120) || resp="(rpc failure)"
-  assert "reorg: generate mined the replacement branch" contains "$resp" '"result"'
+  # invalidated branch, paying ADDR_B like every phase-2 block.
+  assert "reorg: mined the $((depth + 2))-block replacement branch" \
+    mine_blocks "$ADDR_B" $((depth + 2))
   new_tip=$(zebra_height)
   assert "reorg: tip advanced past the old branch ($old_tip -> $new_tip)" \
     [ "$new_tip" = "$((old_tip + 2))" ]
@@ -1307,8 +1369,8 @@ sys.exit(1 if bad else 0)'
     sleep 1
   done
 
-  resp=$(zebra_rpc generate "[$((depth_offline + 2))]" 120) || resp="(rpc failure)"
-  assert "reorg-offline: generate mined the replacement branch" contains "$resp" '"result"'
+  assert "reorg-offline: mined the $((depth_offline + 2))-block replacement branch" \
+    mine_blocks "$ADDR_B" $((depth_offline + 2))
   new_tip=$(zebra_height)
   assert "reorg-offline: tip advanced past the old branch ($old_tip -> $new_tip)" \
     [ "$new_tip" = "$((old_tip + 2))" ]
@@ -1337,8 +1399,8 @@ run_scenario() {
 
 main() {
   if [ "$BUILD" = 1 ]; then
-    log "building zebrad (internal-miner) and zallet-zaino, release profile"
-    (cd "$REPO_ROOT/zebra" && cargo build --release -p zebrad --features internal-miner)
+    log "building zebrad and zallet-zaino, release profile"
+    (cd "$REPO_ROOT/zebra" && cargo build --release -p zebrad)
     # The zaino backend is its own workspace with its own lockfile, so it is
     # built from its own directory rather than selected by feature from the
     # root workspace (which no longer has a `zaino` feature).
@@ -1349,6 +1411,7 @@ main() {
   setup
   if [ "$SETUP_ONLY" = 1 ]; then
     log "--setup-only: golden chain ready; skipping scenarios"
+    report_mining
     log "=== results: $PASSES passed, $FAILURES failed ==="
     [ "$FAILURES" = 0 ]
     return
@@ -1363,6 +1426,7 @@ main() {
   # reorg mutates the chain irreversibly; it must stay last.
   run_scenario reorg
 
+  report_mining
   log "=== results: $PASSES passed, $FAILURES failed ==="
   [ "$FAILURES" = 0 ]
 }
