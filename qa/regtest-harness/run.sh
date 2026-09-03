@@ -335,7 +335,11 @@ zallet_alive() {
 MINED_BLOCKS=0
 MINED_MS=0
 
-now_ms() { python3 -c 'import time; print(int(time.monotonic() * 1000))'; }
+# CLOCK_MONOTONIC rather than time.monotonic(): each call is a fresh
+# process, and on macOS Python's monotonic() is not comparable across
+# processes (it read 5 ms in every one), while CLOCK_MONOTONIC is system-wide
+# on both Linux and macOS and immune to wall-clock steps.
+now_ms() { python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1000))'; }
 
 # mine_blocks <address> <count>: mine exactly <count> blocks paying their
 # coinbase to <address>, in bounded chunks so a wedged node is a red harness
