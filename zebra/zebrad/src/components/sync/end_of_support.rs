@@ -12,10 +12,9 @@ use zebra_chain::{
 
 use crate::application::release_version;
 
+// [zero] Carries upstream zebra v6.3.0's value (this tree vendors 6.2.3) so Zero
+// builds share upstream's support horizon; re-set it at every Zero release.
 /// The estimated height that this release will be published.
-///
-/// Zero carries upstream zebra v6.3.0's value (this tree vendors 6.2.3) so Zero builds share
-/// upstream's current support horizon; re-set it at every Zero release. // [zero]
 pub const ESTIMATED_RELEASE_HEIGHT: u32 = 3_444_000;
 
 /// The estimated number of blocks per day, with the post-Blossom 75-second target spacing.
