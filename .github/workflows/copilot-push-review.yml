@@ -64,7 +64,7 @@ jobs:
       - name: Checkout
         # Pinned by SHA, not tag: this job holds contents:write and
         # pull-requests:write, and a tag can be moved under it.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           # The credential git pushes with, not just the one `gh` calls with.

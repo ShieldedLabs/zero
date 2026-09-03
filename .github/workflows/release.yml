@@ -25,7 +25,7 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Refuse to release a pre-release zebra
         # Zebra's end-of-support check gives release candidates a 10-day fuse
         # (EOS_PANIC_AFTER in zebrad/src/components/sync/end_of_support.rs):
