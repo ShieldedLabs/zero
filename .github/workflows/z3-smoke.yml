@@ -238,8 +238,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # The compile stage is never served from cache (no-cache-filters): a
-      # smoke run must never test a stale binary. PR runs cannot write the
-      # registry cache, so they use the GHA cache instead.
+      # smoke run must never test a stale binary. Only the base and apt
+      # layers are cacheable, and every run reads them from the registry
+      # cache that main, scheduled, and dispatched runs refresh. PR runs
+      # export nothing: they cannot write the registry, and exporting to the
+      # Actions cache instead filled the repo's 10 GB quota with buildkit
+      # blobs (38 entries, 9.9 GB, one blob of 5.5 GB on 2026-09-02) that
+      # evicted z3-regtest's rust-cache and golden-chain entries on every PR,
+      # while the always-fresh compile stage could never hit them anyway.
       - name: Build ${{ matrix.name }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -254,10 +260,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: ${{ steps.args.outputs.build_args }}
           no-cache-filters: ${{ fromJSON(env.LEGS)[matrix.name].no_cache_filters }}
-          cache-from: |
-            type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
-            type=gha,scope=${{ matrix.name }}
-          cache-to: ${{ github.event_name == 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.name) || format('type=registry,ref=ghcr.io/shieldedlabs/{0}:buildcache,mode=max,image-manifest=true', matrix.name) }}
+          cache-from: type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
+          # Negated form on purpose: `cond && '' || x` always yields x.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref=ghcr.io/shieldedlabs/{0}:buildcache,mode=max,image-manifest=true', matrix.name) || '' }}
 
       # Artifacts, not a registry push: works unchanged on fork PRs.
       - name: Export image artifact
