@@ -87,7 +87,7 @@ jobs:
               - zallet/.dockerignore
             zcashd:
               - zcashd/**
-              - docker/zcashd/Dockerfile
+              - docker/zcashd/**
 
       - name: Decide per image
         id: gate
@@ -103,7 +103,8 @@ jobs:
           rows="$RUNNER_TEMP/rows"; : > "$rows"
           row() { echo "| $1 | $2 | $3 |" >> "$rows"; }
           changed() { jq -e --arg n "$1" 'any(. == $n)' <<< "$CHANGED" > /dev/null; }
-          first() { jq -r --arg k "${1}_files" '.[$k] | fromjson | .[0]' <<< "$FILTER"; }
+          first() { jq -r --arg k "${1}_files" '.[$k] | fromjson | .[0] | gsub("[|\\r\\n]"; " ")' <<< "$FILTER"; }
+          if [ "$EVENT_NAME" = pull_request ]; then zjob="build (non-gating)"; else zjob="warm cache"; fi
 
           if [ "$FILTER_OUTCOME" != success ]; then
             why="event \`$EVENT_NAME\` builds every image"
@@ -112,7 +113,8 @@ jobs:
               echo "::warning::$why"
             fi
             build='["zero-zebra","zero-zaino","zero-zallet"]'; zcashd=true
-            for name in zero-zebra zero-zaino zero-zallet zero-zcashd; do row "$name" build "$why"; done
+            for name in zero-zebra zero-zaino zero-zallet; do row "$name" build "$why"; done
+            row zero-zcashd "$zjob" "$why"
           else
             for name in zero-zebra zero-zaino zero-zallet; do
               if changed "$name"; then
@@ -137,7 +139,7 @@ jobs:
               fi
             done
             if changed zcashd; then
-              zcashd=true; row zero-zcashd "warm cache" "changed: \`$(first zcashd)\`"
+              zcashd=true; row zero-zcashd "$zjob" "changed: \`$(first zcashd)\`"
             else
               row zero-zcashd skip unchanged
             fi
@@ -272,13 +274,48 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Not a stack image: keeps zcashd's registry build cache warm. Non-gating
-  # (nothing waits on it, and it may fail), so a slow or throttled zcashd
-  # build never holds a PR.
+  # Not a stack image, and not on the gate: nothing waits on either zcashd
+  # job and both may fail, so a slow or throttled zcashd build never holds a
+  # PR. Two jobs because permissions cannot vary by event: PR runs only prove
+  # the image still builds against the registry cache, with a read-only token,
+  # no registry login, and no cache export (exporting the builder layers to
+  # the Actions cache took 10 to 29 minutes per PR for one 5.5 GB blob and
+  # crowded every other cache out of the 10 GB quota).
+  zcashd-image:
+    name: Build zero-zcashd (PR check)
+    needs: changes
+    if: needs.changes.outputs.zcashd == 'true' && github.event_name == 'pull_request'
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Same build as warm-zcashd-cache below, minus the export; keep them in step.
+      - name: Build zero-zcashd
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        continue-on-error: true
+        with:
+          context: zcashd
+          file: docker/zcashd/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          cache-from: type=registry,ref=ghcr.io/shieldedlabs/zero-zcashd:buildcache
+
+  # Every other event refreshes zcashd's registry build cache; images.yml
+  # starts its release build from the same :buildcache.
   warm-zcashd-cache:
     name: Warm zero-zcashd build cache
     needs: changes
-    if: needs.changes.outputs.zcashd == 'true'
+    if: needs.changes.outputs.zcashd == 'true' && github.event_name != 'pull_request'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:
@@ -309,11 +346,8 @@ jobs:
           file: docker/zcashd/Dockerfile
           target: runtime
           platforms: linux/amd64
-          cache-from: |
-            type=registry,ref=ghcr.io/shieldedlabs/zero-zcashd:buildcache
-            type=gha,scope=zero-zcashd
-          cache-to: ${{ github.event_name == 'pull_request' && 'type=gha,mode=max,scope=zero-zcashd' || 'type=registry,ref=ghcr.io/shieldedlabs/zero-zcashd:buildcache,mode=max,image-manifest=true' }}
-
+          cache-from: type=registry,ref=ghcr.io/shieldedlabs/zero-zcashd:buildcache
+          cache-to: type=registry,ref=ghcr.io/shieldedlabs/zero-zcashd:buildcache,mode=max,image-manifest=true
   smoke:
     needs: [changes, build]
     # GitHub-hosted: zebra's mainnet P2P never downloads a block on Blacksmith
