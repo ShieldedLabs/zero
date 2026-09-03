@@ -1,123 +1,217 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>librustzcash in the browser</title>
+<title>Zcash browser wallet — librustzcash on wasm</title>
 <style>
   :root { color-scheme: light dark; --line: color-mix(in oklab, currentColor 18%, transparent); }
-  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 46rem;
-         margin: 3rem auto; padding: 0 1.25rem; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; max-width: 50rem;
+         margin: 2.5rem auto; padding: 0 1.25rem; }
   h1 { font-size: 1.4rem; margin-bottom: .25rem; }
-  h2 { font-size: 1rem; margin: 2rem 0 .6rem; }
+  h2 { font-size: .95rem; margin: 1.8rem 0 .6rem; letter-spacing: .01em; }
   .sub { opacity: .7; margin-top: 0; }
   fieldset { border: 1px solid var(--line); border-radius: .5rem; padding: 1rem; margin: 0 0 1rem; }
-  legend { padding: 0 .4rem; opacity: .75; font-size: .85rem; }
-  label { display: block; font-size: .85rem; opacity: .8; margin-bottom: .25rem; }
+  legend { padding: 0 .4rem; opacity: .75; font-size: .82rem; }
+  label { display: block; font-size: .82rem; opacity: .8; margin-bottom: .25rem; }
   input, select { font: inherit; padding: .4rem .5rem; border-radius: .35rem;
                   border: 1px solid var(--line); background: transparent; color: inherit; width: 100%; }
   .row { display: flex; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
-  .row > * { flex: 1 1 12rem; }
-  button { font: inherit; padding: .45rem .9rem; border-radius: .35rem;
+  .row > * { flex: 1 1 11rem; }
+  button { font: inherit; padding: .45rem .9rem; border-radius: .35rem; margin-right: .4rem;
            border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
   button:hover:not(:disabled) { background: color-mix(in oklab, currentColor 8%, transparent); }
   button:disabled { opacity: .45; cursor: default; }
   pre { background: color-mix(in oklab, currentColor 6%, transparent); padding: .8rem;
-        border-radius: .4rem; overflow-x: auto; font-size: .82rem; margin: 0; }
+        border-radius: .4rem; overflow-x: auto; font-size: .8rem; margin: 0; white-space: pre-wrap;
+        word-break: break-all; }
   code { font-size: .85em; }
-  .warn { border-left: 3px solid currentColor; padding-left: .8rem; opacity: .8; font-size: .88rem; }
-  #log { white-space: pre-wrap; }
+  .note { border-left: 3px solid currentColor; padding-left: .8rem; opacity: .8; font-size: .86rem; }
+  .status { font-size: .84rem; opacity: .8; margin: .4rem 0 0; }
+  .bal { font-size: 1.5rem; font-weight: 600; }
+  .addr { font-size: .74rem; opacity: .75; word-break: break-all; margin-top: .3rem; }
 </style>
 
-<h1>librustzcash in the browser</h1>
-<p class="sub">Key derivation and a real SQLite wallet database, compiled to
-<code>wasm32-unknown-unknown</code>. No server, no network.</p>
+<h1>Zcash browser wallet</h1>
+<p class="sub">librustzcash compiled to <code>wasm32-unknown-unknown</code>: real SQLite wallet
+database, syncing from a lightwalletd over gRPC-Web, persisted in IndexedDB.</p>
 
-<p class="warn" id="caveats">Loading…</p>
+<p class="note" id="build">Loading…</p>
 
-<h2>1. Derive an address</h2>
+<h2>Wallet</h2>
 <fieldset>
-  <legend>pure computation — no database</legend>
+  <legend>persisted in IndexedDB — survives a reload</legend>
+  <div id="balances"><em style="opacity:.6">No accounts yet.</em></div>
+  <p class="status" id="chain"></p>
+  <div style="margin-top:.9rem">
+    <button id="sync">Sync</button>
+    <button id="forget">Forget wallet</button>
+  </div>
+  <p class="status" style="margin-top:.7rem">
+    Syncing is wired end to end and reaches the server, but does not currently finish —
+    under Node it stalls after the first few calls at near-zero CPU. See the README.
+    Everything else here works.
+  </p>
+</fieldset>
+
+<h2>Add an account</h2>
+<fieldset>
+  <legend>a birthday near the tip keeps the first sync short</legend>
   <div class="row">
-    <div>
+    <div style="flex:1 1 100%">
       <label for="seed">Seed (hex, ≥32 bytes)</label>
       <input id="seed" value="0000000000000000000000000000000000000000000000000000000000000001">
     </div>
-    <div style="flex: 0 0 8rem">
-      <label for="network">Network</label>
-      <select id="network"><option value="main">main</option><option value="test">test</option></select>
-    </div>
-    <div style="flex: 0 0 7rem">
-      <label for="account">Account</label>
-      <input id="account" type="number" value="0" min="0">
-    </div>
   </div>
-  <button id="derive">Derive unified address</button>
-</fieldset>
-
-<h2>2. Open a wallet database</h2>
-<fieldset>
-  <legend>SQLite in wasm — applies every migration</legend>
   <div class="row">
     <div><label for="name">Account name</label><input id="name" value="Demo account"></div>
-    <div style="flex: 0 0 10rem">
+    <div style="flex:0 0 11rem">
       <label for="birthday">Birthday height</label>
-      <input id="birthday" type="number" value="2800000" min="1">
+      <input id="birthday" type="number" value="0" min="1">
+    </div>
+    <div style="flex:0 0 9rem">
+      <label for="back">Blocks before tip</label>
+      <input id="back" type="number" value="200" min="1">
     </div>
   </div>
-  <button id="open">Create wallet</button>
-  <button id="add" disabled>Add account</button>
-  <button id="refresh" disabled>Read state back</button>
+  <button id="tip">Use recent tip</button>
+  <button id="add">Add account</button>
+  <button id="derive">Derive address only</button>
+</fieldset>
+
+<h2>Server</h2>
+<fieldset>
+  <legend>must speak gRPC-Web — plain gRPC over HTTP/2 will not answer a browser</legend>
+  <div class="row">
+    <div style="flex:1 1 100%">
+      <label for="url">lightwalletd gRPC-Web endpoint</label>
+      <input id="url" value="https://zcash-mainnet.chainsafe.dev">
+    </div>
+  </div>
+  <div class="row">
+    <div style="flex:0 0 10rem">
+      <label for="batch">Sync batch size</label>
+      <input id="batch" type="number" value="1000" min="1">
+    </div>
+  </div>
 </fieldset>
 
 <h2>Output</h2>
 <pre id="log">Ready.</pre>
 
 <script type="module">
-import init, { Wallet, deriveAddress, buildInfo } from "./pkg/zero_wasm_demo.js";
+import init, {
+  createWallet, addAccount, summary, exportDb, syncNow, fetchTipHeight, deriveAddress, buildInfo,
+  enableLogging,
+} from "./pkg/zero_wasm_demo.js";
 
-const log = document.getElementById("log");
 const $ = (id) => document.getElementById(id);
-let wallet = null;
+const log = $("log");
+const NETWORK = "main";
 
+/* ---- IndexedDB: the whole persistence story is "store the exported db file" ---- */
+const DB = "zcash-wallet-demo", STORE = "files", KEY = "wallet.db";
+const idb = () => new Promise((ok, no) => {
+  const r = indexedDB.open(DB, 1);
+  r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+  r.onsuccess = () => ok(r.result);
+  r.onerror = () => no(r.error);
+});
+const idbDo = async (mode, fn) => {
+  const db = await idb();
+  return await new Promise((ok, no) => {
+    const tx = db.transaction(STORE, mode);
+    const req = fn(tx.objectStore(STORE));
+    tx.oncomplete = () => ok(req?.result);
+    tx.onerror = () => no(tx.error);
+  });
+};
+const loadDb = () => idbDo("readonly", (s) => s.get(KEY));
+const saveDb = (bytes) => idbDo("readwrite", (s) => s.put(bytes, KEY));
+const dropDb = () => idbDo("readwrite", (s) => s.delete(KEY));
+
+/* ---- rendering ---- */
+const zec = (zat) => (Number(zat) / 1e8).toFixed(8);
 const write = (label, value) => {
   const body = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   log.textContent = `${label}\n${"─".repeat(label.length)}\n${body}`;
 };
 const fail = (label, e) => write(`${label} — failed`, String(e?.message ?? e));
 
-const timed = (label, fn) => {
-  const t0 = performance.now();
-  try {
-    const out = fn();
-    write(`${label}  (${(performance.now() - t0).toFixed(1)} ms)`, out);
-    return out;
-  } catch (e) {
-    fail(label, e);
-    return undefined;
-  }
+const render = (s) => {
+  $("balances").innerHTML = s.accounts.length === 0
+    ? '<em style="opacity:.6">No accounts yet.</em>'
+    : s.accounts.map((a) => `
+        <div style="margin-bottom:.9rem">
+          <div class="bal">${zec(a.total_zatoshis)} ZEC</div>
+          <div class="status">${zec(a.spendable_zatoshis)} spendable · account ${a.uuid.slice(0, 8)}</div>
+          <div class="addr">${a.address}</div>
+        </div>`).join("");
+  $("chain").textContent =
+    `birthday ${s.wallet_birthday ?? "—"} · scanned to ${s.fully_scanned_height ?? "—"} · ` +
+    `tip ${s.chain_height ?? "—"} · ${s.migrations} migrations · ${(s.db_bytes / 1024).toFixed(0)} KiB stored`;
 };
 
+/* ---- persistence is explicit: SQLite writes into memory, we store the file ---- */
+const persist = async (label, s) => {
+  await saveDb(await exportDb());
+  render(s);
+  write(label, s);
+};
+
+const run = async (label, fn) => {
+  const t0 = performance.now();
+  try {
+    const out = await fn();
+    write(`${label}  (${((performance.now() - t0) / 1000).toFixed(2)} s)`, out ?? "done");
+    return out;
+  } catch (e) { fail(label, e); }
+};
+
+/* ---- boot ---- */
 await init();
-
 const info = buildInfo();
-$("caveats").textContent =
-  `SQLite ${info.sqlite} · ${info.note}. ` +
-  `This demo cannot sync: that needs a lightwalletd or Zaino speaking gRPC-Web.`;
-write("Ready", "wasm module loaded.");
+$("build").textContent = `SQLite ${info.sqlite} · ${info.storage}. ` +
+  `The default server is ChainSafe's public gRPC-Web lightwalletd proxy — the same one WebZjs uses.`;
 
+const stored = await loadDb();
+const restored = stored ? new Uint8Array(stored) : new Uint8Array();
+let s = createWallet(NETWORK, restored);
+render(s);
+write(stored ? "Wallet restored from IndexedDB" : "New wallet created", s);
+
+/* ---- actions ---- */
 $("derive").onclick = () =>
-  timed("Unified address", () =>
-    deriveAddress($("network").value, $("seed").value, Number($("account").value)));
+  run("Unified address", () => deriveAddress(NETWORK, $("seed").value, 0));
 
-$("open").onclick = () =>
-  timed("Wallet created", () => {
-    wallet = new Wallet($("network").value);
-    $("add").disabled = false;
-    $("refresh").disabled = false;
-    return { migrations_applied: wallet.migrationCount(), ...wallet.summary() };
+$("tip").onclick = () => run("Chain tip", async () => {
+  const tip = await fetchTipHeight($("url").value);
+  $("birthday").value = Math.max(1, tip - Number($("back").value));
+  return { tip, birthday_set_to: Number($("birthday").value) };
+});
+
+$("add").onclick = () => run("Account added", async () => {
+  const birthday = Number($("birthday").value);
+  if (!birthday) throw new Error('set a birthday first — "Use recent tip" fills it in');
+  s = addAccount($("name").value, $("seed").value, birthday);
+  await persist("Account added", s);
+  return s;
+});
+
+$("sync").onclick = async () => {
+  enableLogging();
+  $("sync").disabled = true;
+  $("sync").textContent = "Syncing…";
+  await run("Synced", async () => {
+    s = await syncNow($("url").value, Number($("batch").value));
+    await persist("Synced", s);
+    return s;
   });
+  $("sync").textContent = "Sync";
+  $("sync").disabled = false;
+};
 
-$("add").onclick = () =>
-  timed("Account added", () =>
-    wallet.createAccount($("name").value, $("seed").value, Number($("birthday").value)));
-
-$("refresh").onclick = () => timed("Wallet state", () => wallet.summary());
+$("forget").onclick = () => run("Wallet forgotten", async () => {
+  await dropDb();
+  s = createWallet(NETWORK, new Uint8Array());
+  render(s);
+  return s;
+});
 </script>
