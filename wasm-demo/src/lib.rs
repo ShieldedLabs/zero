@@ -254,6 +254,20 @@ pub fn create_wallet(network: &str, existing: &[u8]) -> Result<JsValue, JsError>
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| err("could not load the rarray module", e))?;
 
+    // The database already lives in RAM and durability comes from `exportDb`, so SQLite's
+    // on-disk safety machinery is pure overhead here — and it is not cheap: a first sync
+    // writes roughly nineteen hundred subtree roots, each one a transaction.
+    //
+    // `journal_mode = MEMORY` keeps the rollback journal in RAM. Note MEMORY and not OFF:
+    // `zcash_client_sqlite` depends on transaction rollback for correctness — a
+    // `WalletWrite` call that fails partway is undone only because the transaction is
+    // dropped uncommitted — so the journal has to exist, it just does not have to be
+    // durable. `synchronous = OFF` then removes flushes that have nothing to flush to.
+    conn.pragma_update(None, "journal_mode", "MEMORY")
+        .map_err(|e| err("could not set journal_mode", e))?;
+    conn.pragma_update(None, "synchronous", "OFF")
+        .map_err(|e| err("could not set synchronous", e))?;
+
     let mut state = WalletState {
         conn,
         network,

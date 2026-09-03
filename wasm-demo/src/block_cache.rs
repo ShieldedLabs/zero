@@ -50,6 +50,31 @@ impl MemoryBlockCache {
         self.lock().clear();
     }
 
+    /// Blocks from `start` upwards, stopping at the first gap.
+    ///
+    /// Contiguity is a contract, not a nicety. `BlockCache::read` is documented to return
+    /// blocks that "are contiguous and start from `range.block_range().start`", and
+    /// `scan_cached_blocks` relies on it: handed a set that begins past the height it asked
+    /// for, or that skips a height, it cannot advance the scanned range — and a caller that
+    /// loops until the range is scanned then loops forever, burning CPU re-scanning. An
+    /// implementation that merely filters by range looks correct and produces exactly that.
+    fn contiguous_from(&self, start: u64, limit: Option<usize>) -> Vec<CompactBlock> {
+        let blocks = self.lock();
+        let mut out = Vec::new();
+        let mut expected = start;
+        for (height, block) in blocks.range(start..) {
+            if *height != expected {
+                break;
+            }
+            out.push(block.clone());
+            expected += 1;
+            if limit.is_some_and(|n| out.len() >= n) {
+                break;
+            }
+        }
+        out
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, CompactBlock>> {
         // Poisoning means another thread panicked holding the lock. wasm is
         // single-threaded and this cache is not shared across workers, so it cannot
@@ -72,16 +97,11 @@ impl BlockSource for MemoryBlockCache {
     where
         F: FnMut(CompactBlock) -> Result<(), error::Error<WalletErrT, Self::Error>>,
     {
-        let from = from_height.map_or(0, |h| u64::from(h));
+        let from = from_height.map_or(0, u64::from);
         // Cloned out of the lock before the callback runs: `with_block` is free to call
         // back into the wallet, and holding the cache lock across it would be a deadlock
         // waiting for a reason.
-        let blocks: Vec<CompactBlock> = self
-            .lock()
-            .range(from..)
-            .take(limit.unwrap_or(usize::MAX))
-            .map(|(_, block)| block.clone())
-            .collect();
+        let blocks = self.contiguous_from(from, limit);
 
         for block in blocks {
             with_block(block)?;
@@ -113,11 +133,9 @@ impl BlockCache for MemoryBlockCache {
 
     async fn read(&self, range: &ScanRange) -> Result<Vec<CompactBlock>, Self::Error> {
         let r = range.block_range();
-        Ok(self
-            .lock()
-            .range(u64::from(r.start)..u64::from(r.end))
-            .map(|(_, block)| block.clone())
-            .collect())
+        let start = u64::from(r.start);
+        let limit = usize::try_from(u64::from(r.end).saturating_sub(start)).unwrap_or(usize::MAX);
+        Ok(self.contiguous_from(start, Some(limit)))
     }
 
     async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {

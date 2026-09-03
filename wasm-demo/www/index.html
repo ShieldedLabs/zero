@@ -45,9 +45,11 @@ database, syncing from a lightwalletd over gRPC-Web, persisted in IndexedDB.</p>
     <button id="forget">Forget wallet</button>
   </div>
   <p class="status" style="margin-top:.7rem">
-    Syncing is wired end to end and reaches the server, but does not currently finish —
-    under Node it stalls after the first few calls at near-zero CPU. See the README.
-    Everything else here works.
+    <strong>Sync reaches the server but will not finish, and will peg a core.</strong> The
+    transport works; the cost is ingesting 1128 Sapling and 769 Orchard subtree roots into
+    the shard trees before any block is scanned, which is bulk memory movement inside
+    SQLite and does not complete in over an hour. See the README. Everything else here
+    works.
   </p>
 </fieldset>
 

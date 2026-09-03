@@ -58,21 +58,33 @@ things it needs on wasm.
   `syncNow` takes the whole wallet out for its duration and puts it back; a second
   concurrent call finds it missing and is refused.
 
-**Status: a sync does not currently complete, and the cause is not yet established.**
-Under Node it gets through the full request sequence — `GetSubtreeRoots` (Sapling 1128,
-Orchard 769, Ironwood 2), `GetLatestBlock`, `GetAddressUtxosStream`, `GetBlockRange`,
-`GetTreeState`, every one answering with a 200 in about 220 ms — and then stalls at
-roughly 6% CPU, issuing no further requests, for over ten minutes. It behaves the same for
-a five-block range as for a hundred, so it is a fixed cost or a hang rather than slow
-scanning.
+**Status: a sync does not complete, and the cause is now located.** The transport is
+fine — verified in Chrome and under Node, both unary (`GetLatestBlock`, 320 ms) and
+server-streaming (10 compact blocks, under a second). A full sync gets through every
+request — `GetSubtreeRoots` for all three pools, `GetLatestBlock`,
+`GetAddressUtxosStream`, `GetBlockRange`, `GetTreeState` — reaches
+`Scanning ChainTip(..)`, and then runs at **99% CPU indefinitely**. A Chrome renderer
+burned **68 minutes of CPU** on a five-block range without finishing; Node behaves the
+same. It is not proportional to the range: three blocks and a hundred behave alike.
 
-Two things point away from librustzcash and towards the host: a unary call
-(`fetchTipHeight`) and a server-streaming call (`probeBlockStream`) each complete in well
-under a second in isolation, and **the stall point moves between runs** — sometimes after
-`GetTreeState`, sometimes after an earlier `GetLatestBlock`. That pattern fits a connection
-pool wedged by response bodies that are never fully drained, which Node's `fetch` and a
-browser's handle differently. It has not been reproduced in a browser, which is the next
-thing to do.
+Sampling the stack (`sample <pid>`) puts essentially all of that time in
+`v8::internal::wasm::memory_copy_wrapper` — wasm `memory.copy`. So the cost is bulk
+memory movement inside SQLite, not trial decryption or proving, and it is a fixed cost
+paid before any block is scanned.
+
+That fixed cost is the subtree roots. The log reports 1128 Sapling subtrees and 769
+Orchard ones, and `sync::run` ingests all of them into the shard trees before scanning
+anything. Each insert reads and rewrites a shard BLOB through SQLite, in a VFS whose
+backing store is wasm linear memory. Roughly nineteen hundred of those, over BLOBs that
+hold up to 2^16 leaves each, is the wall. It is consistent with ChainSafe's finding that
+tree and witness work — not decryption — dominated their browser sync.
+
+What that means for a browser wallet: the first sync cannot be a single blocking call.
+It needs to ingest subtree roots incrementally across many turns of the event loop, with
+progress reported and the ability to resume, and it probably wants threads (see
+`librustzcash/WASM.md`) — or a wallet birthday recent enough that the shard trees start
+nearly empty. None of that is a librustzcash bug; it is a consequence of running the
+existing sync design against wasm memory.
 
 [`tonic-web-wasm-client`]: https://crates.io/crates/tonic-web-wasm-client
 

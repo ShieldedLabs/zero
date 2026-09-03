@@ -266,11 +266,23 @@ verified above or a direct consequence of something verified above.
    The persistent half is harder than "register `sahpool`": the OPFS and
    IndexedDB VFSes are **not in the `sqlite-wasm-rs` version `rusqlite` depends
    on** (see [Storage](#storage)). Somebody has to supply one.
-5. ~~**Transport.**~~ Client side done: `tonic-web-wasm-client` satisfies
-   `sync::run`'s bounds, and `zero-wasm-smoke` holds the instantiation plus a
-   `BlockCache` implementation. **Still needs a decision from you:** the server
-   must speak gRPC-Web, so lightwalletd/Zaino needs a proxy in front or a
-   `tonic-web` layer. Nothing has been run against a live endpoint.
+5. ~~**Transport.**~~ Done and exercised against a live server.
+   `tonic-web-wasm-client` satisfies `sync::run`'s bounds, and `zero/wasm-demo`
+   talks to ChainSafe's public gRPC-Web proxy from Chrome: unary calls in 320 ms,
+   server-streaming in under a second. A server-side decision remains — the
+   endpoint must speak gRPC-Web, so lightwalletd/Zaino needs a proxy or a
+   `tonic-web` layer.
+
+   **But a full `sync::run` does not complete on wasm.** It reaches the scanning
+   phase and then runs at 99% CPU indefinitely — 68 minutes of Chrome renderer
+   CPU on a five-block range, and the same for three blocks or a hundred, so the
+   cost is fixed rather than per-block. Stack sampling puts nearly all of it in
+   wasm `memory.copy`, i.e. bulk memory movement inside SQLite. The fixed cost is
+   subtree-root ingestion: 1128 Sapling and 769 Orchard subtrees, each insert
+   reading and rewriting a shard BLOB through a VFS backed by wasm linear memory.
+   A browser wallet therefore cannot treat the first sync as one blocking call —
+   it needs incremental ingestion across event-loop turns, resumability, and
+   probably threads. See `zero/wasm-demo/README.md`.
 6. ~~**Parameter delivery.**~~ Done, apart from choosing the cache. Real
    parameters load inside wasm: `zero-wasm-smoke` reads all 51 MiB from the host
    and builds a working `LocalTxProver`, in **382 ms** including SHA-256
