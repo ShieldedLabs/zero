@@ -14,6 +14,12 @@ date) before dispatching the release.
   or zebra) is under 4 weeks past the current tip (estimated from a block
   anchor and the wall clock, no network access); MAINTENANCE.md gains the
   matching pre-release checklist.
+- `z3-smoke` builds only the stack images whose build context a PR touches
+  and pulls the others, pinned by digest, from `ghcr.io/shieldedlabs/zero-*:main`:
+  the newest main build that passed the smoke test, published by a new
+  push-to-main run after its own green smoke. Releases, schedules, and
+  dispatches still build every image. The zcashd cache-warm build is its own
+  non-gating job, so smoke no longer waits ~45 minutes for it on zcashd PRs.
 
 ## v28 - 2026-09-02
 
