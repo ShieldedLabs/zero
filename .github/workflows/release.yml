@@ -12,8 +12,9 @@ on:
         required: false
         type: string
 
+# Read-only token by default; only the job that creates the release writes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # 1. Compute the version once, so nothing double-increments.
@@ -232,6 +233,8 @@ jobs:
   release:
     needs: [version, smoke, source, binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
