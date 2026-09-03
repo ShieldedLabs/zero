@@ -20,7 +20,7 @@ Every scenario is a regression guard for a specific production incident:
 | `union` | multi-address filters matching nothing (`all` vs `any`) | zcash/zallet#596 |
 | `hang-guard` | a filtered listing sweeping *other* addresses' dust through per-outpoint checks (~10-minute RPC hang on an exchange wallet) | v11→v12 regression |
 | `poison-heal` | a stored transaction row with no mined height and zero expiry crash-looping the wallet at startup; it must instead be skipped and self-heal via the status sweep | zcash/zallet#568 |
-| `reorg` | a depth-10 reorg driven on the live node (`invalidateblock` + `generate`, plus a `reconsiderblock` wedge check) under a running wallet; the index and listings must converge on the replacement branch, including across a wallet restart. A second fork then opens while the wallet is down: it restarts at the rolled-back tip (scan cursor below the fork point, stored block rows above it) and the replacement branch is mined under it; the wallet must rewind and converge rather than die on the stored-row hash conflict | 2026-07-16 testnet fork-recovery wedge; false-unspent class; BlockConflict crash loop after a reorg above the scan cursor. Runs last: it mutates the chain irreversibly |
+| `reorg` | a depth-10 reorg driven on the live node (`invalidateblock` + `generatetoaddress`, plus a `reconsiderblock` wedge check) under a running wallet; the index and listings must converge on the replacement branch, including across a wallet restart. A second fork then opens while the wallet is down: it restarts at the rolled-back tip (scan cursor below the fork point, stored block rows above it) and the replacement branch is mined under it; the wallet must rewind and converge rather than die on the stored-row hash conflict | 2026-07-16 testnet fork-recovery wedge; false-unspent class; BlockConflict crash loop after a reorg above the scan cursor. Runs last: it mutates the chain irreversibly |
 
 Scenarios run in order and are stateful by design (later scenarios build on
 the chain and wallet mutations of earlier ones). `--only` skips scenarios but
@@ -29,12 +29,14 @@ never reorders them.
 ## Speed model
 
 The harness runs **release-profile** binaries (debug runs are 5-10x slower
-and flakier: a debug orchard proof alone takes minutes). Setup's mining and
-wallet convergence are snapshotted as a **golden chain** under
-`~/.cache/z3-harness-golden/<key>` and restored on later runs (~1 minute
-instead of ~5). `run-parallel.sh` runs the scenario groups as three
-port-isolated stacks from the same snapshot: full suite in roughly the time
-of its slowest scenario.
+and flakier: a debug orchard proof alone takes minutes). Blocks are mined on
+demand with zebra's `generatetoaddress` RPC on the one always-serving node,
+so the 211-block setup chain takes seconds; the wallet walk and receipt
+convergence that follow take minutes, and that converged state is
+snapshotted as a **golden chain** under `~/.cache/z3-harness-golden/<key>`
+and restored on later runs (~1 minute instead of ~4). `run-parallel.sh` runs
+the scenario groups as three port-isolated stacks from the same snapshot:
+full suite in roughly the time of its slowest scenario.
 
 **When to rebuild the golden chain**: bump `GOLDEN_EPOCH` in `run.sh` (which
 changes the snapshot key) whenever any of these change:
@@ -53,8 +55,8 @@ scenarios (used by `run-parallel.sh` to pre-warm).
 ## Running locally
 
 ```sh
-# Build the binaries it needs, then run everything (~10-15 minutes,
-# dominated by mining 240 regtest blocks):
+# Build the binaries it needs, then run everything (~10 minutes, dominated
+# by wallet convergence and the spend-poison wallet lifecycles):
 qa/regtest-harness/run.sh --build
 
 # Re-run a subset against existing binaries:
@@ -65,8 +67,8 @@ qa/regtest-harness/run.sh --keep
 ```
 
 Requirements: `bash`, `curl`, `python3`, `sqlite3` (all present on macOS and
-`ubuntu-latest`). Binaries default to `zebra/target/release/zebrad` (must be
-built with `--features internal-miner`) and
+`ubuntu-latest`). Binaries default to `zebra/target/release/zebrad` (no
+extra features: mining goes through the `generatetoaddress` RPC) and
 `zallet/backends/zaino/target/release/zallet-zaino` (built from
 `zallet/backends/zaino`, its own workspace, with `--features
 rpc-cli,zcashd-import`); override with `ZEBRAD_BIN` / `ZALLET_BIN`.
@@ -83,9 +85,11 @@ printed.
 
 ## Design constraints
 
-- **Deterministic**: regtest dials no peers; block production uses zebra's
-  internal miner in a mine-then-freeze pattern (the chain is static while
-  assertions run). Funding goes to two pinned, clearly-labeled public test
+- **Deterministic**: regtest dials no peers; blocks are mined on demand with
+  the `generatetoaddress` RPC on the one always-serving zebra (no internal
+  miner, no restarts), so the chain is static while assertions run, every
+  phase boundary is exact, and the mempool and fork state survive each
+  mining step. Funding goes to two pinned, clearly-labeled public test
   keypairs, mirroring the imported-watch-address shape of the exchange
   deployments that hit the incidents above.
 - **Hang-proof**: every RPC call carries a per-call timeout (`curl -m`),
