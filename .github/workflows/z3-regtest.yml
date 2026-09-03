@@ -219,7 +219,7 @@ jobs:
         id: bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.BIN_DIR }}/${{ matrix.bin }}
+          path: ${{ runner.temp }}/z3-bin/${{ matrix.bin }}
           key: ${{ steps.key.outputs.key }}
 
       # v3: one workspace per job (v2 entries held both). The `key` input
