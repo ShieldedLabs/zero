@@ -20,6 +20,15 @@ date) before dispatching the release.
   push-to-main run after its own green smoke. Releases, schedules, and
   dispatches still build every image. The zcashd cache-warm build is its own
   non-gating job, so smoke no longer waits ~45 minutes for it on zcashd PRs.
+- The zcashd image builds `depends/` in its own cached layer, so a change under
+  `zcashd/src` rebuilds zcashd alone (about 2 minutes at 16 vCPUs) instead of
+  every dependency (about 15). The cache-warm job no longer exports its builder
+  layers to the Actions cache on PR runs: that upload took 10 to 29 minutes per
+  PR (a single 5.5 GB blob) and had pushed the repository past the 10 GB cache
+  quota, evicting the other workflows' entries. PR runs are now a separate
+  read-only job (no registry login, no `packages: write`, no export); pushes
+  to main, schedules, dispatches, and releases still refresh the registry
+  cache.
 
 ## v28 - 2026-09-02
 
