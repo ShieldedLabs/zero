@@ -43,8 +43,10 @@ add the build overlay:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-CI runs this stack end to end on every change to the bundle or the component
-Dockerfiles (`.github/workflows/z3-smoke.yml`).
+CI runs this stack end to end on every change to the bundle, the component
+Dockerfiles, or the vendored build contexts (`.github/workflows/z3-smoke.yml`);
+a pull request builds only the images it touches and takes the rest from the
+last main build.
 
 The images are `linux/amd64`; ARM64 hosts (e.g. Apple Silicon) run them under
 emulation. Building `zallet` locally on ARM64 additionally requires
