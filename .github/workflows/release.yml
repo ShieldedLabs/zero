@@ -49,32 +49,32 @@ jobs:
         # The release height is a hand-edited constant: v20 through v27 all
         # shipped v20's value and shared one halt block (3,471,448, ~2026-09-04),
         # caught two days ahead. Fail when the halt is under 4 weeks of blocks
-        # past the mainnet tip; skip with a warning when the tip API is down.
+        # past the mainnet tip. The tip is estimated from a fixed anchor and
+        # the wall clock, not fetched: DigiShield holds the long-run average
+        # at the 75-second target (observed +0.1% over the 48 days before the
+        # anchor), so the estimate drifts by hours over months and the anchor
+        # never needs refreshing for the check to stay correct.
         env:
-          TIP_API: https://api.blockchair.com/zcash/stats
+          # Mainnet block 3,469,914 carried timestamp 2026-09-03T00:35:44Z.
+          ANCHOR_HEIGHT: "3469914"
+          ANCHOR_EPOCH: "1788395744"
         run: |
           set -euo pipefail
           h=zcashd/src/deprecation.h
           release_height=$(sed -n 's/^static const int APPROX_RELEASE_HEIGHT = \([0-9]*\);.*/\1/p' "$h")
           weeks=$(sed -n 's/^static const int RELEASE_TO_DEPRECATION_WEEKS = \([0-9]*\);.*/\1/p' "$h")
-          if ! [[ "$release_height" =~ ^[0-9]+$ && "$weeks" =~ ^[0-9]+$ ]]; then
+          if ! [[ "$release_height" =~ ^[0-9]{1,9}$ && "$weeks" =~ ^[0-9]{1,2}$ ]]; then
             echo "::error::Could not parse APPROX_RELEASE_HEIGHT and RELEASE_TO_DEPRECATION_WEEKS from ${h}"
             exit 1
           fi
           blocks_per_week=$(( 7 * 24 * 48 ))   # 75-second post-Blossom block spacing
           halt_height=$(( release_height + weeks * blocks_per_week ))
           min_runway=$(( 4 * blocks_per_week ))
-          tip=$(curl -fsS --max-time 20 "$TIP_API" | jq -r '.data.best_block_height' 2>/dev/null || true)
-          if ! [[ "$tip" =~ ^[0-9]+$ ]]; then
-            echo "::warning::Could not read the mainnet tip from ${TIP_API}; skipping the" \
-              "zcashd halt-height check. Confirm by hand that the halt height (${halt_height})" \
-              "is well past the tip (MAINTENANCE.md, Pre-release checklist)."
-            exit 0
-          fi
-          echo "zcashd halt height ${halt_height}, mainnet tip ${tip}:" \
+          tip=$(( ANCHOR_HEIGHT + ( $(date +%s) - ANCHOR_EPOCH ) / 75 ))
+          echo "zcashd halt height ${halt_height}, estimated mainnet tip ${tip}:" \
             "$(( halt_height - tip )) blocks of runway (minimum ${min_runway})"
           if (( halt_height - tip < min_runway )); then
-            echo "::error::zcashd halts at ${halt_height}, under 4 weeks past the mainnet" \
+            echo "::error::zcashd halts at ${halt_height}, under 4 weeks past the estimated mainnet" \
               "tip (${tip}). Bump APPROX_RELEASE_HEIGHT in ${h} (MAINTENANCE.md," \
               "Pre-release checklist), push, then re-dispatch."
             exit 1

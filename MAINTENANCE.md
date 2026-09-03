@@ -209,8 +209,8 @@ the changelog:
    zebra release's value: re-set it (or pull that tag), then verify the
    resulting halt is comfortably after the next planned release.
 3. `release.yml` refuses to dispatch when the zcashd halt is under 4 weeks
-   past the mainnet tip (read from api.blockchair.com; it skips with a warning
-   when the API is unreachable). That is a floor, not a substitute for steps 1
+   past the mainnet tip (estimated from a fixed block anchor and the wall
+   clock, no network access). That is a floor, not a substitute for steps 1
    and 2.
 
 ## Upstreaming (upstream flow)
