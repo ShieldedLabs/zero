@@ -335,7 +335,7 @@ zallet_alive() {
 MINED_BLOCKS=0
 MINED_MS=0
 
-now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+now_ms() { python3 -c 'import time; print(int(time.monotonic() * 1000))'; }
 
 # mine_blocks <address> <count>: mine exactly <count> blocks paying their
 # coinbase to <address>, in bounded chunks so a wedged node is a red harness
@@ -378,11 +378,23 @@ mine_blocks() {
 # its mempool: getrawmempool lists verified entries only, and
 # sendrawtransaction returns after verification, so no block template can
 # be built ahead of admission. The bounded single-block loop then covers a
-# template that leaves an admitted transaction out for any other reason.
+# template that leaves an admitted transaction out for any other reason. A
+# transaction already in the chain (a retried call) is reported mined as is.
 mine_with_tx() {
   local address="$1" rawtx="$2" txid="$3"
-  local resp tx_height attempt
-  in_mempool() { contains "$(zebra_rpc getrawmempool 2>/dev/null)" "$txid"; }
+  local resp attempt
+  tx_mined() {
+    local h
+    h=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
+      | json_field "['result'].get('height', -1)" 2>/dev/null) || h=-1
+    [ "${h:--1}" -ge 0 ]
+  }
+  # `|| true` for readability only: a failed substitution used as an
+  # argument never trips errexit, and every call below is a condition.
+  in_mempool() { contains "$(zebra_rpc getrawmempool 2>/dev/null || true)" "$txid"; }
+  if tx_mined; then
+    return 0
+  fi
   if ! in_mempool; then
     resp=$(zebra_rpc sendrawtransaction "[\"$rawtx\"]" 2>/dev/null) || resp="(rpc failure)"
     # A rejected resubmission of a transaction the node holds after all (the
@@ -395,9 +407,7 @@ mine_with_tx() {
   WAIT_TIMEOUT=60 wait_until "transaction $txid admitted to the mempool" in_mempool || return 1
   for attempt in 1 2 3 4 5; do
     mine_blocks "$address" 1 || return 1
-    tx_height=$(zebra_rpc getrawtransaction "[\"$txid\", 1]" 2>/dev/null \
-      | json_field "['result'].get('height', -1)" 2>/dev/null) || tx_height=-1
-    if [ "${tx_height:--1}" -ge 0 ]; then
+    if tx_mined; then
       return 0
     fi
     log "transaction $txid not in block $(zebra_height 2>/dev/null || echo '?') (attempt $attempt); mining another"
