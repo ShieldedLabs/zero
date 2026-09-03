@@ -71,7 +71,12 @@ jobs:
           blocks_per_week=$(( 7 * 24 * 48 ))   # 75-second post-Blossom block spacing
           halt_height=$(( release_height + weeks * blocks_per_week ))
           min_runway=$(( 4 * blocks_per_week ))
-          tip=$(( ANCHOR_HEIGHT + ( $(date +%s) - ANCHOR_EPOCH ) / 75 ))
+          now=$(date +%s)
+          if (( now < ANCHOR_EPOCH )); then
+            echo "::error::ANCHOR_EPOCH (${ANCHOR_EPOCH}) is in the future relative to the runner clock (${now}); tip estimate would be invalid."
+            exit 1
+          fi
+          tip=$(( ANCHOR_HEIGHT + ( now - ANCHOR_EPOCH ) / 75 ))
           echo "zcashd halt height ${halt_height}, estimated mainnet tip ${tip}:" \
             "$(( halt_height - tip )) blocks of runway (minimum ${min_runway})"
           if (( halt_height - tip < min_runway )); then
