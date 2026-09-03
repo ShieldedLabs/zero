@@ -317,6 +317,10 @@ jobs:
           restore-keys: |
             z3-golden-v1-${{ runner.os }}-
 
+      # The snapshot root is then pruned to the one snapshot this run used
+      # (the harness names it in its log), so neither the cache entry saved
+      # in the post step nor the artifact below carries the snapshots that
+      # restore-keys can bring along from earlier harness versions.
       - name: Restore or mine the golden chain
         env:
           HARNESS_WORKDIR: ${{ runner.temp }}/z3-golden
@@ -324,7 +328,13 @@ jobs:
           set -euo pipefail
           qa/regtest-harness/run.sh --setup-only 2>&1 | tee "$RUNNER_TEMP/golden.log"
           if grep -q 'golden chain: restored (' "$RUNNER_TEMP/golden.log"; then how=restored; else how=mined; fi
-          echo "golden chain: $how (cache: ${{ steps.golden.outputs.cache-hit == 'true' && 'exact key' || 'restore-keys or miss' }})" >> "$GITHUB_STEP_SUMMARY"
+          key=$(grep -oE 'golden chain: (restoring snapshot|snapshot saved as) [0-9a-f]+' "$RUNNER_TEMP/golden.log" | tail -n1 | awk '{print $NF}')
+          if [ -z "$key" ] || [ ! -f "$GOLDEN_DIR/$key/meta.env" ]; then
+            echo "::error::could not identify the snapshot this run used (key '${key:-none}')"
+            exit 1
+          fi
+          find "$GOLDEN_DIR" -mindepth 1 -maxdepth 1 ! -name "$key" -exec rm -rf {} +
+          echo "golden chain: $how, snapshot $key (cache: ${{ steps.golden.outputs.cache-hit == 'true' && 'exact key' || 'restore-keys or miss' }})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package the snapshot
         run: tar -C "$GOLDEN_DIR" -cf "$RUNNER_TEMP/z3-golden.tar" .
