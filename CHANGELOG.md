@@ -10,10 +10,10 @@ date) before dispatching the release.
 
 ### CI
 
-- `release.yml` refuses to dispatch when zcashd's mainnet halt is under
-  4 weeks past the current tip (estimated from a block anchor and the wall
-  clock, no network access); MAINTENANCE.md gains the matching pre-release
-  checklist.
+- `release.yml` refuses to dispatch when either node's mainnet halt (zcashd
+  or zebra) is under 4 weeks past the current tip (estimated from a block
+  anchor and the wall clock, no network access); MAINTENANCE.md gains the
+  matching pre-release checklist.
 
 ## v28 - 2026-09-02
 
