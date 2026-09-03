@@ -312,7 +312,7 @@ jobs:
         id: golden
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.GOLDEN_DIR }}
+          path: ${{ runner.temp }}/z3-golden-dir
           key: z3-golden-v1-${{ runner.os }}-${{ hashFiles('qa/regtest-harness/run.sh') }}
           restore-keys: |
             z3-golden-v1-${{ runner.os }}-
