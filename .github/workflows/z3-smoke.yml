@@ -1,267 +1,132 @@
 name: Z3 stack smoke test
 
-# Build the Z3 stack images (zebra, zaino, zallet) from vendored source and
-# prove the deploy/z3-stack/ bundle works end to end: zebra healthy, zaino
-# serving lightwalletd gRPC, zallet answering wallet RPC with a node tip, no
-# crash-loops, nothing exposed that shouldn't be. None of the checks need a
-# synced chain, so the smoke phase takes minutes; the builds dominate.
-#
-# A pull request builds only the images whose build context it touches. The
-# `changes` job decides per image, and the smoke job pulls the others, pinned
-# by digest, from ghcr.io/shieldedlabs/<image>:main: the newest main build
-# that passed this smoke test, published by the `publish` job at the end of
-# every push-to-main and scheduled run. A reused image can therefore lag main
-# by one in-flight main run; the gate and smoke summaries print the digest
-# and source commit actually used. Every other event (the workflow_call from
-# release.yml, schedule, workflow_dispatch) builds every image
-# unconditionally, so the release gate never rests on a reused image.
-#
-# Each component builds in its own matrix job (= a separate GitHub job with
-# its own success, cache export, and artifact), so a failure in one build or
-# in the downstream smoke job never discards another component's cached
-# layers or built image. Compile stages are always rebuilt fresh
-# (no-cache-filters): a smoke run must never test a stale binary (observed
-# 2026-07-17: a cached COPY layer served an image without the commit under
-# test). The fresh build is made affordable by the 16-vCPU runner and by the
-# components building in parallel; base and apt layers still come from
-# cache. Each build hands its exact image to the smoke job as an artifact, so
-# smoke never rebuilds. The zcashd image is not part of the stack; its build
-# is a separate, non-gating job that only keeps a registry build cache warm.
-#
-# Build definitions live in the `changes` job and mirror
-# deploy/z3-stack/docker-compose.build.yml; keep them in sync if you change
-# contexts, Dockerfiles, or build args.
+# Builds the Z3 stack images (zebra, zaino, zallet) from vendored source and
+# proves deploy/z3-stack/ works end to end (probes: deploy/z3-stack/smoke.sh).
+# A pull request builds only the images whose build context it touches and
+# reuses the rest from ghcr.io/shieldedlabs/<image>:main, the newest main
+# build that passed this test; every other event builds everything.
 
 on:
-  # Deliberately no `paths:` filter; the equivalent lists live in the `changes`
-  # job below. PR #20 (the zebra security subtree update, 2026-08-06) changed
-  # 144 files, 107 of which matched the vendored-source patterns that used to
-  # sit here, and GitHub created no Actions check suite for it at all: the
-  # pull_request event produced zero workflow runs, so the PR merged with no CI
-  # and nothing on the PR page said so. Nothing about the PR explains it: the
-  # diff was well inside every documented path-filter limit (144 files, 19
-  # commits), GitHub's own compare API returns the same 144 files, and the
-  # workflow file was byte-identical at base and head. Actions was visibly
-  # unhealthy that afternoon (the v25 release dispatched 75 minutes later sat
-  # queued with no jobs and never started; v25 shipped from a re-dispatch the
-  # next day), so the likeliest reading is a transient failure to evaluate the
-  # trigger.
-  #
-  # Transient is the problem, not the excuse. A path-filtered workflow that
-  # does not trigger is indistinguishable from one that passed, so a dropped
-  # event is silent and there is nothing to notice. Filtering in a job instead
-  # makes the decision ours and puts it in a log, and the `required` job at the
-  # bottom reports on every PR either way. Require that check in branch
-  # protection and a dropped event blocks the merge instead of vanishing.
+  # No `paths:` filter: a workflow that does not trigger is indistinguishable
+  # from one that passed (PR #20 merged with no CI that way). The gate job
+  # filters instead, and `required` reports on every PR.
   pull_request:
-  # Every merge: builds and smokes the whole stack on main itself (before
-  # 2026-09-03 only PRs and releases were smoked, so a bad merge surfaced at
-  # the next PR), then publishes the images as `:main` for the PR gate to
-  # reuse.
+  # Smokes every merge and refreshes the :main images.
   push:
     branches: [main]
   workflow_dispatch:
-  # Called by release.yml: every release is gated on a green smoke run of the
-  # exact commit being released. Added 2026-07-22 after v21 nearly shipped
-  # zebra security carries whose PR matched none of the path filters, so no
-  # smoke ran before the release was dispatched. This gate has now caught the
-  # same class of miss twice; keep it even though the PR side is fixed.
+  # release.yml gates every release on this workflow.
   workflow_call:
   schedule:
-    # Weekly: catches interop breakage that reaches the stack through a path
-    # the gate below does not watch.
     - cron: "17 6 * * 1"
 
-# Least privilege by default; the jobs that write to GHCR (build caches, the
-# zcashd cache warm, the :main images) add packages: write themselves.
 permissions:
   contents: read
 
 jobs:
-  # What the `paths:` filter used to do, for about 20 seconds of a
-  # ubuntu-latest runner, decided per image. The workflow registers on every
-  # PR, so the check suite always exists; this job decides which images a PR
-  # has to build and which it can reuse from `:main`.
   changes:
     name: Path gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
-      relevant: ${{ steps.gate.outputs.relevant }}
-      matrix: ${{ steps.gate.outputs.matrix }}
+      build: ${{ steps.gate.outputs.build }}
       reuse: ${{ steps.gate.outputs.reuse }}
       zcashd: ${{ steps.gate.outputs.zcashd }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # One filter per image: its build context as the component's
+      # .dockerignore defines it, plus the Dockerfile; keep the two in step.
+      # A missed path means a green smoke against a reused image that lacks
+      # the change. Fails open: no file list (API error, or a PR too large
+      # for the 3000-file cap of the PR files API), build everything.
+      - name: Changed build contexts
+        id: filter
+        if: github.event_name == 'pull_request' && github.event.pull_request.changed_files < 3000
+        continue-on-error: true
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          # On pull_request, HEAD is the merge commit GitHub built from the PR;
-          # depth 2 is all it takes to diff it against the base it was merged
-          # onto, which is exactly the net change the PR lands.
-          fetch-depth: 2
+          predicate-quantifier: some-with-excludes
+          list-files: json
+          filters: |
+            stack: &stack
+              - deploy/z3-stack/**
+              - .github/workflows/z3-smoke.yml
+              - qa/log-filter-injection-test.sh
+            zero-zebra:
+              - *stack
+              - zebra/.cargo/**
+              - zebra/.config/**
+              - zebra/*.toml
+              - zebra/*.lock
+              - zebra/tower-*/**
+              - zebra/zebra-*/**
+              - zebra/zebrad/**
+              - zebra/docker/entrypoint.sh
+              - zebra/docker/default-zebra-config.toml
+              - zebra/docker/Dockerfile
+              - zebra/.dockerignore
+            zero-zaino:
+              - *stack
+              - zaino/**
+              - '!zaino/.github/**'
+              - '!zaino/docs/**'
+              - '!zaino/**/*.md'
+            zero-zallet:
+              - *stack
+              - zallet/.cargo/**
+              - zallet/Cargo.toml
+              - zallet/Cargo.lock
+              - zallet/vendor/**
+              - zallet/zallet/**
+              - zallet/zallet-core/**
+              - zallet/backends/**
+              - zallet/tools/**
+              - zallet/Dockerfile
+              - zallet/.dockerignore
+            zcashd:
+              - zcashd/**
+              - docker/zcashd/Dockerfile
 
-      - name: Decide which images to build and which to reuse
+      - name: Decide per image
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          CHANGED: ${{ steps.filter.outputs.changes }}
+          FILTER: ${{ toJSON(steps.filter.outputs) }}
         run: |
           set -euo pipefail
+          build='[]'; reuse='[]'; zcashd=false
+          rows="$RUNNER_TEMP/rows"; : > "$rows"
+          row() { echo "| $1 | $2 | $3 |" >> "$rows"; }
+          changed() { jq -e --arg n "$1" 'any(. == $n)' <<< "$CHANGED" > /dev/null; }
+          first() { jq -r --arg k "${1}_files" '.[$k] | fromjson | .[0]' <<< "$FILTER"; }
 
-          # One entry per stack image. Everything but `paths` is the matrix
-          # leg handed to the build job verbatim (mirror of
-          # deploy/z3-stack/docker-compose.build.yml). `paths` is the image's
-          # build context as its .dockerignore defines it, written as
-          # GitHub-style globs (`*` stops at a slash, `**` spans directories,
-          # a leading `!` excludes), plus the Dockerfile and the .dockerignore
-          # itself; when one changes, change the other. A path missing here
-          # is worse than it used to be: a PR that changes only that path
-          # gets a green smoke against a reused image without the change.
-          cat > "$RUNNER_TEMP/legs.json" <<'JSON'
-          [
-            {
-              "name": "zero-zebra",
-              "context": "zebra",
-              "dockerfile": "zebra/docker/Dockerfile",
-              "build_args": "FEATURES=release_max_level_info,progress-bar,prometheus",
-              "no_cache_filters": "release",
-              "paths": [
-                "zebra/.cargo/**",
-                "zebra/.config/**",
-                "zebra/*.toml",
-                "zebra/*.lock",
-                "zebra/tower-*/**",
-                "zebra/zebra-*/**",
-                "zebra/zebrad/**",
-                "zebra/docker/entrypoint.sh",
-                "zebra/docker/default-zebra-config.toml",
-                "zebra/docker/Dockerfile",
-                "zebra/.dockerignore"
-              ]
-            },
-            {
-              "name": "zero-zaino",
-              "context": "zaino",
-              "dockerfile": "zaino/Dockerfile",
-              "build_args": "NO_TLS=true",
-              "rust_toolchain_file": "zaino/rust-toolchain.toml",
-              "no_cache_filters": "builder",
-              "paths": [
-                "zaino/**",
-                "!zaino/.github/**",
-                "!zaino/docs/**",
-                "!zaino/**/*.md"
-              ]
-            },
-            {
-              "name": "zero-zallet",
-              "context": "zallet",
-              "dockerfile": "zallet/Dockerfile",
-              "build_args": "BACKEND=zaino\nFEATURES=rpc-cli,zcashd-import",
-              "no_cache_filters": "builder",
-              "paths": [
-                "zallet/.cargo/**",
-                "zallet/Cargo.toml",
-                "zallet/Cargo.lock",
-                "zallet/vendor/**",
-                "zallet/zallet/**",
-                "zallet/zallet-core/**",
-                "zallet/backends/**",
-                "zallet/tools/**",
-                "zallet/Dockerfile",
-                "zallet/.dockerignore"
-              ]
-            }
-          ]
-          JSON
-
-          # Changes that reach every stack image, whatever else a PR touches.
-          stack_wide=(
-            'deploy/z3-stack/**'
-            '.github/workflows/z3-smoke.yml'
-            'qa/log-filter-injection-test.sh'
-          )
-          # Selects the cache-warm zcashd build only (not a stack image).
-          zcashd_paths=(
-            'zcashd/**'
-            'docker/zcashd/Dockerfile'
-          )
-
-          # First file the merge commit changes against its base under the
-          # given globs (empty when none). `:(glob)` gives git the semantics
-          # GitHub's filter patterns use. Via a file, not a pipe: a subtree
-          # update changes thousands of files, and `head` closing the pipe
-          # early would fail the pipeline under pipefail.
-          first_changed() {
-            local specs=() p
-            for p in "$@"; do
-              case "$p" in
-                '!'*) specs+=(":(glob,exclude)${p#!}") ;;
-                *)    specs+=(":(glob)$p") ;;
-              esac
-            done
-            git diff --name-only HEAD^1 HEAD -- "${specs[@]}" > "$RUNNER_TEMP/hits"
-            head -n1 "$RUNNER_TEMP/hits"
-          }
-
-          # One summary row per image, printed in leg order at the end.
-          row() { echo "| $1 | $2 | $3 |" > "$RUNNER_TEMP/row.$1"; }
-
-          build='[]'      # names of the stack images to build
-          reuse='[]'      # {name, digest} of the stack images to pull from :main
-          zcashd=false    # whether the zcashd cache-warm job runs
-          note=""
-
-          # Every non-PR event builds everything. In particular the
-          # workflow_call from release.yml must never be short-circuited by a
-          # path decision: that gate is the backstop this workflow failed to
-          # be. Fail open the same way when the merge commit is not there to
-          # diff (a checkout race, a head that is not a merge): the whole
-          # point of this job is that "we could not tell" must never silently
-          # mean "no CI".
-          all=""
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            all="event \`$EVENT_NAME\` builds every image"
-          elif ! git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
-            echo "::warning::could not diff the merge commit against its base; building unconditionally"
-            all="could not diff the merge commit against its base; building every image"
-          fi
-
-          if [ -n "$all" ]; then
-            build=$(jq -c 'map(.name)' "$RUNNER_TEMP/legs.json")
-            zcashd=true
-            for name in $(jq -r '.[].name' "$RUNNER_TEMP/legs.json"); do
-              row "$name" build "$all"
-            done
-            row zero-zcashd "warm cache" "$all"
+          if [ "$FILTER_OUTCOME" != success ]; then
+            why="event \`$EVENT_NAME\` builds every image"
+            if [ "$EVENT_NAME" = pull_request ]; then
+              why="could not list the changed files (filter step: $FILTER_OUTCOME, PR changes $CHANGED_FILES files); building every image"
+              echo "::warning::$why"
+            fi
+            build='["zero-zebra","zero-zaino","zero-zallet"]'; zcashd=true
+            for name in zero-zebra zero-zaino zero-zallet zero-zcashd; do row "$name" build "$why"; done
           else
-            note="\`$(wc -l < "$RUNNER_TEMP/changed" | tr -d ' ')\` file(s) changed."
-            stack_hit=$(first_changed "${stack_wide[@]}")
-            pending=""
-            for name in $(jq -r '.[].name' "$RUNNER_TEMP/legs.json"); do
-              paths=()
-              while IFS= read -r p; do paths+=("$p"); done \
-                < <(jq -r --arg n "$name" '.[] | select(.name == $n) | .paths[]' "$RUNNER_TEMP/legs.json")
-              own=$(first_changed "${paths[@]}")
-              if [ -n "$own" ]; then
+            for name in zero-zebra zero-zaino zero-zallet; do
+              if changed "$name"; then
                 build=$(jq -c --arg n "$name" '. + [$n]' <<< "$build")
-                row "$name" build "changed: \`$own\`"
-              elif [ -n "$stack_hit" ]; then
-                build=$(jq -c --arg n "$name" '. + [$n]' <<< "$build")
-                row "$name" build "stack-wide change: \`$stack_hit\`"
-              else
-                pending="$pending $name"
+                row "$name" build "changed: \`$(first "$name")\`"
               fi
             done
-
-            for name in $pending; do
+            for name in zero-zebra zero-zaino zero-zallet; do
+              if changed "$name"; then continue; fi
               if [ "$build" = '[]' ]; then
-                # Nothing reaches the stack: no smoke, so nothing to pull.
-                row "$name" skip "unchanged, and no stack image builds"
+                row "$name" skip "no stack image changed, no smoke"
                 continue
               fi
-              # Reuse only an image that is verifiably there, pinned to the
-              # digest seen now. Anything else (no :main published yet, a
-              # registry throttle, a package gone private) means build.
+              # Reuse only what is verifiably there, pinned to the digest seen now.
               ref="ghcr.io/shieldedlabs/$name:main"
               if digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2> "$RUNNER_TEMP/err"); then
                 reuse=$(jq -c --arg n "$name" --arg d "$digest" '. + [{name: $n, digest: $d}]' <<< "$reuse")
@@ -271,45 +136,17 @@ jobs:
                 row "$name" build "\`$ref\` unavailable, failing open: $(head -n1 "$RUNNER_TEMP/err" | tr '|' '/')"
               fi
             done
-
-            zc_hit=$(first_changed "${zcashd_paths[@]}")
-            if [ -n "$zc_hit" ]; then
-              zcashd=true
-              row zero-zcashd "warm cache" "changed: \`$zc_hit\`"
+            if changed zcashd; then
+              zcashd=true; row zero-zcashd "warm cache" "changed: \`$(first zcashd)\`"
             else
-              row zero-zcashd skip "unchanged (cache-warm build, not a stack image)"
+              row zero-zcashd skip unchanged
             fi
           fi
 
-          # All four outputs from one place, so no branch above can leave the
-          # build job with a matrix it cannot parse.
-          matrix=$(jq -c --argjson names "$build" \
-                     '{include: [.[] | select(.name | IN($names[])) | del(.paths)]}' \
-                     "$RUNNER_TEMP/legs.json")
-          relevant=$(jq -r '.include | length > 0' <<< "$matrix")
-          {
-            echo "relevant=$relevant"
-            echo "matrix=$matrix"
-            echo "reuse=$reuse"
-            echo "zcashd=$zcashd"
-          } | tee -a "$GITHUB_OUTPUT"
+          { echo "build=$build"; echo "reuse=$reuse"; echo "zcashd=$zcashd"; } | tee -a "$GITHUB_OUTPUT"
+          { echo "### z3 stack path gate"; echo; echo "| image | decision | why |"; echo "|---|---|---|"; cat "$rows"; } \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
-          {
-            echo "### z3 stack path gate"
-            echo
-            [ -z "$note" ] || { echo "$note"; echo; }
-            echo "| image | decision | why |"
-            echo "|---|---|---|"
-            for name in $(jq -r '.[].name' "$RUNNER_TEMP/legs.json") zero-zcashd; do
-              cat "$RUNNER_TEMP/row.$name"
-            done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-  # Seconds-long checks that need no build, run before the image builds so an
-  # obvious regression fails the PR immediately instead of after the matrix.
-  # Deliberately not a `needs:` dependency of the builds: these are
-  # independent signals, and blocking a long build on a shell test would
-  # trade fast feedback for slow feedback.
   quick-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -317,32 +154,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Covers the [upstream-pending #11050] carry. zebra-utils scripts are
-      # not in the runtime image, so this cannot be a stack probe.
+      # Covers the [upstream-pending #11050] carry.
       - name: zebrad-log-filter shell-injection regression test
         run: ./qa/log-filter-injection-test.sh
 
-  # One separate job per image the gate selected (matrix legs are independent
-  # jobs). Each builds its image FRESH, exports its build cache (base/apt
-  # layers warm the next run), and uploads the exact image it built as an
-  # artifact for the smoke job. `fail-fast: false` keeps a failure in one
-  # component from cancelling the others, so their caches and artifacts still
-  # land.
   build:
     name: Build ${{ matrix.name }}
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: needs.changes.outputs.build != '[]'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
-    # packages: write is for pushing the GHCR build cache on main, scheduled,
-    # and dispatched runs. PR runs never use it (their cache-to targets the
-    # ephemeral GHA cache; fork PRs get a force-read-only token anyway).
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+      matrix:
+        name: ${{ fromJSON(needs.changes.outputs.build) }}
+    env:
+      # Mirror of deploy/z3-stack/docker-compose.build.yml.
+      LEGS: |
+        {
+          "zero-zebra": {
+            "context": "zebra",
+            "dockerfile": "zebra/docker/Dockerfile",
+            "build_args": "FEATURES=release_max_level_info,progress-bar,prometheus",
+            "no_cache_filters": "release"
+          },
+          "zero-zaino": {
+            "context": "zaino",
+            "dockerfile": "zaino/Dockerfile",
+            "build_args": "NO_TLS=true",
+            "rust_toolchain_file": "zaino/rust-toolchain.toml",
+            "no_cache_filters": "builder"
+          },
+          "zero-zallet": {
+            "context": "zallet",
+            "dockerfile": "zallet/Dockerfile",
+            "build_args": "BACKEND=zaino\nFEATURES=rpc-cli,zcashd-import",
+            "no_cache_filters": "builder"
+          }
+        }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -352,9 +204,6 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # Needed to push the GHCR build cache; pulls of the public cache refs
-      # are anonymous. On fork PRs the token is read-only, but those runs
-      # don't write to the registry (see cache-to below).
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -362,11 +211,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # RUST_VERSION comes from the vendored rust-toolchain.toml where the
+      # Dockerfile has no default.
       - name: Resolve build args
         id: args
         env:
-          BUILD_ARGS: ${{ matrix.build_args }}
-          RUST_TOOLCHAIN_FILE: ${{ matrix.rust_toolchain_file }}
+          BUILD_ARGS: ${{ fromJSON(env.LEGS)[matrix.name].build_args }}
+          RUST_TOOLCHAIN_FILE: ${{ fromJSON(env.LEGS)[matrix.name].rust_toolchain_file }}
         run: |
           set -euo pipefail
           {
@@ -384,19 +235,14 @@ jobs:
             echo "BUILD_ARGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # Authoritative build. `load` puts the image in this job's Docker daemon
-      # so it can be saved as an artifact; the compile stage is rebuilt fresh
-      # (no-cache-filters) for correctness; cache-to warms the cheap layers.
-      # The revision label lets a reused `:main` image name the main commit
-      # it was built from. Cache refs are hardcoded lowercase (registry
-      # rejects the uppercase in github.repository_owner). PR runs (read-only
-      # token) write the GHA cache instead of the registry; every run reads
-      # both.
+      # The compile stage is never served from cache (no-cache-filters): a
+      # smoke run must never test a stale binary. PR runs cannot write the
+      # registry cache, so they use the GHA cache instead.
       - name: Build ${{ matrix.name }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: ${{ fromJSON(env.LEGS)[matrix.name].context }}
+          file: ${{ fromJSON(env.LEGS)[matrix.name].dockerfile }}
           target: runtime
           platforms: linux/amd64
           load: true
@@ -405,15 +251,13 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: ${{ steps.args.outputs.build_args }}
-          no-cache-filters: ${{ matrix.no_cache_filters }}
+          no-cache-filters: ${{ fromJSON(env.LEGS)[matrix.name].no_cache_filters }}
           cache-from: |
             type=registry,ref=ghcr.io/shieldedlabs/${{ matrix.name }}:buildcache
             type=gha,scope=${{ matrix.name }}
           cache-to: ${{ github.event_name == 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.name) || format('type=registry,ref=ghcr.io/shieldedlabs/{0}:buildcache,mode=max,image-manifest=true', matrix.name) }}
 
-      # Hand the exact built image to the smoke job. Artifacts (not a GHCR
-      # push) so this works unchanged on fork PRs, where the token cannot
-      # push images.
+      # Artifacts, not a registry push: works unchanged on fork PRs.
       - name: Export image artifact
         run: |
           set -euxo pipefail
@@ -428,16 +272,9 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Not part of the z3 stack; built only to keep its registry build cache
-  # warm (cache entries are refreshed only when read, and zcashd is otherwise
-  # built solely on releases). Its own job rather than a build-matrix leg so
-  # smoke never waits for it: on a zcashd PR this build runs ~45 minutes
-  # against ~8 for the slowest stack image (PR #59, 2026-09-02). Non-gating
-  # end to end: continue-on-error at job and step level, and neither smoke
-  # nor the required check depends on it (a GHCR throttle on its cache pull
-  # held every PR hostage for an afternoon, 2026-09-01, when it was a matrix
-  # leg). PR runs include it only when zcashd changed; every other event runs
-  # it.
+  # Not a stack image: keeps zcashd's registry build cache warm. Non-gating
+  # (nothing waits on it, and it may fail), so a slow or throttled zcashd
+  # build never holds a PR.
   warm-zcashd-cache:
     name: Warm zero-zcashd build cache
     needs: changes
@@ -464,10 +301,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # No load, no push, no artifact: the build result only lands in the
-      # caches. Step-level continue-on-error keeps this check run green when
-      # a registry throttle breaks its cache pull; the job-level guard alone
-      # keeps the gate green but still shows the check red.
       - name: Build zero-zcashd
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         continue-on-error: true
@@ -483,11 +316,8 @@ jobs:
 
   smoke:
     needs: [changes, build]
-    # GitHub-hosted, NOT Blacksmith: zebra's mainnet P2P starves on Blacksmith
-    # runners (peer handshakes succeed but no block ever downloads; observed
-    # twice 2026-07-17, zebra pinned at Height(0) for the whole probe window,
-    # which starves zaino's chain index and every downstream probe). The probes
-    # are cheap; only the builds need the big runner.
+    # GitHub-hosted: zebra's mainnet P2P never downloads a block on Blacksmith
+    # runners.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -501,8 +331,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Only the images built in this run have an artifact; the rest come
-      # from :main below.
       - name: Download stack images
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -518,10 +346,8 @@ jobs:
             zstd -d -c "$f" | docker load
           done
 
-      # Pinned to the digest the gate saw, so a main run landing between the
-      # gate and here cannot swap the image under the test. Retried: a
-      # registry hiccup on an anonymous pull must not fail an unrelated PR
-      # (GHCR throttled a cache pull for an afternoon, 2026-09-01).
+      # By digest, so a main run landing meanwhile cannot swap the image
+      # under the test; retried, so a registry hiccup does not fail the PR.
       - name: Pull reused images from :main
         if: needs.changes.outputs.reuse != '[]'
         working-directory: ${{ github.workspace }}
@@ -542,9 +368,6 @@ jobs:
             docker tag "$ref" "ghcr.io/shieldedlabs/$name:smoke"
           done < <(jq -r '.[] | "\(.name) \(.digest)"' <<< "$REUSE")
 
-      # Every stack image must be present now, from an artifact or from
-      # :main; compose would otherwise pull a nonexistent :smoke from GHCR.
-      # Records what was actually tested.
       - name: Stack images under test
         working-directory: ${{ github.workspace }}
         env:
@@ -571,10 +394,6 @@ jobs:
           } > "$out"
           tee -a "$GITHUB_STEP_SUMMARY" < "$out"
 
-      # All probe logic lives in deploy/z3-stack/smoke.sh (single source of
-      # truth, also runnable locally against docker-compose.build.yml images
-      # for ~2-minute iteration). The script prints one ok:/FAIL: line per
-      # probe and dumps container state itself when a probe fails.
       - name: Wallet init, stack up, smoke probes
         run: ./smoke.sh --init --up
 
@@ -582,23 +401,16 @@ jobs:
         if: failure()
         run: |
           docker compose ps || true
-          # Full logs per container, not a tail: a crash-looping container
-          # keeps every restart's output in one log, and the interesting
-          # part (the first crash) is at the top.
           for c in zebra zaino zallet; do
             echo "::group::$c (RestartCount=$(docker inspect --format '{{.RestartCount}}' "$c" 2>/dev/null || echo '?'))"
             docker logs "$c" 2>&1 || true
             echo "::endgroup::"
           done
 
-  # Promote the images this run just smoke-tested to `:main`, the images the
-  # PR gate reuses. Only after a green smoke, and only from push and
-  # scheduled runs of main: the release gate's workflow_call builds the same
-  # main commit that already has (or is getting) its own push run, and
-  # letting it publish too would let a release run that finishes late
-  # overwrite a newer commit's images. A failed push here reddens the main
-  # run on purpose: it means `:main` is stale and PRs are being smoked
-  # against older images.
+  # :main is promoted only after a green smoke, and only by push and
+  # scheduled runs: the release call builds a commit that already has its
+  # own push run, and a late release run must not overwrite newer images.
+  # A failed push reddens the main run on purpose: :main is stale.
   publish:
     name: Publish :main images
     needs: [build, smoke]
@@ -641,13 +453,8 @@ jobs:
           } > "$out"
           tee -a "$GITHUB_STEP_SUMMARY" < "$out"
 
-  # The single check to require in branch protection. It reports on every PR,
-  # including the ones the gate skipped, so "the workflow never ran" can never
-  # again be indistinguishable from "the workflow passed". A skipped build or
-  # smoke is a pass here (nothing in the PR reaches the stack); only a real
-  # failure or a cancellation fails it. warm-zcashd-cache and publish are
-  # deliberately not listed: the first is non-gating by design, the second
-  # never runs on a PR.
+  # The one check to require in branch protection: reports on every PR, so a
+  # workflow that never ran cannot pass as one that did. Skipped jobs pass.
   required:
     name: z3 stack smoke result
     needs: [changes, quick-checks, build, smoke]
