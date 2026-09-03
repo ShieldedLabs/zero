@@ -5,7 +5,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 #
 # The z3 smoke-test workflow (.github/workflows/z3-smoke.yml, leg definitions
-# in its `changes` job) builds from the same contexts/Dockerfiles/args; keep
+# in its `build` job’s `LEGS` env) builds from the same contexts/Dockerfiles/args; keep
 # them in sync if you change these.
 
 services:
