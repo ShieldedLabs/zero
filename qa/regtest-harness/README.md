@@ -101,7 +101,12 @@ printed.
 
 ## CI
 
-`.github/workflows/z3-regtest.yml` builds the two binaries (cargo, cached)
-and runs this script on pull requests touching the wallet-behavior surface
-(`zallet/`, `zaino/packages/`, `librustzcash/`), on manual dispatch, and
-weekly. Logs and the wallet database are uploaded as an artifact on failure.
+`.github/workflows/z3-regtest.yml` builds the two binaries in parallel on
+16-vCPU runners, each behind a cache keyed on its source tree so an
+untouched component is not rebuilt, restores or mines the golden chain
+once, and runs the three scenario groups of `run-parallel.sh` as parallel
+jobs on `ubuntu-latest`, each from its own copy of the binaries and the
+snapshot. It runs on pull requests touching the wallet-behavior surface
+(`zallet/`, `zaino/packages/`, `librustzcash/`, zebra crate sources, the
+harness itself), on every merge to `main`, on manual dispatch, and weekly.
+A failed group uploads its logs and wallet database as an artifact.
