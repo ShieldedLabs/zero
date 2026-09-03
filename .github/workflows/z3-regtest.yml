@@ -9,6 +9,16 @@ name: Z3 regtest wallet tests
 # and self-healing. See qa/regtest-harness/README.md for the scenario <->
 # incident map.
 #
+# Shape: the two binaries build in parallel on 16-vCPU runners, each behind
+# a cache keyed on its source tree so an untouched component is never
+# rebuilt; one job restores or mines the golden chain; the three scenario
+# groups of run-parallel.sh then run as parallel jobs, each on its own copy
+# of the binaries and the snapshot (artifacts). Small runners cannot host
+# concurrent stacks, so parallelism is across jobs, never within one. The
+# previous single serial job measured 64 and 83 minutes: cold builds every
+# run (the shared Actions cache was full of z3-smoke's buildkit blobs) and
+# an internal miner at ~8 s/block for the 211-block golden chain.
+#
 # No network access beyond crates.io for the builds: regtest dials no peers.
 
 on:
@@ -18,6 +28,13 @@ on:
   # created no Actions check suite for it at all, and a path-filtered workflow
   # that never triggers is indistinguishable from one that passed.
   pull_request:
+  # Every merge that passes the gate runs the suite on main and, as a side
+  # effect, saves main-scoped cache entries (binaries, cargo target trees,
+  # golden chain). Caches saved by a PR run are readable only by that PR;
+  # main's are readable by every run, and until this trigger existed main
+  # had none, so every fresh PR built cold.
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # Weekly, offset from z3-smoke's Monday 06:17 so their failure signals
@@ -27,11 +44,17 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR supersedes its running suite. Main runs are never
+# cancelled: a cancelled run saves no cache.
+concurrency:
+  group: z3-regtest-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # What the `paths:` filter used to do, for about 20 seconds of a
-  # ubuntu-latest runner. The workflow now registers on every PR, so the check
-  # suite always exists; this job decides whether the ~60-minute harness run is
-  # worth it.
+  # ubuntu-latest runner. The workflow registers on every PR, so the check
+  # suite always exists; this job decides whether the builds and the three
+  # stacks are worth running.
   changes:
     name: Path gate
     runs-on: ubuntu-latest
@@ -40,25 +63,32 @@ jobs:
       relevant: ${{ steps.gate.outputs.relevant }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # On pull_request, HEAD is the merge commit GitHub built from the PR;
-          # depth 2 is all it takes to diff it against the base it was merged
-          # onto, which is exactly the net change the PR lands.
+          # On pull_request, HEAD is the merge commit GitHub built from the PR
+          # and HEAD^1 the base it was merged onto: depth 2 is all it takes to
+          # diff the net change. On push, `before` is HEAD^1 for merge and
+          # squash commits, and out of reach (fail open) for a rebase merge.
           fetch-depth: 2
 
-      - name: Decide whether this PR can change wallet behavior
+      - name: Decide whether this change can reach wallet behavior
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "Event \`$EVENT_NAME\`: running the harness unconditionally." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          case "$EVENT_NAME" in
+            pull_request) base=HEAD^1 ;;
+            push) base="$BEFORE" ;;
+            *)
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              echo "Event \`$EVENT_NAME\`: running the harness unconditionally." >> "$GITHUB_STEP_SUMMARY"
+              exit 0 ;;
+          esac
+          # A push with no usable `before` (branch creation, force-push).
+          case "$base" in ""|0000000000000000000000000000000000000000) base="" ;; esac
 
           # The list the `paths:` block used to hold, unchanged and in the same
           # order. `:(glob)` gives git the semantics GitHub's filter patterns
@@ -82,13 +112,13 @@ jobs:
           )
 
           # Fail open: "we could not tell" must never silently mean "no CI".
-          if ! git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
+          if [ -z "$base" ] || ! git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed" 2>/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::could not diff the merge commit against its base; running the harness unconditionally"
-            echo "Could not diff the merge commit; running the harness unconditionally." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::could not diff against the base commit; running the harness unconditionally"
+            echo "Could not diff against the base commit; running the harness unconditionally." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD -- "${specs[@]}" > "$RUNNER_TEMP/matched"
+          git diff --name-only "$base" HEAD -- "${specs[@]}" > "$RUNNER_TEMP/matched"
 
           total=$(( $(wc -l < "$RUNNER_TEMP/changed") ))
           hits=$(( $(wc -l < "$RUNNER_TEMP/matched") ))
@@ -111,100 +141,312 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  regtest:
+  # One job per binary, in parallel, on 16-vCPU runners (a cold zebrad build
+  # is ~3 minutes here against ~11 on ubuntu-latest). Each leg first looks
+  # for a binary already built from exactly this source tree and, on a hit,
+  # skips rust-cache and cargo entirely; on a miss it builds incrementally
+  # on top of the cargo target cache. The binary reaches every other job as
+  # an artifact, never through the cache: Blacksmith transparently backs
+  # actions/cache and rust-cache with its own colocated store (their docs),
+  # so these entries do not count against the 10 GB GitHub quota, and the
+  # ubuntu-latest jobs downstream could not read them anyway.
+  build:
+    name: Build ${{ matrix.bin }}
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
-    runs-on: ubuntu-latest
-    # First uncached run builds two large Rust workspaces (~25 min). Mining
-    # is instant (generatetoaddress), so a cached run is dominated by wallet
-    # convergence and the spend-poison wallet lifecycles (~10 min).
-    timeout-minutes: 90
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bin: zebrad
+            workspace: zebra
+            binary: zebra/target/release/zebrad
+            build: cargo build --locked --release -p zebrad
+            # Everything cargo can read for this workspace, deliberately wider
+            # than the path gate's crate list: a spurious miss costs one
+            # rebuild, a stale hit would test the wrong binary.
+            hash_globs: |
+              zebra/**
+          - bin: zallet-zaino
+            workspace: zallet/backends/zaino
+            binary: zallet/backends/zaino/target/release/zallet-zaino
+            build: cargo build --locked --release -p zallet-zaino --features rpc-cli,zcashd-import
+            # zaino and librustzcash reach this binary through git-pinned
+            # [patch.crates-io] entries today, not through the vendored trees;
+            # they are keyed anyway so a switch to path dependencies can never
+            # serve a stale binary.
+            hash_globs: |
+              zallet/**
+              zaino/packages/**
+              librustzcash/**
+    env:
+      CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
 
-      # rustup resolves each workspace's own rust-toolchain.toml on first use.
+      # `runner.temp` is not available in job-level env.
+      - name: Resolve paths
+        run: echo "BIN_DIR=$RUNNER_TEMP/z3-bin" >> "$GITHUB_ENV"
+
+      # Computed first, before anything writes under <workspace>/target:
+      # hashFiles walks the checkout, so a later evaluation would hash the
+      # restored target tree and never match. The build command is part of
+      # the key so a feature or flag change rotates it.
+      - name: Compute binary cache key
+        id: key
+        env:
+          SRC_HASH: ${{ hashFiles(matrix.hash_globs) }}
+          BUILD_CMD: ${{ matrix.build }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SRC_HASH" ]; then
+            echo "::error::hashFiles matched nothing for ${{ matrix.bin }}; refusing a constant cache key"
+            exit 1
+          fi
+          cmd=$(printf '%s' "$BUILD_CMD" | sha256sum | cut -c1-8)
+          key="z3-bin-v1-${{ runner.os }}-${{ matrix.bin }}-${cmd}-${SRC_HASH}"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "binary cache key: $key"
+
+      # No restore-keys: a partial match would be a binary built from other
+      # sources.
+      - name: Restore prebuilt ${{ matrix.bin }}
+        id: bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/z3-bin/${{ matrix.bin }}
+          key: ${{ steps.key.outputs.key }}
+
+      # v3: one workspace per job (v2 entries held both). The `key` input
+      # keeps the two matrix legs apart; rust-cache's own key is the job id,
+      # `build` for both.
       - name: Rust build cache
-        uses: Swatinem/rust-cache@v2
+        if: steps.bin.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # v2: release-profile switch; fresh prefix rebuilds the caches
-          # from scratch rather than layering release artifacts onto the
-          # old debug cache entries.
-          prefix-key: v2-release
-          workspaces: |
-            zebra -> target
-            zallet/backends/zaino -> target
+          prefix-key: v3-release
+          key: ${{ matrix.bin }}
+          workspaces: ${{ matrix.workspace }} -> target
 
-      # Release profile: mining, proving, and scanning are compute-bound;
-      # debug binaries ran the harness 5-10x slower and widened its
-      # startup-race retry windows.
-      - name: Build zebrad
-        working-directory: zebra
-        run: cargo build --release -p zebrad
+      # Release profile: proving and scanning are compute-bound; debug
+      # binaries ran the harness 5-10x slower and widened its startup-race
+      # retry windows.
+      - name: Build ${{ matrix.bin }}
+        if: steps.bin.outputs.cache-hit != 'true'
+        working-directory: ${{ matrix.workspace }}
+        run: ${{ matrix.build }}
 
-      - name: Build zallet (zaino backend)
-        # Since beta.3 each backend is its own workspace under
-        # zallet/backends/ producing a zallet-<name> binary; the harness
-        # drives the backend binary directly (see qa/regtest-harness/run.sh).
-        working-directory: zallet/backends/zaino
-        run: cargo build --release -p zallet-zaino --features rpc-cli,zcashd-import
+      - name: Stage ${{ matrix.bin }} for the cache
+        if: steps.bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$BIN_DIR"
+          install -m 0755 "${{ matrix.binary }}" "$BIN_DIR/${{ matrix.bin }}"
 
-      - name: Cache the golden chain
-        uses: actions/cache@v4
+      # tar keeps the executable bit; the artifact zip does not.
+      - name: Check and package ${{ matrix.bin }}
+        run: |
+          set -euo pipefail
+          "$BIN_DIR/${{ matrix.bin }}" --version
+          tar -C "$BIN_DIR" -cf "$RUNNER_TEMP/${{ matrix.bin }}.tar" "${{ matrix.bin }}"
+          echo "${{ matrix.bin }}: binary cache hit=${{ steps.bin.outputs.cache-hit || 'false' }}, key \`${{ steps.key.outputs.key }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ${{ matrix.bin }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: ~/.cache/z3-harness-golden
-          # The harness computes its own content key (GOLDEN_EPOCH + mining
-          # constants) and self-invalidates on restore failure; this outer
-          # key only needs to rotate when the harness itself changes.
-          key: z3-golden-${{ hashFiles('qa/regtest-harness/run.sh') }}
+          name: z3-bin-${{ matrix.bin }}
+          path: ${{ runner.temp }}/${{ matrix.bin }}.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
 
-      # Three isolated invocations from the same golden snapshot, mirroring
-      # run-parallel.sh's semantics sequentially (2-core runners cannot host
-      # concurrent stacks). Isolation matters for correctness, not just
-      # speed: the reorg scenario is reliable against a pristine chain but
-      # accumulates tolerance drift when run after the other scenarios'
-      # chain mutations at release-profile mining speed.
-      - name: Golden chain
+  # One restore-or-mine of the golden chain, handed to the scenario jobs as
+  # an artifact. The harness verifies whatever it restores (tip, receipt
+  # count, wallet sync) and re-mines on any mismatch, so an outdated snapshot
+  # costs a minute, never correctness; restore-keys therefore hand it the
+  # newest snapshot of any harness version, and a partial match makes the
+  # post step save the verified result under this version's key.
+  golden:
+    name: Golden chain
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      # The harness defaults point at target/ directories that do not exist
+      # in this job; hand it the artifact copies explicitly.
+      - name: Resolve paths
+        run: |
+          {
+            echo "BIN_DIR=$RUNNER_TEMP/z3-bin"
+            echo "GOLDEN_DIR=$RUNNER_TEMP/z3-golden-dir"
+            echo "ZEBRAD_BIN=$RUNNER_TEMP/z3-bin/zebrad"
+            echo "ZALLET_BIN=$RUNNER_TEMP/z3-bin/zallet-zaino"
+          } >> "$GITHUB_ENV"
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: z3-bin-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/z3-artifacts
+
+      - name: Unpack binaries
+        run: |
+          set -euo pipefail
+          mkdir -p "$BIN_DIR"
+          for t in "$RUNNER_TEMP"/z3-artifacts/*.tar; do tar -C "$BIN_DIR" -xf "$t"; done
+          test -x "$ZEBRAD_BIN" && test -x "$ZALLET_BIN"
+          ls -l "$BIN_DIR"
+
+      - name: Golden chain cache
+        id: golden
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/z3-golden-dir
+          key: z3-golden-v1-${{ runner.os }}-${{ hashFiles('qa/regtest-harness/run.sh') }}
+          restore-keys: |
+            z3-golden-v1-${{ runner.os }}-
+
+      # The snapshot root is then pruned to the one snapshot this run used
+      # (the harness names it in its log), so neither the cache entry saved
+      # in the post step nor the artifact below carries the snapshots that
+      # restore-keys can bring along from earlier harness versions.
+      - name: Restore or mine the golden chain
         env:
           HARNESS_WORKDIR: ${{ runner.temp }}/z3-golden
-        run: qa/regtest-harness/run.sh --setup-only
+        run: |
+          set -euo pipefail
+          qa/regtest-harness/run.sh --setup-only 2>&1 | tee "$RUNNER_TEMP/golden.log"
+          if grep -q 'golden chain: restored (' "$RUNNER_TEMP/golden.log"; then how=restored; else how=mined; fi
+          key=$(grep -oE 'golden chain: (restoring snapshot|snapshot saved as) [0-9a-f]+' "$RUNNER_TEMP/golden.log" | tail -n1 | awk '{print $NF}')
+          if [ -z "$key" ] || [ ! -f "$GOLDEN_DIR/$key/meta.env" ]; then
+            echo "::error::could not identify the snapshot this run used (key '${key:-none}')"
+            exit 1
+          fi
+          find "$GOLDEN_DIR" -mindepth 1 -maxdepth 1 ! -name "$key" -exec rm -rf {} +
+          echo "golden chain: $how, snapshot $key (cache: ${{ steps.golden.outputs.cache-hit == 'true' && 'exact key' || 'restore-keys or miss' }})" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Wallet-contract scenarios
-        env:
-          HARNESS_WORKDIR: ${{ runner.temp }}/z3-fast
-        run: qa/regtest-harness/run.sh --only baseline,dust,filter,union,hang-guard,poison-heal
+      - name: Package the snapshot
+        run: tar -C "$GOLDEN_DIR" -cf "$RUNNER_TEMP/z3-golden.tar" .
 
-      - name: Spend-poison scenario
-        env:
-          HARNESS_WORKDIR: ${{ runner.temp }}/z3-poison
-        run: qa/regtest-harness/run.sh --only spend-poison
-
-      - name: Reorg scenario
-        env:
-          HARNESS_WORKDIR: ${{ runner.temp }}/z3-reorg
-        run: qa/regtest-harness/run.sh --only reorg
+      - name: Upload the snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: z3-golden
+          path: ${{ runner.temp }}/z3-golden.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
 
       - name: Upload workdir on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: z3-regtest-workdir
+          name: z3-workdir-golden
           path: |
-            ${{ runner.temp }}/z3-regtest/*.log
-            ${{ runner.temp }}/z3-regtest/*.toml
-            ${{ runner.temp }}/z3-regtest/zallet-data/wallet.db
-          if-no-files-found: ignore
+            ${{ runner.temp }}/z3-golden/*.log
+            ${{ runner.temp }}/z3-golden/*.toml
+            ${{ runner.temp }}/z3-golden/**/wallet.db
+          if-no-files-found: warn
           retention-days: 7
+          overwrite: true
+
+  # Three isolated stacks from the same snapshot, one per job, mirroring
+  # run-parallel.sh. Isolation matters for correctness, not just speed: the
+  # reorg scenario is reliable against a pristine chain but accumulates
+  # tolerance drift when run after the other scenarios' chain mutations.
+  scenarios:
+    name: Scenarios (${{ matrix.group }})
+    needs: [build, golden]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: wallet-contract
+            only: baseline,dust,filter,union,hang-guard,poison-heal
+          - group: spend-poison
+            only: spend-poison
+          - group: reorg
+            only: reorg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Resolve paths
+        run: |
+          {
+            echo "BIN_DIR=$RUNNER_TEMP/z3-bin"
+            echo "GOLDEN_DIR=$RUNNER_TEMP/z3-golden-dir"
+            echo "ZEBRAD_BIN=$RUNNER_TEMP/z3-bin/zebrad"
+            echo "ZALLET_BIN=$RUNNER_TEMP/z3-bin/zallet-zaino"
+          } >> "$GITHUB_ENV"
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: z3-bin-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/z3-artifacts
+
+      - name: Download the golden snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: z3-golden
+          path: ${{ runner.temp }}/z3-artifacts
+
+      - name: Unpack binaries and snapshot
+        run: |
+          set -euo pipefail
+          mkdir -p "$BIN_DIR" "$GOLDEN_DIR"
+          for t in "$RUNNER_TEMP"/z3-artifacts/*.tar; do
+            case "$t" in
+              */z3-golden.tar) tar -C "$GOLDEN_DIR" -xf "$t" ;;
+              *) tar -C "$BIN_DIR" -xf "$t" ;;
+            esac
+          done
+          test -x "$ZEBRAD_BIN" && test -x "$ZALLET_BIN"
+          ls "$GOLDEN_DIR"
+
+      - name: Run ${{ matrix.only }}
+        env:
+          HARNESS_WORKDIR: ${{ runner.temp }}/z3-${{ matrix.group }}
+        run: qa/regtest-harness/run.sh --only ${{ matrix.only }}
+
+      - name: Upload workdir on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: z3-workdir-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/z3-${{ matrix.group }}/*.log
+            ${{ runner.temp }}/z3-${{ matrix.group }}/*.toml
+            ${{ runner.temp }}/z3-${{ matrix.group }}/**/wallet.db
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
 
   # The single check to require in branch protection. It reports on every PR,
   # including the ones the gate skipped, so "the workflow never ran" can never
   # again be indistinguishable from "the workflow passed". A skipped harness
-  # run is a pass here; only a real failure or a cancellation fails it.
+  # run is a pass here; only a real failure or a cancellation fails it. Matrix
+  # jobs report one aggregated result each.
   required:
     name: z3 regtest result
-    needs: [changes, regtest]
+    needs: [changes, build, golden, scenarios]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
