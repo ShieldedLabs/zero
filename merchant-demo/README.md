@@ -40,6 +40,12 @@ Trial decryption returns the note **and the address it was sent to**. A viewing 
 unlimited addresses, so each invoice gets its own and the recipient identifies the invoice.
 No memo, nothing required from the payer's wallet, and no second request to read one.
 
+Invoices get **Unified Addresses** (`u1…`), not bare Sapling ones, so a customer's wallet can
+pay from whichever pool it supports. That makes matching slightly indirect: a UA is a bundle
+of receivers and a payment arrives at one of them, never at "the UA". The scanner therefore
+takes the invoice *indices* and re-derives each address's Sapling and Orchard receivers to
+match against — the caller never has to know a UA has parts.
+
 **One trap, and it is not obvious.** About half of all diversifier indices produce no valid
 address, and the key API searches *forward* from the index it is given until it finds one
 that does. Requesting indices 0..8 yields far fewer than eight distinct addresses. A merchant

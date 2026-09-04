@@ -5,8 +5,6 @@
 //! layer above. The split matters because those are the parts a merchant will want to
 //! change, and they should not require rebuilding wasm to do it.
 
-use std::collections::HashMap;
-
 use futures_util::StreamExt;
 use wasm_bindgen::prelude::*;
 use zcash_client_backend::proto::service::{
@@ -64,21 +62,23 @@ pub async fn tip_height(url: String) -> Result<u32, JsError> {
 
 /// Scans `[from, from + count)` and returns the payments found.
 ///
-/// `addresses` is a JS object mapping encoded address to invoice index.
+/// `indices` are the diversifier indices of the invoices to watch. Receivers are re-derived
+/// here rather than passed in, so the caller never has to know that a Unified Address is a
+/// bundle and that payments arrive at one receiver inside it.
 #[wasm_bindgen(js_name = scanRange)]
 pub async fn scan_range(
     url: String,
     network_name: String,
     uivk: String,
-    addresses: JsValue,
+    indices: JsValue,
     from: u32,
     count: u32,
 ) -> Result<JsValue, JsError> {
     let params = network(&network_name).map_err(|e| JsError::new(&e))?;
     let key = UnifiedIncomingViewingKey::decode(&params, &uivk)
         .map_err(|e| JsError::new(&format!("could not decode the viewing key: {e}")))?;
-    let addresses: HashMap<String, u32> =
-        serde_wasm_bindgen::from_value(addresses).map_err(|e| JsError::new(&e.to_string()))?;
+    let indices: Vec<u32> =
+        serde_wasm_bindgen::from_value(indices).map_err(|e| JsError::new(&e.to_string()))?;
 
     let mut client = CompactTxStreamerClient::new(tonic_web_wasm_client::Client::new(url));
     let mut stream = client
@@ -103,7 +103,7 @@ pub async fn scan_range(
     let mut payments: Vec<Payment> = Vec::new();
     while let Some(block) = stream.next().await {
         let block = block.map_err(|e| JsError::new(&format!("block stream failed: {e}")))?;
-        payments.extend(scan_blocks(&params, &key, &addresses, &[block]));
+        payments.extend(scan_blocks(&params, &key, &indices, &[block]));
     }
     js(&payments)
 }

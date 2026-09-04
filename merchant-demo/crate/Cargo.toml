@@ -39,6 +39,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
+zip32 = "0.2"
 zcash_client_backend = { path = "/Users/judah/Desktop/BetterSource/zero/librustzcash/zcash_client_backend", default-features = false, features = ["orchard", "lightwalletd-tonic", "test-dependencies"] }
 
 [profile.release]

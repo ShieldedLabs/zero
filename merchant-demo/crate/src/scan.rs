@@ -10,7 +10,7 @@ use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_note_encryption::try_compact_note_decryption;
 use zcash_protocol::consensus::{BlockHeight, Network};
 
-use crate::enforcement;
+use crate::{enforcement, unified_address_at};
 
 /// A payment found in a block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,16 +30,41 @@ pub struct Payment {
     pub pool: &'static str,
 }
 
-/// Scans blocks for payments to any of `addresses`.
+/// Builds the receiver lookups for a set of invoice indices.
 ///
-/// `addresses` maps a diversifier index to the encoded address minted for it. Matching is by
-/// address rather than by memo, so it needs nothing from the payer's wallet.
+/// A Unified Address is a bundle of receivers, and a payment arrives at one of them — never
+/// at "the UA". So matching is done on receiver bytes, and both pools are indexed: a
+/// customer's wallet chooses which one to pay, and the merchant must recognise either.
+fn receiver_lookups(
+    uivk: &UnifiedIncomingViewingKey,
+    indices: &[u32],
+) -> (HashMap<[u8; 43], u32>, HashMap<[u8; 43], u32>) {
+    let mut sapling = HashMap::new();
+    let mut orchard = HashMap::new();
+    for &index in indices {
+        let Ok(Some((ua, _))) = unified_address_at(uivk, index) else {
+            continue;
+        };
+        if let Some(addr) = ua.sapling() {
+            sapling.insert(addr.to_bytes(), index);
+        }
+        if let Some(addr) = ua.orchard() {
+            orchard.insert(addr.to_raw_address_bytes(), index);
+        }
+    }
+    (sapling, orchard)
+}
+
+/// Scans blocks for payments to the Unified Addresses at `indices`.
+///
+/// Matching is by address rather than by memo, so it needs nothing from the payer's wallet.
 pub fn scan_blocks(
     params: &Network,
     uivk: &UnifiedIncomingViewingKey,
-    addresses: &HashMap<String, u32>,
+    indices: &[u32],
     blocks: &[CompactBlock],
 ) -> Vec<Payment> {
+    let (sapling_addrs, orchard_addrs) = receiver_lookups(uivk, indices);
     let sapling_ivk = uivk.sapling().as_ref().map(|ivk| ivk.prepare());
     let orchard_ivk = uivk.orchard().as_ref().map(|ivk| ivk.prepare());
     let mut found = Vec::new();
@@ -65,9 +90,7 @@ pub fn scan_blocks(
                             height: block.height as u32,
                             txid: txid.clone(),
                             zatoshis: note.value().inner(),
-                            index: addresses
-                                .get(&crate::address_string(params, &recipient))
-                                .copied(),
+                            index: sapling_addrs.get(&recipient.to_bytes()).copied(),
                             pool: "sapling",
                         });
                     }
@@ -80,17 +103,19 @@ pub fn scan_blocks(
                         continue;
                     };
                     let domain = OrchardDomain::for_compact_action(&action);
-                    if let Some((note, _recipient)) =
+                    if let Some((note, recipient)) =
                         try_compact_note_decryption(&domain, ivk, &action)
                     {
-                        // Orchard invoice addresses are not minted here yet, so an Orchard
-                        // note is reported without an index rather than silently dropped —
-                        // money that arrived is money the merchant should see.
                         found.push(Payment {
                             height: block.height as u32,
                             txid: txid.clone(),
                             zatoshis: note.value().inner(),
-                            index: None,
+                            // `None` here means the note decrypted with this key but landed
+                            // on an address outside the invoice set — funds arriving off the
+                            // checkout path, which the merchant should still see.
+                            index: orchard_addrs
+                                .get(&recipient.to_raw_address_bytes())
+                                .copied(),
                             pool: "orchard",
                         });
                     }

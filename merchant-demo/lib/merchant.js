@@ -120,10 +120,10 @@ export class Merchant {
       return { scanned: 0, tip, cursor: await this.store.getCursor() };
     }
 
-    const invoices = await this.store.allInvoices();
-    /** @type {Record<string, number>} */
-    const addresses = {};
-    for (const inv of invoices) addresses[inv.address] = inv.index;
+    // Indices, not addresses: a Unified Address is a bundle of receivers and a payment lands
+    // on one of them, so the wasm side re-derives the receivers rather than the caller
+    // having to know that.
+    const indices = (await this.store.allInvoices()).map((i) => i.index);
 
     let scanned = 0;
     while (cursor < tip) {
@@ -132,7 +132,7 @@ export class Merchant {
         this.endpoint,
         this.network,
         this.viewingKey,
-        addresses,
+        indices,
         cursor + 1,
         count,
       );

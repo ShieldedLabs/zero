@@ -59,7 +59,7 @@ company's own API and the frontend only ever sees invoice status.</p>
       <input id="endpoint" value="https://zcash-mainnet.chainsafe.dev">
     </div>
   </div>
-  <button id="start">Start merchant</button>
+  <button id="start">Restart with these settings</button>
   <span class="status" id="setupStatus"></span>
 </fieldset>
 
@@ -131,7 +131,7 @@ const render = async () => {
         </tr>`).join("");
 };
 
-$("start").onclick = async () => {
+async function startMerchant() {
   try {
     $("start").disabled = true;
     const viewingKey = wasm.deriveViewingKey("main", $("seed").value, 0);
@@ -171,14 +171,28 @@ $("start").onclick = async () => {
     });
 
     const tip = await merchant.tipHeight();
-    $("setupStatus").textContent = `viewing key derived · chain tip ${tip} · serving checkout`;
+    $("setupStatus").textContent = `running · chain tip ${tip} · serving checkout`;
+    $("start").disabled = false;
     say(`merchant started; viewing key ${viewingKey.slice(0, 24)}…`);
     for (const b of ["create", "poll", "auto", "openCheckout"]) $(b).disabled = false;
   } catch (e) {
     $("start").disabled = false;
     say(`could not start: ${e.message ?? e}`);
   }
+}
+
+$("start").onclick = () => {
+  // Restarting drops the in-memory store, so invoices created under the old settings go with
+  // it. That is the honest behaviour for a demo whose storage does not outlive the page.
+  if (api) api.close();
+  if (stopAuto) { stopAuto(); stopAuto = null; $("auto").textContent = "Start auto-scan"; }
+  startMerchant();
 };
+
+// Start without being asked. A merchant service is not something an operator launches by
+// hand each morning, and it means a reloaded tab recovers on its own — which matters here
+// because the checkout page depends on this one being up.
+startMerchant();
 
 $("create").onclick = async () => {
   try {

@@ -89,32 +89,44 @@ pub fn mint_addresses(
     let params = network(network_name)?;
     let uivk = UnifiedIncomingViewingKey::decode(&params, uivk)
         .map_err(|e| format!("could not decode the viewing key: {e}"))?;
-    let dfvk = uivk
-        .sapling()
-        .as_ref()
-        .ok_or_else(|| "the viewing key has no Sapling component".to_owned())?;
 
     let mut out = Vec::new();
     let mut next = start;
     while out.len() < count as usize {
-        let Some((found_at, address)) = dfvk.find_address(zip32::DiversifierIndex::from(next))
-        else {
+        let Some((address, found_at)) = unified_address_at(&uivk, next)? else {
             break;
         };
         let index = u32::try_from(u128::from(found_at))
             .map_err(|_| "diversifier index beyond u32".to_owned())?;
         out.push(InvoiceAddress {
             index,
-            address: address_string(&params, &address),
+            address: address.encode(&params),
         });
         next = index.checked_add(1).ok_or("ran out of indices")?;
     }
     Ok(out)
 }
 
-fn address_string(params: &Network, address: &sapling::PaymentAddress) -> String {
-    use zcash_keys::address::Address;
-    Address::from(*address).encode(params)
+/// The Unified Address at or after `index`, and the index it actually came from.
+///
+/// `Ok(None)` means no valid address exists at or after `index`, which only happens near the
+/// top of the diversifier space.
+pub(crate) fn unified_address_at(
+    uivk: &UnifiedIncomingViewingKey,
+    index: u32,
+) -> Result<Option<(zcash_keys::address::UnifiedAddress, zip32::DiversifierIndex)>, String> {
+    // Every receiver the key can produce. A merchant wants the widest address it can give
+    // out: a customer's wallet picks whichever pool it can pay from, and one that only
+    // understands Sapling should not be turned away.
+    match uivk.find_address(
+        zip32::DiversifierIndex::from(index),
+        zcash_keys::keys::UnifiedAddressRequest::AllAvailableKeys,
+    ) {
+        Ok((address, found_at)) => Ok(Some((address, found_at))),
+        // Running off the end of the diversifier space is not an error worth propagating;
+        // it just means there are no more addresses.
+        Err(_) => Ok(None),
+    }
 }
 
 /// The ZIP 212 rules in force at `height`.

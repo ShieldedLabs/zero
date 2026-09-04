@@ -102,6 +102,8 @@ const orderId = `web-${Date.now().toString(36)}`;
 const api = new MerchantApiClient();
 let polling = null;
 let currentInvoice = null;
+/** Set once contact is lost; stops the poll from overwriting the message. */
+let unreachable = false;
 
 const simulate = async (label, zatoshis, confirmed) => {
   try {
@@ -109,9 +111,21 @@ const simulate = async (label, zatoshis, confirmed) => {
     // No local state is changed here: the next poll reads the merchant's answer, so what
     // appears on screen is the merchant's view rather than an optimistic guess.
   } catch (e) {
-    setState("error", "Simulation failed", String(e.message ?? e));
+    fail("Simulation failed", String(e.message ?? e));
   }
 };
+
+/**
+ * Enters a sticky error state.
+ *
+ * Sticky because the poll runs every three seconds and would otherwise overwrite the message
+ * with "Waiting for payment…" before anyone read it — which is how a shop that has gone away
+ * ends up looking like a customer who has not paid yet. Found by closing the merchant tab.
+ */
+function fail(text, detail) {
+  unreachable = true;
+  setState("error", text, detail);
+}
 
 const setState = (cls, text, detail = "") => {
   $("state").className = `state ${cls}`;
@@ -138,7 +152,7 @@ $("pay").onclick = async () => {
   } catch (e) {
     $("pay").disabled = false;
     $("pay").textContent = "Pay with Zcash";
-    setState("error", "Could not reach the shop", String(e.message ?? e));
+    fail("Could not reach the shop", String(e.message ?? e));
     $("preview").hidden = false;
     $("paying").hidden = false;
   }
@@ -153,7 +167,20 @@ const poll = () => {
   polling = setInterval(async () => {
     try {
       const inv = await api.getInvoice(orderId);
-      if (!inv) return;
+      // Contact restored: the merchant tab was reopened, so resume reporting its view.
+      unreachable = false;
+      if (!inv) {
+        // The shop is answering but has never heard of this order. In the demo that means
+        // the merchant restarted and its in-memory store went with it; in a deployment it
+        // would mean the invoice was purged. Either way the customer must not be left
+        // waiting for an order that no longer exists — that is how someone pays into an
+        // address nobody is watching.
+        clearInterval(polling);
+        fail("This order is no longer on file",
+          "The shop restarted and lost it. Start again to get a fresh address — do not send to the one above.");
+        return;
+      }
+      if (unreachable) return;
       if (inv.status === "paid") {
         clearInterval(polling);
         setState("paid", "Payment received", `Thank you. Order ${orderId} is confirmed.`);
@@ -175,7 +202,7 @@ const poll = () => {
         setState("pending", "Waiting for payment…", "Scan the code with any Zcash wallet.");
       }
     } catch {
-      setState("error", "Lost contact with the shop", "The merchant dashboard tab may be closed.");
+      fail("Lost contact with the shop", "The merchant dashboard tab may be closed or reloading.");
     }
   }, 3000);
 };
