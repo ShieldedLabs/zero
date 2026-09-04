@@ -13,6 +13,7 @@
  * Messages are the API surface a real one would expose:
  *   createInvoice { orderId, zatoshis } -> { id, address, uri, qr, expectedZats, expiresHeight }
  *   getInvoice    { orderId }           -> invoice or null
+ *   simulatePayment { orderId, zatoshis, confirmed } -> payment   (demo only)
  */
 
 const CHANNEL = 'zcash-merchant-demo';
@@ -87,6 +88,20 @@ export class MerchantApiClient {
   /** @param {string} orderId */
   getInvoice(orderId) {
     return this.#call('getInvoice', orderId);
+  }
+
+  /**
+   * Demo only: asks the merchant to behave as though this invoice had been paid.
+   *
+   * Exists on the client because the interesting thing to look at is the *customer's*
+   * screen changing, and that is where someone demonstrating this is looking.
+   *
+   * @param {string} orderId
+   * @param {number} [zatoshis]
+   * @param {boolean} [confirmed]
+   */
+  simulatePayment(orderId, zatoshis, confirmed = true) {
+    return this.#call('simulatePayment', orderId, zatoshis, confirmed);
   }
 
   close() {

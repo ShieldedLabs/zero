@@ -174,6 +174,45 @@ export class Merchant {
     }
   }
 
+  /**
+   * Injects a payment as though the chain had carried one. Demo only.
+   *
+   * The payment is pushed into the same structure the scanner fills, so everything after
+   * that point is the real code: confirmation counting, underpayment tolerance, the invoice
+   * state machine, and whatever the customer's page does with the result. What it skips is
+   * the chain read and the trial decryption — those are covered by tests, and waiting for
+   * someone to send real ZEC is not a way to look at a checkout flow.
+   *
+   * @param {string} orderId
+   * @param {number} [zatoshis]  Defaults to the full amount owed.
+   * @param {object} [opts]
+   * @param {boolean} [opts.confirmed]  Land it far enough back to be final. Default true.
+   */
+  async simulatePayment(orderId, zatoshis, { confirmed = true } = {}) {
+    const invoices = await this.store.allInvoices();
+    const invoice = invoices.find((i) => i.id === orderId);
+    if (!invoice) throw new Error(`no such invoice: ${orderId}`);
+
+    const tip = await this.tipHeight();
+    // Backdated by the confirmation depth when it should count immediately; otherwise put it
+    // at the tip, where it is visible but not yet final — the state a customer sees for the
+    // first few minutes after paying, and the one most worth being able to look at.
+    const height = confirmed ? tip - this.policy.confirmations + 1 : tip;
+    const payment = {
+      txid: `simulated-${orderId}-${(this.seen.get(invoice.index) ?? []).length}`,
+      zatoshis: zatoshis ?? invoice.expectedZats,
+      height,
+      simulated: true,
+    };
+
+    const list = this.seen.get(invoice.index) ?? [];
+    list.push(payment);
+    this.seen.set(invoice.index, list);
+    this.#emit({ type: 'payment', payment });
+    await this.#settleAll(tip);
+    return payment;
+  }
+
   /** Polls every `ms`; returns a function that stops it. */
   watch(ms = 15000) {
     let stopped = false;

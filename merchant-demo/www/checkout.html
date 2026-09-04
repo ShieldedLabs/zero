@@ -36,6 +36,18 @@
   .note { font-size: .8rem; opacity: .6; margin-top: 1.5rem; border-top: 1px solid var(--line);
           padding-top: .8rem; }
   a { color: inherit; }
+
+  /* Demo controls. Fixed to the corner so the checkout itself can be screenshotted
+     without them, and visually quiet so they never read as part of the shop. */
+  #sim { position: fixed; bottom: 1rem; right: 1rem; z-index: 10;
+         border: 1px dashed var(--line); border-radius: .5rem; padding: .6rem .7rem;
+         background: color-mix(in oklab, canvas 92%, currentColor 8%);
+         font-size: .75rem; opacity: .55; transition: opacity .15s; max-width: 13rem; }
+  #sim:hover { opacity: 1; }
+  #sim h3 { margin: 0 0 .45rem; font-size: .7rem; letter-spacing: .06em;
+            text-transform: uppercase; opacity: .7; font-weight: 600; }
+  #sim button { padding: .3rem .5rem; font-size: .75rem; margin-bottom: .3rem; }
+  #sim .why { margin: .4rem 0 0; font-size: .68rem; opacity: .75; line-height: 1.4; }
 </style>
 
 <p class="shop">Demo Store</p>
@@ -71,6 +83,14 @@
   viewing key, which is exactly the boundary an HTTP API would give you.
 </p>
 
+<aside id="sim" hidden>
+  <h3>Demo controls</h3>
+  <button id="simPay">Pay in full</button>
+  <button id="simPartial">Pay half</button>
+  <button id="simPending">Pay, unconfirmed</button>
+  <p class="why">Stands in for a wallet sending the payment. Not part of the checkout.</p>
+</aside>
+
 <script type="module">
 import { MerchantApiClient } from "./lib/api.js";
 
@@ -81,6 +101,17 @@ const orderId = `web-${Date.now().toString(36)}`;
 
 const api = new MerchantApiClient();
 let polling = null;
+let currentInvoice = null;
+
+const simulate = async (label, zatoshis, confirmed) => {
+  try {
+    await api.simulatePayment(orderId, zatoshis, confirmed);
+    // No local state is changed here: the next poll reads the merchant's answer, so what
+    // appears on screen is the merchant's view rather than an optimistic guess.
+  } catch (e) {
+    setState("error", "Simulation failed", String(e.message ?? e));
+  }
+};
 
 const setState = (cls, text, detail = "") => {
   $("state").className = `state ${cls}`;
@@ -101,6 +132,8 @@ $("pay").onclick = async () => {
     $("steps").textContent =
       `Order ${orderId} · invoice expires at block ${inv.expiresHeight}`;
     setState("pending", "Waiting for payment…", "Scan the code with any Zcash wallet.");
+    $("sim").hidden = false;
+    currentInvoice = inv;
     poll();
   } catch (e) {
     $("pay").disabled = false;
@@ -110,6 +143,11 @@ $("pay").onclick = async () => {
     $("paying").hidden = false;
   }
 };
+
+$("simPay").onclick = () => simulate("full", undefined, true);
+$("simPartial").onclick = () =>
+  simulate("half", Math.round(currentInvoice.expectedZats / 2), true);
+$("simPending").onclick = () => simulate("unconfirmed", undefined, false);
 
 const poll = () => {
   polling = setInterval(async () => {
@@ -127,10 +165,14 @@ const poll = () => {
       } else if (inv.status === "expired") {
         clearInterval(polling);
         setState("expired", "This invoice expired", "Start again to get a fresh address.");
+      } else if (inv.pendingZats > 0) {
+        // Paid but not yet final. Saying so is what stops a customer paying twice.
+        setState("pending", "Payment seen — confirming",
+          `${(inv.pendingZats / COIN).toFixed(4)} ZEC received. ` +
+          `${inv.confirmationsSeen} of ${inv.confirmationsNeeded} confirmations.`);
+        $("steps").textContent = "You can close this page; the order is recorded.";
       } else {
-        // Payments are visible before they are final. Saying so is better than looking stuck.
-        setState("pending", "Waiting for payment…",
-          inv.paidZats > 0 ? "Seen on chain — waiting for confirmations." : "Scan the code with any Zcash wallet.");
+        setState("pending", "Waiting for payment…", "Scan the code with any Zcash wallet.");
       }
     } catch {
       setState("error", "Lost contact with the shop", "The merchant dashboard tab may be closed.");

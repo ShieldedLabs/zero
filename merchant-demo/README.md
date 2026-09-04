@@ -95,6 +95,17 @@ The QR is rendered in Rust from the same URI the customer is told to pay, by the
 that produced the address. Generating them separately is how a QR ends up pointing somewhere
 the displayed address does not.
 
+## Simulating a payment
+
+The checkout has demo controls pinned to the bottom-right corner — pay in full, pay half,
+pay unconfirmed. They are fixed there so the checkout itself can be screenshotted without
+them, and they call `simulatePayment` on the merchant.
+
+The simulation injects a payment into the same structure the scanner fills, so everything
+downstream is the real code: confirmation counting, underpayment tolerance, the invoice state
+machine, and what the customer's page does with the result. It skips the chain read and the
+trial decryption, which are covered by tests instead.
+
 ## Deployment, and the one rule
 
 **The viewing key must not reach a browser in production.** Anyone holding it can read every
@@ -111,12 +122,11 @@ browsers cannot read the HTTP trailers gRPC reports status in.
 In Chrome, against ChainSafe's public gRPC-Web proxy on mainnet:
 
 - 400 blocks scanned in **0.69 s** (~4,500 outputs/second trial decryption)
+- checkout to confirmed payment, across the API boundary, driven in Chrome
 - invoice creation, address minting, attribution: instant
 - wasm module: **0.70 MB**, including QR rendering
 
-The checkout page's visual behaviour has not been driven in a browser — the API round-trip,
-its error and timeout paths, and QR generation are covered by `node --test`, but how it
-*looks* is unverified.
+
 
 Zcash blocks are ~75 seconds apart, so keeping up with the chain is not a concern; the
 constraint is how fast you can backfill, and a year is roughly ten minutes.

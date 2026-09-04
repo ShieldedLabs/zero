@@ -56,6 +56,16 @@ export function settle(invoice, payments, chainHeight, policy) {
     (p) => chainHeight - p.height + 1 >= policy.confirmations,
   );
   const paidZats = confirmed.reduce((sum, p) => sum + p.zatoshis, 0);
+  // Money that has arrived but is not yet final. Tracked separately rather than folded into
+  // `paidZats`, because a customer who has paid and sees nothing for twelve minutes assumes
+  // it failed and pays again — and the merchant must not treat it as settled either.
+  const pending = [...unique.values()].filter(
+    (p) => chainHeight - p.height + 1 < policy.confirmations,
+  );
+  const pendingZats = pending.reduce((sum, p) => sum + p.zatoshis, 0);
+  const confirmationsSeen = pending.length
+    ? Math.max(0, chainHeight - Math.max(...pending.map((p) => p.height)) + 1)
+    : 0;
   const paidHeight = confirmed.length
     ? Math.min(...confirmed.map((p) => p.height))
     : null;
@@ -75,6 +85,9 @@ export function settle(invoice, payments, chainHeight, policy) {
     ...invoice,
     status,
     paidZats,
+    pendingZats,
+    confirmationsSeen,
+    confirmationsNeeded: policy.confirmations,
     paidHeight,
     txids: [...unique.keys()],
   };

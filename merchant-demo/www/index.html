@@ -161,6 +161,13 @@ $("start").onclick = async () => {
         const all = await merchant.store.allInvoices();
         return all.find((i) => i.id === orderId) ?? null;
       },
+      // Demo only. A deployment would not expose this, obviously.
+      simulatePayment: async (orderId, zatoshis, confirmed) => {
+        const p = await merchant.simulatePayment(orderId, zatoshis, { confirmed });
+        say(`simulated ${(p.zatoshis / COIN).toFixed(4)} ZEC to ${orderId}${confirmed ? "" : " (unconfirmed)"}`);
+        await render();
+        return p;
+      },
     });
 
     const tip = await merchant.tipHeight();

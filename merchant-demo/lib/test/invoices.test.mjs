@@ -72,3 +72,22 @@ test('payment uri carries address and amount', () => {
   const uri = paymentUri('zs1demo', COIN / 2);
   assert.equal(uri, 'zcash:zs1demo?amount=0.5');
 });
+
+test('a payment awaiting confirmations is reported, not hidden', () => {
+  // The failure this guards against: a customer pays, sees "waiting" unchanged for twelve
+  // minutes, assumes it failed, and pays twice.
+  const pay = [{ txid: 'a', zatoshis: 100_000, height: 1009 }];
+  const out = settle(base, pay, 1010, P);
+  assert.equal(out.status, 'pending');
+  assert.equal(out.paidZats, 0, 'not settled yet');
+  assert.equal(out.pendingZats, 100_000, 'but visibly received');
+  assert.equal(out.confirmationsSeen, 2);
+  assert.equal(out.confirmationsNeeded, 10);
+});
+
+test('once confirmed the amount moves from pending to paid', () => {
+  const pay = [{ txid: 'a', zatoshis: 100_000, height: 1005 }];
+  const out = settle(base, pay, 1014, P);
+  assert.equal(out.pendingZats, 0);
+  assert.equal(out.paidZats, 100_000);
+});
