@@ -1,4 +1,4 @@
-name: Copilot review of pushes to main
+name: Copilot Review
 
 # Copilot code review only ever looks at pull requests. There is no trigger, API
 # or setting that reviews a bare commit range, so a commit pushed straight to
@@ -22,6 +22,20 @@ name: Copilot review of pushes to main
 # The pull requests this opens are scratch. They are closed automatically, never
 # merged, and the branches under copilot-review/ are deleted on the way out.
 #
+# REVIEW MODES. Copilot reads its custom instructions from
+# .github/copilot-instructions.md on the head branch of the pull request, and
+# from nowhere else -- there is no per-run way to hand it a different prompt.
+# The modes therefore live as fragments in .github/review-modes/, and this
+# workflow composes the requested one into that path on BOTH scratch branch
+# tips. Writing the same content to both keeps it out of the two-dot diff, so
+# the review still sees exactly the pushed range and nothing else. Pushes use
+# `code`; `security` and `full` are for manual runs.
+#
+# One consequence worth knowing: a pushed range that itself edits
+# .github/copilot-instructions.md or .github/review-modes/** has that edit
+# masked by the overlay, so changes to the review prompt are not themselves
+# reviewed. That is a fair trade for being able to select a mode at all.
+#
 # IDENTITY MATTERS. A pull request opened with the built-in GITHUB_TOKEN is
 # authored by github-actions[bot], and Copilot does not review it: measured
 # directly, the identical diff into the identical base got no review as the bot
@@ -38,6 +52,20 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Review style
+        type: choice
+        required: false
+        default: code
+        options:
+          - code
+          - security
+          - full
+      ref:
+        description: Commit to review (defaults to the last commit on the branch)
+        type: string
+        required: false
 
 # Serialize. Two pushes in quick succession would otherwise race on the shared
 # base branch and produce two pull requests with overlapping diffs.
@@ -51,7 +79,6 @@ permissions:
 
 env:
   BASE_BRANCH: copilot-review-base
-  REVIEW_TIMEOUT_SECONDS: "420"
   # Applied to every scratch pull request so they can be filtered out of, or
   # into, a search: `is:pr label:automated-review`.
   REVIEW_LABEL: automated-review
@@ -59,7 +86,7 @@ env:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         # Pinned by SHA, not tag: this job holds contents:write and
@@ -76,19 +103,58 @@ jobs:
           # the PAT has to own the push as well as the pull request.
           token: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
 
+      - name: Pick the review mode
+        id: mode
+        env:
+          # A push is unattended, so it gets the cheap, high-signal review.
+          # Anything heavier is asked for deliberately.
+          REQUESTED: ${{ github.event.inputs.mode }}
+        run: |
+          set -euo pipefail
+          mode="${REQUESTED:-code}"
+          case "$mode" in
+            code)     label="Code review";                     timeout=420 ;;
+            security) label="Security review";                 timeout=600 ;;
+            full)     label="Full review (code + security)";   timeout=600 ;;
+            *)
+              echo "unknown mode: $mode" >&2
+              exit 1
+              ;;
+          esac
+          echo "mode=$mode" >>"$GITHUB_OUTPUT"
+          echo "label=$label" >>"$GITHUB_OUTPUT"
+          echo "timeout=$timeout" >>"$GITHUB_OUTPUT"
+          echo "Review mode: $mode ($label)"
+
+      # The checked-in instructions file is what a human-opened pull request
+      # gets reviewed against, and it is generated from the same fragments. If
+      # it has drifted, real pull requests are being reviewed against a stale
+      # prompt. Say so, but do not fail this run over it -- the run composes its
+      # own copy and is unaffected.
+      - name: Check the checked-in instructions are in sync
+        id: drift
+        continue-on-error: true
+        run: .github/review-modes/compose.sh --check code
+
       - name: Decide whether this push needs a review
         id: gate
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
+          REF_INPUT: ${{ github.event.inputs.ref }}
         run: |
           set -euo pipefail
 
+          after="$AFTER"
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            # Manual runs review the last commit, so the workflow can be tested
-            # without pushing anything.
-            before=$(git rev-parse HEAD~1)
+            # Manual runs review one commit, so the workflow can be tested
+            # without pushing anything, and so an older commit can be re-reviewed
+            # under a different mode.
+            if [ -n "$REF_INPUT" ]; then
+              after=$(git rev-parse "${REF_INPUT}^{commit}")
+            fi
+            before=$(git rev-parse "${after}~1")
           else
             before="$BEFORE"
           fi
@@ -106,13 +172,13 @@ jobs:
             exit 0
           fi
 
-          if [ "$before" = "$AFTER" ]; then
+          if [ "$before" = "$after" ]; then
             echo "nothing new; skipping"
             echo "run=false" >>"$GITHUB_OUTPUT"
             exit 0
           fi
 
-          changed=$(git diff --name-only "$before" "$AFTER" | wc -l | tr -d ' ')
+          changed=$(git diff --name-only "$before" "$after" | wc -l | tr -d ' ')
           if [ "$changed" -eq 0 ]; then
             echo "empty diff; skipping"
             echo "run=false" >>"$GITHUB_OUTPUT"
@@ -120,6 +186,7 @@ jobs:
           fi
 
           echo "base=$before" >>"$GITHUB_OUTPUT"
+          echo "head=$after" >>"$GITHUB_OUTPUT"
           echo "changed=$changed" >>"$GITHUB_OUTPUT"
           echo "run=true" >>"$GITHUB_OUTPUT"
 
@@ -128,13 +195,20 @@ jobs:
         id: prcheck
         env:
           GH_TOKEN: ${{ github.token }}
-          AFTER: ${{ github.sha }}
+          HEAD_SHA: ${{ steps.gate.outputs.head }}
           REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # A manual run is a deliberate request, usually to re-review something
+          # under a heavier mode. Do not second-guess it.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Any pull request already associated with this commit means Copilot
           # saw it on the way in.
-          count=$(gh api "repos/$REPO/commits/$AFTER/pulls" --jq 'length' 2>/dev/null || echo 0)
+          count=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq 'length' 2>/dev/null || echo 0)
           if [ "$count" != "0" ]; then
             echo "commit arrived via a pull request; already reviewed"
             echo "run=false" >>"$GITHUB_OUTPUT"
@@ -149,17 +223,47 @@ jobs:
           GH_TOKEN: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
           REPO: ${{ github.repository }}
           BASE_SHA: ${{ steps.gate.outputs.base }}
-          AFTER: ${{ github.sha }}
+          HEAD_SHA: ${{ steps.gate.outputs.head }}
           CHANGED: ${{ steps.gate.outputs.changed }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          MODE_LABEL: ${{ steps.mode.outputs.label }}
+          GIT_AUTHOR_NAME: copilot-review
+          GIT_AUTHOR_EMAIL: copilot-review@users.noreply.github.com
+          GIT_COMMITTER_NAME: copilot-review
+          GIT_COMMITTER_EMAIL: copilot-review@users.noreply.github.com
         run: |
           set -euo pipefail
-          short_after=$(git rev-parse --short "$AFTER")
+          short_head=$(git rev-parse --short "$HEAD_SHA")
           short_base=$(git rev-parse --short "$BASE_SHA")
-          head_branch="copilot-review/${short_after}"
+          head_branch="copilot-review/${MODE}-${short_head}"
+
+          # The mode's prompt, composed from the fragments on the checked-out
+          # tip -- never from whatever the reviewed range happens to contain.
+          instructions="$RUNNER_TEMP/copilot-instructions.md"
+          .github/review-modes/compose.sh "$MODE" >"$instructions"
+          blob=$(git hash-object -w "$instructions")
+
+          # Lay that one file over a commit without touching the working tree,
+          # by building the new tree in a scratch index. Both scratch branch
+          # tips get the identical blob, so it cancels out of the diff.
+          overlay() {
+            local base=$1 idx tree
+            idx="$RUNNER_TEMP/index.$$"
+            rm -f "$idx"
+            GIT_INDEX_FILE="$idx" git read-tree "$base"
+            GIT_INDEX_FILE="$idx" git update-index --add \
+              --cacheinfo "100644,${blob},.github/copilot-instructions.md"
+            tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+            rm -f "$idx"
+            git commit-tree "$tree" -p "$base" -m "Review instructions: ${MODE}"
+          }
+
+          base_commit=$(overlay "$BASE_SHA")
+          head_commit=$(overlay "$HEAD_SHA")
 
           # The scratch base: exactly where main stood before this push.
-          git push --force origin "${BASE_SHA}:refs/heads/${BASE_BRANCH}"
-          git push --force origin "${AFTER}:refs/heads/${head_branch}"
+          git push --force origin "${base_commit}:refs/heads/${BASE_BRANCH}"
+          git push --force origin "${head_commit}:refs/heads/${head_branch}"
 
           # Recorded BEFORE the pull request is created, so that a failure in
           # `gh pr create` still leaves the cleanup step something to delete.
@@ -170,7 +274,8 @@ jobs:
           body=$(printf '%s\n' \
             "Automated review of commits pushed directly to \`main\`, which Copilot cannot see otherwise." \
             "" \
-            "Range: \`${short_base}..${short_after}\` (${CHANGED} files)" \
+            "Range: \`${short_base}..${short_head}\` (${CHANGED} files)" \
+            "Mode: \`${MODE}\` — ${MODE_LABEL}" \
             "" \
             "**This pull request is scratch and is closed automatically. Do not merge it.**")
 
@@ -180,21 +285,21 @@ jobs:
           gh label create "$REVIEW_LABEL" \
             --repo "$REPO" \
             --color 0E8A16 \
-            --description "Scratch PR opened by the push-review workflow; auto-closed, never merged" \
+            --description "Scratch PR opened by the Copilot Review workflow; auto-closed, never merged" \
             >/dev/null 2>&1 || true
 
           pr_url=$(gh pr create \
             --repo "$REPO" \
             --base "$BASE_BRANCH" \
             --head "$head_branch" \
-            --title "Copilot review: main ${short_base}..${short_after}" \
+            --title "Copilot ${MODE} review: main ${short_base}..${short_head}" \
             --label "$REVIEW_LABEL" \
             --body "$body")
 
           pr_number=$(basename "$pr_url")
           echo "number=$pr_number" >>"$GITHUB_OUTPUT"
           echo "url=$pr_url" >>"$GITHUB_OUTPUT"
-          echo "range=${short_base}..${short_after}" >>"$GITHUB_OUTPUT"
+          echo "range=${short_base}..${short_head}" >>"$GITHUB_OUTPUT"
 
       # Belt and braces. If the ruleset covers this base branch the review is
       # requested automatically and this is a no-op; if it does not, this asks
@@ -221,6 +326,10 @@ jobs:
           PR: ${{ steps.pr.outputs.number }}
           RANGE: ${{ steps.pr.outputs.range }}
           PR_URL: ${{ steps.pr.outputs.url }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          MODE_LABEL: ${{ steps.mode.outputs.label }}
+          REVIEW_TIMEOUT_SECONDS: ${{ steps.mode.outputs.timeout }}
+          DRIFT: ${{ steps.drift.outcome }}
           HAVE_PAT: ${{ secrets.COPILOT_REVIEW_PAT != '' }}
         run: |
           set -euo pipefail
@@ -237,7 +346,15 @@ jobs:
           done
 
           {
-            printf '# Copilot review of `main` %s\n\n' "$RANGE"
+            printf '# %s of `main` %s\n\n' "$MODE_LABEL" "$RANGE"
+            printf 'Mode: `%s`\n\n' "$MODE"
+            if [ "$DRIFT" = "failure" ]; then
+              printf '> **Note:** `.github/copilot-instructions.md` is out of sync with\n'
+              printf '> `.github/review-modes/`. This run composed its own prompt and is\n'
+              printf '> unaffected, but human-opened pull requests are being reviewed against\n'
+              printf '> the stale file. Regenerate it with\n'
+              printf '> `.github/review-modes/compose.sh code > .github/copilot-instructions.md`.\n\n'
+            fi
             if [ "$found" = "0" ]; then
               printf '**No review arrived within %ss.**\n\n' "$REVIEW_TIMEOUT_SECONDS"
               printf 'This is a reviewer failure, not a clean review: nothing was checked.\n\n'
