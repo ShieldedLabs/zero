@@ -152,7 +152,20 @@ jobs:
             # without pushing anything, and so an older commit can be re-reviewed
             # under a different mode.
             if [ -n "$REF_INPUT" ]; then
-              after=$(git rev-parse "${REF_INPUT}^{commit}")
+              # --verify -q, not a bare rev-parse. Given a value starting with
+              # `-`, bare rev-parse neither resolves it nor fails: it echoes the
+              # argument back and exits 0, so `set -e` never fires and the bogus
+              # string flows on into `before`, cat-file rejects it, and the run
+              # ends as a green "previous tip is not present; skipping" having
+              # reviewed nothing. A workflow that silently does not run is the
+              # one failure mode worth engineering against here.
+              #
+              # `--` is NOT the guard for this: in rev-parse it separates revs
+              # from paths, so `git rev-parse -- "$x"` resolves nothing at all.
+              if ! after=$(git rev-parse --verify -q "${REF_INPUT}^{commit}"); then
+                echo "ref input '${REF_INPUT}' is not a commit in this repository" >&2
+                exit 1
+              fi
             fi
             before=$(git rev-parse "${after}~1")
           else
