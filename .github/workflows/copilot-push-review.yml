@@ -243,23 +243,42 @@ jobs:
           .github/review-modes/compose.sh "$MODE" >"$instructions"
           blob=$(git hash-object -w "$instructions")
 
-          # Lay that one file over a commit without touching the working tree,
-          # by building the new tree in a scratch index. Both scratch branch
-          # tips get the identical blob, so it cancels out of the diff.
+          # Lay that one file over a commit's tree without touching the working
+          # tree, by building the new tree in a scratch index.
+          #
+          # `from` is the commit the tree comes from; `parent` is what the new
+          # commit descends from. They differ for the head snapshot, and that
+          # difference is the whole point: GitHub shows a pull request the
+          # THREE-dot diff, from the merge base to the head. If the head
+          # snapshot kept its real parent, the merge base would be BASE_SHA
+          # itself, the base branch's overlay commit would not be an ancestor of
+          # the head, and the instructions file would show up as a change --
+          # measured directly, Copilot reported "Files reviewed: 2/2" and
+          # summarized the instructions file as part of the change. Parenting
+          # the head snapshot onto the base commit makes the merge base exactly
+          # that commit, so three-dot and two-dot agree and the identical blob
+          # on both sides cancels out.
           overlay() {
-            local base=$1 idx tree
+            local from=$1 parent=$2 msg=$3 idx tree
             idx="$RUNNER_TEMP/index.$$"
             rm -f "$idx"
-            GIT_INDEX_FILE="$idx" git read-tree "$base"
+            GIT_INDEX_FILE="$idx" git read-tree "$from"
             GIT_INDEX_FILE="$idx" git update-index --add \
               --cacheinfo "100644,${blob},.github/copilot-instructions.md"
             tree=$(GIT_INDEX_FILE="$idx" git write-tree)
             rm -f "$idx"
-            git commit-tree "$tree" -p "$base" -m "Review instructions: ${MODE}"
+            git commit-tree "$tree" -p "$parent" -m "$msg"
           }
 
-          base_commit=$(overlay "$BASE_SHA")
-          head_commit=$(overlay "$HEAD_SHA")
+          base_commit=$(overlay "$BASE_SHA" "$BASE_SHA" "Review instructions: ${MODE}")
+
+          # The head snapshot is therefore one squashed commit rather than the
+          # range's own commits. Copilot reviews the diff, not the history, but
+          # the subjects are still useful context, so carry them in the message.
+          head_msg=$(printf '%s\n\n%s\n' \
+            "Reviewed range: ${short_base}..${short_head}" \
+            "$(git log --format='%h %s' "${BASE_SHA}..${HEAD_SHA}" | head -50)")
+          head_commit=$(overlay "$HEAD_SHA" "$base_commit" "$head_msg")
 
           # The scratch base: exactly where main stood before this push.
           git push --force origin "${base_commit}:refs/heads/${BASE_BRANCH}"
