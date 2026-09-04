@@ -137,3 +137,23 @@ pub fn network_name(params: &Network) -> &'static str {
         "test"
     }
 }
+
+/// Renders `text` as a QR code, as an SVG string.
+///
+/// Lives here rather than in JavaScript so the payment URI and the image a customer scans
+/// are produced by the same code that understands the address — a mismatch between them is
+/// a payment sent nowhere.
+pub fn qr_svg(text: &str) -> Result<String, String> {
+    use qrcode::{render::svg, EcLevel, QrCode};
+    // Medium error correction: a payment URI is long enough that the highest level bloats
+    // the image, and a screen is not a crumpled receipt.
+    let code = QrCode::with_error_correction_level(text, EcLevel::M)
+        .map_err(|e| format!("could not encode the QR code: {e}"))?;
+    Ok(code
+        .render::<svg::Color>()
+        .min_dimensions(220, 220)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}

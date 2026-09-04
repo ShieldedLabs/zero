@@ -77,6 +77,15 @@ company's own API and the frontend only ever sees invoice status.</p>
   <span class="status" id="chain"></span>
 </fieldset>
 
+<h2>Customer view</h2>
+<fieldset>
+  <legend>what the buyer sees</legend>
+  <p class="status" style="margin:0 0 .7rem">Open the <a href="./checkout.html" target="_blank">checkout
+    page</a> in another tab. It requests an invoice from this page, shows a QR code, and polls
+    for payment — holding no keys of its own.</p>
+  <button id="openCheckout" disabled>Open checkout in a new tab</button>
+</fieldset>
+
 <h2>Invoices</h2>
 <table id="table">
   <thead><tr><th>Order</th><th>Status</th><th>Expected</th><th>Received</th><th>Address</th></tr></thead>
@@ -89,6 +98,7 @@ company's own API and the frontend only ever sees invoice status.</p>
 <script type="module">
 import init, * as wasm from "./pkg/zcash_merchant_core.js";
 import { Merchant, COIN } from "./lib/merchant.js";
+import { MerchantApiServer } from "./lib/api.js";
 
 const $ = (id) => document.getElementById(id);
 const log = $("log");
@@ -101,6 +111,7 @@ const say = (msg) => {
 const zec = (z) => (z / COIN).toFixed(8).replace(/0+$/, "").replace(/\.$/, "") || "0";
 let merchant = null;
 let stopAuto = null;
+let api = null;
 
 await init();
 say("wasm module loaded");
@@ -134,10 +145,28 @@ $("start").onclick = async () => {
       else if (e.type === "invoice-created") say(`invoice ${e.invoice.id} created at index ${e.invoice.index}`);
       else if (e.type === "error") say(`error: ${e.payment}`);
     });
+    // Serve the checkout page. In a deployment this is the company's HTTP API; here it is
+    // a channel between two pages, which keeps the key genuinely out of the customer's
+    // reach rather than only by agreement.
+    api = new MerchantApiServer({
+      createInvoice: async (orderId, zatoshis) => {
+        const inv = await merchant.createInvoice(orderId, zatoshis);
+        say(`checkout asked for an invoice: ${orderId}`);
+        await render();
+        // The QR is rendered from the same URI the customer is told to pay, by the same
+        // code that built the address — the two cannot drift apart.
+        return { ...inv, qr: wasm.qrSvg(inv.uri) };
+      },
+      getInvoice: async (orderId) => {
+        const all = await merchant.store.allInvoices();
+        return all.find((i) => i.id === orderId) ?? null;
+      },
+    });
+
     const tip = await merchant.tipHeight();
-    $("setupStatus").textContent = `viewing key derived · chain tip ${tip}`;
+    $("setupStatus").textContent = `viewing key derived · chain tip ${tip} · serving checkout`;
     say(`merchant started; viewing key ${viewingKey.slice(0, 24)}…`);
-    for (const b of ["create", "poll", "auto"]) $(b).disabled = false;
+    for (const b of ["create", "poll", "auto", "openCheckout"]) $(b).disabled = false;
   } catch (e) {
     $("start").disabled = false;
     say(`could not start: ${e.message ?? e}`);
@@ -173,6 +202,8 @@ $("poll").onclick = async () => {
   } catch (e) { say(`scan failed: ${e.message ?? e}`); }
   $("poll").disabled = false;
 };
+
+$("openCheckout").onclick = () => window.open("./checkout.html", "_blank");
 
 $("auto").onclick = () => {
   if (stopAuto) {

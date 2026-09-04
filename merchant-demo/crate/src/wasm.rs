@@ -14,7 +14,7 @@ use zcash_client_backend::proto::service::{
 };
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 
-use crate::{derive_uivk, mint_addresses, network, scan_blocks, InvoiceAddress, Payment};
+use crate::{derive_uivk, mint_addresses, network, qr_svg, scan_blocks, InvoiceAddress, Payment};
 
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -106,4 +106,10 @@ pub async fn scan_range(
         payments.extend(scan_blocks(&params, &key, &addresses, &[block]));
     }
     js(&payments)
+}
+
+/// Renders a payment URI as a scannable SVG QR code.
+#[wasm_bindgen(js_name = qrSvg)]
+pub fn qr_svg_js(text: &str) -> Result<String, JsError> {
+    qr_svg(text).map_err(|e| JsError::new(&e))
 }

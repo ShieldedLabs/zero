@@ -21,10 +21,13 @@ Then open <http://127.0.0.1:8735/index.html>. Tests: `cd lib && node --test "tes
 ## Shape
 
 ```
-crate/   Rust -> wasm. Keys, addresses, trial decryption. Nothing else.
-lib/     The JavaScript library: invoices, policy, scan loop, storage interface.
-www/     A demo checkout page using the library.
+crate/   Rust -> wasm. Keys, addresses, trial decryption, QR rendering. Nothing else.
+lib/     The JavaScript library: invoices, policy, scan loop, storage, API boundary.
+www/     Two pages: the merchant dashboard and the customer's checkout.
 ```
+
+Open `index.html` for the merchant's side and `checkout.html` for the buyer's. The checkout
+requests an invoice, shows a QR code, and polls for payment.
 
 The split is deliberate. The wasm side is the part that must be Zcash-correct and rarely
 changes. Everything a merchant will actually want to alter — confirmation depth, expiry,
@@ -76,6 +79,22 @@ something. A production merchant leaves it at zero.
 row and one scan cursor; it belongs in whatever database the company already runs, not in one
 this library imposes. Implement three methods against Postgres and you are done.
 
+## The two pages, and why they are two
+
+`index.html` is the merchant: it holds the viewing key and scans. `checkout.html` is the
+customer: it holds nothing and asks the merchant for an invoice.
+
+They talk over a `BroadcastChannel`, which stands in for the company's HTTP API. That
+substitution is not cosmetic — the checkout runs in its own page and *cannot* read the
+merchant's variables, so it genuinely cannot obtain the viewing key. The browser enforces
+the same boundary an HTTP call would, rather than the demo asking you to imagine it.
+Replacing `lib/api.js` with `fetch` calls is the whole difference between this and a
+deployment.
+
+The QR is rendered in Rust from the same URI the customer is told to pay, by the same code
+that produced the address. Generating them separately is how a QR ends up pointing somewhere
+the displayed address does not.
+
 ## Deployment, and the one rule
 
 **The viewing key must not reach a browser in production.** Anyone holding it can read every
@@ -93,7 +112,11 @@ In Chrome, against ChainSafe's public gRPC-Web proxy on mainnet:
 
 - 400 blocks scanned in **0.69 s** (~4,500 outputs/second trial decryption)
 - invoice creation, address minting, attribution: instant
-- wasm module: **0.67 MB**
+- wasm module: **0.70 MB**, including QR rendering
+
+The checkout page's visual behaviour has not been driven in a browser — the API round-trip,
+its error and timeout paths, and QR generation are covered by `node --test`, but how it
+*looks* is unverified.
 
 Zcash blocks are ~75 seconds apart, so keeping up with the chain is not a concern; the
 constraint is how fast you can backfill, and a year is roughly ten minutes.
