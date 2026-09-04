@@ -124,7 +124,9 @@ $("start").onclick = async () => {
   try {
     $("start").disabled = true;
     const viewingKey = wasm.deriveViewingKey("main", $("seed").value, 0);
-    merchant = new Merchant({ wasm, endpoint: $("endpoint").value, viewingKey });
+    // 200 blocks of history so the first scan does visible work. A real merchant would
+    // leave this at zero and start from the tip.
+    merchant = new Merchant({ wasm, endpoint: $("endpoint").value, viewingKey, lookback: 200 });
     merchant.on((e) => {
       if (e.type === "payment") say(`payment: ${zec(e.payment.zatoshis)} ZEC at height ${e.payment.height} (invoice index ${e.payment.index})`);
       else if (e.type === "unattributed-payment") say(`payment to this key outside any invoice: ${zec(e.payment.zatoshis)} ZEC`);
@@ -158,9 +160,15 @@ $("poll").onclick = async () => {
   $("poll").disabled = true;
   try {
     const t0 = performance.now();
-    const { scanned, tip } = await merchant.poll();
-    $("chain").textContent = `tip ${tip} · scanned ${scanned} blocks`;
-    say(`scanned ${scanned} blocks in ${((performance.now() - t0) / 1000).toFixed(2)}s`);
+    const { scanned, tip, cursor } = await merchant.poll();
+    const behind = tip - cursor;
+    $("chain").textContent =
+      `tip ${tip} · scanned to ${cursor}` + (behind > 0 ? ` · ${behind} behind` : " · up to date");
+    say(
+      scanned === 0
+        ? `already up to date at ${cursor} — nothing new since the last scan`
+        : `scanned ${scanned} blocks in ${((performance.now() - t0) / 1000).toFixed(2)}s (now at ${cursor})`,
+    );
     await render();
   } catch (e) { say(`scan failed: ${e.message ?? e}`); }
   $("poll").disabled = false;

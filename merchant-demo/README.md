@@ -59,6 +59,17 @@ without a chain, and it recomputes totals from the transaction set rather than a
 so **rescanning a range cannot double-count**. That matters because rescanning is the normal
 way to recover from a crash.
 
+## Why a scan can legitimately report zero
+
+`createInvoice` starts the scan cursor at the current tip: there is nothing to find before
+the first invoice existed. Zcash blocks arrive every 75 seconds or so, so a scan run
+immediately afterwards has no work and correctly reports nothing — which is indistinguishable
+from a broken scanner unless the UI says how far it has got. `poll()` returns the cursor
+alongside the count for exactly that reason, and the demo shows `scanned to N · up to date`.
+
+The demo passes `lookback: 200` so its first scan covers real history and visibly does
+something. A production merchant leaves it at zero.
+
 ## Storage
 
 `lib/store.js` is an interface with a throwaway in-memory default. The state is one invoice

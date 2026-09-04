@@ -26,14 +26,19 @@ export class Merchant {
    * @param {string} [opts.network]    'main' or 'test'.
    * @param {object} [opts.store]      Storage; defaults to in-memory.
    * @param {import('./invoices.js').Policy} [opts.policy]
+   * @param {number} [opts.lookback]   Blocks of history to scan on first run.
    */
-  constructor({ wasm, endpoint, viewingKey, network = 'main', store, policy }) {
+  constructor({ wasm, endpoint, viewingKey, network = 'main', store, policy, lookback = 0 }) {
     this.wasm = wasm;
     this.endpoint = endpoint;
     this.viewingKey = viewingKey;
     this.network = network;
     this.store = store ?? new MemoryStore();
     this.policy = { ...DEFAULT_POLICY, ...(policy ?? {}) };
+    // How far back the first scan reaches. Zero is right for a real merchant: there is
+    // nothing to find before the first invoice existed. A demo wants a non-zero value so the
+    // first scan does visible work instead of correctly finding nothing.
+    this.lookback = lookback;
     /** Payments seen, keyed by invoice index. Rebuilt by rescanning; not authoritative. */
     this.seen = new Map();
     /** @type {((event: {type: string, invoice?: any, payment?: any}) => void)[]} */
@@ -94,7 +99,7 @@ export class Merchant {
     // A merchant that has never scanned starts from the first invoice rather than the
     // genesis block; there is nothing to find before it.
     if ((await this.store.getCursor()) === null) {
-      await this.store.setCursor(tip);
+      await this.store.setCursor(Math.max(0, tip - this.lookback));
     }
     this.#emit({ type: 'invoice-created', invoice });
     return { ...invoice, uri: paymentUri(minted.address, expectedZats) };
@@ -111,8 +116,8 @@ export class Merchant {
     const tip = await this.tipHeight();
     let cursor = await this.store.getCursor();
     if (cursor === null) {
-      await this.store.setCursor(tip);
-      return { scanned: 0, tip };
+      await this.store.setCursor(Math.max(0, tip - this.lookback));
+      return { scanned: 0, tip, cursor: await this.store.getCursor() };
     }
 
     const invoices = await this.store.allInvoices();
@@ -149,7 +154,9 @@ export class Merchant {
     }
 
     await this.#settleAll(tip);
-    return { scanned, tip };
+    // `cursor` is returned so a caller can distinguish "caught up" from "not running" —
+    // both report zero blocks scanned, and without the cursor they look identical.
+    return { scanned, tip, cursor };
   }
 
   async #settleAll(tip) {
