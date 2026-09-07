@@ -8,6 +8,22 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### Added
+
+- zebra: per-check timers for transaction verification. The `checks` phase of
+  `zebra_consensus_transaction_duration_seconds` was one timer around every
+  script, signature and proof check and their waits on the shared batch
+  verifiers, so the largest cost in block verification could not be attributed.
+  `zebra_consensus_transaction_check_duration_seconds{check,request}` now
+  records each check's wall time from first poll to completion, with `check` in
+  `script`, `sprout_proof`, `sprout_sig`, `sapling`, `orchard` and `state`
+  (mempool only); subtracting `zebra_consensus_batch_duration_seconds` for the
+  matching verifier isolates queue wait from batch work. The checks run
+  concurrently, so the kinds overlap rather than sum. A `phase="prepare"`
+  sample covers the sighash and transaction id digests, bundle extraction and
+  check construction between `utxo_fetch` and `checks`, which were previously
+  untimed.
+
 ### CI
 
 - `release.yml` refuses to dispatch when either node's mainnet halt (zcashd
