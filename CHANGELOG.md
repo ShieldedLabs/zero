@@ -6,7 +6,7 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
-## Unreleased
+## v29 - 2026-09-07
 
 ### Added
 
@@ -22,20 +22,20 @@ date) before dispatching the release.
   concurrently, so the kinds overlap rather than sum. A `phase="prepare"`
   sample covers the sighash and transaction id digests, bundle extraction and
   check construction between `utxo_fetch` and `checks`, which were previously
-  untimed.
+  untimed. (#74)
 
 ### CI
 
 - `release.yml` refuses to dispatch when either node's mainnet halt (zcashd
   or zebra) is under 4 weeks past the current tip (estimated from a block
   anchor and the wall clock, no network access); MAINTENANCE.md gains the
-  matching pre-release checklist.
+  matching pre-release checklist. (#61)
 - `z3-smoke` builds only the stack images whose build context a PR touches
   and pulls the others, pinned by digest, from `ghcr.io/shieldedlabs/zero-*:main`:
   the newest main build that passed the smoke test, published by a new
   push-to-main run after its own green smoke. Releases, schedules, and
   dispatches still build every image. The zcashd cache-warm build is its own
-  non-gating job, so smoke no longer waits ~45 minutes for it on zcashd PRs.
+  non-gating job, so smoke no longer waits ~45 minutes for it on zcashd PRs. (#64)
 - The zcashd image builds `depends/` in its own cached layer, so a change under
   `zcashd/src` rebuilds zcashd alone (about 2 minutes at 16 vCPUs) instead of
   every dependency (about 15). The cache-warm job no longer exports its builder
@@ -44,7 +44,29 @@ date) before dispatching the release.
   quota, evicting the other workflows' entries. PR runs are now a separate
   read-only job (no registry login, no `packages: write`, no export); pushes
   to main, schedules, dispatches, and releases still refresh the registry
-  cache.
+  cache. (#65, #66)
+- `release.yml` grants its smoke gate `pull-requests: read`. The reusable
+  `z3-smoke` workflow has required that scope since #64, and a called workflow
+  may not request more than its caller grants, so every release dispatch since
+  then failed at startup with no jobs. (b212452c89)
+- `z3-regtest` mines its golden chain with `generatetoaddress` on the live
+  node instead of the internal miner behind stop-and-restart cycles, builds
+  its binaries in parallel behind a source-tree binary cache, and runs the
+  scenario groups as parallel jobs, with a push-to-main run so PR caches have
+  something to hit: 64 to 83 minutes per run before, about 15 after. (#67, #68)
+- `release.yml`'s version job uses the same checkout v7.0.1 pin as its other
+  jobs, and a mislabelled checkout pin in the Copilot review workflow is
+  labelled correctly; SHAs unchanged. (#62)
+- The Copilot push-review workflow gains `code`, `security` and `full` modes
+  (`code` by default on pushes to main, selectable on manual runs), and
+  `.github/copilot-instructions.md` is generated from
+  `.github/review-modes/*.md` rather than edited by hand. (#71)
+
+### Docs
+
+- zebra: the end-of-support vendor note is a plain `// [zero]` comment above
+  `ESTIMATED_RELEASE_HEIGHT` instead of part of its rustdoc; value and
+  behaviour unchanged. (#63)
 
 ## v28 - 2026-09-02
 
