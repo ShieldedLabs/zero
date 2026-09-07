@@ -165,9 +165,12 @@ jobs:
   smoke:
     needs: version
     uses: ./.github/workflows/z3-smoke.yml
+    # A called workflow may not request more than the calling job grants;
+    # the smoke gate needs pull-requests: read for paths-filter.
     permissions:
       contents: read
       packages: write
+      pull-requests: read
 
   # 3. Source archives: one ZIP per vendored component (only tracked files).
   source:
