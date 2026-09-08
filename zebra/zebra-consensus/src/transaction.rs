@@ -1671,3 +1671,17 @@ impl AsyncChecks {
         Ok(())
     }
 }
+
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod bench_support {
+    use super::{script_cache, WtxId};
+
+    pub fn contains(key: &WtxId) -> bool {
+        script_cache::verified_scripts().contains(key)
+    }
+
+    pub fn forget(key: &WtxId) {
+        script_cache::verified_scripts().remove(key);
+    }
+}

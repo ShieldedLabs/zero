@@ -32,6 +32,9 @@ progress-bar = [
 # Test-only features
 proptest-impl = ["proptest", "proptest-derive", "zebra-chain/proptest-impl", "zebra-state/proptest-impl"]
 
+# Benchmark-only features
+bench-internals = []
+
 [dependencies]
 blake2b_simd = { workspace = true }
 bellman = { workspace = true }
@@ -120,6 +123,7 @@ harness = false
 [[bench]]
 name = "script"
 harness = false
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "utxo_lookup"

@@ -1,14 +1,30 @@
-//! Benchmarks of transparent script verification and the script cache.
+//! Block-path transaction verification with transparent-script cache hits and misses.
 //!
-//! The workload is a 1001-input P2SH consolidation with a real ECDSA
-//! signature on every input (P2SH-wrapped pay-to-public-key), so a cache
-//! miss pays the interpreter, the ZIP-244 sighash, and the signature
-//! verification for every input, and a hit skips all three.
+//! BENCH_INPUTS selects the input count (default: 1001).
+//! Fixture construction and cache preparation are outside the measured intervals.
+//! Benchmarks use in-memory UTXOs and identical per-iteration batching.
+//! These measure isolated hits and misses, not eviction or contention.
+//!
+//! From the zebra workspace, save measurements before changing the implementation:
+//!
+//! ```sh
+//! (for n in 1 1001; do BENCH_INPUTS=$n RAYON_NUM_THREADS=4 TOKIO_WORKER_THREADS=1 cargo bench -p zebra-consensus --features bench-internals --bench script -- --save-baseline before || exit $?; done)
+//! ```
+//!
+//! After changing the implementation, compare using the same checkout's saved results:
+//!
+//! ```sh
+//! (for n in 1 1001; do BENCH_INPUTS=$n RAYON_NUM_THREADS=4 TOKIO_WORKER_THREADS=1 cargo bench -p zebra-consensus --features bench-internals --bench script -- --baseline before || exit $?; done)
+//! ```
+//!
+//! Defaults: 1-second warmup, 3-second measurement, 30 samples per benchmark.
+//! Use the same machine, compiler, build settings, and worker counts.
+//! Repeat comparisons before drawing conclusions about small differences.
 
 // Disabled due to warnings in criterion macros
 #![allow(missing_docs)]
 
-use std::{collections::HashMap, hint::black_box, sync::Arc};
+use std::{collections::HashMap, hint::black_box, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
@@ -21,11 +37,10 @@ use zebra_chain::{
     amount::Amount,
     block::Height,
     parameters::{Network, NetworkUpgrade},
-    transaction::{HashType, LockTime, Transaction},
+    transaction::{HashType, LockTime, Transaction, UnminedTxId},
     transparent,
 };
-use zebra_consensus::transaction::{BlockRequest, BlockTxVerifier};
-use zebra_script::CachedFfiTransaction;
+use zebra_consensus::transaction::{bench_support, BlockRequest, BlockTxVerifier};
 
 const INPUTS: usize = 1001;
 const INPUT_VALUE: i64 = 10_000;
@@ -38,16 +53,17 @@ fn testnet_nu5_height() -> Height {
         .expect("height in range")
 }
 
-/// Builds the consolidation transaction with a real ECDSA signature on every
-/// input, its spent outputs in input order, and the `known_utxos` map serving
-/// them to the block verifier.
-fn consolidation(
-    output_value: i64,
-) -> (
+/// Builds a signed P2SH consolidation and its spent UTXOs.
+fn consolidation() -> (
     Arc<Transaction>,
-    Vec<transparent::Output>,
     Arc<HashMap<transparent::OutPoint, transparent::OrderedUtxo>>,
 ) {
+    let input_count = std::env::var("BENCH_INPUTS")
+        .map(|s| s.parse::<usize>().expect("BENCH_INPUTS must be an integer"))
+        .unwrap_or(INPUTS);
+
+    assert!(input_count > 0);
+
     let block_height = testnet_nu5_height();
     let fund_height = (block_height - 1).expect("height in range");
 
@@ -74,12 +90,11 @@ fn consolidation(
 
     let source_hash = zebra_chain::transaction::Hash([7u8; 32]);
     let mut known_utxos = HashMap::new();
-    let unsigned_inputs: Vec<transparent::Input> = (0..INPUTS)
+    let unsigned_inputs: Vec<transparent::Input> = (0..input_count)
         .map(|index| {
             let outpoint = transparent::OutPoint {
                 hash: source_hash,
-                // Bounded by INPUTS, so the cast cannot truncate.
-                index: index as u32,
+                index: u32::try_from(index).expect("input index fits in u32"),
             };
             known_utxos.insert(
                 outpoint,
@@ -94,7 +109,7 @@ fn consolidation(
         .collect();
 
     let output = transparent::Output {
-        value: Amount::try_from(output_value).expect("valid amount"),
+        value: Amount::try_from(5_000).expect("valid amount"),
         lock_script: transparent::Script::new(&[0]),
     };
 
@@ -108,12 +123,12 @@ fn consolidation(
         network_upgrade: NetworkUpgrade::Nu5,
     };
 
-    let spent_outputs = vec![spent_output; INPUTS];
+    let spent_outputs = vec![spent_output; input_count];
 
     // The ZIP-244 signature digest excludes the unlock scripts, so the unsigned
     // transaction produces the same sighashes as the signed one.
     let sighasher = unsigned
-        .sighasher(NetworkUpgrade::Nu5, Arc::new(spent_outputs.clone()))
+        .sighasher(NetworkUpgrade::Nu5, Arc::new(spent_outputs))
         .expect("supported transaction version");
 
     let inputs = unsigned_inputs
@@ -173,7 +188,7 @@ fn consolidation(
         network_upgrade,
     });
 
-    (transaction, spent_outputs, Arc::new(known_utxos))
+    (transaction, Arc::new(known_utxos))
 }
 
 fn block_request(
@@ -189,83 +204,62 @@ fn block_request(
     }
 }
 
-/// The per-input script verification a cache hit skips.
-fn script_verification(c: &mut Criterion) {
-    let (transaction, spent_outputs, _) = consolidation(5_000);
-    let cached = CachedFfiTransaction::new(
-        transaction.clone(),
-        Arc::new(spent_outputs),
-        NetworkUpgrade::Nu5,
-    )
-    .expect("supported transaction version");
+fn benchmarks(c: &mut Criterion) {
+    debug_assert!(false, "benchmarks require debug assertions disabled");
 
-    c.bench_function("verify_1001_input_scripts", |b| {
-        b.iter(|| {
-            for input_index in 0..INPUTS {
-                black_box(&cached)
-                    .is_valid(input_index)
-                    .expect("script is valid");
-            }
-        })
-    });
-}
+    let (transaction, known_utxos) = consolidation();
+    let request = block_request(&transaction, &known_utxos);
+    let key = match transaction.unmined_id() {
+        UnminedTxId::Witnessed(key) => key,
+        UnminedTxId::Legacy(_) => panic!("the fixture must be witnessed"),
+    };
 
-/// Full block-path transaction verification, miss vs hit.
-///
-/// Every miss iteration verifies a distinct transaction (unique output value,
-/// so a unique cache key); the hit series repeats one transaction after its
-/// first verification populated the cache.
-fn block_verification(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let network = Network::new_default_testnet();
-    let state = || service_fn(|_| async { unreachable!("all UTXOs come from known_utxos") });
-
-    let mut group = c.benchmark_group("block_verification_1001_inputs");
-    group.sample_size(20);
-
-    let mut next_value = 5_000;
-    group.bench_function("cache_miss", |b| {
-        b.iter_batched(
-            || {
-                next_value += 1;
-                let (transaction, _, known_utxos) = consolidation(next_value);
-                (
-                    BlockTxVerifier::new(&network, state()),
-                    block_request(&transaction, &known_utxos),
-                )
-            },
-            |(verifier, request)| {
-                rt.block_on(verifier.oneshot(request))
-                    .expect("transaction verifies")
-            },
-            BatchSize::SmallInput,
+    let make_verifier = || {
+        BlockTxVerifier::new(
+            &network,
+            service_fn(|_| async {
+                unreachable!("all UTXOs come from known_utxos")
+            }),
         )
-    });
+    };
 
-    let (transaction, _, known_utxos) = consolidation(4_000);
-    rt.block_on(
-        BlockTxVerifier::new(&network, state()).oneshot(block_request(&transaction, &known_utxos)),
-    )
-    .expect("the populating verification succeeds");
+    let mut group =
+        c.benchmark_group(format!("script/{}inputs", transaction.inputs().len()));
 
-    group.bench_function("cache_hit", |b| {
-        b.iter_batched(
-            || {
-                (
-                    BlockTxVerifier::new(&network, state()),
-                    block_request(&transaction, &known_utxos),
-                )
-            },
-            |(verifier, request)| {
-                rt.block_on(verifier.oneshot(request))
-                    .expect("transaction verifies")
-            },
-            BatchSize::SmallInput,
-        )
-    });
+    for (name, hit) in [("cache_hit", true), ("cache_miss", false)] {
+        group.bench_function(format!("block_path/{name}"), |b| {
+            b.iter_batched(
+                || {
+                    bench_support::forget(&key);
+                    if hit {
+                        rt.block_on(make_verifier().oneshot(request.clone()))
+                            .expect("cache-populating verification succeeds");
+                    }
+                    assert_eq!(bench_support::contains(&key), hit);
+                    (make_verifier(), request.clone())
+                },
+                |(verifier, request)| {
+                    black_box(
+                        rt.block_on(verifier.oneshot(request))
+                            .expect("transaction verifies"),
+                    );
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
 
     group.finish();
 }
 
-criterion_group!(benches, script_verification, block_verification);
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(3))
+        .sample_size(30);
+    targets = benchmarks
+}
 criterion_main!(benches);

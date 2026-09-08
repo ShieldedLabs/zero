@@ -182,9 +182,8 @@ impl VerifiedScripts {
             .unwrap_or_default()
     }
 
-    /// Test-only: forgets one key, so a test can force re-verification of its
-    /// own transaction without touching other tests' entries in the global.
-    #[cfg(test)]
+    /// Forgets one key so tests and benchmarks can force a miss.
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(super) fn remove(&self, key: &WtxId) {
         let mut inner = self.lock();
         inner.keys.remove(key);
