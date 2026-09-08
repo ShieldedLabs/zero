@@ -37,10 +37,10 @@ use zebra_chain::{
     amount::Amount,
     block::Height,
     parameters::{Network, NetworkUpgrade},
-    transaction::{HashType, LockTime, Transaction, UnminedTxId},
+    transaction::{HashType, LockTime, Transaction},
     transparent,
 };
-use zebra_consensus::transaction::{bench_support, BlockRequest, BlockTxVerifier};
+use zebra_consensus::transaction::{BlockRequest, BlockTxVerifier};
 
 const INPUTS: usize = 1001;
 const INPUT_VALUE: i64 = 10_000;
@@ -209,10 +209,6 @@ fn benchmarks(c: &mut Criterion) {
 
     let (transaction, known_utxos) = consolidation();
     let request = block_request(&transaction, &known_utxos);
-    let key = match transaction.unmined_id() {
-        UnminedTxId::Witnessed(key) => key,
-        UnminedTxId::Legacy(_) => panic!("the fixture must be witnessed"),
-    };
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let network = Network::new_default_testnet();
@@ -228,28 +224,18 @@ fn benchmarks(c: &mut Criterion) {
     let mut group =
         c.benchmark_group(format!("script/{}inputs", transaction.inputs().len()));
 
-    for (name, hit) in [("cache_hit", true), ("cache_miss", false)] {
-        group.bench_function(format!("block_path/{name}"), |b| {
-            b.iter_batched(
-                || {
-                    bench_support::forget(&key);
-                    if hit {
-                        rt.block_on(make_verifier().oneshot(request.clone()))
-                            .expect("cache-populating verification succeeds");
-                    }
-                    assert_eq!(bench_support::contains(&key), hit);
-                    (make_verifier(), request.clone())
-                },
-                |(verifier, request)| {
-                    black_box(
-                        rt.block_on(verifier.oneshot(request))
-                            .expect("transaction verifies"),
-                    );
-                },
-                BatchSize::PerIteration,
-            );
-        });
-    }
+    group.bench_function("block_path/cache_disabled", |b| {
+        b.iter_batched(
+            || (make_verifier(), request.clone()),
+            |(verifier, request)| {
+                black_box(
+                    rt.block_on(verifier.oneshot(request))
+                        .expect("transaction verifies"),
+                );
+            },
+            BatchSize::PerIteration,
+        );
+    });
 
     group.finish();
 }
