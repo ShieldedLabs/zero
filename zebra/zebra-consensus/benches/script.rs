@@ -1,33 +1,22 @@
-//! Block-path transaction verification with transparent-script cache hits and misses.
+//! Paired script-cache measurements, driven by bench-script-cache.sh.
 //!
-//! BENCH_INPUTS selects the input count (default: 1001).
-//! Fixture construction and cache preparation are outside the measured intervals.
-//! Benchmarks use in-memory UTXOs and identical per-iteration batching.
-//! These measure isolated hits and misses, not eviction or contention.
+//! BENCH_INPUTS selects the signed transaction's transparent input count.
+//! After initialization, the program prints READY.
+//! Each stdin line supplies a positive batch size.
+//! Each response reports average verification times in nanoseconds:
+//! cache miss and hit when cache_enabled; ordinary verification and zero otherwise.
 //!
-//! From the zebra workspace, save measurements before changing the implementation:
-//!
-//! ```sh
-//! (for n in 1 1001; do BENCH_INPUTS=$n RAYON_NUM_THREADS=4 TOKIO_WORKER_THREADS=1 cargo bench -p zebra-consensus --features bench-internals --bench script -- --save-baseline before || exit $?; done)
-//! ```
-//!
-//! After changing the implementation, compare using the same checkout's saved results:
-//!
-//! ```sh
-//! (for n in 1 1001; do BENCH_INPUTS=$n RAYON_NUM_THREADS=4 TOKIO_WORKER_THREADS=1 cargo bench -p zebra-consensus --features bench-internals --bench script -- --baseline before || exit $?; done)
-//! ```
-//!
-//! Defaults: 1-second warmup, 3-second measurement, 30 samples per benchmark.
-//! Use the same machine, compiler, build settings, and worker counts.
-//! Repeat comparisons before drawing conclusions about small differences.
+//! Fixture construction, verifier construction, and cache preparation are untimed.
 
-// Disabled due to warnings in criterion macros
-#![allow(missing_docs)]
-
-use std::{collections::HashMap, hint::black_box, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    hint::black_box,
+    io::{self, BufRead, Write},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use tower::{service_fn, ServiceExt};
 
 use ripemd::Ripemd160;
@@ -41,6 +30,9 @@ use zebra_chain::{
     transparent,
 };
 use zebra_consensus::transaction::{BlockRequest, BlockTxVerifier};
+
+#[cfg(cache_enabled)]
+use zebra_consensus::transaction::bench_support;
 
 const INPUTS: usize = 1001;
 const INPUT_VALUE: i64 = 10_000;
@@ -204,48 +196,81 @@ fn block_request(
     }
 }
 
-fn benchmarks(c: &mut Criterion) {
+fn main() {
     debug_assert!(false, "benchmarks require debug assertions disabled");
 
     let (transaction, known_utxos) = consolidation();
     let request = block_request(&transaction, &known_utxos);
 
+    #[cfg(cache_enabled)]
+    let key = match transaction.unmined_id() {
+        zebra_chain::transaction::UnminedTxId::Witnessed(key) => key,
+        zebra_chain::transaction::UnminedTxId::Legacy(_) => {
+            panic!("the fixture must be witnessed")
+        }
+    };
+
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let network = Network::new_default_testnet();
-    let make_verifier = || {
-        BlockTxVerifier::new(
+
+    let measure = || {
+        let verifier = BlockTxVerifier::new(
             &network,
             service_fn(|_| async {
                 unreachable!("all UTXOs come from known_utxos")
             }),
-        )
+        );
+        let request = request.clone();
+
+        let start = Instant::now();
+        black_box(
+            rt.block_on(verifier.oneshot(request))
+                .expect("transaction verifies"),
+        );
+        start.elapsed()
     };
 
-    let mut group =
-        c.benchmark_group(format!("script/{}inputs", transaction.inputs().len()));
+    // Initialize the verifier's workers before reporting readiness.
+    let _ = measure();
+    println!("READY");
+    io::stdout().flush().expect("flush readiness");
 
-    group.bench_function("block_path/cache_disabled", |b| {
-        b.iter_batched(
-            || (make_verifier(), request.clone()),
-            |(verifier, request)| {
-                black_box(
-                    rt.block_on(verifier.oneshot(request))
-                        .expect("transaction verifies"),
-                );
-            },
-            BatchSize::PerIteration,
+    for line in io::stdin().lock().lines() {
+        let batch: usize = line
+            .expect("read batch size")
+            .parse()
+            .expect("batch size must be an integer");
+        assert!(batch > 0);
+
+        let mut first = Duration::ZERO;
+
+        #[cfg(cache_enabled)]
+        let mut second = Duration::ZERO;
+
+        for _ in 0..batch {
+            #[cfg(cache_enabled)]
+            {
+                bench_support::forget(&key);
+                assert!(!bench_support::contains(&key));
+            }
+
+            first += measure();
+
+            #[cfg(cache_enabled)]
+            {
+                assert!(bench_support::contains(&key));
+                second += measure();
+            }
+        }
+
+        #[cfg(not(cache_enabled))]
+        let second = Duration::ZERO;
+
+        println!(
+            "{} {}",
+            first.as_nanos() as f64 / batch as f64,
+            second.as_nanos() as f64 / batch as f64,
         );
-    });
-
-    group.finish();
+        io::stdout().flush().expect("flush measurements");
+    }
 }
-
-criterion_group! {
-    name = benches;
-    config = Criterion::default()
-        .warm_up_time(Duration::from_secs(1))
-        .measurement_time(Duration::from_secs(3))
-        .sample_size(30);
-    targets = benchmarks
-}
-criterion_main!(benches);
