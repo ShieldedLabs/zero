@@ -1,3 +1,11 @@
+[patch.crates-io]
+zcash_primitives = { path = "../librustzcash/zcash_primitives" }
+zcash_transparent = { path = "../librustzcash/zcash_transparent" }
+zcash_keys = { path = "../librustzcash/zcash_keys" }
+zcash_protocol = { path = "../librustzcash/components/zcash_protocol" }
+zcash_address = { path = "../librustzcash/components/zcash_address" }
+equihash = { path = "../librustzcash/components/equihash" }
+
 [workspace]
 members = [
         "zebrad",
