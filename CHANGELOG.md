@@ -6,6 +6,25 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
+## Unreleased
+
+### Changed
+
+- zaino: re-vendored to upstream `0.10.0` (265 commits, `07695fac5e..f1d2befe62`).
+  Upstream split the finalised state into backend crates
+  (`zaino-chain-store`, `zaino-chain-store-zainodb`, `zaino-encoding`,
+  `zaino-primitives`, `zaino-chain-head-service`) and removed zcashd support
+  entirely. Our sync-patience patch (`41d4342ded`) survives in
+  `chain_index.rs` and is still required: upstream's loop still escalates to
+  `CriticalError` after `max_consecutive_failures` with no startup exemption.
+
+### Removed
+
+- zaino: the two `[zero]` patches on `chain_index/non_finalised_state.rs`
+  (`fae256572a`, `1c1c3029ea`), obsolete because upstream deleted the module.
+  `UpdateError::DatabaseHole` and its "could not determine best chain" message,
+  which `fae256572a` existed to un-mask, no longer appear anywhere upstream.
+
 ## v29 - 2026-09-07
 
 ### Added
