@@ -25,6 +25,13 @@ be considered breaking changes.
 
 ## [Unreleased]
 
+### Changed
+- A transaction proposal that cannot be funded now fails with `zcashd`'s
+  "insufficient funds" error code (-6) and its `Wallet has insufficient funds`
+  message, instead of the generic wallet error code (-4). This applies whether
+  the shortfall is detected while selecting inputs or while balancing change,
+  and affects `z_sendmany`, `z_sendfromaccount` and `pczt_create`.
+
 ## [0.1.0-beta.3] - 2026-08-24
 
 ### Added

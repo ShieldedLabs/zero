@@ -10,6 +10,7 @@ use zcash_address::{ZcashAddress, unified};
 use zcash_client_backend::{
     data_api::{
         Account as _, WalletRead,
+        error::Error as ProposeError,
         wallet::{
             ConfirmationsPolicy,
             input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy},
@@ -17,7 +18,7 @@ use zcash_client_backend::{
         },
     },
     fees::{
-        DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
+        ChangeError, DustOutputPolicy, StandardFeeRule, TransparentChangePolicy,
         standard::MultiOutputChangeStrategy,
     },
     proposal::{Proposal, Step},
@@ -225,6 +226,31 @@ pub(super) fn transparent_change_policy_for(spend_policy: &SpendPolicy) -> Trans
     }
 }
 
+/// Maps a proposal error onto the JSON-RPC error a `zcashd` caller expects.
+///
+/// Every way of running out of money reports as `zcashd`'s "insufficient funds" code,
+/// whether the shortfall was found while selecting inputs or while balancing change: a
+/// caller distinguishes "I cannot afford this" from "this request is malformed" by the
+/// code, and both are the former. Remaining variants keep the generic message.
+fn propose_error<DE, TE, SE, FE, CE, N>(e: ProposeError<DE, TE, SE, FE, CE, N>) -> ErrorObjectOwned
+where
+    DE: fmt::Display,
+    TE: fmt::Display,
+    SE: fmt::Display,
+    FE: fmt::Display,
+    CE: fmt::Display,
+    N: fmt::Display,
+{
+    match e {
+        ProposeError::InsufficientFunds { .. }
+        | ProposeError::Change(ChangeError::InsufficientFunds { .. }) => {
+            LegacyCode::WalletInsufficientFunds.with_static("Wallet has insufficient funds")
+        }
+        e => LegacyCode::Wallet
+            .with_message(fl!("err-propose-transaction-failed", error = e.to_string())),
+    }
+}
+
 /// Validates the recipients against the privacy policy, proposes a transfer, and
 /// enforces both the privacy policy and the configured Orchard action limit on the
 /// resulting proposal.
@@ -327,7 +353,10 @@ pub(super) fn propose_and_check(
     // configuration, so the account keeps a usable set of denominations.
     let split_policy = APP.config().note_management.split_policy();
 
-    // Change too small to be worth its own output is added to the fee instead.
+    // The default action is `Reject`: change below the strategy's dust threshold (the
+    // ZIP 317 marginal fee) is not written as an output, and selection is asked for
+    // another input instead. If none is available the proposal fails as insufficient
+    // funds rather than silently donating the change to the miner.
     let dust_output_policy = DustOutputPolicy::default();
 
     // No memo is attached to change. A change memo would force the change into a shielded
@@ -367,11 +396,7 @@ pub(super) fn propose_and_check(
         // implied by the target height.
         None,
     )
-    // TODO: Map errors to `zcashd` shape.
-    .map_err(|e| {
-        LegacyCode::Wallet
-            .with_message(fl!("err-propose-transaction-failed", error = e.to_string()))
-    })?;
+    .map_err(propose_error)?;
 
     enforce_privacy_policy(&proposal, privacy_policy)?;
 
@@ -2406,5 +2431,50 @@ mod proposal_policy_tests {
             vec![],
         );
         assert_eq!(check_shielded_action_limits(&proposal, 2), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod propose_error_tests {
+    use super::*;
+
+    /// A concrete instantiation of the proposal error; the type parameters only need to be
+    /// printable for the mapping under test.
+    type TestError = ProposeError<Infallible, Infallible, Infallible, Infallible, Infallible, u32>;
+
+    fn amounts() -> (Zatoshis, Zatoshis) {
+        (Zatoshis::const_from_u64(1), Zatoshis::const_from_u64(2))
+    }
+
+    #[test]
+    fn selection_shortfall_reports_insufficient_funds() {
+        let (available, required) = amounts();
+        let err = propose_error(TestError::InsufficientFunds {
+            available,
+            required,
+        });
+        assert_eq!(err.code(), i32::from(LegacyCode::WalletInsufficientFunds));
+        assert_eq!(err.message(), "Wallet has insufficient funds");
+    }
+
+    #[test]
+    fn change_shortfall_reports_insufficient_funds() {
+        let (available, required) = amounts();
+        let err = propose_error(TestError::Change(ChangeError::InsufficientFunds {
+            available,
+            required,
+        }));
+        assert_eq!(err.code(), i32::from(LegacyCode::WalletInsufficientFunds));
+        assert_eq!(err.message(), "Wallet has insufficient funds");
+    }
+
+    #[test]
+    fn other_failures_are_not_reported_as_insufficient_funds() {
+        // The message itself is localized, and the localizations are not loaded in unit
+        // tests, so the code and the absence of the insufficient-funds string are what
+        // this can assert.
+        let err = propose_error(TestError::ScanRequired);
+        assert_eq!(err.code(), i32::from(LegacyCode::Wallet));
+        assert_ne!(err.message(), "Wallet has insufficient funds");
     }
 }
