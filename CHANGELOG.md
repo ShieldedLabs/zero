@@ -8,8 +8,20 @@ date) before dispatching the release.
 
 ## Unreleased
 
+### Security
+
+- lightwalletd: pull upstream `master` to `aa9acac2f9`, nine commits past
+  `v0.5.4`, for three dependency CVE fixes: `golang.org/x/crypto`
+  (CVE-2026-56854, `5044f4b924`), `golang.org/x/net` (CVE-2026-46600,
+  `96fe9a145e`) and `golang.org/x/text` (CVE-2026-56852, `a3cb34c5e6`).
+  Upstream has not cut a tag carrying them, so the subtree is deliberately
+  un-pinned until `v0.5.5`; see SUBTREES.md.
+
 ### Changed
 
+- lightwalletd: `google.golang.org/grpc` 1.82.1 to 1.83.1 (`1cb42c5166`), and
+  the image now builds in a stage and ships on `debian:13-slim`
+  (`0e398d79cf`).
 - zaino: re-vendored to upstream `0.10.0` (265 commits, `07695fac5e..f1d2befe62`).
   Upstream split the finalised state into backend crates
   (`zaino-chain-store`, `zaino-chain-store-zainodb`, `zaino-encoding`,
