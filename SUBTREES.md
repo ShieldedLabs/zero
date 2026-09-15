@@ -17,7 +17,14 @@ still pull upstream updates or split changes back out when useful.
 | `lightwalletd/` | https://github.com/zcash/lightwalletd.git | `master` | `up-lightwalletd` |
 
 Notes:
-- **zaino** tracks `dev` (its active default), not `stable`.
+- **zaino** tracks `dev` (its active default), not `stable`, but is pinned to a
+  release tag: currently **`0.10.0`** (2026-09-11). `dev` is an ancestor of each
+  tag rather than ahead of it, so the tag is strictly the better pin. As of the
+  0.10.0 re-vendor the finalised state lives in its own backend crates
+  (`zaino-chain-store`, `zaino-chain-store-zainodb`, `zaino-encoding`,
+  `zaino-primitives`, `zaino-chain-head-service`), zcashd support is gone, and
+  `chain_index/non_finalised_state.rs` no longer exists. Test with
+  `cargo nextest run`, not `cargo test`; see the `update-subtree` skill.
 - **zallet** is the `zallet` crate, which lives in the `zcash/wallet` repo.
 - **orchard** tracks `main` and is pinned to a release tag. The `feat/ironwood`
   branch it used to track was merged into `main` and shipped as the 0.15.x line,

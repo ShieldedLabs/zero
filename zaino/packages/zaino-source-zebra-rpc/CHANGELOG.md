@@ -8,6 +8,34 @@ and this library adheres to Rust's notion of
 ## [Unreleased]
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.1] - 2026-09-11
+
+### Added
+### Changed
+- Documentation no longer refers to zcashd, whose support was removed from
+  Zaino. No code change.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.0] - 2026-08-28
+
+### Added
+### Changed
+- `ZebraRpcAdapter` implements `zaino-source` 0.2.0's renamed single-attempt
+  ports (`OneShotGetBlock` and peers); behaviour is unchanged.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.1.0] - 2026-08-14
+
+### Added
 - New crate. `ZebraRpcAdapter` implements every `zaino-source` port that
   JSON-RPC can answer, so it is the one transport always present in a
   deployment; the read-state adapter is an optional accelerator.
