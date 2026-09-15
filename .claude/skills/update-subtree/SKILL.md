@@ -12,11 +12,10 @@ Never run on `main`; never auto-merge a dirty result.
 
 | Component | Prefix    | Remote      | Branch   | Test command |
 |-----------|-----------|-------------|----------|--------------|
-| zcashd    | `zcashd/` | `up-zcashd` | `master` | `cd zcashd && ./zcutil/build.sh -j$(nproc)` (build-only smoke) |
 | zebra     | `zebra/`  | `up-zebra`  | `main`   | `cd zebra && cargo test --workspace` |
-| zaino     | `zaino/`  | `up-zaino`  | `dev`    | `cd zaino && cargo test --workspace` |
+| zaino     | `zaino/`  | `up-zaino`  | `dev`    | `cd zaino && cargo nextest run --workspace --no-default-features` |
 | zallet    | `zallet/` | `up-zallet` | `main`   | `cd zallet && cargo test --workspace` |
-| orchard   | `orchard/`| `up-orchard`| `feat/ironwood` | `cd orchard && cargo test` |
+| orchard   | `orchard/`| `up-orchard`| `main`   | `cd orchard && cargo test` |
 | librustzcash | `librustzcash/` | `up-librustzcash` | `main` | `cd librustzcash && cargo test --workspace` |
 | lightwalletd | `lightwalletd/` | `up-lightwalletd` | `master` | `cd lightwalletd && go test ./...` |
 
@@ -74,6 +73,15 @@ MAINTENANCE.md tag-pinning policy).
 
 ## Notes
 
+- **zaino must be tested with `cargo nextest`, not `cargo test`.** Its
+  `chain_index` tests call a `try_init().unwrap()` tracing helper, which
+  succeeds only for the first test in a process. Upstream CI uses nextest
+  (process per test) and never sees this; `cargo test --workspace` fails ~49
+  tests on the shared global dispatcher, which is a harness artifact and not a
+  regression. Do not "fix" it in vendored code.
+- **zcashd is retired from this skill** (2026-09-08): upstream `zcash/zcash` is
+  archived, there is no `up-zcashd` remote, and `zcashd/` is a Zero-only fork
+  with nothing left to pull.
 - One component per run. To update several, run repeatedly.
 - If the pull is clean and tests pass, still stop for human review before merge.
 - A carry marked `[upstream-pending #N]` whose PR has merged upstream should be
