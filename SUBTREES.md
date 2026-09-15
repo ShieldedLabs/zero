@@ -32,7 +32,11 @@ Notes:
   2026-08-19 cohort, which is what zallet builds against.
 - **lightwalletd** is the original Go light client server (Zaino serves the same
   protocol in the Z3 stack). Vendored as the platform for private-lookup (PIR)
-  experimentation. Tracks `master`, pinned to a release tag (currently `v0.5.4`).
+  experimentation. Tracks `master`, normally pinned to a release tag.
+  **Deliberately un-pinned as of 2026-09-15**, at `aa9acac2f9`, nine commits past
+  `v0.5.4`: upstream shipped three CVE dependency bumps (x/crypto CVE-2026-56854,
+  x/net CVE-2026-46600, x/text CVE-2026-56852) after cutting that tag and has not
+  cut another. Re-pin when `v0.5.5` appears.
 
 ## Why subtrees (not submodules)
 
