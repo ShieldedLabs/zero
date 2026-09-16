@@ -257,6 +257,110 @@ async fn a_get_transaction_is_answered_by_the_hub_and_the_operator_is_never_dial
 }
 
 #[tokio::test]
+async fn a_queue_hit_with_no_bytes_is_relayed_as_pending() {
+    // The hub answers a lookup for a QUEUED migration "found, height 0, no
+    // bytes": it withholds the bytes of a transaction it has not published yet.
+    // That sentinel IS the answer -- it is the only existence-and-status signal
+    // a stateless shim has, and a wallet renders "pending" from it -- so the
+    // shim must relay it rather than run it through the L4 byte guard, which
+    // has nothing to verify and would turn every queued migration into
+    // NOT_FOUND.
+    let looked_up = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub_full(
+        "unused",
+        HubLookup::Found {
+            data: Vec::new(),
+            height: 0,
+        },
+        Arc::new(Mutex::new(None)),
+        looked_up.clone(),
+    )
+    .await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    let hash = wire_hash(V6_MIGRATION);
+    let reply = get_transaction(&mut sender, shim, &hash).await;
+
+    assert_eq!(reply.status, 0, "a queue hit is a success, not NOT_FOUND");
+    let raw = decode_raw_transaction(&reply.body);
+    assert!(
+        raw.data.is_empty(),
+        "the hub's withheld body is relayed as-is"
+    );
+    assert_eq!(raw.height, 0, "height 0 is the mempool sentinel");
+
+    assert_eq!(looked_up.lock().unwrap().as_deref(), Some(&hash[..]));
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "a hub-served GetTransaction must not dial the operator"
+    );
+}
+
+#[tokio::test]
+async fn a_hub_reply_for_a_different_txid_is_refused_not_served() {
+    // L4, and the check that accepting the empty-body sentinel above did not
+    // widen it: a hub that answers with a transaction OTHER than the one
+    // queried must not have it served to the wallet under the queried txid.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let hub = spawn_mock_hub_full(
+        "unused",
+        HubLookup::Found {
+            data: V6_MIGRATION.to_vec(),
+            height: 0,
+        },
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    // Query a hash that is NOT V6_MIGRATION's txid; the hub returns V6_MIGRATION.
+    let reply = get_transaction(&mut sender, shim, &[0x11u8; 32]).await;
+
+    assert_eq!(
+        reply.status, 5,
+        "a mismatched lookup reply is refused as NOT_FOUND, not served"
+    );
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "refusing a mismatched reply must not fall back to the operator"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_body_at_a_mined_height_is_refused() {
+    // The sentinel is height 0 ONLY. A mined transaction always has bytes, so an
+    // empty body at a nonzero height is not a queue hit and is not anything to
+    // hand a wallet as a transaction: it goes through the guard and fails it.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let hub = spawn_mock_hub_full(
+        "unused",
+        HubLookup::Found {
+            data: Vec::new(),
+            height: 424_242,
+        },
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    let reply = get_transaction(&mut sender, shim, &wire_hash(V6_MIGRATION)).await;
+
+    assert_eq!(reply.status, 5, "an empty body off the chain is refused");
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn get_transaction_height_from_the_hub_is_relayed() {
     let hub = spawn_mock_hub_full(
         "unused",

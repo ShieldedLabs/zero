@@ -362,6 +362,71 @@ async fn a_get_transaction_is_answered_over_the_mixnet_and_the_operator_is_never
 }
 
 #[tokio::test]
+async fn a_queue_hit_with_no_bytes_is_relayed_as_pending() {
+    // The mixnet twin of the clearnet case: the hub answers a QUEUED migration
+    // "found, height 0, no bytes", withholding the bytes of a transaction it has
+    // not published yet. The sentinel IS the answer -- the only
+    // existence-and-status signal a stateless shim has, and what a wallet
+    // renders "pending" from -- so it must be relayed rather than run through
+    // the L4 byte guard, which has nothing to verify and would turn every queued
+    // migration into NOT_FOUND.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let (shim, seen) = spawn_nym_shim(
+        backend,
+        OnSubmit::Accept,
+        OnLookup::Found {
+            data: Vec::new(),
+            height: 0,
+        },
+    )
+    .await;
+
+    let mut sender = connect_h2(shim).await;
+    let hash = wire_hash(V6_MIGRATION);
+    let reply = get_transaction(&mut sender, shim, &hash).await;
+
+    assert_eq!(reply.status, 0, "a queue hit is a success, not NOT_FOUND");
+    let raw = decode_raw_transaction(&reply.body);
+    assert!(
+        raw.data.is_empty(),
+        "the hub's withheld body is relayed as-is"
+    );
+    assert_eq!(raw.height, 0, "height 0 is the mempool sentinel");
+
+    assert_eq!(seen.lookups.lock().unwrap().as_slice(), &[hash.clone()]);
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "a hub-served GetTransaction must not dial the operator"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_body_at_a_mined_height_is_refused() {
+    // The sentinel is height 0 ONLY. A mined transaction always has bytes, so an
+    // empty body at a nonzero height is not a queue hit and is not anything to
+    // hand a wallet as a transaction: it goes through the guard and fails it.
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let (shim, _) = spawn_nym_shim(
+        backend,
+        OnSubmit::Accept,
+        OnLookup::Found {
+            data: Vec::new(),
+            height: 424_242,
+        },
+    )
+    .await;
+
+    let mut sender = connect_h2(shim).await;
+    let reply = get_transaction(&mut sender, shim, &wire_hash(V6_MIGRATION)).await;
+
+    assert_eq!(reply.status, 5, "an empty body off the chain is refused");
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn a_mined_height_from_the_hub_is_relayed() {
     let backend = spawn_counting_backend(Arc::new(AtomicUsize::new(0))).await;
     let (shim, _) = spawn_nym_shim(

@@ -27,6 +27,8 @@
 # Environment overrides:
 #   SMOKE_LOOKUP_MAX_SECS   GetTransaction must finish within this (default 15)
 #   SMOKE_LOOKUP_HARD_SECS  curl's own ceiling on the two heavy calls (default 90)
+#   SMOKE_DIVERT_SETTLE_SECS  how long the divert lookup retries a NOT_FOUND
+#                           while the submit crosses the mixnet (default 10)
 #   SMOKE_HTTP_TIMEOUT      ceiling on the small JSON calls (default 20)
 #   SMOKE_BLOCK_START       first height of the GetBlockRange check (default 3444100)
 #   SMOKE_FIXTURE           path to v6_migration.bin (default: alongside this script)
@@ -38,6 +40,11 @@ set -u
 
 SMOKE_LOOKUP_MAX_SECS=${SMOKE_LOOKUP_MAX_SECS:-15}
 SMOKE_LOOKUP_HARD_SECS=${SMOKE_LOOKUP_HARD_SECS:-90}
+SMOKE_DIVERT_SETTLE_SECS=${SMOKE_DIVERT_SETTLE_SECS:-10}
+# The gap between divert-lookup attempts. Not a knob: the budget above is the
+# thing an operator would ever want to change, and a finer step would only add
+# packets to a mixnet that is already the slow part.
+DIVERT_RETRY_STEP_SECS=2
 SMOKE_HTTP_TIMEOUT=${SMOKE_HTTP_TIMEOUT:-20}
 SMOKE_BLOCK_START=${SMOKE_BLOCK_START:-3444100}
 BLOCK_COUNT=50
@@ -628,16 +635,51 @@ assert len(txid) == 32, "a txid is 32 bytes"
 msg = b"\x1a" + bytes([len(txid)]) + txid   # TxFilter.hash, field 3
 sys.stdout.buffer.write(b"\x00" + len(msg).to_bytes(4, "big") + msg)
 PY
-  grpc_call GetTransaction "$_req2" "$SMOKE_LOOKUP_HARD_SECS"
+  # RETRY A NOT_FOUND, BOUNDED. This is about mixnet ARRIVAL ORDER, not about a
+  # slow hub. Over the mixnet the submit is fire-and-forget: the shim answers
+  # the wallet the moment the frame is handed to its Nym client, with a
+  # locally-computed txid, so the submit and this lookup are two independent
+  # Sphinx packets with no ordering guarantee between them. A single-shot lookup
+  # therefore measures packet luck as much as it measures the hub: on 2026-09-15
+  # the hub logged the admit and the lookup miss 44 ms apart.
+  #
+  # Retrying inside a short budget removes the luck and weakens nothing. A hub
+  # that never queued the transaction still fails, with the same message; the
+  # latency assertion is still made against one call, not the sum; and this is a
+  # retry, not a sleep, so a run where the packets arrive in order pays nothing.
+  #
+  # NOT_FOUND ONLY. Retrying any non-zero status would spend the budget on
+  # failures that arrival order cannot explain and then describe them as a
+  # missing queue entry: UNAVAILABLE (14) is the hub being unreachable, which a
+  # wallet needs told immediately, and INVALID_ARGUMENT (3) can never become
+  # true by waiting. Only a 5 is ambiguous between "not queued" and "not queued
+  # YET", and only a 5 is retried.
+  _waited=0
+  while :; do
+    grpc_call GetTransaction "$_req2" "$SMOKE_LOOKUP_HARD_SECS"
+    [ "$CURL_RC" = 0 ] || break
+    [ "$(header_value "$HDRS" grpc-status)" = 5 ] || break
+    [ "$_waited" -lt "$SMOKE_DIVERT_SETTLE_SECS" ] || break
+    sleep "$DIVERT_RETRY_STEP_SECS"
+    _waited=$((_waited + DIVERT_RETRY_STEP_SECS))
+  done
   _measured="submit ${_submit_secs}s, lookup ${SECS}s, $BYTES bytes"
+  if [ "$_waited" != 0 ]; then
+    _measured="$_measured, ${_waited}s of mixnet settle"
+  fi
   if [ "$CURL_RC" != 0 ]; then
     fail shim:divert "lookup got no reply within ${SMOKE_LOOKUP_HARD_SECS}s: ${CURL_ERR:-curl exit $CURL_RC}"
     return
   fi
   if [ "$CODE" != 200 ] || grpc_status_bad "$HDRS"; then
     fail shim:divert "lookup: $CODE, $(grpc_status_text "$HDRS"), $_measured"
-    note "NOT_FOUND means the transaction is not in the hub's queue: it was never diverted there,"
-    note "or a flush has already dropped it (it is consensus-invalid, so a flush always will)"
+    # The queue explanation belongs to NOT_FOUND alone. Printing it under an
+    # UNAVAILABLE would send a deployer to look for a flush that never happened.
+    if [ "$(header_value "$HDRS" grpc-status)" = 5 ]; then
+      note "NOT_FOUND, still, after ${SMOKE_DIVERT_SETTLE_SECS}s of retries: the transaction is not in the"
+      note "hub's queue. It was never diverted there, or a flush has already dropped it (it is"
+      note "consensus-invalid, so a flush always will)"
+    fi
     return
   fi
   # The reply must be the fixture BYTE FOR BYTE at height 0. Height 0 is the
