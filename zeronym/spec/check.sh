@@ -48,6 +48,7 @@ check honest         safety          holds
 check honest         pendingIsTrue   holds
 check before_ecb4641 pendingVisible  fails
 check before_45e408f noQueuedBytes   fails
+check current        noQueuedBytes   fails
 check current        noEarlyBytes    fails
 check current        noSilentRefusal fails
 check current        pendingIsTrue   fails

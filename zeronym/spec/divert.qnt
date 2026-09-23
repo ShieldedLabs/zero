@@ -13,6 +13,7 @@
 // Run all of these with spec/check.sh, or one at a time (npm i -g @informalsystems/quint):
 //   quint run --main=honest --invariant=safety spec/divert.qnt           holds
 //   quint run --main=current --invariant=shimSafety ...                  holds
+//   quint run --main=current --invariant=noQueuedBytes ...               fails: known gap (lying hub)
 //   quint run --main=current --invariant=noEarlyBytes ...                fails: known gap (lying hub)
 //   quint run --main=before_ecb4641 --invariant=pendingVisible ...       fails: the sentinel bug
 //   quint run --main=before_45e408f --invariant=noQueuedBytes ...        fails: the byte leak
