@@ -368,6 +368,29 @@ pub(crate) async fn get_transaction(
     }
 
     match diversion.hub.get_transaction(&filter.hash).await {
+        // The hub's queue-hit sentinel: found, height 0, no bytes. Since
+        // 45e408f0ff the hub answers a lookup for a QUEUED migration this way,
+        // because the lookup is unauthenticated on both transports and serving
+        // a not-yet-published migration's bytes to whoever asks would let a
+        // third party broadcast it first. Relaying the sentinel is the whole
+        // point of it: height 0 is the mempool sentinel, and it is the
+        // existence-and-status signal this stateless shim has nothing else to
+        // answer from. A wallet renders "pending" from it.
+        //
+        // It must not go through the L4 guard below. The guard verifies the
+        // RETURNED BYTES against the queried txid, and there are none here; it
+        // would deserialize an empty body, fail, and turn every queued
+        // migration into NOT_FOUND. Nor is there anything for it to protect:
+        // the attack L4 exists to stop is a hub substituting a DIFFERENT
+        // transaction's bytes, which an empty body cannot do.
+        //
+        // Height 0 only. A mined transaction always has bytes, so an empty body
+        // at a nonzero height is not a queue hit and is not something to hand a
+        // wallet as a transaction; it falls through to the arm below, where the
+        // guard refuses it.
+        Ok(Lookup::Found { data, height }) if data.is_empty() && height == 0 => {
+            Ok(get_transaction_response(&data, height))
+        }
         Ok(Lookup::Found { data, height }) => {
             // L4: verify the hub returned the transaction that was ASKED for. A
             // hub, buggy or hostile, that answers a query with a DIFFERENT
@@ -455,9 +478,11 @@ fn not_found_message(wire_hash: &[u8]) -> String {
     )
 }
 
-/// A synthesized `GetTransaction` reply carrying the transaction the hub
-/// returned. Height 0 (from a queue hit) is the mempool sentinel; a mined
-/// transaction relays the indexer's height.
+/// A synthesized `GetTransaction` reply carrying what the hub returned. Height 0
+/// is the mempool sentinel; a mined transaction relays the indexer's height. The
+/// bytes are the hub's verbatim, and for a queue hit there are none: the hub
+/// withholds a queued migration's bytes, and the wallet that sent it already has
+/// them.
 fn get_transaction_response(tx_bytes: &[u8], height: u64) -> Response<ProxyBody> {
     let message = RawTransaction {
         data: tx_bytes.to_vec().into(),
