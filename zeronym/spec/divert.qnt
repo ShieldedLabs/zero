@@ -11,7 +11,9 @@
 //   hub   server.rs lookup, queue.rs admit, batcher.rs flush
 //
 // Run all of these with spec/check.sh, or one at a time (npm i -g @informalsystems/quint):
-//   quint run --main=current --invariant=safety spec/divert.qnt          holds
+//   quint run --main=honest --invariant=safety spec/divert.qnt           holds
+//   quint run --main=current --invariant=shimSafety ...                  holds
+//   quint run --main=current --invariant=noEarlyBytes ...                fails: known gap (lying hub)
 //   quint run --main=before_ecb4641 --invariant=pendingVisible ...       fails: the sentinel bug
 //   quint run --main=before_45e408f --invariant=noQueuedBytes ...        fails: the byte leak
 //   quint run --main=current --invariant=noSilentRefusal ...             fails: known gap
@@ -30,7 +32,8 @@ module divert {
   pure val EMPTY = ""
 
   // One record shape for every message; `kind` picks the fields that matter.
-  // `hubSaw` is a ghost field: the hub's state for the tx when it replied.
+  // `hubSaw` and `honest` are ghost fields: the hub's state for the tx when it
+  // replied, and whether the reply followed the hub's code.
   type Msg = {
     kind: str, // "submit" | "lookup" | "reply"
     tx: str,
@@ -39,10 +42,11 @@ module divert {
     height: int,
     data: str,
     hubSaw: str,
+    honest: bool,
   }
 
   // What the wallet saw for one lookup.
-  type Obs = { tx: str, status: str, data: str, hubSaw: str }
+  type Obs = { tx: str, status: str, data: str, hubSaw: str, honest: bool }
 
   // hub[tx]: "absent" | "queued" | "flushing" | "mempool" | "mined" | "dropped"
   var hub: str -> str
@@ -54,13 +58,13 @@ module divert {
   var obs: List[Obs]
 
   pure def submitMsg(t: str): Msg =
-    { kind: "submit", tx: t, nonce: -1, disp: "", height: 0, data: EMPTY, hubSaw: "" }
+    { kind: "submit", tx: t, nonce: -1, disp: "", height: 0, data: EMPTY, hubSaw: "", honest: true }
 
   pure def lookupMsg(t: str, n: int): Msg =
-    { kind: "lookup", tx: t, nonce: n, disp: "", height: 0, data: EMPTY, hubSaw: "" }
+    { kind: "lookup", tx: t, nonce: n, disp: "", height: 0, data: EMPTY, hubSaw: "", honest: true }
 
   pure def replyMsg(t: str, n: int, disp: str, h: int, d: str, saw: str): Msg =
-    { kind: "reply", tx: t, nonce: n, disp: disp, height: h, data: d, hubSaw: saw }
+    { kind: "reply", tx: t, nonce: n, disp: disp, height: h, data: d, hubSaw: saw, honest: true }
 
   // server.rs lookup: queue first, then the indexer.
   pure def hubReply(t: str, n: int, st: str, hides: bool): Msg =
@@ -72,13 +76,13 @@ module divert {
   // intercept.rs get_transaction: the reply arms, in order.
   pure def shimHandle(q: str, r: Msg, sentinelArm: bool): Obs =
     if (r.disp == "found" and sentinelArm and r.data == EMPTY and r.height == 0)
-      { tx: q, status: "pending", data: EMPTY, hubSaw: r.hubSaw }
+      { tx: q, status: "pending", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
     else if (r.disp == "found")
       // L4 guard: the bytes must be the queried transaction.
-      if (r.data == q) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw }
-      else { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw }
-    else if (r.disp == "notfound") { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw }
-    else { tx: q, status: "unavailable", data: EMPTY, hubSaw: r.hubSaw }
+      if (r.data == q) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw, honest: r.honest }
+      else { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
+    else if (r.disp == "notfound") { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
+    else { tx: q, status: "unavailable", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
 
   action init = all {
     hub' = TXS.mapBy(_ => "absent"),
@@ -177,7 +181,7 @@ module divert {
     net.contains(lookupMsg(t, n)),
     nondet d = TXS.union(Set(EMPTY)).oneOf()
     nondet h = Set(0, 1).oneOf()
-    net' = net.union(Set(replyMsg(t, n, "found", h, d, "lie"))),
+    net' = net.union(Set(replyMsg(t, n, "found", h, d, hub.get(t)).with("honest", false))),
     hub' = hub,
     unchangedExcept_net_hub,
   }
@@ -195,7 +199,7 @@ module divert {
   // 90 s lookup deadline.
   action shimTimeout(n: int): bool = all {
     waiters.keys().contains(n),
-    obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout" }),
+    obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
     net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused,
   }
@@ -225,29 +229,36 @@ module divert {
     }
   }
 
-  // ---- Safety: must hold for the current code ----
+  // ---- Shim claims: hold against any hub ----
 
   // L4: bytes served to the wallet are always the queried transaction.
   val guardHolds: bool = obs.foldl(true, (ok, o) => ok and (o.status != "tx" or o.data == o.tx))
+
+  // An honest queue hit reaches the wallet as pending (the ecb4641f7e bug).
+  val pendingVisible: bool = obs.foldl(true, (ok, o) =>
+    ok and (not(o.honest) or o.hubSaw != "queued" or o.status == "pending"))
+
+  val shimSafety: bool = guardHolds and pendingVisible
+
+  // ---- Hub claims: hold for an honest hub; attestation is what makes it one ----
 
   // A queued migration's bytes never leave the hub before publication.
   val noQueuedBytes: bool = net.forall(m =>
     not(m.kind == "reply" and m.hubSaw == "queued" and m.data != EMPTY))
 
-  // An honest queue hit reaches the wallet as pending (the ecb4641f7e bug).
-  val pendingVisible: bool = obs.foldl(true, (ok, o) =>
-    ok and (o.hubSaw != "queued" or o.status == "pending"))
-
   // The wallet sees a transaction's bytes only once it is published.
   val noEarlyBytes: bool = obs.foldl(true, (ok, o) =>
-    ok and (o.status != "tx" or o.hubSaw.in(Set("mempool", "mined", "lie"))))
+    ok and (o.status != "tx" or o.hubSaw.in(Set("mempool", "mined"))))
 
-  val safety: bool = guardHolds and noQueuedBytes and pendingVisible and noEarlyBytes
+  val safety: bool = shimSafety and noQueuedBytes and noEarlyBytes
 
   // ---- Known gaps: expected to fail; each counterexample documents one ----
 
   // Over Nym the wallet is told success even when the hub refuses.
   val noSilentRefusal: bool = told.intersect(refused) == Set()
+
+  // noQueuedBytes and noEarlyBytes also fail under a lying hub: a hub holding
+  // a queued migration can release its bytes early.
 
   // Pending only ever comes from a real queue hit. A lying hub can fake it.
   val pendingIsTrue: bool = obs.foldl(true, (ok, o) =>
