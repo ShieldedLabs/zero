@@ -653,7 +653,8 @@ PY
   # missing queue entry: UNAVAILABLE (14) is the hub being unreachable, which a
   # wallet needs told immediately, and INVALID_ARGUMENT (3) can never become
   # true by waiting. Only a 5 is ambiguous between "not queued" and "not queued
-  # YET", and only a 5 is retried.
+  # YET", and only a 5 is retried. A guard refusal is also a 5, identical on the
+  # wire by design, so it spends the budget too; the note below names it.
   _waited=0
   while :; do
     grpc_call GetTransaction "$_req2" "$SMOKE_LOOKUP_HARD_SECS"
@@ -681,7 +682,8 @@ PY
     if [ "$(header_value "$HDRS" grpc-status)" = 5 ]; then
       note "NOT_FOUND, still, after ${_waited}s of retries: the transaction is not in the"
       note "hub's queue. It was never diverted there, or a flush has already dropped it (it is"
-      note "consensus-invalid, so a flush always will)"
+      note "consensus-invalid, so a flush always will). The shim also answers NOT_FOUND when its txid"
+      note "guard refuses a hub reply; its log names that case (\"does not match the query\")"
     fi
     return
   fi
