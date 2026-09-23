@@ -660,8 +660,11 @@ PY
     [ "$CURL_RC" = 0 ] || break
     [ "$(header_value "$HDRS" grpc-status)" = 5 ] || break
     [ "$_waited" -lt "$SMOKE_DIVERT_SETTLE_SECS" ] || break
-    sleep "$DIVERT_RETRY_STEP_SECS"
-    _waited=$((_waited + DIVERT_RETRY_STEP_SECS))
+    # The last step is capped at what is left, so the budget is never overrun.
+    _step=$((SMOKE_DIVERT_SETTLE_SECS - _waited))
+    [ "$_step" -le "$DIVERT_RETRY_STEP_SECS" ] || _step=$DIVERT_RETRY_STEP_SECS
+    sleep "$_step"
+    _waited=$((_waited + _step))
   done
   _measured="submit ${_submit_secs}s, lookup ${SECS}s, $BYTES bytes"
   if [ "$_waited" != 0 ]; then
@@ -676,7 +679,7 @@ PY
     # The queue explanation belongs to NOT_FOUND alone. Printing it under an
     # UNAVAILABLE would send a deployer to look for a flush that never happened.
     if [ "$(header_value "$HDRS" grpc-status)" = 5 ]; then
-      note "NOT_FOUND, still, after ${SMOKE_DIVERT_SETTLE_SECS}s of retries: the transaction is not in the"
+      note "NOT_FOUND, still, after ${_waited}s of retries: the transaction is not in the"
       note "hub's queue. It was never diverted there, or a flush has already dropped it (it is"
       note "consensus-invalid, so a flush always will)"
     fi
