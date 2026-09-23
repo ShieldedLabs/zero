@@ -40,6 +40,23 @@ jobs:
       - name: Repository claim guards
         run: sh zeronym/guards.sh
 
+  # The Quint model of the shim <-> hub divert protocol. Simulation only, so it
+  # stays in the cheap tier.
+  spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # It runs code fetched at run time (npx, Quint's evaluator), so it gets a
+    # read-only token and a pinned checkout.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner image's Node is enough for Quint.
+      - name: Divert protocol model
+        run: sh zeronym/spec/check.sh
+
   tests:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
