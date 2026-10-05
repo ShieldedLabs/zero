@@ -15,10 +15,6 @@ scripts/wasm-check.sh                  # wasm32-unknown-unknown (browser)
 scripts/wasm-check.sh wasm32-wasip1    # WASI
 ```
 
-`zero/wasm-demo` is a browser demo built on all of this: key derivation and a
-real wallet database in a page, with no server. Start there for a feel of what
-works today.
-
 The scripts above only prove the crates *compile*. For proof that the wallet
 database also *runs* on the target — migrations applied, queries executed, `rarray` working —
 and for what proving costs, see `zero-wasm-smoke/`. For whether a threaded build
@@ -261,14 +257,14 @@ verified above or a direct consequence of something verified above.
    With this, **every crate in the workspace that a browser wallet needs builds
    for `wasm32-unknown-unknown`.** What is left is integration, not porting.
 4. **Pick and wire a VFS.** The in-memory half is done and proven twice:
-   `zero-wasm-smoke` runs the database under Node, and `zero/wasm-demo` runs it
+   `zero-wasm-smoke` runs the database under Node, and it has also run
    in Chrome — 71 migrations applied in 130 ms, accounts created and read back.
    The persistent half is harder than "register `sahpool`": the OPFS and
    IndexedDB VFSes are **not in the `sqlite-wasm-rs` version `rusqlite` depends
    on** (see [Storage](#storage)). Somebody has to supply one.
 5. ~~**Transport.**~~ Done and exercised against a live server.
-   `tonic-web-wasm-client` satisfies `sync::run`'s bounds, and `zero/wasm-demo`
-   talks to ChainSafe's public gRPC-Web proxy from Chrome: unary calls in 320 ms,
+   `tonic-web-wasm-client` satisfies `sync::run`'s bounds, and has been run against
+   ChainSafe's public gRPC-Web proxy from Chrome: unary calls in 320 ms,
    server-streaming in under a second. A server-side decision remains — the
    endpoint must speak gRPC-Web, so lightwalletd/Zaino needs a proxy or a
    `tonic-web` layer.
@@ -282,7 +278,7 @@ verified above or a direct consequence of something verified above.
    reading and rewriting a shard BLOB through a VFS backed by wasm linear memory.
    A browser wallet therefore cannot treat the first sync as one blocking call —
    it needs incremental ingestion across event-loop turns, resumability, and
-   probably threads. See `zero/wasm-demo/README.md`.
+   probably threads.
 6. ~~**Parameter delivery.**~~ Done, apart from choosing the cache. Real
    parameters load inside wasm: `zero-wasm-smoke` reads all 51 MiB from the host
    and builds a working `LocalTxProver`, in **382 ms** including SHA-256
