@@ -19,6 +19,10 @@ workspace.
 - The `tor` feature now requires Rust 1.89 or later, as `arti-client 0.43`
   declares that MSRV. Every other feature still builds on Rust 1.88.
 
+### Fixed
+- `data_api::chain::scan_cached_blocks` no longer hangs on `wasm32` targets built
+  without the `atomics` target feature.
+
 ## [0.24.0] - 2026-08-18
 
 ### Added

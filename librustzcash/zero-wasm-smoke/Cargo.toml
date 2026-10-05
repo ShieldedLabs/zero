@@ -39,5 +39,9 @@ zcash_protocol.workspace = true
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
 js-sys = "0.3"
+rand_chacha = "0.3"
+sapling.workspace = true
 secrecy = "0.8"
 wasm-bindgen-test = "0.3.54"
+zcash_note_encryption.workspace = true
+zcash_primitives.workspace = true

@@ -269,16 +269,16 @@ verified above or a direct consequence of something verified above.
    endpoint must speak gRPC-Web, so lightwalletd/Zaino needs a proxy or a
    `tonic-web` layer.
 
-   **But a full `sync::run` does not complete on wasm.** It reaches the scanning
-   phase and then runs at 99% CPU indefinitely — 68 minutes of Chrome renderer
-   CPU on a five-block range, and the same for three blocks or a hundred, so the
-   cost is fixed rather than per-block. Stack sampling puts nearly all of it in
-   wasm `memory.copy`, i.e. bulk memory movement inside SQLite. The fixed cost is
-   subtree-root ingestion: 1128 Sapling and 769 Orchard subtrees, each insert
-   reading and rewriting a shard BLOB through a VFS backed by wasm linear memory.
-   A browser wallet therefore cannot treat the first sync as one blocking call —
-   it needs incremental ingestion across event-loop turns, resumability, and
-   probably threads.
+   A full `sync::run` completes. It used to reach the scanning phase and then
+   spin forever: the batch decryptor queued its work with `rayon::spawn_fifo`,
+   and without threads rayon has no worker to run it, so `collect_results`
+   waited on a channel nothing would ever send to. `scan.rs` now runs the batch
+   inline on wasm without `atomics`, and `zero-wasm-smoke`'s
+   `scan_finds_a_received_note` guards it. Against mainnet under Node, single
+   threaded: 5 blocks in 3 s, 1,000 in 23 s, 10,000 in 172 s — about 58 blocks/s,
+   with subtree-root ingestion a fixed cost of a couple of seconds.
+   Each scan batch still blocks the thread it runs on, so a browser wallet
+   should sync from a Worker, not the page.
 6. ~~**Parameter delivery.**~~ Done, apart from choosing the cache. Real
    parameters load inside wasm: `zero-wasm-smoke` reads all 51 MiB from the host
    and builds a working `LocalTxProver`, in **382 ms** including SHA-256

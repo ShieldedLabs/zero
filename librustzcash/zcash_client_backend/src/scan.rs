@@ -200,6 +200,14 @@ pub(crate) trait Tasks<Item> {
     fn add_task(&self, item: Item) -> Self::Task;
     fn run_task(&self, item: Item) {
         let task = self.add_task(item);
+        // [zero] @claude Without threads, rayon's global pool has no worker of its own:
+        // a spawned job runs only when the current thread next enters rayon, and
+        // `collect_results` waits on the batch's channel instead, so the scan spins on
+        // that channel forever. Running the batch here is safe because the channel is
+        // unbounded, and it is what the pool would have done on this thread anyway.
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+        task.run();
+        #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
         rayon::spawn_fifo(|| task.run());
     }
 }

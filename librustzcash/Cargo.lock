@@ -7960,6 +7960,7 @@ dependencies = [
  "orchard",
  "rand_chacha 0.3.1",
  "rusqlite",
+ "sapling-crypto",
  "secrecy",
  "sha2 0.10.8",
  "sqlite-wasm-rs",
@@ -7969,6 +7970,8 @@ dependencies = [
  "wasm-bindgen-test",
  "zcash_client_backend",
  "zcash_client_sqlite",
+ "zcash_note_encryption",
+ "zcash_primitives",
  "zcash_proofs",
  "zcash_protocol",
 ]
