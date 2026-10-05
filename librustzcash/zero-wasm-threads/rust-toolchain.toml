@@ -1,0 +1,8 @@
+# [zero] @claude A threaded wasm build needs `std` rebuilt with atomics, which is
+# `-Z build-std`, which is nightly-only. Pin an exact nightly: atomics builds have broken
+# outright on a nightly bump before. This is the nightly `scripts/wasm-atomics-check.sh`
+# passes on.
+[toolchain]
+channel = "nightly-2026-01-26"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]

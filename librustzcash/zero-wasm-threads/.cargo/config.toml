@@ -1,0 +1,28 @@
+# [zero] @claude Shared memory for the rayon pool, and `std` rebuilt to match: a
+# non-atomics `std` cannot link into an atomics module.
+#
+# The `link-arg`s are not optional on current nightlies. `+atomics` alone yields atomic
+# instructions over an ordinary, unshared memory, and the first `Atomics.wait` then fails
+# at runtime with "not a shared typed array". wasm-bindgen's thread support also needs the
+# TLS symbols exported so it can initialise each worker's thread-local storage.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    "-C", "link-arg=--shared-memory",
+    "-C", "link-arg=--max-memory=4294967296",
+    "-C", "link-arg=--import-memory",
+    "-C", "link-arg=--export=__wasm_init_tls",
+    "-C", "link-arg=--export=__tls_size",
+    "-C", "link-arg=--export=__tls_align",
+    "-C", "link-arg=--export=__tls_base",
+    "--cfg", 'getrandom_backend="wasm_js"',
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+# `sqlite-wasm-rs` compiles SQLite from C with the `cc` crate, and wasm-ld refuses a shared
+# memory if any object lacks atomics. SQLite itself stays single-threaded
+# (`SQLITE_THREADSAFE=0`); it only has to be built for the same memory model.
+[env]
+CFLAGS_wasm32_unknown_unknown = "-matomics -mbulk-memory"
