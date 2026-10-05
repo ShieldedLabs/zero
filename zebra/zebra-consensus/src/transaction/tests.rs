@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, TimeZone, Utc};
 use color_eyre::eyre::Report;
-use futures::{FutureExt, TryFutureExt};
+use futures::{FutureExt, StreamExt, TryFutureExt};
 use halo2::pasta::{group::ff::PrimeField, pallas};
 use tokio::time::timeout;
 use tower::{buffer::Buffer, service_fn, ServiceExt};
@@ -43,7 +43,7 @@ use zebra_test::mock_service::MockService;
 
 use crate::{error::TransactionError, transaction::POLL_MEMPOOL_DELAY, BoxError};
 
-use super::{check, BlockRequest, BlockTxVerifier, MempoolRequest, MempoolTxVerifier};
+use super::{check, AsyncChecks, BlockRequest, BlockTxVerifier, MempoolRequest, MempoolTxVerifier};
 
 #[cfg(test)]
 mod prop;
@@ -3826,7 +3826,6 @@ async fn block_utxo_lookups_overlap() {
     .expect("the test must complete within the test timeout");
 }
 
-
 // Transparent script verification cache tests.
 //
 // The cache is process-global and keyed by transaction id, so every cache test
@@ -5544,4 +5543,29 @@ fn script_sig_args_expected_values() {
     let ms_kind = check::standard_script_kind(&ms_kind)
         .expect("1-of-1 multisig should be a standard script kind");
     assert_eq!(check::script_sig_args_expected(&ms_kind), Some(2));
+}
+
+/// The per-check timer wraps every check with its label, and a failing check still ends the
+/// set immediately, without waiting for checks that never complete.
+#[tokio::test]
+async fn async_checks_fail_fast_and_label_each_check() {
+    let _init_guard = zebra_test::init();
+
+    let mut checks = AsyncChecks::new();
+    checks.push("script", async { Ok(()) });
+    let (check_kind, elapsed, result) = checks.0.next().await.expect("one labelled check");
+    assert_eq!(check_kind, "script");
+    assert!(elapsed < test_timeout());
+    result.expect("the wrapped check passes its result through");
+
+    let mut checks = AsyncChecks::new();
+    checks.push("sapling", futures::future::pending());
+    checks.push("orchard", async {
+        Err(BoxError::from("orchard check failed"))
+    });
+    let error = timeout(test_timeout(), checks.check("block"))
+        .await
+        .expect("a failing check ends the set without waiting for the pending one")
+        .expect_err("the failing check's error is returned");
+    assert_eq!(error.to_string(), "orchard check failed");
 }

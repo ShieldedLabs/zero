@@ -354,7 +354,7 @@ where
             //
             // https://zips.z.cash/zip-0213#specification
 
-            // Metric label matching the mempool verifier's, so the two phases timed below can be
+            // Metric label matching the mempool verifier's, so the phases timed below can be
             // compared between block validation and mempool admission.
             let request_kind = "block";
 
@@ -377,6 +377,9 @@ where
 
             let (spent_utxos, spent_outputs) = spent_utxos_result?;
 
+            // Sighash and transaction id digests, bundle extraction and check construction.
+            let prepare_start = Instant::now();
+
             let cached_ffi_transaction =
                 Arc::new(CachedFfiTransaction::new(tx.clone(), Arc::new(spent_outputs), nu).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
 
@@ -389,14 +392,24 @@ where
                 cache_key,
                 script_verifier,
                 cached_ffi_transaction.clone()
-            )?;
+            );
+
+            metrics::histogram!(
+                "zebra.consensus.transaction.duration_seconds",
+                "phase" => "prepare",
+                "request" => request_kind
+            )
+            .record(prepare_start.elapsed().as_secs_f64());
+
+            let async_checks = async_checks?;
 
             tracing::trace!(?tx_id, "awaiting async checks...");
 
-            // Script, signature and proof verification. Paired with the UTXO fetch above, these
-            // two phases account for almost all of a transaction's verification time.
+            // Script, signature and proof verification. With the UTXO fetch and preparation
+            // above, these three phases account for almost all of a transaction's verification
+            // time.
             let checks_start = Instant::now();
-            let checks_result = async_checks.check().await;
+            let checks_result = async_checks.check(request_kind).await;
 
             metrics::histogram!(
                 "zebra.consensus.transaction.duration_seconds",
@@ -601,7 +614,7 @@ where
             //
             // https://zips.z.cash/zip-0213#specification
 
-            // Metric label matching the block verifier's, so the two phases timed below can be
+            // Metric label matching the block verifier's, so the phases timed below can be
             // compared between block validation and mempool admission.
             let request_kind = "mempool";
 
@@ -639,6 +652,9 @@ where
             let unpaid_actions = transaction::zip317::unpaid_actions(&unmined_tx, miner_fee);
             transaction::zip317::mempool_checks(unpaid_actions, miner_fee, unmined_tx.size)?;
 
+            // Sighash and transaction id digests, bundle extraction and check construction.
+            let prepare_start = Instant::now();
+
             let cached_ffi_transaction =
                 Arc::new(CachedFfiTransaction::new(tx.clone(), Arc::new(spent_outputs), nu).map_err(|_| TransactionError::UnsupportedByNetworkUpgrade(tx.version(), nu))?);
 
@@ -655,13 +671,22 @@ where
             };
 
             // Select version-specific async verification pipeline
-            let mut async_checks = dispatch_version_verification(
+            let async_checks = dispatch_version_verification(
                 tx.as_ref(),
                 nu,
                 cache_key,
                 script_verifier,
                 cached_ffi_transaction.clone()
-            )?;
+            );
+
+            metrics::histogram!(
+                "zebra.consensus.transaction.duration_seconds",
+                "phase" => "prepare",
+                "request" => request_kind
+            )
+            .record(prepare_start.elapsed().as_secs_f64());
+
+            let mut async_checks = async_checks?;
 
             let check_anchors_and_revealed_nullifiers_query = state
                 .clone()
@@ -676,14 +701,15 @@ where
                     Ok(())
                 });
 
-            async_checks.push(check_anchors_and_revealed_nullifiers_query);
+            async_checks.push("state", check_anchors_and_revealed_nullifiers_query);
 
             tracing::trace!(?tx_id, "awaiting async checks...");
 
-            // Script, signature and proof verification. Paired with the UTXO fetch above, these
-            // two phases account for almost all of a transaction's verification time.
+            // Script, signature and proof verification. With the UTXO fetch and preparation
+            // above, these three phases account for almost all of a transaction's verification
+            // time.
             let checks_start = Instant::now();
-            let checks_result = async_checks.check().await;
+            let checks_result = async_checks.check(request_kind).await;
 
             metrics::histogram!(
                 "zebra.consensus.transaction.duration_seconds",
@@ -1348,7 +1374,7 @@ fn make_transparent_input_and_output_checks(
         Some(key) => {
             let checks = futures::future::try_join_all(script_checks());
             let mut checks_then_insert = AsyncChecks::new();
-            checks_then_insert.push(async move {
+            checks_then_insert.push("script", async move {
                 checks.await?;
                 script_cache::verified_scripts().insert(key);
                 Ok(())
@@ -1356,7 +1382,12 @@ fn make_transparent_input_and_output_checks(
             checks_then_insert
         }
         // Uncacheable (pre-v5, or spending unmined mempool outputs).
-        None => script_checks().collect(),
+        None => {
+            let checks = futures::future::try_join_all(script_checks());
+            let mut script_checks = AsyncChecks::new();
+            script_checks.push("script", async move { checks.await.map(|_| ()) });
+            script_checks
+        }
     }
 }
 
@@ -1381,9 +1412,12 @@ fn verify_sprout_shielded_data(
             // resulting future to our collection of async
             // checks that (at a minimum) must pass for the
             // transaction to verify.
-            checks.push(primitives::groth16::JOINSPLIT_VERIFIER.oneshot(
-                primitives::groth16::Item::from_joinsplit(joinsplit, &joinsplit_data.pub_key)?,
-            ));
+            checks.push(
+                "sprout_proof",
+                primitives::groth16::JOINSPLIT_VERIFIER.oneshot(
+                    primitives::groth16::Item::from_joinsplit(joinsplit, &joinsplit_data.pub_key)?,
+                ),
+            );
         }
 
         // # Consensus
@@ -1419,7 +1453,7 @@ fn verify_sprout_shielded_data(
         let ed25519_verifier = primitives::ed25519::VERIFIER.clone();
         let ed25519_item = (joinsplit_data.pub_key, joinsplit_data.sig, shielded_sighash).into();
 
-        checks.push(ed25519_verifier.oneshot(ed25519_item));
+        checks.push("sprout_sig", ed25519_verifier.oneshot(ed25519_item));
     }
 
     Ok(checks)
@@ -1481,6 +1515,7 @@ fn verify_sapling_bundle(
     // https://zips.z.cash/protocol/protocol.pdf#txnconsensus
     if let Some(bundle) = bundle {
         async_checks.push(
+            "sapling",
             primitives::sapling::VERIFIER
                 .clone()
                 .oneshot(primitives::sapling::Item::new(bundle, *sighash)),
@@ -1549,6 +1584,7 @@ fn queue_orchard_bundle(
 
     if let Some(bundle) = bundle {
         async_checks.push(
+            "orchard",
             select_verifier()
                 .clone()
                 .oneshot(primitives::halo2::Item::new(bundle, *sighash)),
@@ -1574,7 +1610,11 @@ fn miner_fee(
 /// A set of unordered asynchronous checks that should succeed.
 ///
 /// A wrapper around [`FuturesUnordered`] with some auxiliary methods.
-struct AsyncChecks(FuturesUnordered<Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>>);
+struct AsyncChecks(
+    FuturesUnordered<
+        Pin<Box<dyn Future<Output = (&'static str, Duration, Result<(), BoxError>)> + Send>>,
+    >,
+);
 
 impl AsyncChecks {
     /// Create an empty set of unordered asynchronous checks.
@@ -1582,9 +1622,20 @@ impl AsyncChecks {
         AsyncChecks(FuturesUnordered::new())
     }
 
-    /// Push a check into the set.
-    pub fn push(&mut self, check: impl Future<Output = Result<(), BoxError>> + Send + 'static) {
-        self.0.push(check.boxed());
+    /// Push a check into the set, labelled `check_kind` for the per-check timer.
+    pub fn push(
+        &mut self,
+        check_kind: &'static str,
+        check: impl Future<Output = Result<(), BoxError>> + Send + 'static,
+    ) {
+        self.0.push(
+            async move {
+                let start = Instant::now();
+                let result = check.await;
+                (check_kind, start.elapsed(), result)
+            }
+            .boxed(),
+        );
     }
 
     /// Push a set of checks into the set.
@@ -1599,26 +1650,24 @@ impl AsyncChecks {
     ///
     /// If any of the checks fail, this method immediately returns the error and cancels all other
     /// checks by dropping them.
-    async fn check(mut self) -> Result<(), BoxError> {
+    async fn check(mut self, request_kind: &'static str) -> Result<(), BoxError> {
         // Wait for all asynchronous checks to complete
         // successfully, or fail verification if they error.
-        while let Some(check) = self.0.next().await {
-            tracing::trace!(?check, remaining = self.0.len());
+        while let Some((check_kind, elapsed, check)) = self.0.next().await {
+            // [zero] The checks run concurrently, so each sample is one check's wall time from
+            // its first poll, including any wait for a shared batch verifier or the script
+            // thread pool. The kinds overlap; they do not add up to the `checks` phase.
+            metrics::histogram!(
+                "zebra.consensus.transaction.check_duration_seconds",
+                "check" => check_kind,
+                "request" => request_kind
+            )
+            .record(elapsed.as_secs_f64());
+
+            tracing::trace!(check_kind, ?check, remaining = self.0.len());
             check?;
         }
 
         Ok(())
-    }
-}
-
-impl<F> FromIterator<F> for AsyncChecks
-where
-    F: Future<Output = Result<(), BoxError>> + Send + 'static,
-{
-    fn from_iter<I>(iterator: I) -> Self
-    where
-        I: IntoIterator<Item = F>,
-    {
-        AsyncChecks(iterator.into_iter().map(FutureExt::boxed).collect())
     }
 }

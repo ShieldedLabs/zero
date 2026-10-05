@@ -117,6 +117,25 @@ A commit may override this in its body if a particular change should yield to
 upstream. To recover the rationale during a conflict, grep the change:
 `git log --grep='^\[zero\]' -- <conflicted-path>`.
 
+## Comment policy
+
+Comments in vendored code are part of the `[zero]` delta: upstream maintainers,
+reviewers, and generated docs all read them. Keep them minimal.
+
+- Say only what the code cannot: the why, the upstream reference, the
+  invariant. Never narrate the next line, and never restate the commit message
+  or a review thread in the code.
+- No agent-isms: no `// @claude` tags, no review-round references such as
+  `(review H3)`, no "Note that", "Importantly", "This ensures". A comment must
+  read as if the upstream maintainer wrote it.
+- Default to a plain line comment (`//` in Rust, C++, and Go). Doc comments
+  (`///`, `//!`, `/** */`) are API documentation and render in generated docs,
+  so they never carry vendor notes.
+- Mark a Zero divergence with one `// [zero]` line at the top of the block, as
+  in `zebra/zebra-state/src/service/check/difficulty.rs`. The comment carries
+  one line of why; the commit body carries the rest (see "Commit-message
+  convention").
+
 ## Pulling upstream (downstream flow)
 
 - **Don't** track moving branches forever. Pin to upstream **release tags** when
@@ -170,6 +189,28 @@ refuses to release unless a non-empty section for the version exists, and
 embeds it in the GitHub release body. Stage entries under `## Unreleased` as
 work lands; cutting a release means retitling that section to
 `## vN - YYYY-MM-DD`, pushing, then dispatching the workflow.
+
+## Pre-release checklist
+
+Both node forks halt on mainnet at a hardcoded height that only moves when
+someone edits it: v20 through v27 all shipped v20's zcashd value and shared one
+halt block (3,471,448, ~2026-09-04), noticed two days ahead. Before retitling
+the changelog:
+
+1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to
+   the current mainnet height plus a ship-day buffer (about 1,150 blocks per
+   day). The halt is 7 weeks of blocks (56,448) later; put that height and its
+   approximate date in the changelog entry, as v28 does. The same constant
+   seeds the default `signrawtransaction` branch id, so never set it past a
+   pending upgrade's activation height.
+2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER`
+   days of blocks in `zebra/zebrad/src/components/sync/end_of_support.rs`.
+   Zero carries that height as a `[zero]` line pinned to the newest upstream
+   zebra release's value: re-set it (or pull that tag), then verify the
+   resulting halt is comfortably after the next planned release.
+3. `release.yml` refuses to dispatch when either halt is under 4 weeks past
+   the mainnet tip (estimated from a fixed block anchor and the wall clock,
+   no network access). That is a floor, not a substitute for steps 1 and 2.
 
 ## Upstreaming (upstream flow)
 

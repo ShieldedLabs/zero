@@ -7,8 +7,8 @@
 #   group B: spend-poison (signer + recovery wallet lifecycles)
 #   group C: reorg (mutates its stack's chain; isolated here by construction)
 #
-# Local iteration tool: CI keeps the serial run.sh (2-core runners cannot
-# host three stacks). Usage:
+# Local iteration tool; CI runs the same three groups as separate jobs
+# (small runners cannot host three stacks in one job). Usage:
 #
 #   qa/regtest-harness/run-parallel.sh [--build]
 #
