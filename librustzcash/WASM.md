@@ -160,18 +160,31 @@ README suggests. It is **not thread-safe** (SQLite is compiled
 supports multiple connections**, so all database access stays on one thread even
 if trial decryption is parallelised.
 
-More importantly: **as published, `sqlite-wasm-rs` 0.5.5 ships only the in-memory
-VFS.** The `sahpool` (OPFS) and `relaxed-idb` (IndexedDB) backends its README
-describes were split out after 0.4 — 0.4.x depended on `indexed_db_futures` and
-`web-sys`, 0.5.5 depends only on `js-sys`, `rsqlite-vfs` and `wasm-bindgen`, and
-`rsqlite-vfs` 0.1.1 contains `memvfs` and nothing else. `rusqlite` 0.39 pulls
-`sqlite-wasm-rs` 0.5, so a wallet built through `rusqlite` today gets a database
-that does not survive a page reload.
+`sqlite-wasm-rs` 0.5.5 itself ships only the in-memory VFS. The persistent
+backends live in a separate crate, [`sqlite-wasm-vfs`], and **0.2 is the line that
+fits this workspace**: it is built on `rsqlite-vfs` 0.1, the same as
+`sqlite-wasm-rs` 0.5 (0.3 moves to `sqlite-wasm-rs` 0.6, which `rusqlite` 0.39 does
+not use). It provides two:
 
-That makes persistence a real piece of work rather than a VFS registration call.
-The options are to vendor or revive a persistent VFS against `rsqlite-vfs`'s
-traits, to pin the older `sqlite-wasm-rs` line and give up `rusqlite`'s built-in
-wasm support, or to wait for the backends to reappear upstream.
+- `relaxed-idb` (IndexedDB). Works on the page's main thread. The database is
+  preloaded into memory when the VFS is installed, SQLite reads and writes that
+  memory, and committed pages are written to IndexedDB in the background. It
+  rejects any `synchronous` setting other than `OFF`, which `zcash_client_sqlite`
+  never sets.
+- `sahpool` (OPFS). Faster storage, but only usable from a dedicated Worker.
+
+Install either as the default VFS and `WalletDb::for_path` works unchanged — no
+`from_connection`, no manual `rarray` load. `zero-wasm-smoke`'s
+`wallet_persists_to_indexeddb` checks this in headless Chrome, reading IndexedDB
+directly to confirm the pages landed. The persistence has also been checked
+through a full page reload: an account added before the reload is there, with
+the same address, after it.
+
+The one cost to know about: a commit is durable once its background write to
+IndexedDB finishes, slightly after the SQLite transaction returns. A tab closed
+in that window loses that last commit, never a partial one.
+
+[`sqlite-wasm-vfs`]: https://crates.io/crates/sqlite-wasm-vfs
 
 Do **not** plan around `zcash_client_memory`. It was merged into the workspace in
 August 2025, then extracted to `zcash/zcash_client_memory` and removed from
@@ -256,12 +269,11 @@ verified above or a direct consequence of something verified above.
    Done, via `zcash_client_sqlite/src/sql.rs`. `bundled` is now target-conditional.
    With this, **every crate in the workspace that a browser wallet needs builds
    for `wasm32-unknown-unknown`.** What is left is integration, not porting.
-4. **Pick and wire a VFS.** The in-memory half is done and proven twice:
-   `zero-wasm-smoke` runs the database under Node, and it has also run
-   in Chrome — 71 migrations applied in 130 ms, accounts created and read back.
-   The persistent half is harder than "register `sahpool`": the OPFS and
-   IndexedDB VFSes are **not in the `sqlite-wasm-rs` version `rusqlite` depends
-   on** (see [Storage](#storage)). Somebody has to supply one.
+4. ~~**Pick and wire a VFS.**~~ Done: `sqlite-wasm-vfs` 0.2's `relaxed-idb`,
+   installed as the default VFS, persists the wallet across reloads with
+   `WalletDb::for_path` unchanged (see [Storage](#storage)). The open choice is
+   `relaxed-idb` on the page versus `sahpool` in a Worker; a wallet that syncs
+   from a Worker anyway (item 5) should take `sahpool`.
 5. ~~**Transport.**~~ Done and exercised against a live server.
    `tonic-web-wasm-client` satisfies `sync::run`'s bounds, and has been run against
    ChainSafe's public gRPC-Web proxy from Chrome: unary calls in 320 ms,

@@ -22,6 +22,9 @@ rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
 secrecy = "0.8"
 sha2 = "0.10"
 sqlite-wasm-rs = "0.5"
+# 0.2 is the last line built on `rsqlite-vfs` 0.1, which is what `sqlite-wasm-rs` 0.5 (and
+# so `rusqlite` 0.39) uses; 0.3 moves to `sqlite-wasm-rs` 0.6.
+sqlite-wasm-vfs = "0.2"
 tonic-web-wasm-client = "0.9"
 uuid = { version = "1", features = ["js"] }
 wasm-bindgen = "0.2"
@@ -42,6 +45,8 @@ js-sys = "0.3"
 rand_chacha = "0.3"
 sapling.workspace = true
 secrecy = "0.8"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3.54"
 zcash_note_encryption.workspace = true
 zcash_primitives.workspace = true

@@ -16,7 +16,12 @@ It also pins down the transport: `sync_once` names `zcash_client_backend::sync::
 `sync::run`'s bounds stop being satisfiable on wasm — the `Send + 'static` requirements on
 the transport's response body are the fragile ones — this crate stops compiling. No sync is
 run: that needs a gRPC-Web endpoint, and reaching for a public one would make this a live
-network dependency rather than a test.
+network dependency rather than a test. The scanning that a sync drives is covered offline
+instead: `tests/scan.rs` scans a cached block holding a note to the wallet.
+
+Persistence is covered by `tests/persistence.rs`, which opens the wallet through
+`WalletDb::for_path` over the `relaxed-idb` VFS from `sqlite-wasm-vfs` and checks that the
+pages reach IndexedDB.
 
 This crate exercises the path a browser wallet actually takes:
 
@@ -53,10 +58,14 @@ rather than skipping quietly.
 The `RUSTFLAGS` is not optional: `getrandom` 0.3 has no default backend for OS-less wasm,
 and without it the build fails in a dependency rather than here.
 
-Node is enough for the in-memory VFS, which is what these tests use. The `sahpool`/OPFS
-VFS a real wallet wants is browser-only and needs a dedicated Worker, so it cannot be
-covered here; `wasm-pack test --headless --firefox` would be the place to add that once a
-browser driver is available in CI.
+Node is enough for the in-memory VFS, which is what most of these tests use.
+`tests/persistence.rs` needs IndexedDB, so it runs in a browser and Node skips it:
+
+```sh
+RUSTFLAGS='--cfg getrandom_backend="wasm_js"' wasm-pack test --headless --chrome -- --test persistence
+```
+
+wasm-pack fetches a chromedriver matching the installed Chrome on first use.
 
 `wasm-bindgen-test` is pinned at `0.3.54` or newer on purpose. With an older one the
 tests compile, the `__wbgt_*` symbols are present in the `.wasm`, and the runner reports
