@@ -257,9 +257,10 @@ module divert {
   }
 
   // nym.rs: a reply for an unknown nonce is dropped; a known one resolves the
-  // waiter once.
+  // waiter once. The message has to be one that was actually queued.
   action shimDeliver(r: Msg): bool = all {
     r.kind == "reply",
+    net.contains(r),
     waiters.keys().contains(r.nonce),
     obs' = obs.append(shimHandle(waiters.get(r.nonce), r, SENTINEL_ARM)),
     waiters' = waiters.keys().exclude(Set(r.nonce)).mapBy(k => waiters.get(k)),
@@ -272,6 +273,25 @@ module divert {
     obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true, disp: "" }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
     net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, chain' = chain,
+  }
+
+  // A run injects a reply no hub action produces: an L4 mismatch, the sentinel
+  // image alone, or a dishonest not-found. Not part of `step`.
+  action stageReply(r: Msg): bool = all {
+    r.kind == "reply",
+    net' = net.union(Set(r)),
+    hub' = hub,
+    unchangedExcept_net_hub,
+  }
+
+  // Take the reply an action queued for this nonce, not one the run wrote down.
+  action deliverReply(n: int): bool = all {
+    nondet r = net.oneOf()
+    all {
+      r.kind == "reply",
+      r.nonce == n,
+      shimDeliver(r),
+    },
   }
 
   action lose(m: Msg): bool = all {
@@ -366,6 +386,7 @@ module current {
       .then(walletSubmit("a"))
       .then(hubAdmit("a"))
       .then(walletLookup("a"))
+      .then(stageReply(replyMsg("a", 0, "notfound", 0, EMPTY, "queued").with("honest", false)))
       .then(shimDeliver(replyMsg("a", 0, "notfound", 0, EMPTY, "queued").with("honest", false)))
       .expect(obs[0].disp == "notfound" and obs[0].status == "notfound" and not(queuedNotSuppressed))
 }
@@ -381,6 +402,7 @@ module honest {
   run mismatchedLookupRefusedTest =
     init
       .then(walletLookup("a"))
+      .then(stageReply(replyMsg("a", 0, "found", 1, "b", "mined")))
       .then(shimDeliver(replyMsg("a", 0, "found", 1, "b", "mined")))
       .expect(obs[0].status == "notfound")
 
@@ -388,6 +410,7 @@ module honest {
   run sentinelLookupPendingTest =
     init
       .then(walletLookup("a"))
+      .then(stageReply(replyMsg("a", 0, "found", 0, EMPTY, "queued")))
       .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "queued")))
       .expect(obs[0].status == "pending")
 
@@ -398,7 +421,7 @@ module honest {
       .then(hubAdmit("a"))
       .then(walletLookup("a"))
       .then(hubAnswer(0, "a"))
-      .then(shimDeliver(hubReply("a", 0, "queued", true)))
+      .then(deliverReply(0))
       .expect(not(parseable.get("a")) and hub.get("a") == "queued" and obs[0].status == "notfound" and obs[0].hubSaw == "queued")
 
   run reorderedReplyRegressesTest =
@@ -411,9 +434,9 @@ module honest {
       .then(markMempool("a"))
       .then(walletLookup("a"))
       .then(hubAnswer(1, "a"))
-      .then(shimDeliver(hubReply("a", 1, "mempool", true)))
-      .then(shimDeliver(hubReply("a", 0, "queued", true)))
-      .expect(not(statusNeverRegresses))
+      .then(deliverReply(1))
+      .then(deliverReply(0))
+      .expect(obs[0].status == "tx" and obs[1].status == "pending" and not(statusNeverRegresses))
 
   run resendAfterPublishRegressesTest =
     init
@@ -423,12 +446,12 @@ module honest {
       .then(markMempool("a"))
       .then(walletLookup("a"))
       .then(hubAnswer(0, "a"))
-      .then(shimDeliver(hubReply("a", 0, "mempool", true)))
+      .then(deliverReply(0))
       .then(hubAdmit("a"))
       .then(walletLookup("a"))
       .then(hubAnswer(1, "a"))
-      .then(shimDeliver(hubReply("a", 1, "queued", true)))
-      .expect(not(statusNeverRegresses))
+      .then(deliverReply(1))
+      .expect(obs[0].status == "tx" and obs[1].status == "pending" and not(statusNeverRegresses))
 }
 
 module before_ecb4641 {
@@ -459,6 +482,6 @@ module badIndexer {
     init
       .then(walletLookup("a"))
       .then(indexerZero(0, "a"))
-      .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "absent")))
+      .then(deliverReply(0))
       .expect(obs[0].status == "pending" and obs[0].hubSaw == "absent" and obs[0].honest)
 }
