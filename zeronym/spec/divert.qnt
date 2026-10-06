@@ -55,7 +55,10 @@ module divert {
   type Obs = { tx: str, status: str, data: str, hubSaw: str, honest: bool, disp: str }
 
   // hub[tx]: "absent" | "queued" | "flushing" | "mempool" | "mined" | "dropped"
+  // chain[tx]: what a broadcast left on the indexer. "none" until the first
+  // acceptance. Admit and a dropped queue copy do not clear it.
   var hub: str -> str
+  var chain: str -> str
   var net: Set[Msg]
   var waiters: int -> str // shim: lookup nonce -> queried tx
   var nextNonce: int
@@ -78,11 +81,12 @@ module divert {
   def queueHit(st: str, t: str): bool =
     st == "queued" and TXS.exists(e => parseable.get(e) and e == t)
 
-  // server.rs lookup: queue first, then the indexer.
+  // server.rs lookup: queue first, then the indexer. The indexer image survives
+  // a later queue copy being admitted or dropped.
   def hubReply(t: str, n: int, st: str, hides: bool): Msg =
     if (queueHit(st, t)) replyMsg(t, n, "found", 0, if (hides) EMPTY else t, st)
-    else if (st == "mempool") replyMsg(t, n, "found", 0, t, st)
-    else if (st == "mined") replyMsg(t, n, "found", 1, t, st)
+    else if (chain.get(t) == "mempool") replyMsg(t, n, "found", 0, t, "mempool")
+    else if (chain.get(t) == "mined") replyMsg(t, n, "found", 1, t, "mined")
     else replyMsg(t, n, "notfound", 0, EMPTY, st) // absent, flushing, dropped, or queued with no txid
 
   // intercept.rs get_transaction: the reply arms, in order.
@@ -106,11 +110,12 @@ module divert {
     refused' = Set(),
     obs' = List(),
     parseable' = TXS.mapBy(_ => true),
+    chain' = TXS.mapBy(_ => "none"),
   }
 
   action unchangedExcept_net_hub = all {
     waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
-    parseable' = parseable,
+    parseable' = parseable, chain' = chain,
   }
 
   // Nym submit is dispatch-only: the wallet hears success once the frame is
@@ -119,7 +124,7 @@ module divert {
     net' = net.union(Set(submitMsg(t))),
     told' = told.union(Set(t)),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
-    parseable' = parseable,
+    parseable' = parseable, chain' = chain,
   }
 
   // The body does not deserialize. It is still submitted; admit holds the bytes
@@ -129,6 +134,7 @@ module divert {
     told' = told.union(Set(t)),
     parseable' = parseable.set(t, false),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
+    chain' = chain,
   }
 
   // A resend of the same bytes is admitted again while the tx is published,
@@ -149,7 +155,7 @@ module divert {
     net.contains(submitMsg(t)),
     hub.get(t).in(Set("absent", "dropped")),
     refused' = refused.union(Set(t)),
-    hub' = hub, net' = net, parseable' = parseable,
+    hub' = hub, net' = net, parseable' = parseable, chain' = chain,
     waiters' = waiters, nextNonce' = nextNonce, told' = told, obs' = obs,
   }
 
@@ -166,23 +172,38 @@ module divert {
     hub.get(t) == "flushing",
     hub' = hub.set(t, "mempool"),
     net' = net,
-    unchangedExcept_net_hub,
+    chain' = chain.set(t, "mempool"),
+    waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
+    parseable' = parseable,
   }
 
+  // A published tx stays on the indexer. A later mempool acceptance must not
+  // downgrade a mined one.
+  pure def chainAfter(prev: str, outcome: str): str =
+    if (outcome == "mempool" and prev != "mined") "mempool" else prev
+
   // broadcast_batch verdicts: published, rejected, or retryable (requeued).
+  // Only an acceptance updates the indexer. A rejection or a requeue leaves
+  // whatever was already broadcast.
   action flushOutcome(t: str): bool = all {
     hub.get(t) == "flushing",
     nondet outcome = Set("mempool", "dropped", "queued").oneOf()
-    hub' = hub.set(t, outcome),
-    net' = net,
-    unchangedExcept_net_hub,
+    all {
+      hub' = hub.set(t, outcome),
+      net' = net,
+      chain' = chain.set(t, chainAfter(chain.get(t), outcome)),
+      waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
+      parseable' = parseable,
+    },
   }
 
   action mine(t: str): bool = all {
     hub.get(t) == "mempool",
     hub' = hub.set(t, "mined"),
     net' = net,
-    unchangedExcept_net_hub,
+    chain' = chain.set(t, "mined"),
+    waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
+    parseable' = parseable,
   }
 
   action walletLookup(t: str): bool = all {
@@ -190,7 +211,7 @@ module divert {
     net' = net.union(Set(lookupMsg(t, nextNonce))),
     waiters' = waiters.put(nextNonce, t),
     nextNonce' = nextNonce + 1,
-    hub' = hub, told' = told, refused' = refused, obs' = obs, parseable' = parseable,
+    hub' = hub, told' = told, refused' = refused, obs' = obs, parseable' = parseable, chain' = chain,
   }
 
   action hubAnswer(n: int, t: str): bool = all {
@@ -242,7 +263,7 @@ module divert {
     waiters.keys().contains(r.nonce),
     obs' = obs.append(shimHandle(waiters.get(r.nonce), r, SENTINEL_ARM)),
     waiters' = waiters.keys().exclude(Set(r.nonce)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, chain' = chain,
   }
 
   // 90 s lookup deadline.
@@ -250,7 +271,7 @@ module divert {
     waiters.keys().contains(n),
     obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true, disp: "" }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, chain' = chain,
   }
 
   action lose(m: Msg): bool = all {
