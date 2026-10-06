@@ -85,18 +85,20 @@ module divert {
   // a later queue copy being admitted or dropped.
   def hubReply(t: str, n: int, st: str, hides: bool): Msg =
     if (queueHit(st, t)) replyMsg(t, n, "found", 0, if (hides) EMPTY else t, st)
-    else if (chain.get(t) == "mempool") replyMsg(t, n, "found", 0, t, "mempool")
-    else if (chain.get(t) == "mined") replyMsg(t, n, "found", 1, t, "mined")
-    else replyMsg(t, n, "notfound", 0, EMPTY, st) // absent, flushing, dropped, or queued with no txid
+    else if (chain.get(t) == "mempool" and parseable.get(t)) replyMsg(t, n, "found", 0, t, "mempool")
+    else if (chain.get(t) == "mined" and parseable.get(t)) replyMsg(t, n, "found", 1, t, "mined")
+    else replyMsg(t, n, "notfound", 0, EMPTY, st) // absent, flushing, dropped, queued with no txid, or an image of one
 
   // intercept.rs get_transaction: the reply arms, in order.
-  pure def shimHandle(q: str, r: Msg, sentinelArm: bool): Obs =
+  // lookup_is_for_query rejects bytes that do not deserialize, so a found body
+  // is the queried tx only when it has a txid.
+  def shimHandle(q: str, r: Msg, sentinelArm: bool): Obs =
     if (r.disp == "found" and sentinelArm and r.data == EMPTY and r.height == 0)
       { tx: q, status: "pending", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
     else if (r.disp == "found")
       // L4 guard: the bytes must be the queried transaction. Status becomes
       // not-found; disp stays found, so a mismatch is not a not-found reply.
-      if (r.data == q) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
+      if (r.data == q and parseable.get(q)) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
       else { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
     else if (r.disp == "notfound") { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
     else { tx: q, status: "unavailable", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
@@ -433,6 +435,27 @@ module honest {
       .then(hubError(0, "a"))
       .then(deliverReply(0))
       .expect(hub.get("a") == "queued" and obs[0].status == "unavailable" and obs[0].hubSaw == "queued")
+
+  // A found body that does not deserialize is not the queried transaction.
+  run unparseableFoundRefusedTest =
+    init
+      .then(submitUnparseable("a"))
+      .then(walletLookup("a"))
+      .then(stageReply(replyMsg("a", 0, "found", 1, "a", "mined")))
+      .then(shimDeliver(replyMsg("a", 0, "found", 1, "a", "mined")))
+      .expect(not(parseable.get("a")) and obs[0].status == "notfound" and obs[0].disp == "found")
+
+  // The mempool image is only returned for a body that has a txid.
+  run unparseableMempoolMissesTest =
+    init
+      .then(submitUnparseable("a"))
+      .then(hubAdmit("a"))
+      .then(flushStart)
+      .then(markMempool("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(0, "a"))
+      .then(deliverReply(0))
+      .expect(chain.get("a") == "mempool" and obs[0].status == "notfound" and obs[0].disp == "notfound")
 
   run reorderedReplyRegressesTest =
     init
