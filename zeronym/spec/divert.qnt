@@ -19,6 +19,7 @@
 //   quint run --main=before_45e408f --invariant=noQueuedBytes ...        fails: the byte leak
 //   quint run --main=current --invariant=noSilentRefusal ...             fails: known gap
 //   quint run --main=current --invariant=pendingIsTrue ...               fails: known gap (lying hub)
+//   quint run --main=current --invariant=queuedNotSuppressed ...         fails: hostile not-found
 //   quint run --main=badIndexer --invariant=pendingIsTrue ...            fails: zero RawTransaction
 //   quint run --main=honest --invariant=pendingMonotone ...              fails: known gap (flush window)
 // Simulation samples random traces; `quint verify` (Apalache) checks every
@@ -27,7 +28,7 @@ module divert {
   // Toggles that reproduce fixed bugs.
   const SENTINEL_ARM: bool     // ecb4641f7e: shim relays found/height 0/empty ahead of the L4 guard
   const HUB_HIDES_QUEUED: bool // 45e408f0ff: hub answers a queue hit with no bytes
-  const HONEST_HUB: bool       // false lets the hub answer lookups with anything
+  const HONEST_HUB: bool       // false lets the hub answer found, notfound, or error
   const CONFORMING_INDEXER: bool // false lets a missed lookup return a zero RawTransaction
   const TXS: Set[str]
   const MAX_NONCE: int
@@ -190,13 +191,15 @@ module divert {
     unchangedExcept_net_hub,
   }
 
-  // A buggy or hostile hub may answer any lookup with anything.
+  // A hostile hub may answer a lookup with found, notfound, or error.
+  // Height is 0 or 1. The body is empty or one of the modelled tx ids.
   action hubLie(n: int, t: str): bool = all {
     not(HONEST_HUB),
     net.contains(lookupMsg(t, n)),
+    nondet disp = Set("found", "notfound", "error").oneOf()
     nondet d = TXS.union(Set(EMPTY)).oneOf()
     nondet h = Set(0, 1).oneOf()
-    net' = net.union(Set(replyMsg(t, n, "found", h, d, hub.get(t)).with("honest", false))),
+    net' = net.union(Set(replyMsg(t, n, disp, h, d, hub.get(t)).with("honest", false))),
     hub' = hub,
     unchangedExcept_net_hub,
   }
@@ -276,6 +279,10 @@ module divert {
   val pendingIsTrue: bool = obs.foldl(true, (ok, o) =>
     ok and (o.status != "pending" or o.hubSaw == "queued"))
 
+  // A hostile hub can answer not-found for a migration it has queued.
+  val queuedNotSuppressed: bool = obs.foldl(true, (ok, o) =>
+    ok and not(o.hubSaw == "queued" and o.status == "notfound" and not(o.honest)))
+
   // Once pending, a tx reads as not-found only if the hub dropped it. The
   // flush window (server.rs lookup note) breaks this.
   val pendingMonotone: bool =
@@ -290,6 +297,14 @@ module current {
     CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
+
+  run hostileHubHidesQueueHitTest =
+    init
+      .then(walletSubmit("a"))
+      .then(hubAdmit("a"))
+      .then(walletLookup("a"))
+      .then(shimDeliver(replyMsg("a", 0, "notfound", 0, EMPTY, "queued").with("honest", false)))
+      .expect(obs[0].status == "notfound" and not(queuedNotSuppressed))
 }
 
 module honest {

@@ -43,7 +43,7 @@ check() {
 $QUINT typecheck divert.qnt || exit 1
 
 echo "---- runs"
-for main in badIndexer honest; do
+for main in badIndexer honest current; do
   if $QUINT test divert.qnt --main "$main"; then
     :
   else
@@ -61,6 +61,7 @@ check current        noQueuedBytes   fails
 check current        noEarlyBytes    fails
 check current        noSilentRefusal fails
 check current        pendingIsTrue   fails
+check current        queuedNotSuppressed fails
 check honest         pendingMonotone fails
 
 exit "$failures"
