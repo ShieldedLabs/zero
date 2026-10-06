@@ -108,7 +108,7 @@ module types {
   // ------------------------------------------------------------------------
 
   /// Why a hub refuses a submission, in the order admission checks them.
-  type Refusal = TipStale | Draining | TooLarge | ExpiryTooTight | Full
+  type Refusal = TipStale | HubDraining | TooLarge | ExpiryTooTight | Full
 
   /// A hub's decision on a submission. `Duplicate` is a success: the bytes are
   /// already queued here.

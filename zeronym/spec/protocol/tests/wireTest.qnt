@@ -41,7 +41,7 @@ module wireTest {
     tuples(BODIES, HEIGHTS).map(((body, height)) => WFound({ body: body, height: height }))
       .union(Set(WNotFound, WError))
 
-  pure val REFUSALS = Set(TipStale, Draining, TooLarge, ExpiryTooTight, Full)
+  pure val REFUSALS = Set(TipStale, HubDraining, TooLarge, ExpiryTooTight, Full)
 
   /// F1. Rendering an honest outcome and reading it back gives what the
   /// outcome means.
@@ -101,12 +101,12 @@ module wireTest {
   /// F10. Draining and full are one refusal on the wire; a fresh admission and
   /// a duplicate are one acceptance. Every other refusal keeps its own code.
   run ackRenderingTest = all {
-    assert(renderAck(Refused(Draining)) == renderAck(Refused(Full))),
+    assert(renderAck(Refused(HubDraining)) == renderAck(Refused(Full))),
     assert(renderAck(Admitted) == WAccepted),
     assert(renderAck(Duplicate) == WAccepted),
     assert(REFUSALS.forall(refusal => renderAck(Refused(refusal)) != WAccepted)),
     assert(tuples(REFUSALS, REFUSALS).forall(((left, right)) =>
       renderAck(Refused(left)) == renderAck(Refused(right))
-        implies (left == right or Set(left, right) == Set(Draining, Full)))),
+        implies (left == right or Set(left, right) == Set(HubDraining, Full)))),
   }
 }

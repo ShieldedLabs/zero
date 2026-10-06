@@ -51,7 +51,7 @@ module wire {
       | Refused(refusal) =>
         match refusal {
           | TipStale => WRefused(WTipStale)
-          | Draining => WRefused(WQueueFull)
+          | HubDraining => WRefused(WQueueFull)
           | TooLarge => WRefused(WTooLarge)
           | ExpiryTooTight => WRefused(WExpiryTooTight)
           | Full => WRefused(WQueueFull)
