@@ -63,7 +63,6 @@ module divert {
   var refused: Set[str]   // hub refused a submit (the ack never reaches the wallet)
   var obs: List[Obs]
   var parseable: str -> bool // false: that body has no txid; find_by_txid skips it
-  var replica: str -> str // second hub; submits are not copied, so it answers not-found
 
   pure def submitMsg(t: str): Msg =
     { kind: "submit", tx: t, nonce: -1, disp: "", height: 0, data: EMPTY, hubSaw: "", honest: true }
@@ -107,12 +106,11 @@ module divert {
     refused' = Set(),
     obs' = List(),
     parseable' = TXS.mapBy(_ => true),
-    replica' = TXS.mapBy(_ => "absent"),
   }
 
   action unchangedExcept_net_hub = all {
     waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
-    parseable' = parseable, replica' = replica,
+    parseable' = parseable,
   }
 
   // Nym submit is dispatch-only: the wallet hears success once the frame is
@@ -121,7 +119,7 @@ module divert {
     net' = net.union(Set(submitMsg(t))),
     told' = told.union(Set(t)),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
-    parseable' = parseable, replica' = replica,
+    parseable' = parseable,
   }
 
   // The body does not deserialize. It is still submitted; admit holds the bytes
@@ -131,7 +129,6 @@ module divert {
     told' = told.union(Set(t)),
     parseable' = parseable.set(t, false),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
-    replica' = replica,
   }
 
   // A resend of the same bytes is admitted again while the tx is published,
@@ -152,7 +149,7 @@ module divert {
     net.contains(submitMsg(t)),
     hub.get(t).in(Set("absent", "dropped")),
     refused' = refused.union(Set(t)),
-    hub' = hub, net' = net, parseable' = parseable, replica' = replica,
+    hub' = hub, net' = net, parseable' = parseable,
     waiters' = waiters, nextNonce' = nextNonce, told' = told, obs' = obs,
   }
 
@@ -193,22 +190,12 @@ module divert {
     net' = net.union(Set(lookupMsg(t, nextNonce))),
     waiters' = waiters.put(nextNonce, t),
     nextNonce' = nextNonce + 1,
-    hub' = hub, told' = told, refused' = refused, obs' = obs, parseable' = parseable, replica' = replica,
+    hub' = hub, told' = told, refused' = refused, obs' = obs, parseable' = parseable,
   }
 
   action hubAnswer(n: int, t: str): bool = all {
     net.contains(lookupMsg(t, n)),
     net' = net.union(Set(hubReply(t, n, hub.get(t), HUB_HIDES_QUEUED))),
-    hub' = hub,
-    unchangedExcept_net_hub,
-  }
-
-  // The other hub answers the same lookup. It never sees the submit, so a tx
-  // this hub has published is not-found there. The shim returns the first
-  // answer that is not a timeout.
-  action replicaAnswer(n: int, t: str): bool = all {
-    net.contains(lookupMsg(t, n)),
-    net' = net.union(Set(hubReply(t, n, replica.get(t), HUB_HIDES_QUEUED))),
     hub' = hub,
     unchangedExcept_net_hub,
   }
@@ -255,7 +242,7 @@ module divert {
     waiters.keys().contains(r.nonce),
     obs' = obs.append(shimHandle(waiters.get(r.nonce), r, SENTINEL_ARM)),
     waiters' = waiters.keys().exclude(Set(r.nonce)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, replica' = replica,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable,
   }
 
   // 90 s lookup deadline.
@@ -263,7 +250,7 @@ module divert {
     waiters.keys().contains(n),
     obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true, disp: "" }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, replica' = replica,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable,
   }
 
   action lose(m: Msg): bool = all {
@@ -338,8 +325,8 @@ module divert {
           and obs[j].status == "notfound" and obs[j].hubSaw != "dropped")))
 
   // Once the wallet has been shown a transaction's bytes, a later observation
-  // of that tx is those bytes again or unavailable. Reorder, a resend after
-  // publication, and another hub's not-found all break this.
+  // of that tx is those bytes again or unavailable. A reordered reply and a
+  // resend after publication both break this.
   val statusNeverRegresses: bool =
     0.to(obs.length() - 1).forall(i => 0.to(obs.length() - 1).forall(j =>
       not(i < j and obs[i].tx == obs[j].tx and obs[i].status == "tx"
@@ -420,20 +407,6 @@ module honest {
       .then(walletLookup("a"))
       .then(hubAnswer(1, "a"))
       .then(shimDeliver(hubReply("a", 1, "queued", true)))
-      .expect(not(statusNeverRegresses))
-
-  run replicaNotFoundRegressesTest =
-    init
-      .then(walletSubmit("a"))
-      .then(hubAdmit("a"))
-      .then(flushStart)
-      .then(markMempool("a"))
-      .then(walletLookup("a"))
-      .then(hubAnswer(0, "a"))
-      .then(shimDeliver(hubReply("a", 0, "mempool", true)))
-      .then(walletLookup("a"))
-      .then(replicaAnswer(1, "a"))
-      .then(shimDeliver(hubReply("a", 1, "absent", true)))
       .expect(not(statusNeverRegresses))
 }
 
