@@ -14,10 +14,13 @@ doctest = false
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 async-trait = "0.1"
+# `rand` 0.10 brings `getrandom` 0.4, which has no randomness source on this target until
+# the `wasm_js` feature is turned on.
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 js-sys = "0.3"
 # `circuit` without `multicore`: the Halo2 proving machinery, single-threaded.
 orchard = { workspace = true, features = ["circuit"] }
-rand_chacha = "0.3"
+rand_chacha.workspace = true
 rusqlite = { workspace = true, features = ["time", "array", "uuid", "hooks"] }
 secrecy = "0.8"
 sha2 = "0.10"
@@ -42,7 +45,7 @@ zcash_protocol.workspace = true
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
 js-sys = "0.3"
-rand_chacha = "0.3"
+rand_chacha.workspace = true
 sapling.workspace = true
 secrecy = "0.8"
 wasm-bindgen = "0.2"

@@ -58,6 +58,7 @@ consuming crate has to set them.
 # Cargo.toml of the wasm crate
 getrandom     = { version = "0.2", features = ["js"] }
 getrandom_03  = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04  = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 uuid          = { version = "1", features = ["js"] }   # only if you use uuid
 ```
 
@@ -65,8 +66,8 @@ uuid          = { version = "1", features = ["js"] }   # only if you use uuid
 RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
 ```
 
-Both major versions of `getrandom` are in the lockfile and both need handling;
-0.3 needs the `cfg` as well as the feature.
+Three major versions of `getrandom` are in the lockfile (0.4 arrives with
+`rand` 0.10) and each needs its feature; 0.3 needs the `cfg` as well.
 
 **`multicore` must stay off.** `halo2_proofs` 0.3.5 contains a hard
 

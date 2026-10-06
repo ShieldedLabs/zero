@@ -25,10 +25,11 @@ trap 'rm -rf "$WORK"' EXIT
 case "$TARGET" in
   wasm32-unknown-unknown)
     # getrandom 0.3 has no default backend for OS-less wasm; both the feature and
-    # the cfg are required. getrandom 0.2 only needs the feature.
+    # the cfg are required. getrandom 0.2 and 0.4 only need the feature.
     export RUSTFLAGS="${RUSTFLAGS:-} --cfg getrandom_backend=\"wasm_js\""
     RNG_DEPS='getrandom = { version = "0.2", features = ["js"] }
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }'
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }'
     ;;
   wasm32-wasip1)
     RNG_DEPS=''

@@ -7,7 +7,7 @@
 
 use rand_chacha::{rand_core::SeedableRng, ChaChaRng};
 use sapling::{
-    note_encryption::{sapling_note_encryption, SaplingDomain},
+    note_encryption::{sapling_note_encryption, SaplingDomain, COMPACT_NOTE_SIZE},
     util::generate_random_rseed,
     value::NoteValue,
 };
@@ -21,7 +21,7 @@ use zcash_client_backend::{
     proto::compact_formats::{ChainMetadata, CompactBlock, CompactSaplingOutput, CompactTx},
 };
 use zcash_client_sqlite::wallet::init::init_wallet_db;
-use zcash_note_encryption::{Domain, COMPACT_NOTE_SIZE};
+use zcash_note_encryption::Domain;
 use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
 use zcash_protocol::{
     consensus::{BlockHeight, Network},
@@ -74,7 +74,7 @@ async fn scan_finds_a_received_note() {
         outputs: vec![CompactSaplingOutput {
             cmu: note.cmu().to_bytes().to_vec(),
             ephemeral_key: SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
-            ciphertext: encryptor.encrypt_note_plaintext()[..COMPACT_NOTE_SIZE].to_vec(),
+            ciphertext: encryptor.encrypt_note_plaintext().0[..COMPACT_NOTE_SIZE].to_vec(),
         }],
         ..Default::default()
     };

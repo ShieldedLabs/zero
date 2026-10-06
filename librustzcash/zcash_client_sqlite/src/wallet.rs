@@ -6291,7 +6291,7 @@ mod tests {
     use crate::{
         AccountUuid,
         error::SqliteClientError,
-        sql::RowExt,
+        sql::{RowExt, SqlU64},
         testing::{BlockCache, db::TestDbFactory},
     };
 
@@ -6899,7 +6899,7 @@ mod tests {
                     ":tx": tx_ref.0,
                     ":account_id": account_id,
                     ":address": &address,
-                    ":value": u64::from(OUTPUT_VALUE),
+                    ":value": SqlU64(u64::from(OUTPUT_VALUE)),
                     ":address_id": address_id,
                 ],
             )
