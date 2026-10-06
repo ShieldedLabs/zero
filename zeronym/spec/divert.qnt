@@ -225,7 +225,7 @@ module divert {
   // before the indexer is asked.
   action hubError(n: int, t: str): bool = all {
     net.contains(lookupMsg(t, n)),
-    hub.get(t) != "queued",
+    not(queueHit(hub.get(t), t)),
     net' = net.union(Set(replyMsg(t, n, "error", 0, EMPTY, hub.get(t)))),
     hub' = hub,
     unchangedExcept_net_hub,
@@ -237,7 +237,7 @@ module divert {
   action indexerZero(n: int, t: str): bool = all {
     not(CONFORMING_INDEXER),
     net.contains(lookupMsg(t, n)),
-    hub.get(t) != "queued",
+    not(queueHit(hub.get(t), t)),
     net' = net.union(Set(replyMsg(t, n, "found", 0, EMPTY, hub.get(t)))),
     hub' = hub,
     unchangedExcept_net_hub,
@@ -423,6 +423,16 @@ module honest {
       .then(hubAnswer(0, "a"))
       .then(deliverReply(0))
       .expect(not(parseable.get("a")) and hub.get("a") == "queued" and obs[0].status == "notfound" and obs[0].hubSaw == "queued")
+
+  // A queued body with no txid is a miss, so the indexer is asked.
+  run unparseableAsksIndexerTest =
+    init
+      .then(submitUnparseable("a"))
+      .then(hubAdmit("a"))
+      .then(walletLookup("a"))
+      .then(hubError(0, "a"))
+      .then(deliverReply(0))
+      .expect(hub.get("a") == "queued" and obs[0].status == "unavailable" and obs[0].hubSaw == "queued")
 
   run reorderedReplyRegressesTest =
     init
