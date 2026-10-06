@@ -84,7 +84,11 @@ module shimTest {
     assert(dispatching.after(send(Clean(pPlain), 2)) == dispatching),
     // A body the shim cannot parse is diverted, never forwarded.
     assert(outputOf(dispatching, send(Clean(pJunk), 1))
-      == DivertedOutput({ frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pJunk }) }), told: Some(SentOk) })),
+      == DivertedOutput({
+        payload: pJunk,
+        frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pJunk }) }),
+        told: Some(SentOk),
+      })),
   }
 
   run failClosedTest = all {
@@ -103,6 +107,7 @@ module shimTest {
     // One frame per hub, each under its own nonce, and the wallet is told ok
     // at once.
     assert(outputOf(dispatching, send(Clean(pOrchard), 2)) == DivertedOutput({
+      payload: pOrchard,
       frames: Set(
         { hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) },
         { hub: "h2", msg: Submit({ nonce: 1, payload: pOrchard }) },
@@ -111,6 +116,7 @@ module shimTest {
     })),
     // A sweep that stopped after the first address still tells the wallet ok.
     assert(outputOf(dispatching, send(Clean(pOrchard), 1)) == DivertedOutput({
+      payload: pOrchard,
       frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) }),
       told: Some(SentOk),
     })),
@@ -125,6 +131,7 @@ module shimTest {
   run awaitVerdictTest = all {
     // One hub, and nothing is told until it answers.
     assert(outputOf(awaiting, send(Clean(pOrchard), 1)) == DivertedOutput({
+      payload: pOrchard,
       frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) }),
       told: None,
     })),
@@ -231,6 +238,7 @@ module shimTest {
     // It can send a hub something other than what the wallet sent.
     assert(byzShimResults(dispatching, send(Clean(pOrchard), 2), PAYLOADS, HEIGHTS).exists(result =>
       result.out == DivertedOutput({
+        payload: pOrchard,
         frames: Set({ hub: "h2", msg: Submit({ nonce: 0, payload: pJunk }) }),
         told: Some(SentOk),
       }))),

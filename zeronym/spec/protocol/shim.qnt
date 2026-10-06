@@ -63,7 +63,8 @@ module shim {
 
   type ShimOutput =
     | ForwardOutput(Payload)                                      // to the operator's indexer
-    | DivertedOutput({ frames: Set[Frame], told: Option[SendObs] })
+    // `payload` is what the wallet sent; `told` is its answer, if it has one yet.
+    | DivertedOutput({ payload: Payload, frames: Set[Frame], told: Option[SendObs] })
     | SendDoneOutput({ input: SendInput, obs: SendObs })
     | LookupSentOutput({ frame: Frame })
     | LookupDoneOutput({ query: TxId, result: LookupObs })
@@ -75,8 +76,8 @@ module shim {
   pure def toForwardOutput(state: ShimState, payload: Payload): ShimResult =
     { state: state, out: ForwardOutput(payload) }
 
-  pure def toDivertedOutput(state: ShimState, frames: Set[Frame], told: Option[SendObs]): ShimResult =
-    { state: state, out: DivertedOutput({ frames: frames, told: told }) }
+  pure def toDivertedOutput(state: ShimState, payload: Payload, frames: Set[Frame], told: Option[SendObs]): ShimResult =
+    { state: state, out: DivertedOutput({ payload: payload, frames: frames, told: told }) }
 
   pure def toSendDoneOutput(state: ShimState, input: SendInput, obs: SendObs): ShimResult =
     { state: state, out: SendDoneOutput({ input: input, obs: obs }) }
@@ -137,7 +138,7 @@ module shim {
       val waiting = targets.indices().fold(state.waiters, (waiters, i) =>
         waiters.put(state.nextNonce + i, AckWaiter({ payload: payload, awaited: awaited })))
       { ...state, waiters: waiting, nextNonce: state.nextNonce + targets.length() }
-        .toDivertedOutput(frames, if (awaited) None else Some(SentOk))
+        .toDivertedOutput(payload, frames, if (awaited) None else Some(SentOk))
 
   /// Route a `SendTransaction`. Nothing but a cleanly read pass-through
   /// transaction ever reaches the operator; everything else is diverted or
@@ -302,16 +303,18 @@ module shim {
     val lies = lookupObservations(universe, heights)
     match input {
       | SendTxSInput(send) =>
-        val forwarded = match send.input {
-          | Clean(payload) => Set(state.toForwardOutput(payload))
+        val unsent = SEND_OBSERVATIONS.map(obs => state.toSendDoneOutput(send.input, obs))
+        val misrouted = match send.input {
+          | Clean(sent) =>
+            tuples(universe, state.hubs.indices(), SEND_OBSERVATIONS).map(((payload, i, obs)) =>
+              { ...state, nextNonce: state.nextNonce + 1 }.toDivertedOutput(
+                sent,
+                Set({ hub: state.hubs[i], msg: Submit({ nonce: state.nextNonce, payload: payload }) }),
+                Some(obs)))
+              .union(Set(state.toForwardOutput(sent)))
           | _ => Set()
         }
-        val unsent = SEND_OBSERVATIONS.map(obs => state.toSendDoneOutput(send.input, obs))
-        val stray = tuples(universe, state.hubs.indices(), SEND_OBSERVATIONS).map(((payload, i, obs)) =>
-          { ...state, nextNonce: state.nextNonce + 1 }.toDivertedOutput(
-            Set({ hub: state.hubs[i], msg: Submit({ nonce: state.nextNonce, payload: payload }) }),
-            Some(obs)))
-        honest.union(forwarded).union(unsent).union(stray)
+        honest.union(unsent).union(misrouted)
       | GetTxSInput(lookup) =>
         honest.union(lies.map(result => state.toLookupDoneOutput(lookup.query, result)))
       | _ =>

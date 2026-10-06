@@ -23,7 +23,7 @@ module hub {
   ///
   /// `deliveryLag` and `minWalletExpiry` are not read by any transition. They
   /// are the wallet-side budget the schedule is validated against at startup
-  /// (`budgetFits`), and the properties read them from here.
+  /// (`scheduleFitsBudget`), and the properties read them from here.
   type HubParams = {
     flushInterval: int,     // blocks between scheduled flushes
     miningMargin: int,      // blocks a published transaction needs to be mined
@@ -37,7 +37,7 @@ module hub {
   /// The startup check: a transaction that takes `deliveryLag` blocks to
   /// arrive, waits a full interval and needs `miningMargin` blocks to be mined
   /// still fits inside the smallest supported expiry.
-  pure def budgetFits(params: HubParams): bool =
+  pure def scheduleFitsBudget(params: HubParams): bool =
     params.flushInterval + params.miningMargin + params.deliveryLag <= params.minWalletExpiry
 
   /// Where the process is in its life. `Starting` has not seen a tip yet;

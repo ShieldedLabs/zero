@@ -88,14 +88,14 @@ module hubTest {
   /// the delivery lag passes the expiry check. The lemma is about admission at
   /// one tip. It does not say at what height the flush later happens.
   run conformingTimelyPayloadIsAdmissibleTest = all {
-    assert(budgetFits(PARAMS)),
+    assert(scheduleFitsBudget(PARAMS)),
     assert(tuples(0.to(9), 0.to(PARAMS.deliveryLag), 0.to(2)).forall(((created, lag, extra)) =>
       survivesNextFlush(
         Some(created + PARAMS.minWalletExpiry + extra), created + lag,
         PARAMS.flushInterval, PARAMS.miningMargin))),
     // The budget is what makes it true: one block less and a payload built
     // one block before a boundary, arriving on it, is refused.
-    assert(not(budgetFits({ ...PARAMS, minWalletExpiry: 4 }))),
+    assert(not(scheduleFitsBudget({ ...PARAMS, minWalletExpiry: 4 }))),
     assert(not(survivesNextFlush(Some(2 + 4), 2 + 1, PARAMS.flushInterval, PARAMS.miningMargin))),
   }
 
