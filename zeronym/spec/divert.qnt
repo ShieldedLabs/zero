@@ -19,6 +19,7 @@
 //   quint run --main=before_45e408f --invariant=noQueuedBytes ...        fails: the byte leak
 //   quint run --main=current --invariant=noSilentRefusal ...             fails: known gap
 //   quint run --main=current --invariant=pendingIsTrue ...               fails: known gap (lying hub)
+//   quint run --main=badIndexer --invariant=pendingIsTrue ...            fails: zero RawTransaction
 //   quint run --main=honest --invariant=pendingMonotone ...              fails: known gap (flush window)
 // Simulation samples random traces; `quint verify` (Apalache) checks every
 // trace up to a bound.
@@ -27,6 +28,7 @@ module divert {
   const SENTINEL_ARM: bool     // ecb4641f7e: shim relays found/height 0/empty ahead of the L4 guard
   const HUB_HIDES_QUEUED: bool // 45e408f0ff: hub answers a queue hit with no bytes
   const HONEST_HUB: bool       // false lets the hub answer lookups with anything
+  const CONFORMING_INDEXER: bool // false lets a missed lookup return a zero RawTransaction
   const TXS: Set[str]
   const MAX_NONCE: int
 
@@ -176,6 +178,18 @@ module divert {
     unchangedExcept_net_hub,
   }
 
+  // Queue miss forwards the indexer image. A non-conforming indexer answers
+  // that path with a zero RawTransaction: found, empty body, height 0. The
+  // shim renders pending. A queue hit returns before the indexer is asked.
+  action indexerZero(n: int, t: str): bool = all {
+    not(CONFORMING_INDEXER),
+    net.contains(lookupMsg(t, n)),
+    hub.get(t) != "queued",
+    net' = net.union(Set(replyMsg(t, n, "found", 0, EMPTY, hub.get(t)))),
+    hub' = hub,
+    unchangedExcept_net_hub,
+  }
+
   // A buggy or hostile hub may answer any lookup with anything.
   action hubLie(n: int, t: str): bool = all {
     not(HONEST_HUB),
@@ -224,6 +238,7 @@ module divert {
       walletLookup(t),
       hubAnswer(n, t),
       hubError(n, t),
+      indexerZero(n, t),
       hubLie(n, t),
       shimTimeout(n),
       all { net.size() > 0, nondet m = net.oneOf() any { shimDeliver(m), lose(m) } },
@@ -276,6 +291,7 @@ module divert {
 module current {
   import divert(
     SENTINEL_ARM = true, HUB_HIDES_QUEUED = true, HONEST_HUB = false,
+    CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
 }
@@ -283,6 +299,7 @@ module current {
 module honest {
   import divert(
     SENTINEL_ARM = true, HUB_HIDES_QUEUED = true, HONEST_HUB = true,
+    CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
 }
@@ -290,6 +307,7 @@ module honest {
 module before_ecb4641 {
   import divert(
     SENTINEL_ARM = false, HUB_HIDES_QUEUED = true, HONEST_HUB = true,
+    CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
 }
@@ -297,6 +315,23 @@ module before_ecb4641 {
 module before_45e408f {
   import divert(
     SENTINEL_ARM = false, HUB_HIDES_QUEUED = false, HONEST_HUB = true,
+    CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
+}
+
+// Honest hub, indexer answers the forward path with a zero RawTransaction.
+module badIndexer {
+  import divert(
+    SENTINEL_ARM = true, HUB_HIDES_QUEUED = true, HONEST_HUB = true,
+    CONFORMING_INDEXER = false,
+    TXS = Set("a", "b"), MAX_NONCE = 4,
+  ).*
+
+  run indexerZeroForgesPendingTest =
+    init
+      .then(walletLookup("a"))
+      .then(indexerZero(0, "a"))
+      .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "absent")))
+      .expect(obs[0].status == "pending" and obs[0].hubSaw == "absent" and obs[0].honest)
 }

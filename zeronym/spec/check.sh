@@ -43,9 +43,19 @@ check() {
 
 $QUINT typecheck divert.qnt || exit 1
 
+echo "---- runs"
+for main in badIndexer; do
+  if $QUINT test divert.qnt --main "$main"; then
+    :
+  else
+    failures=$((failures + 1))
+  fi
+done
+
 check current        shimSafety      holds
 check honest         safety          holds
 check honest         pendingIsTrue   holds
+check badIndexer     pendingIsTrue   fails
 check before_ecb4641 pendingVisible  fails
 check before_45e408f noQueuedBytes   fails
 check current        noQueuedBytes   fails
