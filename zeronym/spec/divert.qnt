@@ -4,7 +4,7 @@
 // then polls GetTransaction. The hub queues, flushes on epochs, and answers
 // lookups from its queue or its indexer. The mixnet may lose, duplicate and
 // reorder any message. A transaction's bytes are modelled as its id, and ""
-// is an empty body. An unparseable body has no txid: `parseable` is per tx.
+// is an empty body.
 //
 // Code this mirrors:
 //   shim  intercept.rs get_transaction reply arms, nym.rs nonce correlation
@@ -60,7 +60,6 @@ module divert {
   var told: Set[str]      // wallet was told its submit succeeded
   var refused: Set[str]   // hub refused a submit (the ack never reaches the wallet)
   var obs: List[Obs]
-  var parseable: str -> bool // false: that body has no txid; find_by_txid skips it
   var replica: str -> str // second hub; submits are not copied, so it answers not-found
 
   pure def submitMsg(t: str): Msg =
@@ -72,17 +71,12 @@ module divert {
   pure def replyMsg(t: str, n: int, disp: str, h: int, d: str, saw: str): Msg =
     { kind: "reply", tx: t, nonce: n, disp: disp, height: h, data: d, hubSaw: saw, honest: true }
 
-  // find_by_txid: the queue hits only when some entry's txid is the query.
-  // A parseable body's txid is its id. An unparseable body has none.
-  def queueHit(st: str, t: str): bool =
-    st == "queued" and TXS.exists(e => parseable.get(e) and e == t)
-
   // server.rs lookup: queue first, then the indexer.
-  def hubReply(t: str, n: int, st: str, hides: bool): Msg =
-    if (queueHit(st, t)) replyMsg(t, n, "found", 0, if (hides) EMPTY else t, st)
+  pure def hubReply(t: str, n: int, st: str, hides: bool): Msg =
+    if (st == "queued") replyMsg(t, n, "found", 0, if (hides) EMPTY else t, st)
     else if (st == "mempool") replyMsg(t, n, "found", 0, t, st)
     else if (st == "mined") replyMsg(t, n, "found", 1, t, st)
-    else replyMsg(t, n, "notfound", 0, EMPTY, st) // absent, flushing, dropped, or queued with no txid
+    else replyMsg(t, n, "notfound", 0, EMPTY, st) // absent, flushing, dropped
 
   // intercept.rs get_transaction: the reply arms, in order.
   pure def shimHandle(q: str, r: Msg, sentinelArm: bool): Obs =
@@ -103,13 +97,12 @@ module divert {
     told' = Set(),
     refused' = Set(),
     obs' = List(),
-    parseable' = TXS.mapBy(_ => true),
     replica' = TXS.mapBy(_ => "absent"),
   }
 
   action unchangedExcept_net_hub = all {
     waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
-    parseable' = parseable, replica' = replica,
+    replica' = replica,
   }
 
   // Nym submit is dispatch-only: the wallet hears success once the frame is
@@ -117,16 +110,6 @@ module divert {
   action walletSubmit(t: str): bool = all {
     net' = net.union(Set(submitMsg(t))),
     told' = told.union(Set(t)),
-    hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
-    parseable' = parseable, replica' = replica,
-  }
-
-  // The body does not deserialize. It is still submitted; admit holds the bytes
-  // with no txid. Kept out of `step`; the run is the witness.
-  action submitUnparseable(t: str): bool = all {
-    net' = net.union(Set(submitMsg(t))),
-    told' = told.union(Set(t)),
-    parseable' = parseable.set(t, false),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
     replica' = replica,
   }
@@ -149,7 +132,7 @@ module divert {
     net.contains(submitMsg(t)),
     hub.get(t).in(Set("absent", "dropped")),
     refused' = refused.union(Set(t)),
-    hub' = hub, net' = net, parseable' = parseable, replica' = replica,
+    hub' = hub, net' = net, replica' = replica,
     waiters' = waiters, nextNonce' = nextNonce, told' = told, obs' = obs,
   }
 
@@ -190,7 +173,7 @@ module divert {
     net' = net.union(Set(lookupMsg(t, nextNonce))),
     waiters' = waiters.put(nextNonce, t),
     nextNonce' = nextNonce + 1,
-    hub' = hub, told' = told, refused' = refused, obs' = obs, parseable' = parseable, replica' = replica,
+    hub' = hub, told' = told, refused' = refused, obs' = obs, replica' = replica,
   }
 
   action hubAnswer(n: int, t: str): bool = all {
@@ -252,7 +235,7 @@ module divert {
     waiters.keys().contains(r.nonce),
     obs' = obs.append(shimHandle(waiters.get(r.nonce), r, SENTINEL_ARM)),
     waiters' = waiters.keys().exclude(Set(r.nonce)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, replica' = replica,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, replica' = replica,
   }
 
   // 90 s lookup deadline.
@@ -260,7 +243,7 @@ module divert {
     waiters.keys().contains(n),
     obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, parseable' = parseable, replica' = replica,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, replica' = replica,
   }
 
   action lose(m: Msg): bool = all {
@@ -291,11 +274,10 @@ module divert {
 
   // ---- Shim claims: hold for an honest hub's replies ----
 
-  // An honest queue hit on a parseable tx reaches the wallet as pending.
-  // `not(o.honest)` drops lying replies. An unparseable body has no txid, so
-  // a lookup misses it even while the hub holds the bytes.
+  // An honest queue hit reaches the wallet as pending (the ecb4641f7e bug).
+  // `not(o.honest)` drops lying replies, so this says nothing about a hub that may lie.
   val pendingVisible: bool = obs.foldl(true, (ok, o) =>
-    ok and (not(o.honest) or o.hubSaw != "queued" or not(parseable.get(o.tx)) or o.status == "pending"))
+    ok and (not(o.honest) or o.hubSaw != "queued" or o.status == "pending"))
 
   // ---- Hub claims: hold for an honest hub; attestation is what makes it one ----
 
@@ -377,16 +359,6 @@ module honest {
       .then(walletLookup("a"))
       .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "queued")))
       .expect(obs[0].status == "pending")
-
-  // Unparseable bytes stay queued. Lookup misses them: no entry has that txid.
-  run unparseableLookupMissesTest =
-    init
-      .then(submitUnparseable("a"))
-      .then(hubAdmit("a"))
-      .then(walletLookup("a"))
-      .then(hubAnswer(0, "a"))
-      .then(shimDeliver(hubReply("a", 0, "queued", true)))
-      .expect(not(parseable.get("a")) and hub.get("a") == "queued" and obs[0].status == "notfound" and obs[0].hubSaw == "queued")
 
   run reorderedReplyRegressesTest =
     init
