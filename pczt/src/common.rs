@@ -1,9 +1,12 @@
 //! The common fields of a PCZT.
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use core::fmt;
 
 use getset::Getters;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::roles::combiner::merge_map;
 
@@ -27,8 +30,8 @@ pub(crate) const PLACEHOLDER_ANCHOR: [u8; 32] = [0; 32];
 /// Governs whether a non-empty shielded bundle's `anchor` must be set in order to parse
 /// it into the form used by the payment protocol crates.
 ///
-/// [ZIP 374](https://zips.z.cash/zip-0374) makes the anchor of a v6 transaction's
-/// shielded bundles deferrable until proving, so operations that do not depend on the
+/// [ZIP 374](https://zips.z.cash/zip-0374) makes Sapling and Orchard-family bundle anchors
+/// deferrable in V6 and later transactions, so operations that do not depend on the
 /// anchor's value (for example computing a v6 sighash, which excludes anchors, or
 /// updating unrelated fields) can proceed with it absent.
 #[cfg(any(
@@ -67,10 +70,11 @@ impl AnchorRequirement {
     /// anchors for Sapling spends and Orchard-protocol actions, so those bundles must
     /// keep requiring them.
     pub(crate) fn for_pre_authorization(tx_version: u32) -> Self {
-        if tx_version == zcash_protocol::constants::V6_TX_VERSION {
-            AnchorRequirement::NotRequired
-        } else {
-            AnchorRequirement::Required
+        match tx_version {
+            zcash_protocol::constants::V6_TX_VERSION => AnchorRequirement::NotRequired,
+            #[cfg(zcash_unstable = "nutachyon")]
+            zcash_protocol::constants::V7_TX_VERSION => AnchorRequirement::NotRequired,
+            _ => AnchorRequirement::Required,
         }
     }
 
@@ -120,6 +124,10 @@ pub struct Global {
     ///
     /// - This is set by the Creator.
     /// - If omitted, the fallback locktime is assumed to be 0.
+    ///
+    /// The transaction's actual lock time is given by [`determine_lock_time`], which
+    /// takes the inputs' required lock times into account.
+    #[getset(get = "pub")]
     pub(crate) fallback_lock_time: Option<u32>,
 
     #[getset(get = "pub")]
@@ -138,6 +146,7 @@ pub struct Global {
     ///   for key identification) should check against this field for correctness.
     ///
     /// [SLIP 44]: https://github.com/satoshilabs/slips/blob/master/slip-0044.md
+    #[getset(get = "pub")]
     pub(crate) coin_type: u32,
 
     /// A bitfield for various transaction modification flags.
@@ -183,6 +192,11 @@ pub struct Global {
     ///   - This is set to `false` by every Signer (as all signatures commit to all
     ///     shielded spends and outputs).
     ///   - The Combiner merges this bit towards `false`.
+    ///
+    /// Individual flags are also available via [`Global::inputs_modifiable`],
+    /// [`Global::outputs_modifiable`], [`Global::has_sighash_single`], and
+    /// [`Global::shielded_modifiable`].
+    #[getset(get = "pub")]
     pub(crate) tx_modifiable: u8,
 
     /// Proprietary fields related to the overall transaction.
@@ -374,11 +388,135 @@ impl LockTimeInput for ::transparent::pczt::Input {
     }
 }
 
+/// The encoding of a secret key that a PCZT carries.
+///
+/// The bytes are erased when the value is dropped. The `Debug` output does not show
+/// them, and equality comparison takes constant time. The serialized form is the same
+/// as that of a `[u8; 32]`.
+#[derive(Clone)]
+pub struct SecretKeyBytes([u8; 32]);
+
+impl SecretKeyBytes {
+    /// Wraps the encoding of a secret key.
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the encoding of the secret key.
+    pub fn expose_secret(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Drop for SecretKeyBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretKeyBytes {}
+
+impl fmt::Debug for SecretKeyBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretKeyBytes(..)")
+    }
+}
+
+impl PartialEq for SecretKeyBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl Eq for SecretKeyBytes {}
+
+impl Serialize for SecretKeyBytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretKeyBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <[u8; 32]>::deserialize(deserializer).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod secret_key_bytes_tests {
+    use alloc::format;
+
+    use proptest::prelude::*;
+
+    use super::SecretKeyBytes;
+
+    proptest! {
+        #[test]
+        fn serializes_as_byte_array(bytes in prop::array::uniform32(any::<u8>())) {
+            let secret = SecretKeyBytes::new(bytes);
+            let encoded = postcard::to_allocvec(&secret).unwrap();
+            prop_assert_eq!(&encoded, &postcard::to_allocvec(&bytes).unwrap());
+
+            let decoded: SecretKeyBytes = postcard::from_bytes(&encoded).unwrap();
+            prop_assert_eq!(decoded.expose_secret(), &bytes);
+        }
+
+        #[test]
+        fn debug_output_is_redacted(bytes in prop::array::uniform32(any::<u8>())) {
+            let debug = format!("{:?}", SecretKeyBytes::new(bytes));
+            prop_assert_eq!(debug.as_str(), "SecretKeyBytes(..)");
+        }
+
+        #[test]
+        fn equality_matches_byte_equality(
+            lhs in prop::array::uniform32(any::<u8>()),
+            rhs in prop::array::uniform32(any::<u8>()),
+        ) {
+            prop_assert_eq!(SecretKeyBytes::new(lhs) == SecretKeyBytes::new(rhs), lhs == rhs);
+            prop_assert!(SecretKeyBytes::new(lhs) == SecretKeyBytes::new(lhs));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::collections::BTreeMap;
 
-    use super::Global;
+    use zcash_protocol::{
+        consensus::BranchId,
+        constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID, mainnet},
+    };
+
+    use super::{FLAG_SHIELDED_MODIFIABLE, FLAG_TRANSPARENT_INPUTS_MODIFIABLE, Global};
+
+    #[test]
+    fn global_getters() {
+        // Distinct values, so that a getter reading the wrong field is caught.
+        const FALLBACK_LOCK_TIME: u32 = 1;
+        const EXPIRY_HEIGHT: u32 = 2;
+        const TX_MODIFIABLE: u8 = FLAG_TRANSPARENT_INPUTS_MODIFIABLE | FLAG_SHIELDED_MODIFIABLE;
+
+        let global = Global {
+            tx_version: V5_TX_VERSION,
+            version_group_id: V5_VERSION_GROUP_ID,
+            consensus_branch_id: BranchId::Nu6.into(),
+            fallback_lock_time: Some(FALLBACK_LOCK_TIME),
+            expiry_height: EXPIRY_HEIGHT,
+            coin_type: mainnet::COIN_TYPE,
+            tx_modifiable: TX_MODIFIABLE,
+            proprietary: BTreeMap::new(),
+        };
+
+        assert_eq!(global.coin_type(), &mainnet::COIN_TYPE);
+        assert_eq!(global.fallback_lock_time(), &Some(FALLBACK_LOCK_TIME));
+        assert_eq!(global.tx_modifiable(), &TX_MODIFIABLE);
+
+        // The raw bitfield agrees with the semantic flag accessors.
+        assert!(global.inputs_modifiable());
+        assert!(!global.outputs_modifiable());
+        assert!(!global.has_sighash_single());
+        assert!(global.shielded_modifiable());
+    }
 
     #[test]
     fn tx_modifiable() {

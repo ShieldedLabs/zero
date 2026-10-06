@@ -10,6 +10,83 @@ workspace.
 
 ## [Unreleased]
 
+## [0.23.0-pre.0] - 2026-10-02
+
+### Added
+- `WalletDb` implements the storage-trait methods newly added to
+  `zcash_client_backend`: `WalletWrite::queue_rescan` and, behind
+  `transparent-inputs`, `WalletRead::{get_unspent_transparent_outpoints,
+  get_transparent_receiver_accounts}` and
+  `ll::LowLevelWalletWrite::track_block_transparent_spends`.
+- `WalletSnapshot` and `WalletDb::get_wallet_snapshot`.
+- `zewif::ZewifImportReport::transactions_deferred_no_chain_tip`
+
+### Changed
+- Migrated to `bip32 0.6`, `group 0.14`, `incrementalmerkletree 0.9`,
+  `jubjub 0.11`, `orchard 0.16`, `pczt 0.10.0-pre.0`, `rand_core 0.10`,
+  `sapling-crypto 0.9`, `secp256k1 0.33`, `shardtree 0.8`,
+  `zcash_address 0.14.0-pre.0`, `zcash_client_backend 0.25.0-pre.0`,
+  `zcash_keys 0.17.0-pre.0`, `zcash_pool_migration 0.2.0-pre.0`,
+  `zcash_primitives 0.31.0-pre.0`, `zcash_proofs 0.31.0-pre.0`,
+  `zcash_protocol 0.11.0-pre.0`, `zcash_script 0.6`,
+  `zcash_transparent 0.11.0-pre.0`, and `zip32 0.3`.
+- `SqliteClientError` has a new variant `DivergedCheckpoints { pool, height }`.
+  When a pool's note commitment tree has checkpoints above and below the
+  truncation height but none at it, truncating or rewinding the wallet now
+  fails with this variant instead of `SqliteClientError::CorruptedData`.
+- `zcash_client_sqlite::pool_migration::orchard_ironwood::PoolMigrations::take_transaction_for_broadcast`
+  takes an additional `rng` first argument that implements `rand_core::{Rng, CryptoRng}`.
+- The `R` parameter of `WalletDb` must now implement `rand_core::Rng` in place
+  of `rand_core::RngCore` wherever it previously required the latter.
+- The types in `zcash_client_sqlite::util` (`Clock`, `SystemClock`, and
+  `util::testing::FixedClock`) are now re-exports of the same-named types in
+  `zcash_client_backend::util`.
+- `WalletWrite::import_account_ufvk` accepts a transparent-only unified full
+  viewing key; it previously failed with
+  `AddressGenerationError::NoSatisfiableReceiver`. The resulting account's
+  default address is a transparent-only ZIP 316 Revision 2 (`tu`) Unified
+  Address.
+- `WalletDb::put_blocks` records the transparent outputs that pay a wallet
+  account and the spends of the wallet's transparent outputs, for blocks
+  scanned from both compact and full block data. A spend observed before the
+  output it spends has been discovered is resolved when that output is
+  discovered.
+- `zewif::ZewifImportReport::transactions_without_wallet_relevance` no longer
+  counts transactions deferred to the post-import rescan for lack of a chain
+  tip; these are counted by `transactions_deferred_no_chain_tip`.
+
+### Fixed
+- Upgrading a wallet database whose `support_zcashd_wallet_import` migration
+  ran before 2025-09-16 no longer fails with `NOT NULL constraint failed:
+  accounts_new.zcashd_legacy_address_index`.
+- Reading back a stored unmined transaction with a zero expiry height (such as
+  a coinbase transaction imported from a zcashd wallet before any chain scan)
+  no longer fails with a "Consensus branch ID not known" error when the wallet
+  has a view of the chain tip.
+- `zewif::import_wallet` now establishes the wallet's view of the chain tip
+  from the document (the maximum of its export height and its transactions'
+  mined heights, clamped to the wallet birthday) whenever at least one account
+  was imported and account import itself did not establish one. A document
+  whose accounts all had birthdays at or below Sapling activation previously
+  had every transaction deferred to the post-import rescan.
+- The `v_tx_outputs` view now includes its documented `diversifier_index_be`
+  column; queries naming it previously failed with "no such column".
+- The `v_transactions` and `v_transactions_with_pending_migrations` views no
+  longer multiply a sending account's row by the number of distinct groups the
+  transaction's outputs were received into, where a group is an account of the
+  wallet and the outputs no account of the wallet received form one further
+  group. `account_balance_delta`, `total_spent`, `total_received`,
+  `received_note_count`, `spent_note_count`, and the received-note contribution
+  to `memo_count` were each scaled by that count; `sent_note_count` reported
+  the notes of the largest single group instead of all of them.
+- `wallet::init::init_wallet_db` and `wallet::init::WalletMigrator::init_or_migrate`
+  no longer fail on wallets containing accounts imported by UIVK.
+- `WalletDb`'s implementation of
+  `zcash_client_backend::data_api::ll::LowLevelWalletRead::get_unknown_fee_spenders_of`
+  now returns only transactions that spend a transparent output of the given
+  transaction. It previously returned every transaction with an unknown fee
+  that spends any transparent output received by the wallet.
+
 ## [0.22.0] - 2026-08-18
 
 ### Added

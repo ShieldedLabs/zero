@@ -2033,8 +2033,8 @@ mod tests {
     ) -> Result<Step<u32>, ProposalError> {
         let sk: SpendingKey = Option::from(SpendingKey::from_bytes([0x2a; 32])).unwrap();
         let recipient = FullViewingKey::from(&sk).address_at(0u32, zip32::Scope::External);
-        let ua = UnifiedAddress::from_receivers(Some(recipient), None, None).unwrap();
-        let to = Address::Unified(ua).to_zcash_address(&Network::TestNetwork);
+        let ua = UnifiedAddress::from_receivers(Some(recipient), None, None, None, None).unwrap();
+        let to = Address::Unified(Box::new(ua)).to_zcash_address(&Network::TestNetwork);
 
         let request = TransactionRequest::new(vec![
             zip321::Payment::new(
@@ -2155,10 +2155,9 @@ mod tests {
         ])
     }
 
-    // The network upgrades from which the Orchard pool disables cross-address transfers. `Nu7` is
-    // excluded: it has no activation height on any network yet, so no bundle can be built for it.
+    // The network upgrades from which the Orchard pool disables cross-address transfers.
     fn arb_nu6_3_or_later_upgrade() -> impl Strategy<Value = NetworkUpgrade> {
-        prop::sample::select(vec![NetworkUpgrade::Nu6_3])
+        prop::sample::select(vec![NetworkUpgrade::Nu6_3, NetworkUpgrade::Nu7])
     }
 
     // Resolves the bundle version applicable to a pool at an upgrade's testnet activation height,
