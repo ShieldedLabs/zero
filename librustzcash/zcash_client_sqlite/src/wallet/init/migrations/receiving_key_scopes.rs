@@ -279,7 +279,7 @@ mod tests {
     use std::convert::Infallible;
 
     use incrementalmerkletree::Position;
-    use rand_core::OsRng;
+    use rand::{rand_core::UnwrapErr, rngs::SysRng};
     use rusqlite::{Connection, OptionalExtension, named_params, params};
 
     use crate::sql::{RowExt, SqlU64};
@@ -297,7 +297,7 @@ mod tests {
         },
         decrypt_transaction,
         proto::compact_formats::{CompactBlock, CompactTx},
-        scanning::{Nullifiers, ScanningKeys, scan_block},
+        scanning::{SpendIdentifiers, ScanningKeys, scan_block},
         wallet::WalletTx,
     };
     use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
@@ -415,7 +415,7 @@ mod tests {
                 &transparent_signing_set,
                 &[],
                 &[],
-                OsRng,
+                UnwrapErr(SysRng),
                 &prover,
                 &prover,
                 #[allow(deprecated)]
@@ -672,7 +672,7 @@ mod tests {
             &params,
             block,
             &scanning_keys,
-            &Nullifiers::empty(),
+            &SpendIdentifiers::empty(),
             Some(&BlockMetadata::from_parts(
                 height - 1,
                 prev_hash,
@@ -682,6 +682,8 @@ mod tests {
                 #[cfg(feature = "orchard")]
                 Some(0),
             )),
+            #[cfg(feature = "transparent-inputs")]
+            |_addr| Ok::<_, std::convert::Infallible>(None),
         )
         .unwrap();
 

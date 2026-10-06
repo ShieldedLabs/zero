@@ -776,6 +776,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn create_to_address_respects_recipient_expiry() {
+        testing::pool::create_to_address_respects_recipient_expiry::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_full_block_detects_outputs() {
         testing::pool::scan_full_block_detects_outputs::<OrchardPoolTester>()
     }
@@ -1766,7 +1771,7 @@ pub(crate) mod tests {
             wallet::orchard::select_spendable_ironwood_notes,
         };
         use orchard::keys::{FullViewingKey, Scope, SpendAuthorizingKey};
-        use rand_core::OsRng;
+        use rand::{rand_core::UnwrapErr, rngs::SysRng};
         use transparent::builder::TransparentSigningSet;
 
         // A network on which Ironwood (NU6.3) is active from the Sapling activation height, so
@@ -2305,7 +2310,12 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             let tx = builder
-                .mock_build(&TransparentSigningSet::new(), &[], &[orchard_sak], OsRng)
+                .mock_build(
+                    &TransparentSigningSet::new(),
+                    &[],
+                    &[orchard_sak],
+                    UnwrapErr(SysRng),
+                )
                 .unwrap()
                 .transaction()
                 .clone();

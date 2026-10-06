@@ -2,7 +2,7 @@
 
 use core::{cmp::Ordering, fmt};
 
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, Rng};
 
 use ::sapling::{Note, PaymentAddress, builder::SaplingMetadata};
 use ::transparent::{
@@ -74,6 +74,9 @@ pub enum Error<FE> {
     /// Insufficient funds were provided to the transaction builder; the given
     /// additional amount is required in order to construct the transaction.
     InsufficientFunds(ZatBalance),
+    /// PCZT does not preserve a nonzero ZIP 233 amount.
+    #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
+    Zip233UnsupportedByPczt,
     /// The transaction has inputs in excess of outputs and fees; the user must
     /// add a change output.
     ChangeRequired(ZatBalance),
@@ -133,6 +136,10 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
                 f,
                 "Insufficient funds for transaction construction; need an additional {amount:?} zatoshis"
             ),
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
+            Error::Zip233UnsupportedByPczt => {
+                write!(f, "PCZT does not support a nonzero ZIP 233 amount")
+            }
             Error::ChangeRequired(amount) => write!(
                 f,
                 "The transaction requires an additional change output of {amount:?} zatoshis"
@@ -441,7 +448,7 @@ fn orchard_action_count(
     bundle_type.num_actions(flags, num_spends, num_outputs)
 }
 
-/// A builder for V6 (NU6.3 onward) transactions constructed as PCZTs with their
+/// A builder for V6 and later transactions constructed as PCZTs with their
 /// Orchard-family anchors DEFERRED to proving time, per [ZIP 374].
 ///
 /// [`Builder`] requires each shielded pool's anchor in its [`BuildConfig`] and a Merkle
@@ -450,8 +457,8 @@ fn orchard_action_count(
 /// deferred-anchor support ([`orchard::builder::Builder::new_with_anchor_deferred`]), and the
 /// emitted PCZT carries ABSENT anchor and witness fields, which the PCZT Updater role
 /// (`set_{orchard,ironwood}_anchor` / `set_*_spend_witnesses`) fills in at proving time,
-/// after the transaction has been finalized and SIGNED. This is sound exactly for the V6
-/// transaction format, whose txid and sighash exclude shielded anchors (they are
+/// after the transaction has been finalized and SIGNED. This is sound exactly for V6 and later
+/// transaction formats, whose txid and sighash exclude Sapling and Orchard-family anchors (they are
 /// committed only by the authorizing-data digest), so neither the transaction id nor any
 /// signature commits to the deferred values; [`Self::new`] refuses any earlier format.
 /// The witness-to-anchor consistency check that [`Builder`] performs per spend at
@@ -484,8 +491,8 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
     /// delta; override it with [`Self::with_expiry_height`].
     ///
     /// Returns [`Error::AnchorDeferralUnsupported`] if the consensus branch in effect at
-    /// `target_height` does not use the V6 transaction format, whose txid and sighash
-    /// exclude shielded anchors; under any earlier format the anchors cannot outlive
+    /// `target_height` uses a transaction format older than V6, whose txid and sighash include
+    /// Sapling and Orchard-family anchors; under those formats the anchors cannot outlive
     /// signing.
     pub fn new<FE>(
         params: P,
@@ -655,7 +662,7 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
     /// result to the PCZT Creator (`build_from_parts`), then finalize, sign, and — at
     /// proving time — install the real anchor and witnesses through the PCZT Updater
     /// role before proving.
-    pub fn build_for_pczt<R: RngCore + CryptoRng, FR: FeeRule>(
+    pub fn build_for_pczt<R: Rng + CryptoRng, FR: FeeRule>(
         self,
         mut rng: R,
         fee_rule: &FR,
@@ -800,7 +807,7 @@ pub struct Builder<P, U> {
     build_config: BuildConfig,
     target_height: BlockHeight,
     expiry_height: BlockHeight,
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
     zip233_amount: Zatoshis,
     transparent_builder: TransparentBuilder,
     sapling_builder: Option<sapling::builder::Builder>,
@@ -877,6 +884,15 @@ impl<P, U> Builder<P, U> {
             ));
         }
 
+        #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
+        if self.zip233_amount != Zatoshis::ZERO && !version.has_zip233(self.consensus_branch_id) {
+            return Err(Error::TargetIncompatible(
+                self.consensus_branch_id,
+                version,
+                None,
+            ));
+        }
+
         let sapling_available = version.has_sapling() && self.consensus_branch_id.has_sapling();
         if !sapling_available
             && (!self.sapling_inputs().is_empty() || !self.sapling_outputs().is_empty())
@@ -899,11 +915,12 @@ impl<P, U> Builder<P, U> {
 
         {
             // Ironwood is available only when the target version carries an Ironwood bundle
-            // (V6) and the consensus branch is one in which Ironwood is active.
+            // and the consensus branch is one in which Ironwood is active.
             let ironwood_branch = match self.consensus_branch_id {
                 BranchId::Nu6_3 => true,
-                #[cfg(zcash_unstable = "nu7")]
                 BranchId::Nu7 => true,
+                #[cfg(zcash_unstable = "nutachyon")]
+                BranchId::NuTachyon => true,
                 _ => false,
             };
             let ironwood_available = version.has_ironwood() && ironwood_branch;
@@ -949,14 +966,14 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         // Orchard builder construction on NU5 activation.
         let bundle_version =
             bundle_version_for_branch(consensus_branch_id, orchard::ValuePool::Orchard);
-        // Default transaction version for the branch (V6 from NU6.3 onward).
+        // Default transaction version for the branch.
         let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
 
         let orchard_builder = bundle_version.and_then(|v| build_config.orchard_builder(v));
         let orchard_bundle_version = orchard_builder.as_ref().and(bundle_version);
 
         // The Ironwood builder exists exactly when the branch's transaction version
-        // carries an Ironwood bundle (V6, i.e. NU6.3 onward).
+        // carries an Ironwood bundle.
         let ironwood_builder = if tx_version.has_ironwood() {
             build_config.ironwood_builder()
         } else {
@@ -995,7 +1012,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
             build_config,
             target_height,
             expiry_height,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             zip233_amount: Zatoshis::ZERO,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder,
@@ -1024,7 +1041,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
             build_config: self.build_config,
             target_height: self.target_height,
             expiry_height: self.expiry_height,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             zip233_amount: self.zip233_amount,
             transparent_builder: self.transparent_builder,
             sapling_builder: self.sapling_builder,
@@ -1265,7 +1282,8 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
             .map_err(Error::TransparentBuild)
     }
 
-    /// Returns the sum of the transparent, Sapling, Orchard, and zip233_amount value balances.
+    /// Returns the sum of the transparent, Sapling, Orchard, Ironwood, and any
+    /// experimental ZIP 233 value balances.
     fn value_balance(&self) -> Result<ZatBalance, BalanceError> {
         let value_balances = [
             self.transparent_builder.value_balance()?,
@@ -1290,7 +1308,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
                         .map_err(|_| BalanceError::Overflow)
                 },
             )?,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             -ZatBalance::from(self.zip233_amount),
         ];
 
@@ -1362,7 +1380,9 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
             .map_err(FeeError::FeeRule)
     }
 
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
+    /// Sets the experimental ZIP 233 amount. No implemented transaction format supports
+    /// a nonzero amount; transaction construction rejects it.
     pub fn set_zip233_amount(&mut self, zip233_amount: Zatoshis) {
         self.zip233_amount = zip233_amount;
     }
@@ -1384,7 +1404,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
     /// [final transaction]: Transaction
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "circuits")]
-    pub fn build<R: RngCore + CryptoRng, SP: SpendProver, OP: OutputProver, FR: FeeRule>(
+    pub fn build<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver, FR: FeeRule>(
         self,
         transparent_signing_set: &TransparentSigningSet,
         sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
@@ -1470,7 +1490,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
                 >,
             >,
         A::TransparentAuth: transparent::sighash::TransparentAuthorizingContext,
-        R: RngCore + CryptoRng,
+        R: Rng + CryptoRng,
         SP: SpendProver,
         OP: OutputProver,
     {
@@ -1563,7 +1583,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             consensus_branch_id: self.consensus_branch_id,
             lock_time: 0,
             expiry_height: self.expiry_height,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             zip233_amount: self.zip233_amount,
             transparent_bundle,
             // We don't support constructing Sprout bundles.
@@ -1601,7 +1621,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
 
         let sapling_asks = sapling_extsks
             .iter()
-            .map(|extsk| extsk.expsk.ask.clone())
+            .map(|extsk| extsk.expsk().ask().clone())
             .collect::<Vec<_>>();
         let sapling_bundle = unauthed_tx
             .sapling_bundle
@@ -1681,7 +1701,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             consensus_branch_id: unauthed_tx.consensus_branch_id,
             lock_time: unauthed_tx.lock_time,
             expiry_height: unauthed_tx.expiry_height,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             zip233_amount: unauthed_tx.zip233_amount,
             transparent_bundle,
             sprout_bundle: unauthed_tx.sprout_bundle,
@@ -1707,11 +1727,18 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     /// Upon success, returns a struct containing the PCZT components, and the
     /// [`SaplingMetadata`] and [`orchard::builder::BundleMetadata`] generated during the
     /// build process.
-    pub fn build_for_pczt<R: RngCore + CryptoRng, FR: FeeRule>(
+    ///
+    /// Experimental ZIP 233 builds reject nonzero ZIP 233 amounts because PCZT cannot
+    /// preserve them through extraction.
+    pub fn build_for_pczt<R: Rng + CryptoRng, FR: FeeRule>(
         self,
         mut rng: R,
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
+        #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
+        if self.zip233_amount != Zatoshis::ZERO {
+            return Err(Error::Zip233UnsupportedByPczt);
+        }
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
         self.check_version_compatibility::<FR::Error>(self.tx_version)?;
         self.check_coinbase_expiry_height::<FR::Error>()?;
@@ -1761,9 +1788,6 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
             None => (None, orchard::builder::BundleMetadata::empty()),
         };
 
-        // The Ironwood bundle is only carried by V6 transactions; for any other version it is
-        // left empty (and `check_version_compatibility` above rejects an in-use Ironwood
-        // builder paired with a non-V6 version).
         let (ironwood_bundle, ironwood_meta) = if self.tx_version.has_ironwood() {
             match self
                 .ironwood_builder
@@ -1853,7 +1877,9 @@ fn authorize_transparent(
 
 #[cfg(all(any(test, feature = "test-dependencies"), feature = "circuits"))]
 mod testing {
-    use rand_core::{CryptoRng, RngCore};
+    use core::convert::Infallible;
+
+    use rand_core::{Rng, TryCryptoRng, TryRng};
 
     use ::sapling::prover::mock::{MockOutputProver, MockSpendProver};
     use ::transparent::builder::TransparentSigningSet;
@@ -1865,32 +1891,31 @@ mod testing {
     impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U> {
         /// Build the transaction using mocked randomness and proving capabilities.
         /// DO NOT USE EXCEPT FOR UNIT TESTING.
-        pub fn mock_build<R: RngCore>(
+        pub fn mock_build<R: Rng>(
             self,
             transparent_signing_set: &TransparentSigningSet,
             sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
             orchard_saks: &[orchard::keys::SpendAuthorizingKey],
             rng: R,
         ) -> Result<BuildResult, Error<zip317::FeeError>> {
-            struct FakeCryptoRng<R: RngCore>(R);
-            impl<R: RngCore> CryptoRng for FakeCryptoRng<R> {}
-            impl<R: RngCore> RngCore for FakeCryptoRng<R> {
-                fn next_u32(&mut self) -> u32 {
-                    self.0.next_u32()
+            struct FakeCryptoRng<R: Rng>(R);
+            impl<R: Rng> TryRng for FakeCryptoRng<R> {
+                type Error = Infallible;
+
+                fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+                    Ok(self.0.next_u32())
                 }
 
-                fn next_u64(&mut self) -> u64 {
-                    self.0.next_u64()
+                fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+                    Ok(self.0.next_u64())
                 }
 
-                fn fill_bytes(&mut self, dest: &mut [u8]) {
-                    self.0.fill_bytes(dest)
-                }
-
-                fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-                    self.0.try_fill_bytes(dest)
+                fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
+                    self.0.fill_bytes(dest);
+                    Ok(())
                 }
             }
+            impl<R: Rng> TryCryptoRng for FakeCryptoRng<R> {}
 
             self.build(
                 transparent_signing_set,
@@ -1924,7 +1949,8 @@ mod tests {
         core::convert::Infallible,
         ff::Field,
         incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness},
-        rand_core::OsRng,
+        rand::rngs::SysRng,
+        rand_core::UnwrapErr,
         zcash_protocol::{
             consensus::{BlockHeight, NetworkUpgrade, Parameters, TEST_NETWORK},
             memo::MemoBytes,
@@ -1961,12 +1987,13 @@ mod tests {
             nu6_1: Some(BlockHeight::from_u32(8)),
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
-            #[cfg(zcash_unstable = "nu7")]
             nu7: None,
+            #[cfg(zcash_unstable = "nutachyon")]
+            nu_tachyon: None,
         }
     }
 
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    #[cfg(feature = "circuits")]
     fn nu7_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         zcash_protocol::local_consensus::LocalNetwork {
             overwinter: Some(BlockHeight::from_u32(1)),
@@ -1980,6 +2007,8 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: Some(BlockHeight::from_u32(11)),
+            #[cfg(zcash_unstable = "nutachyon")]
+            nu_tachyon: None,
         }
     }
 
@@ -2043,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    #[cfg(feature = "circuits")]
     fn nu7_coinbase_builder_does_not_expose_orchard() {
         let builder = Builder::new(
             nu7_test_network(),
@@ -2120,6 +2149,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "circuits", feature = "zip-233", zcash_unstable = "zip233"))]
+    fn build_for_pczt_rejects_nonzero_zip233_amount() {
+        let mut builder = Builder::new(
+            nu6_3_test_network(),
+            10u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: None,
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder.set_zip233_amount(Zatoshis::const_from_u64(1));
+        assert!(matches!(
+            builder.check_version_compatibility::<Infallible>(TxVersion::V6),
+            Err(Error::TargetIncompatible(
+                BranchId::Nu6_3,
+                TxVersion::V6,
+                None
+            ))
+        ));
+        builder.consensus_branch_id = BranchId::Nu7;
+        for version in [TxVersion::V5, TxVersion::V6] {
+            assert!(matches!(
+                builder.check_version_compatibility::<Infallible>(version),
+                Err(Error::TargetIncompatible(BranchId::Nu7, _, None))
+            ));
+        }
+        assert!(matches!(
+            builder.build_for_pczt(
+                UnwrapErr(SysRng),
+                &crate::transaction::fees::zip317::FeeRule::standard()
+            ),
+            Err(Error::Zip233UnsupportedByPczt)
+        ));
+    }
+
+    #[test]
     #[cfg(all(feature = "circuits", feature = "transparent-inputs"))]
     fn build_for_pczt_preserves_explicit_v6_without_ironwood() {
         let mut builder = Builder::new(
@@ -2166,7 +2234,7 @@ mod tests {
 
         let res = builder
             .build_for_pczt(
-                OsRng,
+                UnwrapErr(SysRng),
                 &crate::transaction::fees::zip317::FeeRule::standard(),
             )
             .unwrap();
@@ -2206,7 +2274,7 @@ mod tests {
 
         assert_matches!(
             builder.build_for_pczt(
-                OsRng,
+                UnwrapErr(SysRng),
                 &crate::transaction::fees::zip317::FeeRule::standard(),
             ),
             Err(Error::InsufficientFunds(_))
@@ -2246,7 +2314,7 @@ mod tests {
 
         assert_matches!(
             builder.build_for_pczt(
-                OsRng,
+                UnwrapErr(SysRng),
                 &crate::transaction::fees::zip317::FeeRule::standard(),
             ),
             Err(Error::TargetIncompatible(
@@ -2530,7 +2598,7 @@ mod tests {
 
         let result = builder
             .build_for_pczt(
-                OsRng,
+                UnwrapErr(SysRng),
                 &crate::transaction::fees::zip317::FeeRule::standard(),
             )
             .unwrap();
@@ -2604,7 +2672,7 @@ mod tests {
             },
             target_height: sapling_activation_height,
             expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
             zip233_amount: Zatoshis::ZERO,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder: None,
@@ -2643,7 +2711,7 @@ mod tests {
             .unwrap();
 
         let res = builder
-            .mock_build(&transparent_signing_set, &[], &[], OsRng)
+            .mock_build(&transparent_signing_set, &[], &[], UnwrapErr(SysRng))
             .unwrap();
         // No binding signature, because only t input and outputs
         assert!(res.transaction().sapling_bundle.is_none());
@@ -2692,7 +2760,7 @@ mod tests {
             .unwrap();
 
         let res = builder
-            .mock_build(&transparent_signing_set, &[], &[], OsRng)
+            .mock_build(&transparent_signing_set, &[], &[], UnwrapErr(SysRng))
             .unwrap();
         assert_eq!(res.transaction().expiry_height(), 0u32.into());
     }
@@ -2715,7 +2783,7 @@ mod tests {
             .unwrap();
 
         assert_matches!(
-            builder.mock_build(&TransparentSigningSet::new(), &[], &[], OsRng),
+            builder.mock_build(&TransparentSigningSet::new(), &[], &[], UnwrapErr(SysRng)),
             Err(Error::CoinbaseExpiryHeightMismatch {
                 target_height,
                 expiry_height,
@@ -2726,11 +2794,12 @@ mod tests {
     #[test]
     #[cfg(feature = "circuits")]
     fn binding_sig_present_if_shielded_spend() {
-        let extsk = ExtendedSpendingKey::master(&[]);
+        let extsk =
+            ExtendedSpendingKey::master(&[]).expect("the derivation path yields a valid key");
         let dfvk = extsk.to_diversifiable_full_viewing_key();
         let to = dfvk.default_address().1;
 
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         let note1 = to.create_note(
             sapling::value::NoteValue::from_raw(50000),
@@ -2768,7 +2837,12 @@ mod tests {
 
         // A binding signature (and bundle) is present because there is a Sapling spend.
         let res = builder
-            .mock_build(&TransparentSigningSet::new(), &[extsk], &[], OsRng)
+            .mock_build(
+                &TransparentSigningSet::new(),
+                &[extsk],
+                &[],
+                UnwrapErr(SysRng),
+            )
             .unwrap();
         assert!(res.transaction().sapling_bundle().is_some());
     }
@@ -2776,10 +2850,11 @@ mod tests {
     #[test]
     #[cfg(feature = "circuits")]
     fn fails_on_negative_change() {
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
 
         // Just use the master key as the ExtendedSpendingKey for this test
-        let extsk = ExtendedSpendingKey::master(&[]);
+        let extsk =
+            ExtendedSpendingKey::master(&[]).expect("the derivation path yields a valid key");
         let tx_height = TEST_NETWORK
             .activation_height(NetworkUpgrade::Sapling)
             .unwrap();
@@ -2796,7 +2871,7 @@ mod tests {
             };
             let builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), &[], &[], OsRng),
+                builder.mock_build(&TransparentSigningSet::new(), &[], &[], UnwrapErr(SysRng)),
                 Err(Error::InsufficientFunds(expected)) if expected == MINIMUM_FEE.into()
             );
         }
@@ -2827,7 +2902,7 @@ mod tests {
                 )
                 .unwrap();
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng),
+                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], UnwrapErr(SysRng)),
                 Err(Error::InsufficientFunds(expected)) if
                     expected == (Zatoshis::const_from_u64(50000) + MINIMUM_FEE).unwrap().into()
             );
@@ -2851,7 +2926,7 @@ mod tests {
                 )
                 .unwrap();
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng),
+                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], UnwrapErr(SysRng)),
                 Err(Error::InsufficientFunds(expected)) if expected ==
                     (Zatoshis::const_from_u64(50000) + MINIMUM_FEE).unwrap().into()
             );
@@ -2859,7 +2934,7 @@ mod tests {
 
         // Fail if there is only a burn
         // 0.0005 burned, 0.0001 t-ZEC fee
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
@@ -2868,13 +2943,18 @@ mod tests {
                 orchard_padding: BundlePadding::DEFAULT,
                 ironwood_padding: BundlePadding::DEFAULT,
             };
-            let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
+            let mut builder =
+                Builder::new(nu7_test_network(), BlockHeight::from_u32(11), build_config);
             builder.set_zip233_amount(Zatoshis::const_from_u64(50000));
 
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng),
-                Err(Error::InsufficientFunds(expected)) if expected ==
-                    (Zatoshis::const_from_u64(50000) + MINIMUM_FEE).unwrap().into()
+                builder.mock_build(
+                    &TransparentSigningSet::new(),
+                    extsks,
+                    &[],
+                    UnwrapErr(SysRng)
+                ),
+                Err(Error::TargetIncompatible(BranchId::Nu7, _, None))
             );
         }
 
@@ -2920,14 +3000,14 @@ mod tests {
                 )
                 .unwrap();
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng),
+                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], UnwrapErr(SysRng)),
                 Err(Error::InsufficientFunds(expected)) if expected == ZatBalance::const_from_i64(1)
             );
         }
 
         // Fail if there is insufficient input
         // 0.0003 z-ZEC out, 0.00005 t-ZEC out, 0.0001 burned, 0.00015 t-ZEC fee, 0.00059999 z-ZEC in
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
@@ -2936,7 +3016,8 @@ mod tests {
                 orchard_padding: BundlePadding::DEFAULT,
                 ironwood_padding: BundlePadding::DEFAULT,
             };
-            let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
+            let mut builder =
+                Builder::new(nu7_test_network(), BlockHeight::from_u32(11), build_config);
             builder
                 .add_sapling_spend::<Infallible>(
                     dfvk.fvk().clone(),
@@ -2960,8 +3041,13 @@ mod tests {
                 .unwrap();
             builder.set_zip233_amount(Zatoshis::const_from_u64(10000));
             assert_matches!(
-                builder.mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng),
-                Err(Error::InsufficientFunds(expected)) if expected == ZatBalance::const_from_i64(1)
+                builder.mock_build(
+                    &TransparentSigningSet::new(),
+                    extsks,
+                    &[],
+                    UnwrapErr(SysRng)
+                ),
+                Err(Error::TargetIncompatible(BranchId::Nu7, _, None))
             );
         }
 
@@ -3014,7 +3100,12 @@ mod tests {
                 )
                 .unwrap();
             let res = builder
-                .mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng)
+                .mock_build(
+                    &TransparentSigningSet::new(),
+                    extsks,
+                    &[],
+                    UnwrapErr(SysRng),
+                )
                 .unwrap();
             assert_eq!(
                 res.transaction()
@@ -3024,9 +3115,8 @@ mod tests {
             );
         }
 
-        // Succeeds if there is sufficient input
-        // 0.0003 z-ZEC out, 0.00005 t-ZEC out, 0.0001 burned, 0.00015 t-ZEC fee, 0.0006 z-ZEC in
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        // NU7 rejects voluntary removal even when the inputs cover the requested amount.
+        #[cfg(all(feature = "zip-233", zcash_unstable = "zip233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
@@ -3035,7 +3125,8 @@ mod tests {
                 orchard_padding: BundlePadding::DEFAULT,
                 ironwood_padding: BundlePadding::DEFAULT,
             };
-            let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
+            let mut builder =
+                Builder::new(nu7_test_network(), BlockHeight::from_u32(11), build_config);
             builder
                 .add_sapling_spend::<Infallible>(
                     dfvk.fvk().clone(),
@@ -3065,14 +3156,14 @@ mod tests {
                 )
                 .unwrap();
             builder.set_zip233_amount(Zatoshis::const_from_u64(10000));
-            let res = builder
-                .mock_build(&TransparentSigningSet::new(), extsks, &[], OsRng)
-                .unwrap();
-            assert_eq!(
-                res.transaction()
-                    .fee_paid(|_| Err(BalanceError::Overflow))
-                    .unwrap(),
-                Some(Zatoshis::const_from_u64(15_000))
+            assert_matches!(
+                builder.mock_build(
+                    &TransparentSigningSet::new(),
+                    extsks,
+                    &[],
+                    UnwrapErr(SysRng)
+                ),
+                Err(Error::TargetIncompatible(BranchId::Nu7, _, None))
             );
         }
     }

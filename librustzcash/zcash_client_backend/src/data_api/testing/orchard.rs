@@ -79,6 +79,8 @@ impl ShieldedPoolTester for OrchardPoolTester {
             Some(fvk.address_at(0u32, zip32::Scope::External)),
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .into()
@@ -198,7 +200,7 @@ impl ShieldedPoolTester for OrchardPoolTester {
                             note,
                             pool: orchard::ValuePool::Orchard,
                         },
-                        UnifiedAddress::from_receivers(Some(addr), None, None)
+                        UnifiedAddress::from_receivers(Some(addr), None, None, None, None)
                             .unwrap()
                             .into(),
                         MemoBytes::from_bytes(&memo).expect("correct length"),
@@ -229,11 +231,13 @@ impl ShieldedPoolTester for OrchardPoolTester {
         usk: &UnifiedSpendingKey,
     ) -> Result<(), pczt::roles::signer::Error> {
         let sk = Self::usk_to_sk(usk);
+        use rand::{rand_core::UnwrapErr, rngs::SysRng};
+
         let ask = orchard::keys::SpendAuthorizingKey::from(sk);
 
         // Figuring out which one is for us is hard. Let's just try signing all of them!
         for index in 0.. {
-            match signer.sign_orchard(index, &ask) {
+            match signer.sign_orchard(UnwrapErr(SysRng), index, &ask) {
                 // Loop termination.
                 Err(pczt::roles::signer::Error::InvalidIndex) => break,
                 // Ignore any errors due to using the wrong key.

@@ -23,6 +23,135 @@ workspace.
 - `data_api::chain::scan_cached_blocks` no longer hangs on `wasm32` targets built
   without the `atomics` target feature.
 
+## [0.25.0-pre.0] - 2026-10-02
+
+### Added
+- `zeroize` feature, enabled by default, which enables `zcash_keys/zeroize`.
+- `zcash_client_backend::util` module, containing `Clock`, `SystemClock`, and
+  (behind `test-dependencies`) `testing::FixedClock`.
+- `zcash_client_backend::data_api::error::AddressExpiryError`
+- `zcash_client_backend::data_api::error::Error::RecipientAddressExpiry`
+- `zcash_client_backend::data_api::testing::TestState::clock`
+- `zcash_client_backend::data_api::testing::TestState::generate_next_block_transparent`
+  (behind `transparent-inputs`)
+- `zcash_client_backend::wallet::WalletTransparentSpend`
+- `zcash_client_backend::wallet::WalletTx::transparent_spends`
+- `zcash_client_backend::data_api::ScannedBlock::transparent_spend_map` (behind
+  `transparent-inputs`)
+- `zcash_client_backend::scanning::ScanBlockError`, which
+  `zcash_client_backend::scanning::full::ScanBlockError` now re-exports.
+- `zcash_client_backend::scanning::SpendIdentifiers`
+- `zcash_client_backend::scanning::ScanError::TransparentPrevoutInvalid` (behind
+  `transparent-inputs`)
+- `zcash_client_backend::proto::compact_formats::CompactTxIn::prevout` and
+  `TxOut::to_txout` (behind `transparent-inputs`)
+- `zcash_client_backend::sync::decryptor::Handle::{closed, is_closed}` (behind
+  `sync-decryptor`)
+
+### Changed
+- Migrated to `bip32 0.6`, `bls12_381 0.9`, `group 0.14`,
+  `incrementalmerkletree 0.9`, `jubjub 0.11`, `orchard 0.16`,
+  `pasta_curves 0.6`, `pczt 0.10.0-pre.0`, `rand 0.10`, `rand_core 0.10`,
+  `sapling-crypto 0.9`, `secp256k1 0.33`, `shardtree 0.8`,
+  `zcash_address 0.14.0-pre.0`, `zcash_keys 0.17.0-pre.0`,
+  `zcash_note_encryption 0.5`, `zcash_primitives 0.31.0-pre.0`,
+  `zcash_proofs 0.31.0-pre.0`, `zcash_protocol 0.11.0-pre.0`,
+  `zcash_script 0.6`, `zcash_transparent 0.11.0-pre.0`, `zip32 0.3`, and
+  `zip321 0.10.0-pre.0`.
+- `zcash_client_backend::tor::http::Client::get_latest_zec_to_usd_rate` takes an
+  additional `rng: &mut impl Rng` first argument.
+- `zcash_client_backend::data_api::wallet::SpendingKeys` now overwrites the
+  standalone transparent spending keys it holds when it is dropped.
+- `zcash_client_backend::data_api::locking::LockOwner::random` now requires its
+  `rng` argument to implement `rand_core::Rng` in place of `rand_core::RngCore`.
+- `zcash_client_backend::data_api::wallet`: `create_proposed_transactions`,
+  `create_pczt_from_proposal`, `extract_and_store_transaction_from_pczt`, and
+  `shield_transparent_funds` now take a `clock: &impl Clock` argument, used for
+  transaction-creation timestamps and to enforce recipient address expiry, and an
+  `rng: &mut impl CryptoRng` argument, which supplies the randomness for
+  constructing, proving, and signing transactions in place of the operating
+  system's RNG.
+- `zcash_client_backend::data_api::wallet::{create_proposed_transactions,
+  create_pczt_from_proposal}` now enforce the ZIP 316 Revision 2 address
+  expiration rules for every payment recipient: a payment to an address that is
+  known to have expired, or whose expiry height the transaction's expiry height
+  would exceed, fails with `Error::RecipientAddressExpiry`.
+- `zcash_client_backend::data_api::WalletWrite::put_blocks` is now documented as
+  atomic: an implementation must apply the whole batch of blocks or none of it,
+  and a caller may assume after an error that nothing was persisted. An
+  implementation that applies blocks one at a time must be updated. An
+  implementation must also record as received each scanned transparent output
+  that pays a wallet account.
+- `zcash_client_backend::tor::http`:
+  - `Client::http_get_json` takes an additional `request: impl Fn(Builder) ->
+    Builder` argument, positioned after `url` as in `Client::http_get`, for
+    setting request headers such as `User-Agent`. `Accept: application/json`
+    is applied only if the closure did not set `Accept`. Pass `|b| b` to
+    preserve the previous behaviour.
+  - `Client::{http_get, http_post}`, and therefore `Client::http_get_json`,
+    now always send the `Host` header derived from the request URL (host and
+    port, without userinfo). A `Host` set by the request-construction closure
+    is discarded.
+- `zcash_client_backend::data_api::WalletWrite` has a new required method,
+  `queue_rescan`, which queues a range of block heights to be scanned again.
+- `zcash_client_backend::scanning`:
+  - `scan_block` and `full::scan_block` take a `&SpendIdentifiers<AccountId>`
+    in place of the `&Nullifiers<AccountId>` argument. `SpendIdentifiers`
+    pairs the wallet's `Nullifiers` with the outpoints of its unspent
+    transparent outputs; construct it with `SpendIdentifiers::unspent` where
+    `Nullifiers::unspent` was used, and maintain it across a batch with
+    `SpendIdentifiers::update_with`.
+  - `scan_block` takes an additional `find_account_for_address` argument behind
+    the `transparent-inputs` feature, matching `full::scan_block`, and returns
+    `ScanBlockError<E>` in place of `ScanError`. Pass a closure that resolves a
+    transparent address to the wallet account controlling it, such as a lookup
+    in the map returned by `WalletRead::get_transparent_receiver_accounts`; map
+    `ScanBlockError::Scan` back to your former handling and handle
+    `ScanBlockError::AddressLookup` as a wallet error. With
+    `transparent-inputs` disabled the argument is absent, and the
+    unconstrained error type must be named at the call site
+    (`scan_block::<_, _, _, Infallible>(..)`).
+  - `scan_block` now detects transparent outputs paying the wallet and spends
+    of the wallet's transparent outputs, and `full::scan_block` now detects
+    transparent spends; a coinbase transaction's null-outpoint input is
+    excluded.
+- `zcash_client_backend::wallet::WalletTx::new` takes a `transparent_spends`
+  argument before `transparent_outputs`.
+- `zcash_client_backend::data_api::WalletRead` has two new required methods
+  behind `transparent-inputs`, `get_unspent_transparent_outpoints` and
+  `get_transparent_receiver_accounts`.
+- `zcash_client_backend::data_api::ll::LowLevelWalletWrite` has a new required
+  method behind `transparent-inputs`, `track_block_transparent_spends`, and
+  `prune_tracked_nullifiers` is renamed to `prune_tracked_spends`: it now prunes
+  the transparent spend map alongside the nullifier maps.
+- `zcash_client_backend::data_api::ll::wallet::NULLIFIER_MAP_RETENTION_BLOCKS` is
+  renamed to `SPEND_MAP_RETENTION_BLOCKS`.
+- `zcash_client_backend::data_api::ll::LowLevelWalletRead::get_txs_spending_transparent_outputs_of`
+  is renamed to `get_unknown_fee_spenders_of`. An implementation must return
+  only the transactions that spend a transparent output of the referenced
+  transaction, for which the fee is unknown and the raw transaction data is
+  available.
+- `zcash_client_backend::data_api::chain::scan_cached_blocks` detects transparent
+  outputs paying the wallet and spends of the wallet's transparent outputs,
+  including spends observed before the block that created the spent output has
+  been scanned. `zcash_client_backend::sync` does not yet request transparent
+  data from the server; a caller that fetches compact blocks itself must set
+  `BlockRange.poolTypes` to receive it.
+
+### Fixed
+- `zcash_client_backend::data_api::ll::wallet::put_blocks_rows` now records the
+  transparent outputs of each scanned transaction that pay a wallet account, and
+  queues each such outpoint for transparent spend detection, instead of
+  discarding them.
+- `zcash_client_backend::decrypt::decrypt_transaction` now attempts outgoing
+  ciphertext recovery with every outgoing viewing key an account's UFVK can
+  produce — Orchard, Sapling and transparent-derived, in both the external and
+  internal scopes — instead of only the same-pool external-scope key, and tries
+  each pool's outputs against every account instead of only those whose UFVK
+  holds that pool's key. Cross-pool sends, shielding transactions, and outputs
+  encrypted under an internal-scope OVK now recover their recipient, value and
+  memo as `zcash_client_backend::TransferType::Outgoing`.
+
 ## [0.24.0] - 2026-08-18
 
 ### Added

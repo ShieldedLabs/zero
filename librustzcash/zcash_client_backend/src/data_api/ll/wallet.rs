@@ -293,21 +293,24 @@ pub struct PutBlocksRows {
 ///   data for blocks in sequentially increasing height order;
 ///   [`PutBlocksError::NonSequentialBlocks`] will be returned if this invariant is violated.
 ///
-/// # Nullifier tracking
+/// # Spend tracking
 ///
 /// When a batch extends the wallet's contiguous fully-scanned frontier (i.e.
 /// [`LowLevelWalletRead::block_fully_scanned_height`] equals the `from_state` height, so
 /// every block from the wallet birthday through the previous block has been scanned),
-/// nullifier-map insertion is skipped for blocks more than
-/// [`NULLIFIER_MAP_RETENTION_BLOCKS`] below the end of the batch. Under that precondition
-/// the skipped entries are provably unobservable: the nullifier map exists to detect
-/// spends observed before the corresponding note's block has been scanned, which cannot
-/// occur below a contiguous frontier — any wallet note spendable in a skipped block was
+/// spend-map insertion is skipped for blocks more than
+/// [`SPEND_MAP_RETENTION_BLOCKS`] below the end of the batch. Under that precondition
+/// the skipped entries are provably unobservable: the spend maps exist to detect
+/// spends observed before the corresponding output's block has been scanned, which cannot
+/// occur below a contiguous frontier — any wallet output spendable in a skipped block was
 /// either received in an already-scanned block (so its spend is detected directly against
-/// the wallet's own nullifiers rather than the map) or is received later in this same
-/// ascending batch (so the spend is linked when the receiving transaction is processed).
-/// For every out-of-order range — scanning after a gap, recent-first, or chain-tip
-/// pre-scans — the nullifiers of every block are tracked.
+/// the wallet's own nullifiers and outpoints rather than the map) or is received later in
+/// this same ascending batch (so the spend is linked when the receiving transaction is
+/// processed). For every out-of-order range — scanning after a gap, recent-first, or
+/// chain-tip pre-scans — every block's spends are tracked.
+///
+/// This governs the shielded nullifier maps and the transparent spend map alike; the
+/// argument above is indifferent to which kind of output identifier is being tracked.
 pub fn put_blocks_rows<DbT, SE, TE>(
     wallet_db: &mut DbT,
     #[cfg(feature = "transparent-inputs")] gap_limits: GapLimits,
@@ -345,7 +348,7 @@ where
         });
     }
 
-    let nullifier_tracking_floor = nullifier_tracking_floor(
+    let spend_tracking_floor = spend_tracking_floor(
         wallet_db
             .block_fully_scanned_height()
             .map_err(PutBlocksError::Storage)?,
@@ -406,12 +409,14 @@ where
                 .queue_tx_retrieval(std::iter::once(tx.txid()), None)
                 .map_err(PutBlocksError::Storage)?;
 
-            // Mark notes as spent and remove them from the scanning cache
+            // Mark notes and transparent outputs as spent, and remove them from the scanning
+            // cache. Only spends of outputs the wallet already knew of appear here; those it
+            // could not yet recognize are handled by the spend map below.
             let _ = mark_notes_spent(
                 wallet_db,
                 tx_ref,
                 #[cfg(feature = "transparent-inputs")]
-                None.iter(),
+                tx.transparent_spends().iter().map(|spend| spend.outpoint()),
                 tx.sapling_spends().iter().map(|spend| spend.nf()),
                 #[cfg(feature = "orchard")]
                 tx.orchard_spends().iter().map(|spend| spend.nf()),
@@ -505,11 +510,29 @@ where
                 |_account_id| (),
             )
             .map_err(PutBlocksError::Storage)?;
+
+            // Record the transparent outputs of the transaction that pay this wallet. As for
+            // the shielded pools above, only the receive side is recorded here; the sent
+            // outputs of a transaction the wallet funded are recorded when the complete
+            // transaction data arrives via `put_decrypted_tx`, which this scan has queued for
+            // retrieval. The gap-address regeneration that follows the block loop observes
+            // these receives, so no separate notification is needed.
+            #[cfg(feature = "transparent-inputs")]
+            for output in tx.transparent_outputs() {
+                put_received_transparent_output(
+                    wallet_db,
+                    tx_ref,
+                    output,
+                    block.height(),
+                    |_, _| (),
+                )
+                .map_err(PutBlocksError::Storage)?;
+            }
         }
 
-        // Insert the new nullifiers from this block into the nullifier map, unless the caller
-        // has excluded this height from nullifier tracking.
-        if should_track_nullifiers(nullifier_tracking_floor, block.height()) {
+        // Insert this block's unmatched nullifiers and transparent prevouts into the spend maps,
+        // unless the height lies below the spend-tracking floor.
+        if should_track_spends(spend_tracking_floor, block.height()) {
             wallet_db
                 .track_block_sapling_nullifiers(block.height(), block.sapling().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
@@ -522,6 +545,11 @@ where
             #[cfg(feature = "orchard")]
             wallet_db
                 .track_block_ironwood_nullifiers(block.height(), block.ironwood().nullifier_map())
+                .map_err(PutBlocksError::Storage)?;
+
+            #[cfg(feature = "transparent-inputs")]
+            wallet_db
+                .track_block_transparent_spends(block.height(), block.transparent_spend_map())
                 .map_err(PutBlocksError::Storage)?;
         }
 
@@ -592,9 +620,9 @@ where
         }
     }
 
-    // Prune the nullifier map of entries we no longer need.
+    // Prune the nullifier and transparent spend maps of entries we no longer need.
     wallet_db
-        .prune_tracked_nullifiers(PRUNING_DEPTH)
+        .prune_tracked_spends(PRUNING_DEPTH)
         .map_err(PutBlocksError::Storage)?;
 
     Ok(PutBlocksRows {
@@ -1077,7 +1105,7 @@ where
         tx_ref,
         &wallet_transparent_outputs,
         #[cfg(feature = "transparent-inputs")]
-        |wallet_db, output| wallet_db.put_transparent_output(output, observed_height, false),
+        observed_height,
         #[cfg(feature = "transparent-inputs")]
         |account_id, t_key_scope| {
             gap_update_set.insert((account_id, t_key_scope));
@@ -1098,9 +1126,7 @@ where
 
     // For each transaction that spends a transparent output of this transaction and does not
     // already have a known fee value, set the fee if possible.
-    for (spending_tx_ref, spending_tx) in
-        wallet_db.get_txs_spending_transparent_outputs_of(tx_ref)?
-    {
+    for (spending_tx_ref, spending_tx) in wallet_db.get_unknown_fee_spenders_of(tx_ref)? {
         if let Some(fee) = determine_fee(wallet_db, &spending_tx)? {
             wallet_db.update_tx_fee(spending_tx_ref, fee)?;
         }
@@ -1386,21 +1412,76 @@ where
     Ok(())
 }
 
+/// Records the wallet's receipt of `output` if its recipient address belongs to a wallet
+/// account, and queues the resulting outpoint for transparent spend detection.
+///
+/// An output whose recipient address belongs to no wallet account is ignored; recording such an
+/// output as a send is the caller's responsibility.
+///
+/// `observation_height` is the height as of which the output was observed: the height of the
+/// containing block for an output discovered in a mined block, or the caller's best estimate of
+/// the chain tip for one discovered in an unmined transaction. The output is never recorded as
+/// known-unspent, because neither observing it in a block nor receiving complete data for the
+/// transaction that created it establishes that it is still a member of the UTXO set; only a
+/// query of that set can do so.
+///
+/// `on_received` is invoked with the receiving account and key scope when the output is recorded,
+/// so that a caller which does not otherwise track address use can extend the transparent address
+/// gap for that account.
+#[cfg(feature = "transparent-inputs")]
+fn put_received_transparent_output<DbT>(
+    wallet_db: &mut DbT,
+    tx_ref: <DbT as LowLevelWalletRead>::TxRef,
+    output: &WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>,
+    observation_height: BlockHeight,
+    mut on_received: impl FnMut(<DbT as LowLevelWalletRead>::AccountId, TransparentKeyScope),
+) -> Result<(), <DbT as LowLevelWalletRead>::Error>
+where
+    DbT: LowLevelWalletWrite,
+{
+    if output.recipient_account().is_none() {
+        return Ok(());
+    }
+
+    let (account_id, _) = wallet_db.put_transparent_output(output, observation_height, false)?;
+
+    if let Some(t_key_scope) = output.recipient_key_scope() {
+        on_received(account_id, t_key_scope);
+    }
+
+    // Queue this outpoint for explicit transparent-spend detection.
+    //
+    // Unlike shielded notes -- whose spends are detected naturally during
+    // scanning via nullifier matching -- transparent spends are only found
+    // when the wallet already knows which outpoints to watch. For receives at
+    // ordinary transparent addresses this is handled by indexer-driven address
+    // watches, but for receives at ephemeral addresses (e.g. the middle hop of
+    // a ZIP 320 / TEX flow) there is no ongoing watch. A purely-transparent
+    // spend of such an output would otherwise go undetected. This is especially
+    // a problem in wallet recovery, where transactions can be processed out of
+    // order: queuing here ensures the spend is detected even when the receive
+    // side is processed first.
+    wallet_db.queue_transparent_spend_detection(
+        *output.recipient_address(),
+        tx_ref,
+        output.outpoint().n(),
+    )?;
+
+    Ok(())
+}
+
+/// Records both sides of each transparent output of a transaction: the wallet's receipt of
+/// those outputs that pay one of its accounts, and, for each output that names a funding
+/// account, the corresponding sent output.
+///
+/// `observation_height` is the height as of which the outputs were observed; see
+/// [`put_received_transparent_output`].
 fn put_transparent_outputs<DbT, P>(
     wallet_db: &mut DbT,
     params: &P,
     tx_ref: <DbT as LowLevelWalletRead>::TxRef,
     outputs: &[WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>],
-    #[cfg(feature = "transparent-inputs")] put_received_output: impl Fn(
-        &mut DbT,
-        &WalletTransparentOutput<<DbT as LowLevelWalletRead>::AccountId>,
-    ) -> Result<
-        (
-            <DbT as LowLevelWalletRead>::AccountId,
-            std::option::Option<TransparentKeyScope>,
-        ),
-        <DbT as LowLevelWalletRead>::Error,
-    >,
+    #[cfg(feature = "transparent-inputs")] observation_height: BlockHeight,
     #[cfg(feature = "transparent-inputs")] mut on_received: impl FnMut(
         <DbT as LowLevelWalletRead>::AccountId,
         TransparentKeyScope,
@@ -1414,32 +1495,13 @@ where
         // Receive side: record the output as received whenever its recipient
         // address belongs to a wallet account.
         #[cfg(feature = "transparent-inputs")]
-        if output.recipient_account().is_some() {
-            let (account_id, _) = put_received_output(wallet_db, output)?;
-
-            if let Some(t_key_scope) = output.recipient_key_scope() {
-                on_received(account_id, t_key_scope);
-            }
-
-            // Queue this outpoint for explicit transparent-spend detection.
-            //
-            // Unlike shielded notes -- whose spends are detected naturally
-            // during scanning via nullifier matching -- transparent spends are
-            // only found when the wallet already knows which outpoints to
-            // watch. For receives at ordinary transparent addresses this is
-            // handled by indexer-driven address watches, but for receives at
-            // ephemeral addresses (e.g. the middle hop of a ZIP 320 / TEX
-            // flow) there is no ongoing watch. A purely-transparent spend of
-            // such an output would otherwise go undetected. This is
-            // especially a problem in wallet recovery, where transactions can
-            // be processed out of order: queuing here ensures the spend is
-            // detected even when the receive side is processed first.
-            wallet_db.queue_transparent_spend_detection(
-                *output.recipient_address(),
-                tx_ref,
-                output.outpoint().n(),
-            )?;
-        }
+        put_received_transparent_output(
+            wallet_db,
+            tx_ref,
+            output,
+            observation_height,
+            &mut on_received,
+        )?;
 
         // Send side: record the output as sent for the wallet account that
         // funded the transaction, if any. If the recipient is also a wallet
@@ -1598,23 +1660,23 @@ pub fn ensure_checkpoints<'a, H, I: Iterator<Item = &'a BlockHeight>, const DEPT
         .collect::<Vec<_>>()
 }
 
-/// The number of trailing blocks in a batch whose nullifier-map entries are always
-/// retained, even when [`put_blocks_rows`] can prove that insertion is skippable. This
-/// keeps the map's contents aligned with a
-/// [`LowLevelWalletWrite::prune_tracked_nullifiers`] pruning depth of the same value, and
-/// comfortably exceeds the maximum reorg depth the wallet tolerates.
+/// The number of trailing blocks in a batch whose spend-map entries are always retained,
+/// even when [`put_blocks_rows`] can prove that insertion is skippable. This keeps the
+/// maps' contents aligned with a [`LowLevelWalletWrite::prune_tracked_spends`] pruning
+/// depth of the same value, and comfortably exceeds the maximum reorg depth the wallet
+/// tolerates.
 ///
-/// [`LowLevelWalletWrite::prune_tracked_nullifiers`]: super::LowLevelWalletWrite::prune_tracked_nullifiers
-pub const NULLIFIER_MAP_RETENTION_BLOCKS: u32 = 100;
+/// [`LowLevelWalletWrite::prune_tracked_spends`]: super::LowLevelWalletWrite::prune_tracked_spends
+pub const SPEND_MAP_RETENTION_BLOCKS: u32 = 100;
 
-/// Derives the nullifier-tracking floor for one [`put_blocks_rows`] batch (see the
-/// "Nullifier tracking" section of its documentation).
+/// Derives the spend-tracking floor for one [`put_blocks_rows`] batch (see the
+/// "Spend tracking" section of its documentation).
 ///
 /// Returns `Some` only when the batch extends the contiguous fully-scanned frontier
 /// (`fully_scanned == Some(from_state_height)`) and is long enough that a floor above
-/// `from_state_height` retains the full [`NULLIFIER_MAP_RETENTION_BLOCKS`] trailing
+/// `from_state_height` retains the full [`SPEND_MAP_RETENTION_BLOCKS`] trailing
 /// window; every out-of-order or short batch derives `None` and tracks fully.
-fn nullifier_tracking_floor(
+fn spend_tracking_floor(
     fully_scanned: Option<BlockHeight>,
     from_state_height: BlockHeight,
     batch_end: Option<BlockHeight>,
@@ -1622,7 +1684,7 @@ fn nullifier_tracking_floor(
     if fully_scanned == Some(from_state_height) {
         batch_end.and_then(|last| {
             let floor =
-                BlockHeight::from(u32::from(last).saturating_sub(NULLIFIER_MAP_RETENTION_BLOCKS));
+                BlockHeight::from(u32::from(last).saturating_sub(SPEND_MAP_RETENTION_BLOCKS));
             (floor > from_state_height + 1).then_some(floor)
         })
     } else {
@@ -1630,17 +1692,17 @@ fn nullifier_tracking_floor(
     }
 }
 
-/// Returns whether the nullifiers of a block at `block_height` should be inserted into the
-/// nullifier map.
+/// Returns whether the spends observed in a block at `block_height` should be inserted into
+/// the spend maps.
 ///
-/// Tracking is skipped only when a `nullifier_tracking_floor` was derived and
-/// `block_height` lies strictly below it; with no floor, every block's nullifiers are
-/// tracked. See the "Nullifier tracking" section of [`put_blocks_rows`].
-fn should_track_nullifiers(
-    nullifier_tracking_floor: Option<BlockHeight>,
+/// Tracking is skipped only when a `spend_tracking_floor` was derived and
+/// `block_height` lies strictly below it; with no floor, every block's spends are
+/// tracked. See the "Spend tracking" section of [`put_blocks_rows`].
+fn should_track_spends(
+    spend_tracking_floor: Option<BlockHeight>,
     block_height: BlockHeight,
 ) -> bool {
-    nullifier_tracking_floor.is_none_or(|floor| block_height >= floor)
+    spend_tracking_floor.is_none_or(|floor| block_height >= floor)
 }
 
 /// Returns whether the checkpoint at `height` should be retained as a durable anchor: anchor
@@ -1826,8 +1888,7 @@ mod tests {
     #[cfg(feature = "orchard")]
     use super::batch_ensure_heights;
     use super::{
-        NULLIFIER_MAP_RETENTION_BLOCKS, nullifier_tracking_floor, should_retain_anchor,
-        should_track_nullifiers,
+        SPEND_MAP_RETENTION_BLOCKS, should_retain_anchor, should_track_spends, spend_tracking_floor,
     };
     use crate::data_api::anchor_retention::{AnchorRetention, AnchorRetentionInterval};
 
@@ -1839,17 +1900,17 @@ mod tests {
         let h = BlockHeight::from;
         // Frontier far below this range's start: gap ⇒ no floor.
         assert_eq!(
-            nullifier_tracking_floor(Some(h(1_000)), h(500_000), Some(h(510_000))),
+            spend_tracking_floor(Some(h(1_000)), h(500_000), Some(h(510_000))),
             None
         );
         // No frontier at all ⇒ no floor.
         assert_eq!(
-            nullifier_tracking_floor(None, h(500_000), Some(h(510_000))),
+            spend_tracking_floor(None, h(500_000), Some(h(510_000))),
             None
         );
         // Frontier above the range start (re-scan below the frontier) ⇒ no floor.
         assert_eq!(
-            nullifier_tracking_floor(Some(h(600_000)), h(500_000), Some(h(510_000))),
+            spend_tracking_floor(Some(h(600_000)), h(500_000), Some(h(510_000))),
             None
         );
     }
@@ -1861,45 +1922,32 @@ mod tests {
     fn frontier_batches_retain_the_trailing_window() {
         let from = BlockHeight::from(500_000);
         let last = BlockHeight::from(510_000);
-        let floor =
-            nullifier_tracking_floor(Some(from), from, Some(last)).expect("frontier ⇒ floor");
+        let floor = spend_tracking_floor(Some(from), from, Some(last)).expect("frontier ⇒ floor");
         assert_eq!(
             u32::from(last) - u32::from(floor),
-            NULLIFIER_MAP_RETENTION_BLOCKS
+            SPEND_MAP_RETENTION_BLOCKS
         );
 
-        let short = BlockHeight::from(500_000 + NULLIFIER_MAP_RETENTION_BLOCKS / 2);
-        assert_eq!(
-            nullifier_tracking_floor(Some(from), from, Some(short)),
-            None
-        );
-        assert_eq!(nullifier_tracking_floor(Some(from), from, None), None);
+        let short = BlockHeight::from(500_000 + SPEND_MAP_RETENTION_BLOCKS / 2);
+        assert_eq!(spend_tracking_floor(Some(from), from, Some(short)), None);
+        assert_eq!(spend_tracking_floor(Some(from), from, None), None);
     }
 
     #[test]
-    fn nullifier_tracking_floor_gating() {
+    fn spend_tracking_floor_gating() {
         let floor = BlockHeight::from(1000);
 
-        // With no floor, every block's nullifiers are tracked.
-        assert!(should_track_nullifiers(None, BlockHeight::from(0)));
-        assert!(should_track_nullifiers(None, BlockHeight::from(999)));
+        // With no floor, every block's spends are tracked.
+        assert!(should_track_spends(None, BlockHeight::from(0)));
+        assert!(should_track_spends(None, BlockHeight::from(999)));
 
         // At or above the floor: tracked.
-        assert!(should_track_nullifiers(
-            Some(floor),
-            BlockHeight::from(1000)
-        ));
-        assert!(should_track_nullifiers(
-            Some(floor),
-            BlockHeight::from(1001)
-        ));
+        assert!(should_track_spends(Some(floor), BlockHeight::from(1000)));
+        assert!(should_track_spends(Some(floor), BlockHeight::from(1001)));
 
         // Strictly below the floor: skipped.
-        assert!(!should_track_nullifiers(
-            Some(floor),
-            BlockHeight::from(999)
-        ));
-        assert!(!should_track_nullifiers(Some(floor), BlockHeight::from(0)));
+        assert!(!should_track_spends(Some(floor), BlockHeight::from(999)));
+        assert!(!should_track_spends(Some(floor), BlockHeight::from(0)));
     }
 
     /// The gating semantics hold identically at the ZIP 318 interval and at a non-default one, so
