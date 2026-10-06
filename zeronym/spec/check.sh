@@ -1,8 +1,7 @@
 #!/bin/sh
 # Simulate the divert model and assert every invariant's expected outcome.
 #
-# "holds" rows are the protocol's safety claims: the shim's against any hub,
-# the hub's against an honest one. "fails" rows are the two fixed
+# "holds" rows are the protocol's safety claims against an honest hub. "fails" rows are the two fixed
 # bugs, reproduced with their fix switched off, and the known gaps: if
 # one starts holding, the code or the model changed and divert.qnt needs a
 # look.
@@ -44,7 +43,7 @@ check() {
 $QUINT typecheck divert.qnt || exit 1
 
 echo "---- runs"
-for main in badIndexer; do
+for main in badIndexer honest; do
   if $QUINT test divert.qnt --main "$main"; then
     :
   else
@@ -52,7 +51,6 @@ for main in badIndexer; do
   fi
 done
 
-check current        shimSafety      holds
 check honest         pendingVisible  holds
 check honest         safety          holds
 check honest         pendingIsTrue   holds

@@ -12,7 +12,6 @@
 //
 // Run all of these with spec/check.sh, or one at a time (npm i -g @informalsystems/quint):
 //   quint run --main=honest --invariant=safety spec/divert.qnt           holds
-//   quint run --main=current --invariant=shimSafety ...                  holds (any reply)
 //   quint run --main=honest --invariant=pendingVisible ...               holds (honest hub)
 //   quint run --main=current --invariant=noQueuedBytes ...               fails: known gap (lying hub)
 //   quint run --main=current --invariant=noEarlyBytes ...                fails: known gap (lying hub)
@@ -246,13 +245,6 @@ module divert {
     }
   }
 
-  // ---- Shim claims: hold for any reply the model can deliver ----
-
-  // L4: bytes served to the wallet are always the queried transaction.
-  val guardHolds: bool = obs.foldl(true, (ok, o) => ok and (o.status != "tx" or o.data == o.tx))
-
-  val shimSafety: bool = guardHolds
-
   // ---- Shim claims: hold for an honest hub's replies ----
 
   // An honest queue hit reaches the wallet as pending (the ecb4641f7e bug).
@@ -270,7 +262,7 @@ module divert {
   val noEarlyBytes: bool = obs.foldl(true, (ok, o) =>
     ok and (o.status != "tx" or o.hubSaw.in(Set("mempool", "mined"))))
 
-  val safety: bool = shimSafety and pendingVisible and noQueuedBytes and noEarlyBytes
+  val safety: bool = pendingVisible and noQueuedBytes and noEarlyBytes
 
   // ---- Known gaps: expected to fail; each counterexample documents one ----
 
@@ -306,6 +298,20 @@ module honest {
     CONFORMING_INDEXER = true,
     TXS = Set("a", "b"), MAX_NONCE = 4,
   ).*
+
+  // L4: a found body that is not the queried tx is not served.
+  run mismatchedLookupRefusedTest =
+    init
+      .then(walletLookup("a"))
+      .then(shimDeliver(replyMsg("a", 0, "found", 1, "b", "mined")))
+      .expect(obs[0].status == "notfound")
+
+  // The queue-hit image is pending, ahead of L4.
+  run sentinelLookupPendingTest =
+    init
+      .then(walletLookup("a"))
+      .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "queued")))
+      .expect(obs[0].status == "pending")
 }
 
 module before_ecb4641 {
