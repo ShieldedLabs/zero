@@ -12,7 +12,8 @@
 //
 // Run all of these with spec/check.sh, or one at a time (npm i -g @informalsystems/quint):
 //   quint run --main=honest --invariant=safety spec/divert.qnt           holds
-//   quint run --main=current --invariant=shimSafety ...                  holds
+//   quint run --main=current --invariant=shimSafety ...                  holds (any reply)
+//   quint run --main=honest --invariant=pendingVisible ...               holds (honest hub)
 //   quint run --main=current --invariant=noQueuedBytes ...               fails: known gap (lying hub)
 //   quint run --main=current --invariant=noEarlyBytes ...                fails: known gap (lying hub)
 //   quint run --main=before_ecb4641 --invariant=pendingVisible ...       fails: the sentinel bug
@@ -245,16 +246,19 @@ module divert {
     }
   }
 
-  // ---- Shim claims: hold against any hub ----
+  // ---- Shim claims: hold for any reply the model can deliver ----
 
   // L4: bytes served to the wallet are always the queried transaction.
   val guardHolds: bool = obs.foldl(true, (ok, o) => ok and (o.status != "tx" or o.data == o.tx))
 
+  val shimSafety: bool = guardHolds
+
+  // ---- Shim claims: hold for an honest hub's replies ----
+
   // An honest queue hit reaches the wallet as pending (the ecb4641f7e bug).
+  // `not(o.honest)` drops lying replies, so this says nothing about a hub that may lie.
   val pendingVisible: bool = obs.foldl(true, (ok, o) =>
     ok and (not(o.honest) or o.hubSaw != "queued" or o.status == "pending"))
-
-  val shimSafety: bool = guardHolds and pendingVisible
 
   // ---- Hub claims: hold for an honest hub; attestation is what makes it one ----
 
@@ -266,7 +270,7 @@ module divert {
   val noEarlyBytes: bool = obs.foldl(true, (ok, o) =>
     ok and (o.status != "tx" or o.hubSaw.in(Set("mempool", "mined"))))
 
-  val safety: bool = shimSafety and noQueuedBytes and noEarlyBytes
+  val safety: bool = shimSafety and pendingVisible and noQueuedBytes and noEarlyBytes
 
   // ---- Known gaps: expected to fail; each counterexample documents one ----
 

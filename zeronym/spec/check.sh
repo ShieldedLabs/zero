@@ -53,6 +53,7 @@ for main in badIndexer; do
 done
 
 check current        shimSafety      holds
+check honest         pendingVisible  holds
 check honest         safety          holds
 check honest         pendingIsTrue   holds
 check badIndexer     pendingIsTrue   fails
