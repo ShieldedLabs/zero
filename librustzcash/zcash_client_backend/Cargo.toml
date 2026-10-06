@@ -271,6 +271,10 @@ tor = [
     "dep:tokio",
     "tokio?/time",
     "dep:tokio-rustls",
+    # [zero] @claude A TLS crypto provider for the HTTPS client. `ClientConfig::builder`
+    # uses rustls's process-level provider and panics if none can be chosen; arti 0.35
+    # enabled `ring` for it, arti 0.43 enables none.
+    "tokio-rustls?/ring",
     "dep:tor-rtcompat",
     "dep:trait-variant",
     "dep:tower",

@@ -4670,6 +4670,7 @@ checksum = "822ee9188ac4ec04a2f0531e55d035fb2de73f18b41a63c70c2712503b6fb13c"
 dependencies = [
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki 0.103.3",
  "subtle",
@@ -8414,9 +8415,10 @@ name = "zero-wasm-smoke"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "getrandom 0.4.3",
  "js-sys",
  "orchard",
- "rand_chacha 0.3.1",
+ "rand_chacha 0.10.0",
  "rusqlite",
  "sapling-crypto",
  "secrecy",
