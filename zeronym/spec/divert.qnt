@@ -60,6 +60,7 @@ module divert {
   var told: Set[str]      // wallet was told its submit succeeded
   var refused: Set[str]   // hub refused a submit (the ack never reaches the wallet)
   var obs: List[Obs]
+  var replica: str -> str // second hub; submits are not copied, so it answers not-found
 
   pure def submitMsg(t: str): Msg =
     { kind: "submit", tx: t, nonce: -1, disp: "", height: 0, data: EMPTY, hubSaw: "", honest: true }
@@ -96,10 +97,12 @@ module divert {
     told' = Set(),
     refused' = Set(),
     obs' = List(),
+    replica' = TXS.mapBy(_ => "absent"),
   }
 
   action unchangedExcept_net_hub = all {
     waiters' = waiters, nextNonce' = nextNonce, told' = told, refused' = refused, obs' = obs,
+    replica' = replica,
   }
 
   // Nym submit is dispatch-only: the wallet hears success once the frame is
@@ -108,13 +111,16 @@ module divert {
     net' = net.union(Set(submitMsg(t))),
     told' = told.union(Set(t)),
     hub' = hub, waiters' = waiters, nextNonce' = nextNonce, refused' = refused, obs' = obs,
+    replica' = replica,
   }
 
-  // queue.rs admit. Delivery leaves the message in `net`, so duplicates are
-  // free; a duplicate of a queued tx is a no-op (sha256 dedup).
+  // A resend of the same bytes is admitted again while the tx is published,
+  // flushing, or returning from a retry. Lookup prefers the queue, so the next
+  // answer is the empty sentinel. A resend that arrives while the bytes are
+  // already queued stays a no-op (sha256 dedup).
   action hubAdmit(t: str): bool = all {
     net.contains(submitMsg(t)),
-    hub.get(t).in(Set("absent", "dropped")),
+    hub.get(t).in(Set("absent", "dropped", "flushing", "mempool", "mined")),
     hub' = hub.set(t, "queued"),
     net' = net,
     unchangedExcept_net_hub,
@@ -126,7 +132,7 @@ module divert {
     net.contains(submitMsg(t)),
     hub.get(t).in(Set("absent", "dropped")),
     refused' = refused.union(Set(t)),
-    hub' = hub, net' = net,
+    hub' = hub, net' = net, replica' = replica,
     waiters' = waiters, nextNonce' = nextNonce, told' = told, obs' = obs,
   }
 
@@ -134,6 +140,14 @@ module divert {
   action flushStart: bool = all {
     TXS.exists(t => hub.get(t) == "queued"),
     hub' = hub.keys().mapBy(t => if (hub.get(t) == "queued") "flushing" else hub.get(t)),
+    net' = net,
+    unchangedExcept_net_hub,
+  }
+
+  // The run's stand-in for one broadcast_batch verdict: the tx is in the mempool.
+  action markMempool(t: str): bool = all {
+    hub.get(t) == "flushing",
+    hub' = hub.set(t, "mempool"),
     net' = net,
     unchangedExcept_net_hub,
   }
@@ -159,12 +173,22 @@ module divert {
     net' = net.union(Set(lookupMsg(t, nextNonce))),
     waiters' = waiters.put(nextNonce, t),
     nextNonce' = nextNonce + 1,
-    hub' = hub, told' = told, refused' = refused, obs' = obs,
+    hub' = hub, told' = told, refused' = refused, obs' = obs, replica' = replica,
   }
 
   action hubAnswer(n: int, t: str): bool = all {
     net.contains(lookupMsg(t, n)),
     net' = net.union(Set(hubReply(t, n, hub.get(t), HUB_HIDES_QUEUED))),
+    hub' = hub,
+    unchangedExcept_net_hub,
+  }
+
+  // The other hub answers the same lookup. It never sees the submit, so a tx
+  // this hub has published is not-found there. The shim returns the first
+  // answer that is not a timeout.
+  action replicaAnswer(n: int, t: str): bool = all {
+    net.contains(lookupMsg(t, n)),
+    net' = net.union(Set(hubReply(t, n, replica.get(t), HUB_HIDES_QUEUED))),
     hub' = hub,
     unchangedExcept_net_hub,
   }
@@ -211,7 +235,7 @@ module divert {
     waiters.keys().contains(r.nonce),
     obs' = obs.append(shimHandle(waiters.get(r.nonce), r, SENTINEL_ARM)),
     waiters' = waiters.keys().exclude(Set(r.nonce)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, replica' = replica,
   }
 
   // 90 s lookup deadline.
@@ -219,7 +243,7 @@ module divert {
     waiters.keys().contains(n),
     obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
-    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused,
+    net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, replica' = replica,
   }
 
   action lose(m: Msg): bool = all {
@@ -289,6 +313,14 @@ module divert {
     0.to(obs.length() - 1).forall(i => 0.to(obs.length() - 1).forall(j =>
       not(i < j and obs[i].tx == obs[j].tx and obs[i].status == "pending"
           and obs[j].status == "notfound" and obs[j].hubSaw != "dropped")))
+
+  // Once the wallet has been shown a transaction's bytes, a later observation
+  // of that tx is those bytes again or unavailable. Reorder, a resend after
+  // publication, and another hub's not-found all break this.
+  val statusNeverRegresses: bool =
+    0.to(obs.length() - 1).forall(i => 0.to(obs.length() - 1).forall(j =>
+      not(i < j and obs[i].tx == obs[j].tx and obs[i].status == "tx"
+          and not(obs[j].status.in(Set("tx", "unavailable"))))))
 }
 
 module current {
@@ -327,6 +359,49 @@ module honest {
       .then(walletLookup("a"))
       .then(shimDeliver(replyMsg("a", 0, "found", 0, EMPTY, "queued")))
       .expect(obs[0].status == "pending")
+
+  run reorderedReplyRegressesTest =
+    init
+      .then(walletSubmit("a"))
+      .then(hubAdmit("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(0, "a"))
+      .then(flushStart)
+      .then(markMempool("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(1, "a"))
+      .then(shimDeliver(hubReply("a", 1, "mempool", true)))
+      .then(shimDeliver(hubReply("a", 0, "queued", true)))
+      .expect(not(statusNeverRegresses))
+
+  run resendAfterPublishRegressesTest =
+    init
+      .then(walletSubmit("a"))
+      .then(hubAdmit("a"))
+      .then(flushStart)
+      .then(markMempool("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(0, "a"))
+      .then(shimDeliver(hubReply("a", 0, "mempool", true)))
+      .then(hubAdmit("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(1, "a"))
+      .then(shimDeliver(hubReply("a", 1, "queued", true)))
+      .expect(not(statusNeverRegresses))
+
+  run replicaNotFoundRegressesTest =
+    init
+      .then(walletSubmit("a"))
+      .then(hubAdmit("a"))
+      .then(flushStart)
+      .then(markMempool("a"))
+      .then(walletLookup("a"))
+      .then(hubAnswer(0, "a"))
+      .then(shimDeliver(hubReply("a", 0, "mempool", true)))
+      .then(walletLookup("a"))
+      .then(replicaAnswer(1, "a"))
+      .then(shimDeliver(hubReply("a", 1, "absent", true)))
+      .expect(not(statusNeverRegresses))
 }
 
 module before_ecb4641 {
