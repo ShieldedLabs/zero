@@ -50,7 +50,9 @@ module divert {
   }
 
   // What the wallet saw for one lookup.
-  type Obs = { tx: str, status: str, data: str, hubSaw: str, honest: bool }
+  // `disp` is the reply's disposition, before the shim rewrites a mismatched
+  // found into not-found. A timeout has no reply, so its disp is "".
+  type Obs = { tx: str, status: str, data: str, hubSaw: str, honest: bool, disp: str }
 
   // hub[tx]: "absent" | "queued" | "flushing" | "mempool" | "mined" | "dropped"
   var hub: str -> str
@@ -81,13 +83,14 @@ module divert {
   // intercept.rs get_transaction: the reply arms, in order.
   pure def shimHandle(q: str, r: Msg, sentinelArm: bool): Obs =
     if (r.disp == "found" and sentinelArm and r.data == EMPTY and r.height == 0)
-      { tx: q, status: "pending", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
+      { tx: q, status: "pending", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
     else if (r.disp == "found")
-      // L4 guard: the bytes must be the queried transaction.
-      if (r.data == q) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw, honest: r.honest }
-      else { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
-    else if (r.disp == "notfound") { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
-    else { tx: q, status: "unavailable", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest }
+      // L4 guard: the bytes must be the queried transaction. Status becomes
+      // not-found; disp stays found, so a mismatch is not a not-found reply.
+      if (r.data == q) { tx: q, status: "tx", data: r.data, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
+      else { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
+    else if (r.disp == "notfound") { tx: q, status: "notfound", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
+    else { tx: q, status: "unavailable", data: EMPTY, hubSaw: r.hubSaw, honest: r.honest, disp: r.disp }
 
   action init = all {
     hub' = TXS.mapBy(_ => "absent"),
@@ -241,7 +244,7 @@ module divert {
   // 90 s lookup deadline.
   action shimTimeout(n: int): bool = all {
     waiters.keys().contains(n),
-    obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true }),
+    obs' = obs.append({ tx: waiters.get(n), status: "unavailable", data: EMPTY, hubSaw: "timeout", honest: true, disp: "" }),
     waiters' = waiters.keys().exclude(Set(n)).mapBy(k => waiters.get(k)),
     net' = net, hub' = hub, nextNonce' = nextNonce, told' = told, refused' = refused, replica' = replica,
   }
@@ -304,8 +307,10 @@ module divert {
     ok and (o.status != "pending" or o.hubSaw == "queued"))
 
   // A hostile hub can answer not-found for a migration it has queued.
+  // This is the reply's disposition. L4 rewrites a mismatched found into
+  // status not-found and must not count.
   val queuedNotSuppressed: bool = obs.foldl(true, (ok, o) =>
-    ok and not(o.hubSaw == "queued" and o.status == "notfound" and not(o.honest)))
+    ok and not(o.hubSaw == "queued" and o.disp == "notfound" and not(o.honest)))
 
   // Once pending, a tx reads as not-found only if the hub dropped it. The
   // flush window (server.rs lookup note) breaks this.
@@ -336,7 +341,7 @@ module current {
       .then(hubAdmit("a"))
       .then(walletLookup("a"))
       .then(shimDeliver(replyMsg("a", 0, "notfound", 0, EMPTY, "queued").with("honest", false)))
-      .expect(obs[0].status == "notfound" and not(queuedNotSuppressed))
+      .expect(obs[0].disp == "notfound" and obs[0].status == "notfound" and not(queuedNotSuppressed))
 }
 
 module honest {
