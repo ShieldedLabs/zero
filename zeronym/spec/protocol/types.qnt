@@ -69,6 +69,11 @@ module types {
         | None => acc
       })
 
+  /// The id a wallet knows its transaction by, and asks for. For bytes no
+  /// parser accepts it is a name that no hub or node will ever compute.
+  pure def walletTxid(payload: Payload): TxId =
+    payload.txid.unwrapOr(payload.id)
+
   /// What the wallet hands the shim in a `SendTransaction`: a body the shim
   /// read in full, a body it could not read, or an empty one.
   type SendInput = Clean(Payload) | Unreadable | EmptyBody

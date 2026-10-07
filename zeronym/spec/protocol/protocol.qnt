@@ -345,7 +345,7 @@ module protocol {
   /// The txids of the transactions the wallet has handed the shim. A wallet
   /// asks only about its own transactions.
   def walletTxids: Set[TxId] =
-    txidsOf(s.sentByWallet())
+    s.sentByWallet().map(payload => walletTxid(payload))
 
   /// The wallet asks for a transaction it has sent. The shim asks the hub its
   /// cursor points at.

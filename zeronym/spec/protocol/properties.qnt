@@ -426,9 +426,9 @@ module properties {
         reply._3 == WFound({ body: None, height: MEMPOOL_HEIGHT }),
       })
 
-  /// W9. A hub holds a payload it cannot parse, the wallet that sent it asks
-  /// that hub about a transaction the hub has no trace of, and is told not
-  /// found: an entry without a txid can never be hit.
+  /// W9. A hub holds a payload it cannot parse; the wallet that sent it asks
+  /// that hub for it and is told not found. An entry without a txid can never
+  /// be hit.
   pure def wUnparseableMissed(s: System): bool =
     tuples(s.events(), s.lookups(ShimAddr)).exists(((event, lookup)) =>
       match event {
@@ -436,7 +436,8 @@ module properties {
           and {
             got.obs == NotFound,
             got.via == Some(lookup._1),
-            s.queuedAt(lookup._2).exists(payload => payload.txid == None and s.toldOk().contains(payload)),
+            s.queuedAt(lookup._2).exists(payload =>
+              payload.txid == None and walletTxid(payload) == got.query),
           }
         | _ => false
       })
