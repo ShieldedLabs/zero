@@ -616,6 +616,7 @@ cell is a scripted step, and its "holds" cells are the unrun TLC property.
 | K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
 
 | K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
+| K8 | A supported wallet's transaction, acknowledged on time, then lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. G6b and G6c do not cover it: to the restarted hub the resend is a late first arrival | `flakyTip` (hub specification) | scripted run | shown; not a TLC row | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
 
 K7 was added after review. The four-term budget (`reorgSlackFits`) holds with
 equality in the shipped constants, so a transaction that uses all of it is
@@ -776,19 +777,41 @@ with no expiry". Shown on the model; the code was read at those lines and not
 run. The bound there is 8 requeues, so the shape needs nine unjudged flushes
 of a hub that sees no tip throughout.
 
-**8. With "timely" as defined, G6b and G6c do not hold where the tip may be
-reported behind the chain; simulation said they did.** TLC violates both on
-`flakyTip`, and G6b on `flakyTipSlowFlight`, with every component honest and
-the reorg slack in place. `crashThenLateDuplicateTest`: `early` (built at 2,
+**8. "Timely" did not survive a restart; restated, G6b and G6c hold where the
+tip may be reported behind the chain, and what is left is K8.** As first
+written, "timely" remembered a payload's first entry into the hub's queue
+forever. TLC then violated G6b and G6c on `flakyTip`, and G6b on
+`flakyTipSlowFlight`, with every component honest and the reorg slack in
+place; simulation had reported them holding. The trace: `early` (built at 2,
 expiry 9) is admitted at 2 and the hub crashes. It restarts at height 6,
-adopts that epoch without flushing, and is then told the tip is 5. A duplicate
-of the same submission arrives and is admitted, because `9 >= 6 + 2` and
-admission counts on the flush at 6. The hub is shut down at 8; its final flush
-offers the transaction with `9 < 8 + 2`. The property counts the transaction
-as timely because its first entry into this hub's queue, before the crash, was
-on time. Whether this is a statement about the property (a hub that has lost
-its queue cannot be held to an arrival it no longer knows of) or about the
-code has not been confirmed against the code.
+adopts that epoch without flushing, and is then told the tip is 5. A
+duplicate of the same submission arrives and is admitted, because
+`9 >= 6 + 2` and admission counts on the flush at 6. The hub is shut down at
+8; its final flush offers the transaction with `9 < 8 + 2`.
+
+Timeliness is now forgotten when the hub goes down (a crash, or the final
+flush that stops it), as its queue is. Under that definition TLC exhausts
+`flakyTip` with G6b and G6c holding, and `flakyTipSlowFlight` with G6b
+holding (table below). `freshAfterRestartMeetsMarginTest` shows a restarted
+hub giving a fresh arrival the whole margin with the tip one block behind
+throughout, and the reachability row `wTimelyQueuedBehindEpoch` shows that a
+timely payload does get queued while the cadence epoch is behind the one the
+hub last recorded, so the "holds" is not vacuous there.
+
+The three facts the trace rests on were read in the code, and the model has
+each right. A restarted hub has no tip and no recorded epoch, and its first
+observation adopts the current epoch without flushing
+(`zeronym/hub/src/batcher.rs:316-322`). A regression within the reorg
+allowance is followed (`batcher.rs:177-186`), and a cadence epoch below the
+recorded one flushes nothing (`batcher.rs:323-327`). Admission computes its
+deadline from the observed tip alone (`zeronym/hub/src/server.rs:351-356`,
+`zeronym/hub/src/queue.rs:294`, `:507-519`). So the trace is the code's
+behaviour, and what the restatement changes is only which guarantee claims
+it. That behaviour is K8: the wallet did everything right, was acknowledged
+on time, and its resend after the crash is offered with one block of margin
+where two are reserved. Its control, `lateDuplicateWithoutCrashTest`, has no
+crash: the first offer is at 3, in time, and the late offer at 8 is a second
+offer (K6's ground, not G6b's).
 
 ## Model-based testing, later
 
@@ -821,8 +844,9 @@ checked under. A guard that is false leaves no initial state, and `tlc.sh`
 fails on that.
 
 Measured on the machine this was written on (Apple silicon, 16 cores, 64 GB;
-Quint 0.33.0, Apalache 0.62.1, Java 27), under today's definition of
-timeliness and the hub function before the capacity refusals are removed.
+Quint 0.33.0, Apalache 0.62.1, Java 27), under the first definition of
+timeliness (finding 8) and the hub function before the capacity refusals are
+removed.
 Every run had a five-minute limit. Times are for the whole route (compile,
 export, TLC), of which compile and export are about 10 s; "peak" is the
 resident size of the largest process.
@@ -853,25 +877,36 @@ Verdicts (`step` unless said; 8 workers, 8 GB; every row 11 to 17 s):
 |---|---|---|
 | `timely` | G6a and G6b and G6c | holds, 189 297 states, depth 44 |
 | `timely` | `conformingEveryOfferBeforeExpiry` (K6's predicate) | holds, 189 297 states, depth 44 |
-| `timely` | `ackedIsHeldOrSettled` (K5) | violated: 5 states under `step`, 8 under `noCrashStep`, 10 under `quietStep` |
+| `timely` | `ackedIsHeldOrSettled` (K5) | violated: 5 states under `step`, 8 under `noCrashStep`, 9 under `quietStep` |
 | `flakyTip` | G6a (K3) | violated, 8 states |
-| `flakyTip` | G6b; G6c | violated, 18; 19 states |
-| `flakyTipSlowFlight` | G6b; G6c (K7) | violated, 18; 14 states |
+| `flakyTip` | G6b; G6c | violated, 18; 19 states. **Holds, 1 468 808 states, depth 44, once timeliness is forgotten on going down** |
+| `flakyTipSlowFlight` | G6b; G6c (K7) | violated, 18; 14 states. **G6b holds, 2 020 400 states, depth 44, once timeliness is forgotten** |
 | `flakyTipNoSlack` | G6b (K3') | violated, 12 states |
-| `staleLag` | G6a; G6b; G6c; K6 | violated, 13; 13; 14; 13 states |
+| `staleLag` | G6a; G6b; G6c; K6 | violated, 12; 13; 14; 13 states |
 | `staleLagWithSlack` | G6b; G6c | violated, 19; 20 states |
 
-G6b and G6c are violated on `flakyTip` and G6b on `flakyTipSlowFlight`, where
-simulation of the whole protocol reports that they hold. The counterexample
-needs a crash and a late duplicate of a submission that was first admitted on
-time; it is about what "timely" means across a restart.
+Under the first definition G6b and G6c are violated on `flakyTip` and G6b on
+`flakyTipSlowFlight`, where simulation of the whole protocol reports that they
+hold. The counterexample needs a crash and a late duplicate of a submission
+that was first admitted on time; it is about what "timely" means across a
+restart (finding 8). With timeliness forgotten on going down, the restated
+rows were run with 2 workers and 4 GB, side by side: `timely` 229 339 states
+at depth 51 in 38 s, `flakyTip` 205 s, `flakyTipSlowFlight` 286 s. The
+restatement raises the state counts, because `seen` and the timely set now
+differ between states that agreed before. Every other verdict and trace
+length is unchanged by it.
+
+Trace lengths are with one worker, when TLC's search is breadth first and its
+counterexample a shortest one. Three were first recorded from runs with more
+workers and were one to three states too long: G6a on `staleLag` (13, now 12),
+K5 under `quietStep` (10, now 9), `wStale` on `staleLag` (9, now 6).
 
 Reachability, each as `not(..)` and each violated: on `timely`,
 `wOfferWithExpiry` (6 states), `wConformingFirstOffer` (6),
 `wConformingFirstOfferInFlightABlock` (7), `wOffered` (7), `wRequeued` (9),
 `wDown` (2), `wRestartedOwing` (6), `wBlockInFlight` (7), `wStopped` (4); on
-`flakyTip`, the first three (6, 6, 7); `wStale` on `staleLag` (9) and on
-`staleLagWithSlack` (6).
+`flakyTip`, the first three (6, 6, 7) and `wTimelyQueuedBehindEpoch` (6);
+`wStale` on `staleLag` (6) and on `staleLagWithSlack` (6).
 
 ### The schedule rows, before and after the move
 
@@ -881,25 +916,27 @@ bounds (`quint run hubMachine.qnt --init=<init>`, seed 7, 60 or 80 steps, the
 row's trace count), and under TLC. "v" is violated; the number is the length
 of TLC's counterexample in states.
 
-| Configuration | Invariant | Protocol gate | Hub machine, simulated | Hub machine, TLC |
-|---|---|---|---|---|
-| `baseline` / `timely` | G6a, G6b, G6c | holds | holds | holds, exhaustive |
-| `flakyTip` | G6a (K3) | v | v | v, 8 |
-| `flakyTip` | G6b | holds | holds | **v, 18** |
-| `flakyTip` | G6c | holds | holds | **v, 19** |
-| `flakyTipSlowFlight` | G6b | holds | holds | **v, 18** |
-| `flakyTipSlowFlight` | G6c (K7) | v | v | v, 14 |
-| `flakyTipNoSlack` | G6b (K3') | v | v | v, 12 |
-| `flakyTipNoSlack` | G6c (K3') | v | v | not a TLC row; G6b's is |
-| `staleLag` | G6a, G6b, G6c (K4) | v | v | v, 13; 13; 14 |
-| `staleLag` | K6 | v | v | v, 13 |
-| `staleLagWithSlack` | G6b (finding 2) | v, 8000 traces | v, 8000 traces | v, 19 |
-| `baseline` / `timely` | K5 | v | v | v, 5; 8 without a crash; 10 without a shutdown |
-| `byzHub` | G6a, G6b, G6c | v (5000 and 12000 traces for the last two) | v | v, 8; 12; 13 |
-| `byzIndexer` | G6a, G6b, G6c | v | v | v, 8; 16; 17 |
+| Configuration | Invariant | Protocol gate | Hub machine, simulated | Hub machine, TLC | TLC, timeliness restated |
+|---|---|---|---|---|---|
+| `baseline` / `timely` | G6a, G6b, G6c | holds | holds | holds, exhaustive | holds, exhaustive |
+| `flakyTip` | G6a (K3) | v | v | v, 8 | v, 8 |
+| `flakyTip` | G6b | holds | holds | **v, 18** | holds, exhaustive |
+| `flakyTip` | G6c | holds | holds | **v, 19** | holds, exhaustive |
+| `flakyTipSlowFlight` | G6b | holds | holds | **v, 18** | holds, exhaustive |
+| `flakyTipSlowFlight` | G6c (K7) | v | v | v, 14 | v, 14 |
+| `flakyTipNoSlack` | G6b (K3') | v | v | v, 12 | v, 12 |
+| `flakyTipNoSlack` | G6c (K3') | v | v | not a TLC row; G6b's is | |
+| `staleLag` | G6a, G6b, G6c (K4) | v | v | v, 12; 13; 14 | v, 12; 13; 14 |
+| `staleLag` | K6 | v | v | v, 13 | v, 13 |
+| `staleLagWithSlack` | G6b (finding 2) | v, 8000 traces | v, 8000 traces | v, 19 | v, 19 |
+| `baseline` / `timely` | K5 | v | v | v, 5; 8 without a crash; 9 without a shutdown | the same |
+| `byzHub` | G6a, G6b, G6c | v (5000 and 12000 traces for the last two) | v | v, 8; 12; 13 | the same |
+| `byzIndexer` | G6a, G6b, G6c | v | v | v, 8; 16; 17 | the same |
 
-The three rows in bold are finding 8. Simulation, of either machine, does not
-find the counterexample in the traces it samples; TLC does.
+The three rows in bold are finding 8 under the first definition. Simulation,
+of either machine, does not find the counterexample in the traces it samples;
+TLC does. The protocol gate's rows are still simulated on the whole-protocol
+machine, with timeliness as first defined, until they are removed from it.
 
 Configuration in the state against configuration as a constant, on `timely`
 with G6a, G6b and G6c: the compiled JSON is 13.7 MB with named inits and

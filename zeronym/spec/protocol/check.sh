@@ -419,16 +419,20 @@ G6C=conformingFirstOfferJudgedBeforeExpiry
 K5=ackedIsHeldOrSettled
 K6=conformingEveryOfferBeforeExpiry
 
-# The schedule guarantees with every component honest.
+# The schedule guarantees with every component honest: all of them under a
+# timely tip; under a tip that may be reported behind the chain, those for
+# supported wallets; and with a slow flight as well, the one about the offer.
 job tlc_holds    initTimely             step "$G6A and $G6B and $G6C"
 job tlc_holds    initTimely             step $K6
+job tlc_holds    initFlakyTip           step "$G6B and $G6C"
+job tlc_holds    initFlakyTipSlowFlight step $G6B
 
 # The known gaps, each on the configuration that isolates its cause. The last
 # argument is the length of TLC's counterexample.
 job tlc_violated initFlakyTip           step $G6A 8                     # K3
 job tlc_violated initFlakyTipNoSlack    step $G6B 12                    # K3'
 job tlc_violated initFlakyTipSlowFlight step $G6C 14                    # K7
-job tlc_violated initStaleLag           step $G6A 13                    # K4
+job tlc_violated initStaleLag           step $G6A 12                    # K4
 job tlc_violated initStaleLag           step $G6B 13                    # K4
 job tlc_violated initStaleLag           step $G6C 14                    # K4
 job tlc_violated initStaleLag           step $K6 13                     # K6
@@ -438,13 +442,7 @@ job tlc_violated initStaleLagWithSlack  step $G6C 20                    # findin
 # no shutdown either, a requeue that gives the entry up as expired.
 job tlc_violated initTimely             step $K5 5
 job tlc_violated initTimely             noCrashStep $K5 8
-job tlc_violated initTimely             quietStep $K5 10
-
-# Finding 8. A crash, then a late duplicate of a submission first admitted on
-# time: "timely" as defined does not survive a restart.
-job tlc_violated initFlakyTip           step $G6B 18
-job tlc_violated initFlakyTip           step $G6C 19
-job tlc_violated initFlakyTipSlowFlight step $G6B 18
+job tlc_violated initTimely             quietStep $K5 9
 
 # The trust matrix: each schedule guarantee is violated once the component it
 # depends on is Byzantine.
@@ -476,9 +474,10 @@ job tlc_violated initFlakyTip           step "not(wDown)" 2
 job tlc_violated initFlakyTip           step "not(wRestartedOwing)" 6
 job tlc_violated initFlakyTip           step "not(wBlockInFlight)" 7
 job tlc_violated initFlakyTip           step "not(wStopped)" 4
+job tlc_violated initFlakyTip           step "not(wTimelyQueuedBehindEpoch)" 6
 job tlc_violated initFlakyTipSlowFlight step "not(wConformingFirstOffer)" 6
 job tlc_violated initFlakyTipSlowFlight step "not(wBlockInFlight)" 7
-job tlc_violated initStaleLag           step "not(wStale)" 9
+job tlc_violated initStaleLag           step "not(wStale)" 6
 job tlc_violated initStaleLagWithSlack  step "not(wStale)" 6
 finish
 

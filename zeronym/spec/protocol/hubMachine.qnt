@@ -151,10 +151,11 @@ module hubMachine {
 
   // The observer's memory.
 
-  /// The payloads that have entered this hub's queue.
+  /// The payloads that have entered this hub's queue since it last came up.
   var seen: Set[Payload]
   /// Those that first did so within the delivery lag of the height they were
-  /// built at.
+  /// built at. Both are forgotten when the hub goes down, as its queue is: a
+  /// hub cannot be held to an arrival it no longer knows of.
   var onTime: Set[Payload]
   /// The payloads a flight has carried, once that flight has had a node's
   /// answer for them or has ended.
@@ -274,6 +275,7 @@ module hubMachine {
 
   action chainKept = all { height' = height, onChain' = onChain, polled' = polled }
   action admissionsKept = all { seen' = seen, onTime' = onTime }
+  action admissionsForgotten = all { seen' = Set(), onTime' = Set() }
   action memoryKept = all { admissionsKept, offered' = offered, owed' = owed }
 
   /// The hub takes `input` on its own schedule. A step that would change
@@ -373,8 +375,10 @@ module hubMachine {
     all {
       hubTakes(FlushDueHInput),
       flightStart' = if (result.state.flush == Idle) 0 else height,
+      if (result.state.phase == Stopped) admissionsForgotten else admissionsKept,
+      offered' = offered,
+      owed' = owed,
       chainKept,
-      memoryKept,
     }
 
   /// The indexer returns `given` on one entry of the batch, and the network
@@ -405,15 +409,17 @@ module hubMachine {
   }
 
   /// A flush ends: what nothing judged is requeued or dropped. The flight is
-  /// over for every entry it carried.
-  action flushEnd = all {
-    hubTakes(FlushDoneHInput),
-    offered' = offered.union(h.inFlight()),
-    flightStart' = 0,
-    owed' = owed,
-    admissionsKept,
-    chainKept,
-  }
+  /// over for every entry it carried. The final flush stops the hub.
+  action flushEnd =
+    val result = hub(h, FlushDoneHInput)
+    all {
+      hubTakes(FlushDoneHInput),
+      offered' = offered.union(h.inFlight()),
+      flightStart' = 0,
+      owed' = owed,
+      if (result.state.phase == Stopped) admissionsForgotten else admissionsKept,
+      chainKept,
+    }
 
   /// The hub gets its shutdown signal.
   action drain = all {
@@ -430,7 +436,7 @@ module hubMachine {
     offered' = offered.union(h.inFlight()),
     flightStart' = 0,
     owed' = owed,
-    admissionsKept,
+    admissionsForgotten,
     chainKept,
   }
 
@@ -530,8 +536,10 @@ module hubMachine {
     }
 
   /// Whether `payload` reached this hub as a supported wallet's would: it
-  /// honours the expiry floor, and it first entered the queue within the
-  /// delivery lag of the height it was built at.
+  /// honours the expiry floor, and it first entered the queue of this run of
+  /// the hub within the delivery lag of the height it was built at. A copy
+  /// that arrives late at a hub that has been down since the first one is not
+  /// timely, whatever happened before (K8).
   def isConformingAndOnTime(payload: Payload): bool =
     conforming(payload, cfg.params.minWalletExpiry) and onTime.contains(payload)
 
@@ -624,6 +632,15 @@ module hubMachine {
   val wBlockInFlight = flightStart > 0 and height > flightStart
   val wStopped = h.phase == Stopped
   val wStale = h.phase == Stale
+  /// A timely payload is queued while the cadence clock is in an epoch before
+  /// the one the hub last recorded: the tip went back across a boundary the
+  /// hub has already acted on.
+  val wTimelyQueuedBehindEpoch =
+    h.queued().exists(payload => onTime.contains(payload)) and
+      match h.lastEpoch {
+        | Some(epoch) => h.cadenceEpoch() < epoch
+        | None => false
+      }
 
   // ------------------------------------------------------------------------
   // Configurations

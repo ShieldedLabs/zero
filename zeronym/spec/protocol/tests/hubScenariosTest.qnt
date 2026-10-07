@@ -299,21 +299,19 @@ module hubScenariosTest {
       .expect(conformingFirstOfferBeforeExpiry and not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(early, Rejected))
 
-  /// Finding 8. A supported wallet's transaction is admitted on time, and the
-  /// hub crashes. It comes back at height 6, adopts that epoch without
-  /// flushing, and is then told the tip is 5. A duplicate of the submission
-  /// arrives; admission counts on the flush at 6, which will not happen. The
-  /// hub is shut down at 8 and its final flush offers the transaction with
-  /// one block of margin where two are reserved.
-  run crashThenLateDuplicate(c: HubConfig): bool =
-    started(c)
+  /// A supported wallet's transaction is admitted on time at height 2. At
+  /// height 6 the hub, having adopted that epoch without flushing, is told
+  /// the tip is 5, and a duplicate of the submission arrives. The hub is shut
+  /// down at 8.
+  run duplicateBehindTheBoundary(lost: bool): bool =
+    started(flakyTip)
       .then(block)
       .then(deliver(early))
       .expect(onTime == Set(early))
-      .then(crash)
-      .then(unseenBlocks(4))
-      .then(restart)
-      .then(see)
+      .then(
+        if (lost) crash.then(unseenBlocks(4)).then(restart).then(see)
+        else block.then(flush([early], Accepted)).then(blocks(3)).then(flushBegin)
+      )
       .expect(height == 6 and h.lastEpoch == Some(2))
       .then(observeWith(5))
       .then(deliver(early))
@@ -324,14 +322,49 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(flightStart == 8 and h.inFlight() == Set(early) and not(marginLeft(early, flightStart)))
 
-  /// The transaction first entered the queue on time, so it counts as timely,
-  /// and its first offer misses the margin.
+  /// K8 (finding 8). The hub crashed in between and lost its queue. To it the
+  /// duplicate is a first arrival, four blocks late, and admission counts on
+  /// the flush at 6, which will not happen. The wallet's transaction was on
+  /// time, was acknowledged, and is first offered with one block of margin
+  /// where two are reserved. G6b and G6c hold: they are about arrivals this
+  /// run of the hub knows to be timely.
   run crashThenLateDuplicateTest =
-    crashThenLateDuplicate(flakyTip)
-      .expect(reorgSlackFits(cfg) and onTime == Set(early) and offered == Set())
-      .expect(not(conformingFirstOfferBeforeExpiry))
+    duplicateBehindTheBoundary(true)
+      .expect(reorgSlackFits(cfg) and onTime == Set() and offered == Set())
+      .expect(conformingFirstOfferBeforeExpiry)
       .then(advance)
-      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
+      .expect(not(nodeWouldTake(early)) and conformingFirstOfferJudgedBeforeExpiry)
+
+  /// K8, control. No crash: the transaction is published by the flush at 3.
+  /// The late offer at 8 is a second offer of an entry whose first was in
+  /// time.
+  run lateDuplicateWithoutCrashTest =
+    duplicateBehindTheBoundary(false)
+      .expect(onTime == Set(early) and offered == Set(early))
+      .expect(conformingFirstOfferBeforeExpiry and not(conformingEveryOfferBeforeExpiry))
+
+  /// A hub that comes back up owes a fresh arrival the whole margin, even
+  /// with the tip reported one block behind throughout. The hub restarts at
+  /// height 3 and is told the tip is 2; `early` arrives then, on time. The
+  /// flush falls due when the hub hears of height 6, which is at 7, and the
+  /// offer leaves exactly the margin.
+  run freshAfterRestartMeetsMarginTest =
+    initWith(flakyTip)
+      .then(crash)
+      .then(unseenBlocks(2))
+      .then(restart)
+      .then(see)
+      .then(observeWith(2))
+      .then(deliver(early))
+      .expect(height == 3 and onTime == Set(early))
+      .then(4.reps(i => advance.then(observeWith(3 + i))))
+      .expect(height == 7 and h.tip == Some(6) and not(mayAdvance))
+      .then(flushBegin)
+      .expect(flightStart == 7 and wConformingFirstOffer and conformingFirstOfferBeforeExpiry)
+      .then(advance)
+      .expect(height == 8 and not(mayAdvance))
+      .expect(wConformingFirstOfferInFlightABlock and conformingFirstOfferJudgedBeforeExpiry)
+      .then(judge(early, Accepted))
 
   // ------------------------------------------------------------------------
   // A hub that hears nothing for a while
