@@ -760,6 +760,19 @@ where G6b holds.
 the shim function routes a lookup to the operator, so the clause would hold by
 construction and could not be broken by any of the listed changes.
 
+**9. An entry with an expiry can be dropped as exhausted.** In
+`expiringEntryDroppedAsExhaustedTest` (hub specification, `staleLag`): `late`,
+expiry 11, is queued by a hub whose tip stops at 5. Three flushes come back
+unjudged. Each requeue judges the entry against the observed tip, as admission
+does, so the next flush it knows of is still the one at 6 and the expiry rule
+never gives the entry up; the attempt bound does. The implementation's requeue
+has the same two checks in the same order and is passed the observed tip
+(`zeronym/hub/src/queue.rs:408-415`, `zeronym/hub/src/batcher.rs:413-422`),
+while `queue.rs:197` says of the exhausted count "Only reachable for a payload
+with no expiry". Shown on the model; the code was read at those lines and not
+run. The bound there is 8 requeues, so the shape needs nine unjudged flushes
+of a hub that sees no tip throughout.
+
 ## Model-based testing, later
 
 Not built. The specification is shaped so it can be:

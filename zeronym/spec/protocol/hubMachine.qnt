@@ -219,16 +219,24 @@ module hubMachine {
   // ------------------------------------------------------------------------
   //
   // The hub asks its indexer two things. Both answers are the relations of
-  // `indexer.qnt`, not a second model of them.
+  // `indexer.qnt`, not a second model of them: the honest one, or, for a
+  // Byzantine indexer, the wider one.
 
   /// The tips the indexer may report now.
   def tips: Set[Height] =
-    honestTips(chain, if (cfg.tip == TipMayRegress) cfg.params.reorgAllowance else 0, CLOCK_HEIGHTS)
+    match cfg.indexerRole {
+      | Honest =>
+        honestTips(chain, if (cfg.tip == TipMayRegress) cfg.params.reorgAllowance else 0, CLOCK_HEIGHTS)
+      | Byzantine => byzTips(CLOCK_HEIGHTS)
+    }
 
   /// What a broadcast of `payload` may come to: the verdict the hub is given,
   /// and whether the network took the transaction.
   def broadcastResults(payload: Payload): Set[IndexerResult] =
-    honestIndexerResults(chain, BroadcastIInput(payload))
+    match cfg.indexerRole {
+      | Honest => honestIndexerResults(chain, BroadcastIInput(payload))
+      | Byzantine => byzIndexerResults(chain, BroadcastIInput(payload), cfg.payloads, CLOCK_HEIGHTS)
+    }
 
   /// The indexer's transition that gives `given` on `payload` and relays the
   /// transaction to the network, or does not.
@@ -250,9 +258,15 @@ module hubMachine {
   def freeRunEstimates: Set[Height] =
     CLOCK_HEIGHTS.filter(estimate => height <= estimate and estimate <= height + cfg.params.flushInterval)
 
-  /// The transitions the hub may take on a submission of `payload`.
+  /// The transitions the hub may take on a submission of `payload`: the one
+  /// the protocol prescribes, or, for a Byzantine hub, any decision with the
+  /// payload queued or not. A Byzantine hub keeps the honest schedule.
   def submitResults(payload: Payload): Set[HubResult] =
-    Set(hub(h, SubmitHInput({ nonce: 0, payload: payload })))
+    val input = SubmitHInput({ nonce: 0, payload: payload })
+    match cfg.hubRole {
+      | Honest => Set(hub(h, input))
+      | Byzantine => byzHubResults(h, input, cfg.payloads, Set())
+    }
 
   // ------------------------------------------------------------------------
   // Frames
@@ -679,6 +693,17 @@ module hubMachine {
     payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12)),
   }
 
+  // One Byzantine component at a time, on the schedule of `timely`.
+  pure val byzHub: HubConfig = { ...timely, hubRole: Byzantine }
+  pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine }
+
+  /// Bytes neither the shim nor the hub can parse: no txid, no expiry. After
+  /// a network upgrade a build does not know, every transaction looks like
+  /// this to it.
+  pure val junk: Payload =
+    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+  pure val unknownUpgrade: HubConfig = { ...timely, payloads: Set(early, tight, junk) }
+
   // One named init per configuration. A configuration built to show what a
   // relation buys asserts that the relation is false of it, so that its known
   // gap stays pinned on the missing relation.
@@ -699,6 +724,9 @@ module hubMachine {
     initWith(flakyTipSlowFlight),
   }
   action initStaleLag = all { shippedAssumptions(staleLag), initWith(staleLag) }
+  action initByzHub = all { shippedAssumptions(byzHub), initWith(byzHub) }
+  action initByzIndexer = all { shippedAssumptions(byzIndexer), initWith(byzIndexer) }
+  action initUnknownUpgrade = all { shippedAssumptions(unknownUpgrade), initWith(unknownUpgrade) }
   action initStaleLagWithSlack = all {
     standingAssumptions(staleLagWithSlack),
     reorgSlackFits(staleLagWithSlack),
