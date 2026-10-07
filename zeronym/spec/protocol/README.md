@@ -36,7 +36,9 @@ sh zeronym/spec/protocol/check.sh
 Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default;
 set `QUINT=quint` to use an installed one). The two-state properties use the
 action-property syntax introduced in 0.33, so 0.32 does not typecheck the
-specification. No Java is needed.
+specification. Tier 4 needs Java (21 in CI) and Apalache 0.62.1, whose jar
+carries TLC and which Quint fetches into `~/.quint` on first use; without
+either the tier fails.
 
 | Tier | What | Command | Expectation |
 |---|---|---|---|
@@ -44,6 +46,7 @@ specification. No Java is needed.
 | 2 | tests | `quint test` on the spells, the four functional test files, each scenario and trust module, each configuration | all pass |
 | 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` ("fails" rows: 40 to 80 steps, a few with more traces) | "holds" rows hold; "fails" rows are violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
+| 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
 | 5 | two-state properties | `QUINT_TLC=1`, opt-in, **never run** | unknown |
 
 Measured on the machine it was written on (Apple silicon, Quint's Rust
@@ -773,6 +776,20 @@ with no expiry". Shown on the model; the code was read at those lines and not
 run. The bound there is 8 requeues, so the shape needs nine unjudged flushes
 of a hub that sees no tip throughout.
 
+**8. With "timely" as defined, G6b and G6c do not hold where the tip may be
+reported behind the chain; simulation said they did.** TLC violates both on
+`flakyTip`, and G6b on `flakyTipSlowFlight`, with every component honest and
+the reorg slack in place. `crashThenLateDuplicateTest`: `early` (built at 2,
+expiry 9) is admitted at 2 and the hub crashes. It restarts at height 6,
+adopts that epoch without flushing, and is then told the tip is 5. A duplicate
+of the same submission arrives and is admitted, because `9 >= 6 + 2` and
+admission counts on the flush at 6. The hub is shut down at 8; its final flush
+offers the transaction with `9 < 8 + 2`. The property counts the transaction
+as timely because its first entry into this hub's queue, before the crash, was
+on time. Whether this is a statement about the property (a hub that has lost
+its queue cannot be held to an arrival it no longer knows of) or about the
+code has not been confirmed against the code.
+
 ## Model-based testing, later
 
 Not built. The specification is shaped so it can be:
@@ -855,6 +872,34 @@ Reachability, each as `not(..)` and each violated: on `timely`,
 `wDown` (2), `wRestartedOwing` (6), `wBlockInFlight` (7), `wStopped` (4); on
 `flakyTip`, the first three (6, 6, 7); `wStale` on `staleLag` (9) and on
 `staleLagWithSlack` (6).
+
+### The schedule rows, before and after the move
+
+Every row about the schedule, as the gate of the whole-protocol specification
+has it (bounded simulation), under simulation of the hub machine with the same
+bounds (`quint run hubMachine.qnt --init=<init>`, seed 7, 60 or 80 steps, the
+row's trace count), and under TLC. "v" is violated; the number is the length
+of TLC's counterexample in states.
+
+| Configuration | Invariant | Protocol gate | Hub machine, simulated | Hub machine, TLC |
+|---|---|---|---|---|
+| `baseline` / `timely` | G6a, G6b, G6c | holds | holds | holds, exhaustive |
+| `flakyTip` | G6a (K3) | v | v | v, 8 |
+| `flakyTip` | G6b | holds | holds | **v, 18** |
+| `flakyTip` | G6c | holds | holds | **v, 19** |
+| `flakyTipSlowFlight` | G6b | holds | holds | **v, 18** |
+| `flakyTipSlowFlight` | G6c (K7) | v | v | v, 14 |
+| `flakyTipNoSlack` | G6b (K3') | v | v | v, 12 |
+| `flakyTipNoSlack` | G6c (K3') | v | v | not a TLC row; G6b's is |
+| `staleLag` | G6a, G6b, G6c (K4) | v | v | v, 13; 13; 14 |
+| `staleLag` | K6 | v | v | v, 13 |
+| `staleLagWithSlack` | G6b (finding 2) | v, 8000 traces | v, 8000 traces | v, 19 |
+| `baseline` / `timely` | K5 | v | v | v, 5; 8 without a crash; 10 without a shutdown |
+| `byzHub` | G6a, G6b, G6c | v (5000 and 12000 traces for the last two) | v | v, 8; 12; 13 |
+| `byzIndexer` | G6a, G6b, G6c | v | v | v, 8; 16; 17 |
+
+The three rows in bold are finding 8. Simulation, of either machine, does not
+find the counterexample in the traces it samples; TLC does.
 
 Configuration in the state against configuration as a constant, on `timely`
 with G6a, G6b and G6c: the compiled JSON is 13.7 MB with named inits and

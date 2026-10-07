@@ -299,6 +299,40 @@ module hubScenariosTest {
       .expect(conformingFirstOfferBeforeExpiry and not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(early, Rejected))
 
+  /// Finding 8. A supported wallet's transaction is admitted on time, and the
+  /// hub crashes. It comes back at height 6, adopts that epoch without
+  /// flushing, and is then told the tip is 5. A duplicate of the submission
+  /// arrives; admission counts on the flush at 6, which will not happen. The
+  /// hub is shut down at 8 and its final flush offers the transaction with
+  /// one block of margin where two are reserved.
+  run crashThenLateDuplicate(c: HubConfig): bool =
+    started(c)
+      .then(block)
+      .then(deliver(early))
+      .expect(onTime == Set(early))
+      .then(crash)
+      .then(unseenBlocks(4))
+      .then(restart)
+      .then(see)
+      .expect(height == 6 and h.lastEpoch == Some(2))
+      .then(observeWith(5))
+      .then(deliver(early))
+      .expect(h.queued() == Set(early))
+      .then(see)
+      .then(blocks(2))
+      .then(drain)
+      .then(flushBegin)
+      .expect(flightStart == 8 and h.inFlight() == Set(early) and not(marginLeft(early, flightStart)))
+
+  /// The transaction first entered the queue on time, so it counts as timely,
+  /// and its first offer misses the margin.
+  run crashThenLateDuplicateTest =
+    crashThenLateDuplicate(flakyTip)
+      .expect(reorgSlackFits(cfg) and onTime == Set(early) and offered == Set())
+      .expect(not(conformingFirstOfferBeforeExpiry))
+      .then(advance)
+      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
+
   // ------------------------------------------------------------------------
   // A hub that hears nothing for a while
   // ------------------------------------------------------------------------

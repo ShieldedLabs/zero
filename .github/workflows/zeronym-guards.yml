@@ -57,11 +57,13 @@ jobs:
       - name: Divert protocol model
         run: sh zeronym/spec/check.sh
 
-  # The standalone Quint specification of the whole protocol: typecheck, tests
-  # and bounded random simulation. No model checker, so no Java.
+  # The standalone Quint specification of the whole protocol: typecheck, tests,
+  # bounded random simulation, and the hub specification checked exhaustively
+  # with TLC, which needs Java. The Apalache distribution that carries TLC is
+  # fetched by Quint on first use.
   spec-protocol:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     # Same reasoning as `spec`: it runs code fetched at run time.
     permissions:
       contents: read
@@ -69,6 +71,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Protocol specification
         run: sh zeronym/spec/protocol/check.sh
 

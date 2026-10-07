@@ -3,8 +3,8 @@
 #
 # "Holds" here means bounded random simulation: fixed constants, a fixed step
 # bound, a fixed number of traces and one seed. It is not a proof and it is
-# not exhaustive to any depth. `quint verify` is not run by this script unless
-# QUINT_TLC=1 asks for the last tier.
+# not exhaustive to any depth. The exception is tier 4, the hub specification,
+# where TLC visits every reachable state of each configuration.
 #
 # Tiers:
 #   1  typecheck every file.
@@ -18,6 +18,10 @@
 #      one trace. These runs also re-check the configuration's guarantees, on
 #      longer traces and under the narrower step relations, which get deeper
 #      into the protocol than `step` does.
+#   4  tlc.sh: the hub specification, exhaustively. "holds" rows are the
+#      schedule guarantees; "violated" rows are the known gaps, the guarantees
+#      under a Byzantine hub or indexer, and the states that must be reachable
+#      (each as `not(..)`). Needs Java; fails, never skips, without it.
 #   5  opt-in, QUINT_TLC=1: the two-state properties, with TLC. Needs Java 21.
 #
 # A row that starts holding where it is expected to fail, or the reverse,
@@ -68,8 +72,8 @@ finish() {
 }
 
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
-MODULES="types.qnt wire.qnt indexer.qnt hub.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
-FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt"
+MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
+FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
 INSTANCES="baseline byzShim byzHub byzIndexer awaitAck awaitAckByzShim awaitAckByzHub awaitAckByzIndexer replicated replicatedOneByz flakyTip flakyTipNoSlack flakyTipSlowFlight staleLag staleLagWithSlack"
 SCENARIOS="baselineScenarios awaitAckScenarios replicatedScenarios flakyTipScenarios flakyTipSlowFlightScenarios flakyTipNoSlackScenarios staleLagScenarios staleLagWithSlackScenarios byzIndexerScenarios byzHubScenarios"
 TRUST="byzShimTrust awaitAckByzShimTrust byzHubTrust awaitAckByzHubTrust byzIndexerTrust replicatedOneByzTrust"
@@ -199,6 +203,43 @@ reaches() {
       echo "ok    $main: reached: $witness ($count of $samples, $step, $steps steps)"
     fi
   done
+}
+
+# tlc_holds INIT STEP INVARIANT: TLC exhausts the configuration and finds
+# every reachable state satisfies the invariant.
+tlc_holds() {
+  out=$(QUINT=$QUINT sh ./tlc.sh hubMachine.qnt hubMachine "$1" "$2" "$3" 2>&1)
+  case $out in
+    "holds "*) echo "ok    $1: holds, exhaustively: $3 ($2; states and depth: ${out#holds })" ;;
+    "violated "*) fail "$1: $3 expected to hold under $2, TLC found a counterexample of ${out#violated } states" ;;
+    *)
+      echo "$out" | tail -20
+      fail "$1: $3: tlc.sh gave no verdict"
+      ;;
+  esac
+}
+
+# tlc_violated INIT STEP INVARIANT LENGTH: TLC finds a counterexample, and it
+# is no longer than the recorded one. With one worker TLC searches breadth
+# first and its counterexample is a shortest one, so a longer one means the
+# recorded counterexample is gone.
+tlc_violated() {
+  out=$(QUINT=$QUINT TLC_WORKERS=1 sh ./tlc.sh hubMachine.qnt hubMachine "$1" "$2" "$3" 2>&1)
+  case $out in
+    "violated "*)
+      length=${out#violated }
+      if [ "$length" -le "$4" ]; then
+        echo "ok    $1: violated: $3 ($2, $length states)"
+      else
+        fail "$1: $3 violated under $2 in $length states, recorded as $4"
+      fi
+      ;;
+    "holds "*) fail "$1: $3 expected to be violated under $2, TLC found it holds" ;;
+    *)
+      echo "$out" | tail -20
+      fail "$1: $3: tlc.sh gave no verdict"
+      ;;
+  esac
 }
 
 typecheck() {
@@ -368,6 +409,77 @@ job reaches flakyTipSlowFlight quietStep 40 \
 job reaches staleLag quietStep 40 \
   wEarlyFreeRunFlush \
   -- wellFormed
+finish
+
+echo "---- 4 hub specification (TLC, exhaustive)"
+
+G6A=offeredBeforeExpiry
+G6B=conformingFirstOfferBeforeExpiry
+G6C=conformingFirstOfferJudgedBeforeExpiry
+K5=ackedIsHeldOrSettled
+K6=conformingEveryOfferBeforeExpiry
+
+# The schedule guarantees with every component honest.
+job tlc_holds    initTimely             step "$G6A and $G6B and $G6C"
+job tlc_holds    initTimely             step $K6
+
+# The known gaps, each on the configuration that isolates its cause. The last
+# argument is the length of TLC's counterexample.
+job tlc_violated initFlakyTip           step $G6A 8                     # K3
+job tlc_violated initFlakyTipNoSlack    step $G6B 12                    # K3'
+job tlc_violated initFlakyTipSlowFlight step $G6C 14                    # K7
+job tlc_violated initStaleLag           step $G6A 13                    # K4
+job tlc_violated initStaleLag           step $G6B 13                    # K4
+job tlc_violated initStaleLag           step $G6C 14                    # K4
+job tlc_violated initStaleLag           step $K6 13                     # K6
+job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2
+job tlc_violated initStaleLagWithSlack  step $G6C 20                    # finding 2
+# K5, three causes: a crash; without one, a final flush nothing judged; with
+# no shutdown either, a requeue that gives the entry up as expired.
+job tlc_violated initTimely             step $K5 5
+job tlc_violated initTimely             noCrashStep $K5 8
+job tlc_violated initTimely             quietStep $K5 10
+
+# Finding 8. A crash, then a late duplicate of a submission first admitted on
+# time: "timely" as defined does not survive a restart.
+job tlc_violated initFlakyTip           step $G6B 18
+job tlc_violated initFlakyTip           step $G6C 19
+job tlc_violated initFlakyTipSlowFlight step $G6B 18
+
+# The trust matrix: each schedule guarantee is violated once the component it
+# depends on is Byzantine.
+job tlc_violated initByzHub             step $G6A 8
+job tlc_violated initByzHub             step $G6B 12
+job tlc_violated initByzHub             step $G6C 13
+job tlc_violated initByzIndexer         step $G6A 8
+job tlc_violated initByzIndexer         step $G6B 16
+job tlc_violated initByzIndexer         step $G6C 17
+
+# Reachability. The antecedents of G6a, G6b and G6c, so that a "holds" is not
+# vacuous; and one state per family of steps, because TLC runs with deadlock
+# checking off and a machine whose steps died would hold everything.
+job tlc_violated initTimely             step "not(wOfferWithExpiry)" 6
+job tlc_violated initTimely             step "not(wConformingFirstOffer)" 6
+job tlc_violated initTimely             step "not(wConformingFirstOfferInFlightABlock)" 7
+job tlc_violated initTimely             step "not(wOffered)" 7
+job tlc_violated initTimely             step "not(wRequeued)" 9
+job tlc_violated initTimely             step "not(wDown)" 2
+job tlc_violated initTimely             step "not(wRestartedOwing)" 6
+job tlc_violated initTimely             step "not(wBlockInFlight)" 7
+job tlc_violated initTimely             step "not(wStopped)" 4
+job tlc_violated initFlakyTip           step "not(wOfferWithExpiry)" 6
+job tlc_violated initFlakyTip           step "not(wConformingFirstOffer)" 6
+job tlc_violated initFlakyTip           step "not(wConformingFirstOfferInFlightABlock)" 7
+job tlc_violated initFlakyTip           step "not(wOffered)" 7
+job tlc_violated initFlakyTip           step "not(wRequeued)" 9
+job tlc_violated initFlakyTip           step "not(wDown)" 2
+job tlc_violated initFlakyTip           step "not(wRestartedOwing)" 6
+job tlc_violated initFlakyTip           step "not(wBlockInFlight)" 7
+job tlc_violated initFlakyTip           step "not(wStopped)" 4
+job tlc_violated initFlakyTipSlowFlight step "not(wConformingFirstOffer)" 6
+job tlc_violated initFlakyTipSlowFlight step "not(wBlockInFlight)" 7
+job tlc_violated initStaleLag           step "not(wStale)" 9
+job tlc_violated initStaleLagWithSlack  step "not(wStale)" 6
 finish
 
 # Tier 5. Not part of the default gate, not run in CI, and never executed while
