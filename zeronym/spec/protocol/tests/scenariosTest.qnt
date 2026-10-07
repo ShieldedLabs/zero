@@ -123,6 +123,9 @@ module baselineScenarios {
       .expect(queue == Map(early -> 0, garbage -> 0, junk -> 1))
       .expect(audit.dropped == Set({ hub: "h1", payload: tight, attempts: 0 }))
       .expect(wRequeued and wDroppedExpired and wQueueOverCapacity and not(wDroppedExhausted))
+      // `tight` was acknowledged, and is now held nowhere and judged by nobody:
+      // a third way to lose an acknowledged payload (K5).
+      .expect(s.acks("h1", ShimAddr).contains((1, WAccepted)) and not(ackedIsHeldOrSettled))
       .then(blocks(3))
       .then(hubFlushBeginWith("h1"))
       .then(judge("h1", early, Accepted))
