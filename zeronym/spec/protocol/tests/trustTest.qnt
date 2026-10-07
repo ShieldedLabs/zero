@@ -234,6 +234,35 @@ module byzHubTrust {
       .expect(s.acks("h1", ShimAddr) == Set((0, WAccepted)) and s.queuedAt("h1") == Set(early))
       .expect(ackImpliesQueued)
 
+  /// A3 needs the hub. Once its drain has begun, it takes a submission into
+  /// the queue. The simulator does not check `temporal` definitions, so the
+  /// run asserts the step itself: draining before and after, nothing in
+  /// flight, and the queue grown by a payload no flush handed back.
+  run hubAdmitsWhileDrainingTest =
+    started
+      .then(block)
+      .then(submitTo("h1", 0, early))
+      .then(hubBeginDrainWith("h1"))
+      .then(sendToAll(tight))
+      .expect(h1.phase == Draining and s.queuedAt("h1") == Set(early) and s.inFlightAt("h1") == Set())
+      .then(hubReceiveWith(
+        "h1", submitMail("h1", 1, tight), INotFound,
+        { ...h1, queue: h1.queue.put(tight, 0) }.toAckOutput(1, Admitted),
+      ))
+      .expect(h1.phase == Draining and s.queuedAt("h1") == Set(early, tight))
+      .expect(not(wRefusedDraining))
+
+  run hubAdmitsWhileDrainingControlTest =
+    started
+      .then(block)
+      .then(submitTo("h1", 0, early))
+      .then(hubBeginDrainWith("h1"))
+      .then(sendToAll(tight))
+      .expect(h1.phase == Draining and s.queuedAt("h1") == Set(early) and s.inFlightAt("h1") == Set())
+      .then(deliverSubmit("h1", 1, tight))
+      .expect(h1.phase == Draining and s.queuedAt("h1") == Set(early))
+      .expect(wRefusedDraining)
+
   /// G6a needs the hub. It admits a transaction the expiry rule refuses: one
   /// expiring at 5, taken at tip 3, when the next flush is at 6.
   run hubAdmitsPastExpiryRuleTest =

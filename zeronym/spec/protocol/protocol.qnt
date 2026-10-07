@@ -955,10 +955,11 @@ module protocol {
     ).orKeep(s)
   )
 
-  /// A3. A draining hub admits nothing: its queue gains only what a flush
-  /// hands back.
+  /// A3. A draining honest hub admits nothing: its queue gains only what a
+  /// flush hands back. Draining is an admission rule like the others, so a
+  /// Byzantine hub is not bound by it (`hubAdmitsWhileDrainingTest`).
   temporal drainIsFinal = always(
-    HUBS.forall(id =>
+    HONEST_HUBS.forall(id =>
       phaseOf(id) == Draining implies next(queueOf(id)).subseteq(queueOf(id).union(flightOf(id)))
     ).orKeep(s)
   )

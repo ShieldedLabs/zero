@@ -577,6 +577,7 @@ chain cannot pass a running, idle hub that has not asked.
 | G6a | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
 | G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| A3 | not run (TLC, `baseline`) | not run | **required**: `hubAdmitsWhileDrainingTest` | not run |
 
 One Byzantine replica out of two (`replicatedOneByz`):
 
@@ -596,7 +597,8 @@ In short: a Byzantine shim voids every wallet-facing guarantee (G1-G5); the
 hub-side G6 and G8 survive it. G3 is the only wallet-facing guarantee that
 survives a Byzantine hub or indexer, and it authenticates the txid only. G1
 depends on the shim alone. Replication does not dilute trust: one Byzantine
-replica is enough to void G2 and G4.
+replica is enough to void G2 and G4. A3 needs the hub: its "required"
+cell is a scripted step, and its "holds" cells are the unrun TLC property.
 
 ### Known gaps, with every component honest
 
@@ -660,7 +662,14 @@ form, and typechecked. **None has been run.**
 |---|---|---|---|
 | A1 | `chainMonotone` | A transaction's chain status never moves backwards | assumption about the environment |
 | A2 | `neverEvict` | An entry leaves a hub's queue only into a flush, or because the hub went down | guarantee |
-| A3 | `drainIsFinal` | A draining hub's queue gains only what a flush hands back | guarantee |
+| A3 | `drainIsFinal` | A draining honest hub's queue gains only what a flush hands back | guarantee |
+
+A3 is stated over the honest hubs only. Draining is an admission rule, and a
+Byzantine hub is not bound by admission rules: `hubAdmitsWhileDrainingTest`
+takes a submission into the queue after the drain began, and its control
+refuses the same frame. That run asserts the step, because the simulator
+does not check `temporal` definitions. A2 is stated over every hub: the
+Byzantine hub relation only ever adds to a queue.
 
 No liveness property is claimed: the network may lose everything, and under
 `DispatchOnly` nobody waits for an ack.
