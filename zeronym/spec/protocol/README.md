@@ -126,7 +126,7 @@ definitions they justify.
 |---|---|---|
 | Wallet / shim front door | `SendTransaction` input as `Clean(payload) \| Unreadable \| EmptyBody`; routing to divert / forward / fail-closed; `GetTransaction` always to the hub | S1, S3, S4. `divert.qnt` omits it |
 | Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
-| Hub | lifecycle; admission with all five refusals; queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash | S10-S19 |
+| Hub | lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash | S10-S19 |
 | Chain / indexer | height; per-txid status; what the indexer has been offered; verdict and lookup-answer relations | S15, S22 |
 | Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
 | Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
@@ -149,6 +149,7 @@ definitions they justify.
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
+| The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
 | Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
@@ -322,7 +323,7 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> Absent
-    Absent --> Refused: admit fails (TipStale, Draining, TooLarge, ExpiryTooTight, Full)
+    Absent --> Refused: admit fails (TipStale, Draining, ExpiryTooTight)
     Refused --> Absent
     Absent --> Queued: admit
     Queued --> Queued: same bytes again (duplicate)
@@ -419,7 +420,7 @@ pure.
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, A1-A3, the run vocabulary |
-| `instances.qnt` | `configs`, then one module per configuration | The fifteen configurations |
+| `instances.qnt` | `configs`, then one module per configuration | The three configurations: `baseline`, `byzHub`, `byzIndexer` |
 | `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14 |
 | `tests/scenariosTest.qnt` | one module per configuration used | Witnesses and pinned gap causes |
 | `tests/trustTest.qnt` | one module per Byzantine configuration | One run and one control per "required" cell |
@@ -519,9 +520,8 @@ The margin is 2, not 1, so that one block can arrive while a flush is in flight
 and still be inside it: `MAX_FLIGHT_BLOCKS` is 1 everywhere except
 `flakyTipSlowFlight`, where it is 2. `flakyTipNoSlack` uses a floor of 6 and
 `staleLagWithSlack` a floor of 8; those two do not keep the relations, and
-their tests assert that. Also: at most 2 requeues, room for 2 entries,
-heights up to 12, at most 3 sends and 3 lookups by the wallet and 3 requests by
-the third party.
+their tests assert that. Also: at most 2 requeues, heights up to 12,
+at most 3 sends and 3 lookups by the wallet and 3 requests by the third party.
 
 Each configuration has an `assumptionsTest`. The simulator does not enforce
 `assume`, so that test is the check that counts. Every `assume` in
@@ -546,7 +546,7 @@ and `flakyTipSlowFlight` each drop one, and their tests assert it is false.
 | F7 | Under the startup budget, a conforming payload arriving within the delivery lag passes the expiry check. This is about admission at one tip, not about when the flush happens | `hubTest::conformingTimelyPayloadIsAdmissibleTest` |
 | F8 | The admission decision table, in the implementation's order | `hubTest::admissionDecisionTableTest` |
 | F9 | Requeue, entry by entry, and the counts it reports | `hubTest::requeueTest` |
-| F10 | Draining and full are one refusal on the wire | `wireTest::ackRenderingTest` |
+| F10 | A draining hub refuses under the queue-full code | `wireTest::ackRenderingTest` |
 | F11 | `hub` and `shim` are total; an invalid input returns an error and changes nothing | `hubTest::totalityTest`, `shimTest::totalityTest` |
 | F12 | Each Byzantine relation contains the honest transition | `byzantineContainsHonestTest` in `hubTest`, `shimTest`, `indexerTest` |
 | F13 | An accepted ack is given only for a payload the hub then holds; a Byzantine hub can do otherwise | `hubTest::ackImpliesQueuedTest`, `hubTest::byzantineHubTest` |
@@ -659,11 +659,10 @@ Each has a scripted run and, except W15 and W18, is counted in tier 3b.
 | Id | Witness | Name | Configuration |
 |---|---|---|---|
 | W1-W3 | the wallet sees pending; its transaction in the mempool; mined | `wPending`, `wTxInMempool`, `wTxMined` | `baseline` |
-| W4 | each of the five refusals | `wRefusedTipStale`, `wRefusedDraining`, `wRefusedTooLarge`, `wRefusedExpiryTooTight`, `wRefusedFull` | `baseline` |
+| W4 | each of the three refusals | `wRefusedTipStale`, `wRefusedDraining`, `wRefusedExpiryTooTight` | `baseline` |
 | W5-W7 | an entry is requeued; dropped as expired; dropped as exhausted | `wRequeued`, `wDroppedExpired`, `wDroppedExhausted` | `baseline` |
 | W8 | **Accepted disclosure**: a third party that knows a txid learns it is queued. The hub withholds the bytes, not the fact. See the quoted comment under [Scope](#scope) | `wQueuedDisclosed` | `baseline` |
 | W9 | a queued payload the hub cannot parse is asked for and missed | `wUnparseableMissed` | `baseline` |
-| W12 | a queue holds more than its capacity after a requeue | `wQueueOverCapacity` | `baseline` |
 | W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | scripted run `tipAheadOfChainFlushesEarlyTest` (hub specification) | `byzIndexer` |
 | W16 | **Twin served**: the wallet is served a twin of what it sent, and a transaction at a false height; G3 holds throughout | `wTwinServed`, `wFalseHeightServed` | `byzHub` |
 | W17 | the third party's own payload is queued | `wThirdPartyPayloadQueued` | `baseline` |
@@ -920,6 +919,20 @@ counterexample a shortest one. Three were first recorded from runs with more
 workers and were one to three states too long: G6a on `staleLag` (13, now 12),
 K5 under `quietStep` (10, now 9), `wStale` on `staleLag` (9, now 6).
 
+With the capacity refusals removed, a hub may hold all three payloads at
+once, and the tier was re-run. Every verdict and every trace length is
+unchanged. `timely` still exhausts at 229 339 states, depth 51; `flakyTip`
+grows from 1 468 808 to 1 753 204 states, depth 44. Two rows then missed the
+five-minute limit: G6b on `flakyTipSlowFlight` (1 824 007 states at depth 30,
+152 337 on the queue) and G6c on `byzIndexer` with one worker (1 229 802
+states at depth 17). Those two configurations are now checked with two
+payloads: `flakyTipSlowFlight` with `early` and `late`, the supported wallets'
+migrations, and `byzIndexer` with `early` and `tight`, which
+`indexerWithholdsTipTest` needs. On them G6b on `flakyTipSlowFlight` holds,
+164 264 states, depth 36, in 24 s with 4 workers; G6c on `byzIndexer` is
+violated in 17 states, in 100 s with one worker; the other five rows have
+their recorded lengths.
+
 Reachability, each as `not(..)` and each violated: on `timely`,
 `wOfferWithExpiry` (6 states), `wConformingFirstOffer` (6),
 `wConformingFirstOfferInFlightABlock` (7), `wOffered` (7), `wRequeued` (9),
@@ -1011,15 +1024,12 @@ quint verify --main=baseline --invariant='not(wTxInMempool)' --max-steps=12 zero
 quint verify --main=baseline --invariant='not(wTxMined)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wRefusedTipStale)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wRefusedDraining)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRefusedTooLarge)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wRefusedExpiryTooTight)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRefusedFull)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wRequeued)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wDroppedExpired)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wDroppedExhausted)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wQueuedDisclosed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wUnparseableMissed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wQueueOverCapacity)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wThirdPartyPayloadQueued)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wToldRefusedEverywhere)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant='not(wToldNeverDelivered)' --max-steps=12 zeronym/spec/protocol/instances.qnt

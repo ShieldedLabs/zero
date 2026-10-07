@@ -34,10 +34,9 @@ module configs {
     { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: PassThrough, oversize: false }
   /// Other bytes with the txid of `early`.
   pure val earlyTwin = { ...early, id: "early-twin" }
-  /// The third party's own: one payload a hub will queue, one too large to.
+  /// The third party's own payload.
   pure val garbage: Payload =
     { id: "garbage", txid: Some("garbage"), created: 1, expiry: None, class: OrchardTouching, oversize: false }
-  pure val bloat = { ...garbage, id: "bloat", txid: Some("bloat"), oversize: true }
 
   // ------------------------------------------------------------------------
   // Configurations
@@ -64,7 +63,7 @@ module configs {
   pure val baseline: Config = {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
-    tpPayloads: Set(garbage, bloat),
+    tpPayloads: Set(garbage),
     flushInterval: 3,
     miningMargin: 2,
     deliveryLag: 1,
@@ -73,7 +72,6 @@ module configs {
     freeRun: NotSlower,
     minWalletExpiry: 7,
     maxAttempts: 2,
-    queueCap: 2,
     maxFlightBlocks: 1,
     maxHeight: 12,
     maxRequests: 3,

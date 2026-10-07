@@ -64,7 +64,7 @@ module baselineScenarios {
       .expect(s.operator == Set(plain) and s.net == Set())
       .expect(vOperatorBlind and operatorBlind and vQueuedBytesConfidential and queuedBytesConfidential)
 
-  /// W4. Each of the five refusals, in one hub's life.
+  /// W4. Each of the three refusals, in one hub's life.
   run everyRefusalTest =
     init
       // The hub has started and has seen no tip.
@@ -72,32 +72,19 @@ module baselineScenarios {
       .then(deliverSubmitFrom(ThirdPartyAddr, 0, garbage))
       .expect(wRefusedTipStale and tpAcks == Set((0, WRefused(WTipStale))))
       .then(observe)
-      .then(thirdPartySubmitWith(bloat))
-      .then(deliverSubmitFrom(ThirdPartyAddr, 1, bloat))
-      .expect(wRefusedTooLarge and tpAcks.contains((1, WRefused(WTooLarge))))
       // Height 3, and the flush scheduled there has run. The next is at 6,
       // which a transaction expiring at 5 does not survive.
       .then(blocks(2))
       .then(hubFlushBegin)
       .then(submitTo(0, tight))
       .expect(wRefusedExpiryTooTight and s.acks(ShimAddr) == Set((0, WRefused(WExpiryTooTight))))
-      // Two admissions fill the queue. The network then delivers the third
-      // party's first frame a second time.
-      .then(submitTo(1, junk))
-      .then(submitTo(2, early))
-      .expect(s.hub.queued() == Set(junk, early))
-      .then(deliverSubmitFrom(ThirdPartyAddr, 0, garbage))
-      .expect(wRefusedFull and not(wRefusedDraining))
-      // Draining is checked before size: the oversize frame, delivered again,
-      // is now refused for that. On the wire it is the same refusal as full.
+      // A draining hub refuses under the queue-full code. The network
+      // delivers the third party's frame a second time.
       .then(hubBeginDrain)
-      .then(deliverSubmitFrom(ThirdPartyAddr, 1, bloat))
+      .then(deliverSubmitFrom(ThirdPartyAddr, 0, garbage))
       .expect(wRefusedDraining)
-      .expect(tpAcks == Set(
-        (0, WRefused(WTipStale)), (0, WRefused(WQueueFull)),
-        (1, WRefused(WTooLarge)), (1, WRefused(WQueueFull)),
-      ))
-      .expect(audit.everQueued == Set(junk, early))
+      .expect(tpAcks == Set((0, WRefused(WTipStale)), (0, WRefused(WQueueFull))))
+      .expect(audit.everQueued == Set())
 
   /// W8. The accepted disclosure: a third party that knows a txid is told it
   /// is queued, and is not given the bytes.

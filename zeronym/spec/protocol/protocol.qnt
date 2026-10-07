@@ -82,8 +82,6 @@ module protocol {
   pure val MIN_WALLET_EXPIRY = CONFIG.minWalletExpiry
   /// Requeues an entry is allowed.
   pure val MAX_ATTEMPTS = CONFIG.maxAttempts
-  /// Entries a hub's admission will hold.
-  pure val QUEUE_CAP = CONFIG.queueCap
 
   /// Blocks that may arrive while one flush is in flight.
   pure val MAX_FLIGHT_BLOCKS = CONFIG.maxFlightBlocks
@@ -118,7 +116,6 @@ module protocol {
     minWalletExpiry: MIN_WALLET_EXPIRY,
     reorgAllowance: REORG_ALLOWANCE,
     maxAttempts: MAX_ATTEMPTS,
-    queueCap: QUEUE_CAP,
   }
 
   // ------------------------------------------------------------------------
@@ -776,15 +773,12 @@ module protocol {
   val wTxMined = wTxMinedIn(s)
   val wRefusedTipStale = wRefused(audit, TipStale)
   val wRefusedDraining = wRefused(audit, HubDraining)
-  val wRefusedTooLarge = wRefused(audit, TooLarge)
   val wRefusedExpiryTooTight = wRefused(audit, ExpiryTooTight)
-  val wRefusedFull = wRefused(audit, Full)
   val wRequeued = wRequeuedIn(s)
   val wDroppedExpired = wDroppedExpiredIn(s, audit)
   val wDroppedExhausted = wDroppedExhaustedIn(audit)
   val wQueuedDisclosed = wQueuedDisclosedIn(s)
   val wUnparseableMissed = wUnparseableMissedIn(s)
-  val wQueueOverCapacity = wQueueOverCapacityIn(s)
   val wTwinServed = wTwinServedIn(s)
   val wFalseHeightServed = wFalseHeightServedIn(s)
   val wThirdPartyPayloadQueued = wThirdPartyPayloadQueuedIn(s)

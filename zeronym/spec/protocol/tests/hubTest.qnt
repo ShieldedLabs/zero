@@ -1,7 +1,7 @@
 // -*- mode: Bluespec; -*-
 
 /// The hub function, checked on a small schedule: a flush every 3 blocks, a
-/// mining margin of 1, at most 2 requeues, room for 2 entries.
+/// mining margin of 1, at most 2 requeues.
 module hubTest {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
@@ -14,7 +14,6 @@ module hubTest {
     minWalletExpiry: 6,
     reorgAllowance: 1,
     maxAttempts: 2,
-    queueCap: 2,
   }
 
   pure def orchard(id: str, expiry: Option[Height]): Payload =
@@ -24,13 +23,11 @@ module hubTest {
   pure val pB = orchard("b", Some(9))
   pure val pC = orchard("c", None)
   pure val pTight = orchard("tight", Some(6))
-  pure val pBig = { ...orchard("big", None), oversize: true }
-  pure val pBigTight = { ...pTight, id: "big-tight", oversize: true }
   pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
 
-  pure val PAYLOADS = Set(pA, pB, pC, pTight, pBig, pBigTight, pJunk)
+  pure val PAYLOADS = Set(pA, pB, pC, pTight, pJunk)
   pure val HEIGHTS = Set(0, 4)
-  pure val REFUSALS = Set(TipStale, HubDraining, TooLarge, ExpiryTooTight, Full)
+  pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)
 
   /// The state after `input`.
   pure def after(state: HubState, input: HubInput): HubState =
@@ -56,16 +53,16 @@ module hubTest {
   pure val starting = startingHub(PARAMS)
   pure def running(tip: Height): HubState = starting.after(TipHInput(tip))
 
-  /// Running at tip 5 with `pA` and `pJunk` queued: full.
-  pure val full = running(5).after(submit(pA)).after(submit(pJunk))
+  /// Running at tip 5 with `pA` and `pJunk` queued.
+  pure val holding = running(5).after(submit(pA)).after(submit(pJunk))
   /// The same hub one block later, with its flush in flight.
-  pure val flushing = full.after(TipHInput(6)).after(FlushDueHInput)
+  pure val flushing = holding.after(TipHInput(6)).after(FlushDueHInput)
   pure val stale = running(5).after(StaleHInput(8))
-  pure val draining = full.after(DrainHInput)
+  pure val draining = holding.after(DrainHInput)
   pure val stopped = draining.after(FlushDueHInput).after(verdict(pA, Accepted))
     .after(verdict(pJunk, Rejected)).after(FlushDoneHInput)
 
-  pure val STATES = Set(down, starting, running(2), running(5), full, flushing, stale, draining, stopped,
+  pure val STATES = Set(down, starting, running(2), running(5), holding, flushing, stale, draining, stopped,
     stale.after(DrainHInput), flushing.after(verdict(pA, Retryable)))
 
   pure val INPUTS: Set[HubInput] =
@@ -117,16 +114,13 @@ module hubTest {
     assert(PAYLOADS.forall(payload => admission(stale.after(DrainHInput), payload) == Refused(TipStale))),
     // Draining comes before anything about the payload.
     assert(PAYLOADS.forall(payload => admission(draining, payload) == Refused(HubDraining))),
-    // Size before expiry.
-    assert(admission(running(5), pBig) == Refused(TooLarge)),
-    assert(admission(running(5), pBigTight) == Refused(TooLarge)),
     // Expiry before the queue is looked at. At tip 5 the next flush is at 6.
     assert(admission(running(5), pTight) == Refused(ExpiryTooTight)),
-    assert(admission(full, pTight) == Refused(ExpiryTooTight)),
+    assert(admission(holding, pTight) == Refused(ExpiryTooTight)),
     assert(admission(running(2), pTight) == Admitted),
-    // A duplicate is recognised before capacity is checked.
-    assert(admission(full, pA) == Duplicate),
-    assert(admission(full, pB) == Refused(Full)),
+    // A duplicate is recognised; anything else that passes is admitted.
+    assert(admission(holding, pA) == Duplicate),
+    assert(admission(holding, pB) == Admitted),
     assert(admission(running(5), pA) == Admitted),
     // An unparseable payload has no expiry and is admitted like any other.
     assert(admission(running(5), pJunk) == Admitted),
@@ -157,15 +151,15 @@ module hubTest {
 
   run lookupTest = all {
     // A queue hit, whatever the indexer would have said.
-    assert(outputOf(full, LookupHInput({ nonce: 7, txid: "a", answer: IFound({ body: Some(pA), height: 4 }) }))
+    assert(outputOf(holding, LookupHInput({ nonce: 7, txid: "a", answer: IFound({ body: Some(pA), height: 4 }) }))
       == LookupReplyOutput({ nonce: 7, outcome: QueueHit })),
     // A miss forwards the indexer's answer as it came.
     assert(Set(INotFound, IUnavailable, IFound({ body: Some(pB), height: 4 }), IFound({ body: None, height: 0 }))
       .forall(answer =>
-        outputOf(full, LookupHInput({ nonce: 7, txid: "b", answer: answer }))
+        outputOf(holding, LookupHInput({ nonce: 7, txid: "b", answer: answer }))
           == LookupReplyOutput({ nonce: 7, outcome: FromIndexer(answer) }))),
     // A queued payload that does not parse is never hit.
-    assert(full.queued().contains(pJunk) and not(full.isQueuedTxid("junk"))),
+    assert(holding.queued().contains(pJunk) and not(holding.isQueuedTxid("junk"))),
     // Once the flush has taken the queue, the same lookup misses.
     assert(outputOf(flushing, LookupHInput({ nonce: 7, txid: "a", answer: INotFound }))
       == LookupReplyOutput({ nonce: 7, outcome: FromIndexer(INotFound) })),
@@ -215,10 +209,10 @@ module hubTest {
   // ------------------------------------------------------------------------
 
   run flushCycleTest = all {
-    assert(not(full.isFlushDue()) and isError(outputOf(full, FlushDueHInput))),
-    assert(full.after(TipHInput(6)).isFlushDue()),
+    assert(not(holding.isFlushDue()) and isError(outputOf(holding, FlushDueHInput))),
+    assert(holding.after(TipHInput(6)).isFlushDue()),
     // The whole queue moves out at once.
-    assert(outputOf(full.after(TipHInput(6)), FlushDueHInput) == BroadcastOutput(Set(pA, pJunk))),
+    assert(outputOf(holding.after(TipHInput(6)), FlushDueHInput) == BroadcastOutput(Set(pA, pJunk))),
     assert(flushing.queue == Map() and flushing.inFlight() == Set(pA, pJunk)),
     // Published, already known and rejected entries leave.
     assert(Set(Accepted, AlreadyKnown, Rejected).forall(given =>
@@ -227,10 +221,10 @@ module hubTest {
     assert(flushing.after(verdict(pA, Retryable)).inFlight() == Set(pA, pJunk)),
     assert(isError(outputOf(flushing, verdict(pB, Accepted)))),
     assert(isError(outputOf(flushing.after(verdict(pA, Accepted)), verdict(pA, Accepted)))),
-    assert(isError(outputOf(full, verdict(pA, Accepted)))),
+    assert(isError(outputOf(holding, verdict(pA, Accepted)))),
     // The flush cannot end while a verdict is outstanding.
     assert(isError(outputOf(flushing, FlushDoneHInput))),
-    assert(isError(outputOf(full, FlushDoneHInput))),
+    assert(isError(outputOf(holding, FlushDoneHInput))),
     // An empty queue is still a flush event: the epoch is recorded.
     assert(running(5).after(TipHInput(6)).after(FlushDueHInput).lastEpoch == Some(2)),
     assert(outputOf(running(5).after(TipHInput(6)), FlushDueHInput) == NoHubOutput),
@@ -256,10 +250,9 @@ module hubTest {
     assert(outputOf(returning, FlushDoneHInput)
       == RequeuedOutput({ held: 2, droppedExpired: 2, droppedExhausted: 1 })),
     // Held entries come back with one more attempt. The resident copy of the
-    // same bytes wins and keeps its own count. Capacity does not apply.
+    // same bytes wins and keeps its own count.
     assert(returning.after(FlushDoneHInput).queue
       == Map(pResident -> 0, pB -> 0, pC -> 0, pA -> 1, pJunk -> 2)),
-    assert(returning.after(FlushDoneHInput).queued().size() > PARAMS.queueCap),
     assert(returning.after(FlushDoneHInput).flush == Idle),
     assert(returning.after(FlushDoneHInput).lastEpoch == Some(1)),
     // Expiry is judged at the observed tip, not at the cadence height.
@@ -327,8 +320,8 @@ module hubTest {
       result.out == AckOutput({ nonce: 0, kind: Admitted }) and not(result.state.queued().contains(pA)))),
     assert(byzHubResults(running(5), submit(pTight), PAYLOADS, HEIGHTS).exists(result =>
       result.state.queued().contains(pTight))),
-    assert(byzHubResults(full, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS, HEIGHTS)
-      .contains(full.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(pA), height: 0 }))))),
+    assert(byzHubResults(holding, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS, HEIGHTS)
+      .contains(holding.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(pA), height: 0 }))))),
     // It still cannot act while it is not running.
     assert(byzHubResults(down, submit(pA), PAYLOADS, HEIGHTS) == Set(hub(down, submit(pA)))),
   }

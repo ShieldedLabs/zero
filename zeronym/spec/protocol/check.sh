@@ -300,10 +300,9 @@ echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
 BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued wellFormed"
 
-# W4 (four of the five refusals), W8, W17, K1a, K1b, and the antecedents of
-# G1, G2, G8.
+# W4, W8, W17, K1a, K1b, and the antecedents of G1, G2, G8.
 job reaches baseline step 40 \
-  wRefusedTipStale wRefusedDraining wRefusedTooLarge wRefusedExpiryTooTight \
+  wRefusedTipStale wRefusedDraining wRefusedExpiryTooTight \
   wQueuedDisclosed wThirdPartyPayloadQueued wToldRefusedEverywhere wToldNeverDelivered \
   vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
   -- $BASELINE_HOLDS
@@ -312,9 +311,9 @@ job reaches baseline quietStep 80 \
   wPending wTxInMempool wTxMined wRequeued wDroppedExpired wUnparseableMissed \
   vTxidAuthenticity vLookupValidityPerHub \
   -- $BASELINE_HOLDS
-# W4 (the fifth refusal), W7, W12.
+# W7.
 job reaches baseline outageStep 80 \
-  wRefusedFull wDroppedExhausted wQueueOverCapacity \
+  wDroppedExhausted \
   -- $BASELINE_HOLDS
 
 # W16, both halves.

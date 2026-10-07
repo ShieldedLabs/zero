@@ -10,8 +10,8 @@ module wire {
   import basicSpells.* from "./spells/basicSpells"
   import types.* from "./types"
 
-  /// The refusal codes an ack can carry. There are four, for five refusals.
-  type WireRefusal = WExpiryTooTight | WTooLarge | WQueueFull | WTipStale
+  /// The refusal codes an ack can carry, one per refusal.
+  type WireRefusal = WExpiryTooTight | WQueueFull | WTipStale
 
   /// An ack's disposition. A fresh admission and a duplicate are the same ack.
   type WireAck = WAccepted | WRefused(WireRefusal)
@@ -42,8 +42,8 @@ module wire {
       | Lookup(_) => LookupSize
     }
 
-  /// A hub's decision as an ack. A draining hub answers as a full one does:
-  /// the shim reacts to both the same way.
+  /// A hub's decision as an ack. A draining hub answers under the queue-full
+  /// code, as the implementation does.
   pure def renderAck(kind: AckKind): WireAck =
     match kind {
       | Admitted => WAccepted
@@ -52,9 +52,7 @@ module wire {
         match refusal {
           | TipStale => WRefused(WTipStale)
           | HubDraining => WRefused(WQueueFull)
-          | TooLarge => WRefused(WTooLarge)
           | ExpiryTooTight => WRefused(WExpiryTooTight)
-          | Full => WRefused(WQueueFull)
         }
     }
 

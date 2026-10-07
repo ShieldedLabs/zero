@@ -65,14 +65,12 @@ module properties {
     dropped: Set(),
   }
 
-  /// The refusal a refused ack stands for. The wire has one code for a full
-  /// hub and a draining one; the hub's phase tells them apart.
-  pure def refusalBehind(code: WireRefusal, phase: Phase): Refusal =
+  /// The refusal a refused ack stands for.
+  pure def refusalBehind(code: WireRefusal): Refusal =
     match code {
       | WTipStale => TipStale
-      | WTooLarge => TooLarge
       | WExpiryTooTight => ExpiryTooTight
-      | WQueueFull => if (phase == Draining) HubDraining else Full
+      | WQueueFull => HubDraining
     }
 
   /// How many times the hub has offered `payload`.
@@ -134,7 +132,7 @@ module properties {
       match mail.msg {
         | Ack(ack) =>
           match ack.ack {
-            | WRefused(code) => acc.union(Set(refusalBehind(code, pre.hub.phase)))
+            | WRefused(code) => acc.union(Set(refusalBehind(code)))
             | WAccepted => acc
           }
         | _ => acc
@@ -423,11 +421,6 @@ module properties {
           }
         | _ => false
       })
-
-  /// W12. The queue holds more than its capacity: requeue honours the older
-  /// promise over the newer limit.
-  pure def wQueueOverCapacityIn(s: System): bool =
-    s.hub.queued().size() > s.hub.params.queueCap
 
   /// W16a. The wallet is served a twin of what it sent: other bytes, same txid.
   pure def wTwinServedIn(s: System): bool =

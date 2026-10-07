@@ -31,7 +31,6 @@ module hub {
     minWalletExpiry: int,   // the smallest expiry delta a supported wallet sets
     reorgAllowance: int,    // how far back a tip report is followed
     maxAttempts: int,       // requeues an entry is allowed
-    queueCap: int,          // entries admission will hold
   }
 
   /// The startup check: a transaction that takes `deliveryLag` blocks to
@@ -223,14 +222,10 @@ module hub {
       Refused(TipStale)
     else if (state.phase == Draining)
       Refused(HubDraining)
-    else if (payload.oversize)
-      Refused(TooLarge)
     else if (not(survivesNextFlush(payload.expiry, state.observedTip(), state.params.flushInterval, state.params.miningMargin)))
       Refused(ExpiryTooTight)
     else if (state.queued().contains(payload))
       Duplicate
-    else if (state.queued().size() >= state.params.queueCap)
-      Refused(Full)
     else
       Admitted
 
@@ -332,8 +327,7 @@ module hub {
   ///   tip exactly as admission judges it, is dropped as expired.
   /// - An entry out of attempts is dropped as exhausted. Only an entry with no
   ///   expiry gets that far.
-  /// - The rest are held, even past the queue's capacity: they were admitted
-  ///   before anything now resident.
+  /// - The rest are held.
   ///
   /// After the final flush the process exits and whatever was held is lost.
   pure def endFlush(state: HubState): HubResult =
@@ -437,7 +431,7 @@ module hub {
       match input {
         | SubmitHInput(submit) =>
           val kinds = Set(Admitted, Duplicate)
-            .union(Set(TipStale, HubDraining, TooLarge, ExpiryTooTight, Full).map(refusal => Refused(refusal)))
+            .union(Set(TipStale, HubDraining, ExpiryTooTight).map(refusal => Refused(refusal)))
           val holding =
             if (state.queued().contains(submit.payload)) state
             else { ...state, queue: state.queue.put(submit.payload, 0) }

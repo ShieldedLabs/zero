@@ -112,7 +112,7 @@ module types {
   // ------------------------------------------------------------------------
 
   /// Why a hub refuses a submission, in the order admission checks them.
-  type Refusal = TipStale | HubDraining | TooLarge | ExpiryTooTight | Full
+  type Refusal = TipStale | HubDraining | ExpiryTooTight
 
   /// A hub's decision on a submission. `Duplicate` is a success: the bytes are
   /// already queued here.
@@ -204,7 +204,6 @@ module types {
     freeRun: FreeRun,
     minWalletExpiry: int,
     maxAttempts: int,
-    queueCap: int,
     maxFlightBlocks: int,
     maxHeight: Height,
     maxRequests: int,

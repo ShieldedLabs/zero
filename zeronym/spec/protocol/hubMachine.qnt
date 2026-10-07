@@ -672,7 +672,6 @@ module hubMachine {
       minWalletExpiry: 7,
       reorgAllowance: 1,
       maxAttempts: 2,
-      queueCap: 2,
     },
     staleWindow: 3,
     maxFlightBlocks: 1,
@@ -693,8 +692,9 @@ module hubMachine {
   }
 
   // The same tip, and a flush that may stay in flight for as many blocks as
-  // the mining margin reserves.
-  pure val flakyTipSlowFlight: HubConfig = { ...flakyTip, maxFlightBlocks: 2 }
+  // the mining margin reserves. The supported wallets' migrations only: with
+  // `tight` as well TLC does not exhaust it in five minutes.
+  pure val flakyTipSlowFlight: HubConfig = { ...flakyTip, maxFlightBlocks: 2, payloads: Set(early, late) }
 
   // A hub that may go without a tip for a while: on the shipped relation
   // between the staleness window and the expiry floor, and on the relation
@@ -710,9 +710,11 @@ module hubMachine {
     payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12)),
   }
 
-  // One Byzantine component at a time, on the schedule of `timely`.
+  // One Byzantine component at a time, on the schedule of `timely`. The
+  // Byzantine indexer gets one supported migration and `tight`: with three
+  // payloads TLC does not reach its G6c counterexample in five minutes.
   pure val byzHub: HubConfig = { ...timely, hubRole: Byzantine }
-  pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine }
+  pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine, payloads: Set(early, tight) }
 
   /// Bytes neither the shim nor the hub can parse: no txid, no expiry. After
   /// a network upgrade a build does not know, every transaction looks like
