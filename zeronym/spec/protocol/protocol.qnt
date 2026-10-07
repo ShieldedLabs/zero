@@ -41,7 +41,7 @@ module protocol {
   import hub.* from "./hub"
   import shim.* from "./shim"
   import state.* from "./state"
-  import properties as P from "./properties"
+  import properties.* from "./properties"
 
   // ------------------------------------------------------------------------
   // Constants
@@ -224,7 +224,7 @@ module protocol {
   /// The only writer of the variables.
   action commit(post: System, label: Label): bool = all {
     s' = post,
-    audit' = P::advance(audit, s, post),
+    audit' = advance(audit, s, post),
     lastAction' = label,
   }
 
@@ -232,7 +232,7 @@ module protocol {
 
   action init = all {
     s' = INITIAL,
-    audit' = P::initialAudit(INITIAL),
+    audit' = initialAudit(INITIAL),
     lastAction' = Init,
   }
 
@@ -836,79 +836,80 @@ module protocol {
   // Guarantees
   // ------------------------------------------------------------------------
   //
-  // The predicates are defined, and documented, in `properties.qnt`. These
-  // are their values in the current state, under the names the gate checks.
+  // The predicates are defined, and documented, in `properties.qnt`, each as
+  // `<name>In(..)`: a predicate over a system and an audit record. These are
+  // their values in the current state, under the names the gate checks.
 
-  val operatorBlind = P::operatorBlind(s)
-  val queuedBytesConfidential = P::queuedBytesConfidential(s)
-  val txidAuthenticity = P::txidAuthenticity(s)
-  val lookupValidityPerHub = P::lookupValidityPerHub(s, audit)
-  val toldImpliesQueued = P::toldImpliesQueued(s, audit)
-  val offeredBeforeExpiry = P::offeredBeforeExpiry(s, audit, HUBS)
-  val conformingFirstOfferBeforeExpiry = P::conformingFirstOfferBeforeExpiry(s, audit, HUBS)
-  val conformingFirstOfferJudgedBeforeExpiry = P::conformingFirstOfferJudgedBeforeExpiry(s, audit, HUBS)
-  val wellFormed = P::wellFormed(s)
-  val ackImpliesQueued = P::ackImpliesQueued(s, audit, HUBS)
+  val operatorBlind = operatorBlindIn(s)
+  val queuedBytesConfidential = queuedBytesConfidentialIn(s)
+  val txidAuthenticity = txidAuthenticityIn(s)
+  val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
+  val toldImpliesQueued = toldImpliesQueuedIn(s, audit)
+  val offeredBeforeExpiry = offeredBeforeExpiryIn(s, audit, HUBS)
+  val conformingFirstOfferBeforeExpiry = conformingFirstOfferBeforeExpiryIn(s, audit, HUBS)
+  val conformingFirstOfferJudgedBeforeExpiry = conformingFirstOfferJudgedBeforeExpiryIn(s, audit, HUBS)
+  val wellFormed = wellFormedIn(s)
+  val ackImpliesQueued = ackImpliesQueuedIn(s, audit, HUBS)
 
   // The per-hub guarantees, claimed of the honest hubs only. Each is the same
   // predicate as its namesake above, restricted to the hubs whose role is
   // `Honest`; it is not a weaker property. With every hub honest the two
   // coincide.
-  val offeredBeforeExpiryForHonestHubs = P::offeredBeforeExpiry(s, audit, HONEST_HUBS)
-  val conformingFirstOfferBeforeExpiryForHonestHubs = P::conformingFirstOfferBeforeExpiry(s, audit, HONEST_HUBS)
+  val offeredBeforeExpiryForHonestHubs = offeredBeforeExpiryIn(s, audit, HONEST_HUBS)
+  val conformingFirstOfferBeforeExpiryForHonestHubs = conformingFirstOfferBeforeExpiryIn(s, audit, HONEST_HUBS)
   val conformingFirstOfferJudgedBeforeExpiryForHonestHubs =
-    P::conformingFirstOfferJudgedBeforeExpiry(s, audit, HONEST_HUBS)
-  val ackImpliesQueuedForHonestHubs = P::ackImpliesQueued(s, audit, HONEST_HUBS)
+    conformingFirstOfferJudgedBeforeExpiryIn(s, audit, HONEST_HUBS)
+  val ackImpliesQueuedForHonestHubs = ackImpliesQueuedIn(s, audit, HONEST_HUBS)
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
   // ------------------------------------------------------------------------
 
-  val statusNeverRegresses = P::statusNeverRegresses(s)
-  val ackedIsHeldOrSettled = P::ackedIsHeldOrSettled(s, audit)
-  val conformingEveryOfferBeforeExpiry = P::conformingEveryOfferBeforeExpiry(s, audit)
+  val statusNeverRegresses = statusNeverRegressesIn(s)
+  val ackedIsHeldOrSettled = ackedIsHeldOrSettledIn(s, audit)
+  val conformingEveryOfferBeforeExpiry = conformingEveryOfferBeforeExpiryIn(s, audit)
 
   // ------------------------------------------------------------------------
   // Witnesses
   // ------------------------------------------------------------------------
 
-  val wToldRefusedEverywhere = P::wToldRefusedEverywhere(s, audit)
-  val wToldNeverDelivered = P::wToldNeverDelivered(s, audit)
-  val wToldPrefixOnly = P::wToldPrefixOnly(s)
+  val wToldRefusedEverywhere = wToldRefusedEverywhereIn(s, audit)
+  val wToldNeverDelivered = wToldNeverDeliveredIn(s, audit)
+  val wToldPrefixOnly = wToldPrefixOnlyIn(s)
 
-  val wPending = P::wPending(s)
-  val wTxInMempool = P::wTxInMempool(s)
-  val wTxMined = P::wTxMined(s)
-  val wRefusedTipStale = P::wRefused(audit, TipStale)
-  val wRefusedDraining = P::wRefused(audit, HubDraining)
-  val wRefusedTooLarge = P::wRefused(audit, TooLarge)
-  val wRefusedExpiryTooTight = P::wRefused(audit, ExpiryTooTight)
-  val wRefusedFull = P::wRefused(audit, Full)
-  val wRequeued = P::wRequeued(s)
-  val wDroppedExpired = P::wDroppedExpired(s, audit)
-  val wDroppedExhausted = P::wDroppedExhausted(audit)
-  val wQueuedDisclosed = P::wQueuedDisclosed(s)
-  val wUnparseableMissed = P::wUnparseableMissed(s)
-  val wQueueOverCapacity = P::wQueueOverCapacity(s)
-  val wFailoverAnswered = P::wFailoverAnswered(s)
-  val wPublishedByTwoHubs = P::wPublishedByTwoHubs(s, audit)
-  val wPrematureFlush = P::wPrematureFlush(s)
-  val wTwinServed = P::wTwinServed(s)
-  val wFalseHeightServed = P::wFalseHeightServed(s)
-  val wThirdPartyPayloadQueued = P::wThirdPartyPayloadQueued(s)
-  val wEarlyFreeRunFlush = P::wEarlyFreeRunFlush(s)
+  val wPending = wPendingIn(s)
+  val wTxInMempool = wTxInMempoolIn(s)
+  val wTxMined = wTxMinedIn(s)
+  val wRefusedTipStale = wRefused(audit, TipStale)
+  val wRefusedDraining = wRefused(audit, HubDraining)
+  val wRefusedTooLarge = wRefused(audit, TooLarge)
+  val wRefusedExpiryTooTight = wRefused(audit, ExpiryTooTight)
+  val wRefusedFull = wRefused(audit, Full)
+  val wRequeued = wRequeuedIn(s)
+  val wDroppedExpired = wDroppedExpiredIn(s, audit)
+  val wDroppedExhausted = wDroppedExhaustedIn(audit)
+  val wQueuedDisclosed = wQueuedDisclosedIn(s)
+  val wUnparseableMissed = wUnparseableMissedIn(s)
+  val wQueueOverCapacity = wQueueOverCapacityIn(s)
+  val wFailoverAnswered = wFailoverAnsweredIn(s)
+  val wPublishedByTwoHubs = wPublishedByTwoHubsIn(s, audit)
+  val wPrematureFlush = wPrematureFlushIn(s)
+  val wTwinServed = wTwinServedIn(s)
+  val wFalseHeightServed = wFalseHeightServedIn(s)
+  val wThirdPartyPayloadQueued = wThirdPartyPayloadQueuedIn(s)
+  val wEarlyFreeRunFlush = wEarlyFreeRunFlushIn(s)
 
   // Non-vacuity: the antecedent of each guarantee is reachable.
-  val vOperatorBlind = P::vOperatorBlind(s)
-  val vQueuedBytesConfidential = P::vQueuedBytesConfidential(s)
-  val vTxidAuthenticity = P::vTxidAuthenticity(s)
-  val vLookupValidityPerHub = P::vLookupValidityPerHub(s)
-  val vToldImpliesQueued = P::vToldImpliesQueued(s)
-  val vOfferedBeforeExpiry = P::vOfferedBeforeExpiry(audit)
-  val vConformingFirstOfferBeforeExpiry = P::vConformingFirstOfferBeforeExpiry(s, audit)
-  val vConformingOfferAdmittedBehind = P::vConformingOfferAdmittedBehind(s, audit)
-  val vConformingFirstOfferJudged = P::vConformingFirstOfferJudged(s, audit)
-  val vAckImpliesQueued = P::vAckImpliesQueued(s)
+  val vOperatorBlind = vOperatorBlindIn(s)
+  val vQueuedBytesConfidential = vQueuedBytesConfidentialIn(s)
+  val vTxidAuthenticity = vTxidAuthenticityIn(s)
+  val vLookupValidityPerHub = vLookupValidityPerHubIn(s)
+  val vToldImpliesQueued = vToldImpliesQueuedIn(s)
+  val vOfferedBeforeExpiry = vOfferedBeforeExpiryIn(audit)
+  val vConformingFirstOfferBeforeExpiry = vConformingFirstOfferBeforeExpiryIn(s, audit)
+  val vConformingOfferAdmittedBehind = vConformingOfferAdmittedBehindIn(s, audit)
+  val vConformingFirstOfferJudged = vConformingFirstOfferJudgedIn(s, audit)
+  val vAckImpliesQueued = vAckImpliesQueuedIn(s)
 
   // ------------------------------------------------------------------------
   // Two-state properties
