@@ -147,6 +147,7 @@ definitions they justify.
 | Wire codecs `ZNS1` / `ZNA1` / `ZNL1` / `ZNR1` and the golden vectors (`zeronym/hub/src/wire.rs:576-579`) | Byte layouts are scoped out and are pinned by the Rust tests in both crates; the abstract `render` / `interpretReply` layer is the level this spec works at. The spec does not claim to bind the codec |
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
+| A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
 | Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
@@ -359,7 +360,7 @@ pure.
 | `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply`, `sizeOf` |
 | `indexer.qnt` | `indexer` | The chain and indexer as a relation: honest and Byzantine outputs, and their effect |
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
-| `shim.qnt` | `shim` | `shim(state, input)`; routing, the lookup sweep, reply correlation; `byzShimResults` |
+| `shim.qnt` | `shim` | `shim(state, input)`; routing, the lookup sweep, reply correlation |
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, A1-A3, the run vocabulary |
@@ -412,8 +413,6 @@ member of a finite set that contains it (F12):
   queued or not, whatever admission says. Any reply to a lookup: a queue hit,
   not found, error, or found with no body or any payload that exists, at any
   height. It keeps the honest flush schedule.
-- **Byzantine shim.** Any answer to the wallet for a send or a lookup. Any
-  transaction handed to the operator. A frame carrying any payload to any hub.
 - **Byzantine indexer.** Any verdict, with the transaction relayed to the
   network or not. Any lookup answer built from a payload it was offered, one
   the chain published, or a twin of either. Any tip up to `MAX_HEIGHT`.
@@ -436,14 +435,13 @@ abstract indexer per hub was a decision of the design.
 One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 (`PAYLOADS`, `FLUSH_INTERVAL`, `ROLES`, `TIP`, ...).
 
-| Module | Hubs | Roles (shim / hubs / indexer) | Tip |
+| Module | Hubs | Roles (hubs / indexer) | Tip |
 |---|---|---|---|
-| `baseline` | 1 | H / H / H | timely |
-| `byzShim` | 1 | **B** / H / H | timely |
-| `byzHub` | 1 | H / **B** / H | timely |
-| `byzIndexer` | 1 | H / H / **B** | timely for honest reports |
-| `replicated` | 2 | H / H, H / H | timely |
-| `replicatedOneByz` | 2 | H / H, **B** / H | timely |
+| `baseline` | 1 | H / H | timely |
+| `byzHub` | 1 | **B** / H | timely |
+| `byzIndexer` | 1 | H / **B** | timely for honest reports |
+| `replicated` | 2 | H, H / H | timely |
+| `replicatedOneByz` | 2 | H, **B** / H | timely |
 
 The schedule is the shipped one scaled down, keeping the relations between the
 numbers:
@@ -555,17 +553,17 @@ simulator finds at seed 7 were read by hand and both use reports below the true
 height. With truthful answers `byzIndexer` behaves as `baseline`, where the
 chain cannot pass a running, idle hub that has not asked.
 
-| | All honest | Byzantine shim | Byzantine hub | Byzantine indexer |
-|---|---|---|---|---|
-| G1 | holds (`baseline`) | **required**: `operatorSeesMigrationTest` | holds (`byzHub`) | holds (`byzIndexer`) |
-| G2 | holds (`baseline`) | **required**: `shimDisclosesPlaintextTest` | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
-| G3 | holds (`baseline`) | **required**: `shimServesAnotherTransactionTest` | holds (`byzHub`); a twin and a false height are both served (W16) | holds (`byzIndexer`) |
-| G4 | holds (`baseline`, `replicated`) | **required**: `shimInventsStatusTest` | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
-| G8 | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
-| G6a | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
-| G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| A3 | not run (TLC, `baseline`) | not run | **required**: `hubAdmitsWhileDrainingTest` | not run |
+| | All honest | Byzantine hub | Byzantine indexer |
+|---|---|---|---|
+| G1 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
+| G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
+| G3 | holds (`baseline`) | holds (`byzHub`); a twin and a false height are both served (W16) | holds (`byzIndexer`) |
+| G4 | holds (`baseline`, `replicated`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
+| G8 | holds (`baseline`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
+| G6a | holds (`baseline`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
+| G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| A3 | not run (TLC, `baseline`) | **required**: `hubAdmitsWhileDrainingTest` | not run |
 
 One Byzantine replica out of two (`replicatedOneByz`):
 
@@ -580,8 +578,9 @@ One Byzantine replica out of two (`replicatedOneByz`):
 The `...ForHonestHubs` names are the same predicates restricted to the hubs
 whose role is honest. They are not weaker properties.
 
-In short: a Byzantine shim voids every wallet-facing guarantee (G1-G4); the
-hub-side G6 and G8 survive it. G3 is the only wallet-facing guarantee that
+There is no Byzantine-shim column: the shim sees every migration in plaintext
+and controls everything the wallet observes, so every wallet-facing guarantee
+assumes an honest (attested) shim. G3 is the only wallet-facing guarantee that
 survives a Byzantine hub or indexer, and it authenticates the txid only. G1
 depends on the shim alone. Replication does not dilute trust: one Byzantine
 replica is enough to void G2 and G4. A3 needs the hub: its "required"
@@ -950,9 +949,6 @@ quint verify --main=baseline --invariant=offeredBeforeExpiry --max-steps=12 zero
 quint verify --main=baseline --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=baseline --invariant=wellFormed --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzShim --invariant=offeredBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzShim --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzShim --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzHub --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzHub --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzIndexer --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
@@ -967,7 +963,6 @@ should report one; `flakyTipNoSlack` and `flakyTipSlowFlight` satisfy every
 
 ```sh
 quint verify --main=baseline --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzShim --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=flakyTip --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=flakyTipNoSlack --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=flakyTipSlowFlight --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt

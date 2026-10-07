@@ -236,14 +236,6 @@ module protocol {
   // Roles
   // ------------------------------------------------------------------------
 
-  /// The transitions the shim may take on `input`: the one the protocol
-  /// prescribes, or, for a Byzantine shim, any of the wider set.
-  pure def shimResults(state: ShimState, input: ShimInput): Set[ShimResult] =
-    match ROLES.shim {
-      | Honest => Set(shim(state, input))
-      | Byzantine => byzShimResults(state, input, UNIVERSE, HEIGHTS)
-    }
-
   pure def hubResults(id: HubId, state: HubState, input: HubInput): Set[HubResult] =
     match ROLES.hubs.get(id) {
       | Honest => Set(hub(state, input))
@@ -353,7 +345,7 @@ module protocol {
 
   /// The wallet sends a transaction. The shim routes it and, unless it is
   /// waiting for a hub's decision, answers.
-  action walletSendWith(input: SendInput, handedOver: int, result: ShimResult): bool = all {
+  action walletSendWith(input: SendInput, handedOver: int): bool = all {
     s.wallet.sends < MAX_REQUESTS,
     SEND_INPUTS.contains(input),
     // A wallet cannot send a transaction before it has built it.
@@ -361,9 +353,11 @@ module protocol {
       | Clean(payload) => payload.created <= s.height()
       | _ => true
     },
-    shimResults(s.shim, SendTxSInput({ input: input, handedOver: handedOver })).contains(result),
-    not(isShimError(result.out)),
-    commit(s.countSend().shimStepped(result, None), WalletSend({ input: input, handedOver: handedOver })),
+    val result = shim(s.shim, SendTxSInput({ input: input, handedOver: handedOver }))
+    all {
+      not(isShimError(result.out)),
+      commit(s.countSend().shimStepped(result, None), WalletSend({ input: input, handedOver: handedOver })),
+    },
   }
 
   action walletSend = all {
@@ -371,8 +365,7 @@ module protocol {
     {
       nondet input = oneOf(SEND_INPUTS)
       nondet handedOver = oneOf(0.to(HUB_ORDER.length()))
-      nondet result = oneOf(shimResults(s.shim, SendTxSInput({ input: input, handedOver: handedOver })))
-      walletSendWith(input, handedOver, result)
+      walletSendWith(input, handedOver)
     },
   }
 
@@ -383,12 +376,14 @@ module protocol {
 
   /// The wallet asks for a transaction it has sent. The shim asks the hub its
   /// cursor points at.
-  action walletGetWith(query: TxId, start: int, result: ShimResult): bool = all {
+  action walletGetWith(query: TxId, start: int): bool = all {
     s.wallet.gets < MAX_REQUESTS,
     walletTxids.contains(query),
-    shimResults(s.shim, GetTxSInput({ query: query, start: start })).contains(result),
-    not(isShimError(result.out)),
-    commit(s.countGet().shimStepped(result, None), WalletGet({ query: query, start: start })),
+    val result = shim(s.shim, GetTxSInput({ query: query, start: start }))
+    all {
+      not(isShimError(result.out)),
+      commit(s.countGet().shimStepped(result, None), WalletGet({ query: query, start: start })),
+    },
   }
 
   action walletGet = all {
@@ -397,8 +392,7 @@ module protocol {
     {
       nondet query = oneOf(walletTxids)
       nondet start = oneOf(HUB_ORDER.indices())
-      nondet result = oneOf(shimResults(s.shim, GetTxSInput({ query: query, start: start })))
-      walletGetWith(query, start, result)
+      walletGetWith(query, start)
     },
   }
 
@@ -416,36 +410,38 @@ module protocol {
       })
 
   /// The network delivers a frame to the shim.
-  action shimReceiveWith(mail: Mail, result: ShimResult): bool = all {
+  action shimReceiveWith(mail: Mail): bool = all {
     shimDeliverable.contains(mail),
-    shimResults(s.shim, FrameSInput(mail.msg)).contains(result),
-    not(isShimError(result.out)),
-    commit(s.shimStepped(result, nonceOf(FrameSInput(mail.msg))), ShimReceive(mail)),
+    val result = shim(s.shim, FrameSInput(mail.msg))
+    all {
+      not(isShimError(result.out)),
+      commit(s.shimStepped(result, nonceOf(FrameSInput(mail.msg))), ShimReceive(mail)),
+    },
   }
 
   action shimReceive = all {
     shimDeliverable != Set(),
     {
       nondet mail = oneOf(shimDeliverable)
-      nondet result = oneOf(shimResults(s.shim, FrameSInput(mail.msg)))
-      shimReceiveWith(mail, result)
+      shimReceiveWith(mail)
     },
   }
 
   /// The shim gives up waiting for a lookup reply.
-  action shimLookupTimeoutWith(nonce: Nonce, result: ShimResult): bool = all {
+  action shimLookupTimeoutWith(nonce: Nonce): bool = all {
     s.shim.hasWaiter(nonce),
-    shimResults(s.shim, LookupTimeoutSInput(nonce)).contains(result),
-    not(isShimError(result.out)),
-    commit(s.shimStepped(result, None), ShimLookupTimeout(nonce)),
+    val result = shim(s.shim, LookupTimeoutSInput(nonce))
+    all {
+      not(isShimError(result.out)),
+      commit(s.shimStepped(result, None), ShimLookupTimeout(nonce)),
+    },
   }
 
   action shimLookupTimeout = all {
     s.shim.waiters.keys() != Set(),
     {
       nondet nonce = oneOf(s.shim.waiters.keys())
-      nondet result = oneOf(shimResults(s.shim, LookupTimeoutSInput(nonce)))
-      shimLookupTimeoutWith(nonce, result)
+      shimLookupTimeoutWith(nonce)
     },
   }
 
@@ -974,7 +970,7 @@ module protocol {
 
   /// The wallet sends, and the shim routes the transaction as it should.
   action sends(input: SendInput, handedOver: int): bool =
-    walletSendWith(input, handedOver, shim(s.shim, SendTxSInput({ input: input, handedOver: handedOver })))
+    walletSendWith(input, handedOver)
 
   /// The wallet sends a transaction and every hub address takes a frame.
   action sendToAll(payload: Payload): bool =
@@ -982,7 +978,7 @@ module protocol {
 
   /// The wallet asks, and the shim asks the hub at `start`.
   action ask(query: TxId, start: int): bool =
-    walletGetWith(query, start, shim(s.shim, GetTxSInput({ query: query, start: start })))
+    walletGetWith(query, start)
 
   /// `client`'s submission of `payload` under `nonce` reaches `id`, which acts
   /// as it should.
@@ -1016,7 +1012,7 @@ module protocol {
 
   /// `mail` reaches the shim, which acts as it should.
   action deliverToShim(mail: Mail): bool =
-    shimReceiveWith(mail, shim(s.shim, FrameSInput(mail.msg)))
+    shimReceiveWith(mail)
 
   /// The reply an honest `id` with a truthful indexer gives, in the current
   /// state, to a lookup of `txid`.
@@ -1025,7 +1021,7 @@ module protocol {
 
   /// The shim's wait under `nonce` times out.
   action timeOutLookup(nonce: Nonce): bool =
-    shimLookupTimeoutWith(nonce, shim(s.shim, LookupTimeoutSInput(nonce)))
+    shimLookupTimeoutWith(nonce)
 
   /// An honest indexer gives `verdict` on `payload`, with the effect that
   /// verdict has.

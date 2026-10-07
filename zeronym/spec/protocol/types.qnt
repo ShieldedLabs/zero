@@ -144,7 +144,7 @@ module types {
   type Role = Honest | Byzantine
 
   /// The role of each component. Each hub has its own.
-  type Roles = { shim: Role, hubs: HubId -> Role, indexer: Role }
+  type Roles = { hubs: HubId -> Role, indexer: Role }
 
   /// How a hub's view of the chain tip relates to the true height.
   ///

@@ -267,11 +267,6 @@ module state {
         | _ => acc
       })
 
-  /// The payloads the shim has seen in the clear: every transaction the wallet
-  /// handed it, and every body a hub returned to it.
-  pure def seenByShim(s: System): Set[Payload] =
-    s.sentByWallet().union(s.repliedBodies(ShimAddr))
-
   /// The payloads addressed to `hub` by anyone: what it has received or may
   /// yet receive.
   pure def seenByHub(s: System, hub: HubId): Set[Payload] =
@@ -280,8 +275,7 @@ module state {
 
   /// What the Byzantine components, taken together, are able to reveal.
   pure def disclosable(s: System, roles: Roles): Set[Payload] =
-    (if (roles.shim == Byzantine) s.seenByShim() else Set())
-      .union(if (roles.indexer == Byzantine) s.indexer.offered else Set())
+    (if (roles.indexer == Byzantine) s.indexer.offered else Set())
       .union(s.hubIds().filter(hub => roles.hubs.get(hub) == Byzantine)
         .map(hub => s.seenByHub(hub)).flatten())
 

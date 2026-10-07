@@ -537,7 +537,7 @@ module properties {
   pure def wTwinServedIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
-        | Tx(tx) => s.seenByShim().exists(sent => s.toldOk().contains(sent) and areTwins(sent, tx.payload))
+        | Tx(tx) => s.toldOk().exists(sent => areTwins(sent, tx.payload))
         | _ => false
       })
 

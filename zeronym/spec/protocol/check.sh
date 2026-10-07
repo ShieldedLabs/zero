@@ -74,9 +74,9 @@ finish() {
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
 FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
-INSTANCES="baseline byzShim byzHub byzIndexer replicated replicatedOneByz"
+INSTANCES="baseline byzHub byzIndexer replicated replicatedOneByz"
 SCENARIOS="baselineScenarios replicatedScenarios byzHubScenarios"
-TRUST="byzShimTrust byzHubTrust byzIndexerTrust replicatedOneByzTrust"
+TRUST="byzHubTrust byzIndexerTrust replicatedOneByzTrust"
 
 fail() {
   echo "FAIL  $1"
@@ -280,7 +280,6 @@ echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 # The guarantees, where they are claimed. G7 `wellFormed` is checked everywhere.
 job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub \
                               ackImpliesQueued wellFormed
-job holds byzShim             ackImpliesQueued wellFormed
 job holds byzHub              operatorBlind txidAuthenticity wellFormed
 job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
 job holds replicated          lookupValidityPerHub wellFormed
@@ -288,10 +287,6 @@ job holds replicatedOneByz    txidAuthenticity ackImpliesQueuedForHonestHubs wel
 
 # The trust matrix: each guarantee fails once the component it depends on is
 # Byzantine. The schedule guarantees' rows are in tier 4.
-job fails byzShim             step      40 operatorBlind
-job fails byzShim             step      40 queuedBytesConfidential
-job fails byzShim             step      40 txidAuthenticity
-job fails byzShim             step      40 lookupValidityPerHub
 job fails byzHub              step      40 queuedBytesConfidential
 job fails byzHub              step      40 lookupValidityPerHub
 job fails byzHub              step      40 ackImpliesQueued
@@ -327,9 +322,6 @@ job reaches baseline outageStep 80 \
   wRefusedFull wDroppedExhausted wQueueOverCapacity \
   -- $BASELINE_HOLDS
 
-job reaches byzShim quietStep 40 \
-  vAckImpliesQueued \
-  -- ackImpliesQueued wellFormed
 # W16, both halves.
 job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \

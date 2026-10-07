@@ -8,7 +8,9 @@
 /// only the requests it is waiting on: it keeps no record of a migration once
 /// the wallet has its answer, which is why every lookup has to go to a hub.
 ///
-/// `byzShimResults` is the wider relation a Byzantine shim draws from.
+/// The shim is honest in every configuration: it sees every migration in the
+/// clear and controls everything the wallet observes, so a Byzantine shim
+/// would void every wallet-facing guarantee and nothing else.
 module shim {
   import basicSpells.* from "./spells/basicSpells"
   import types.* from "./types"
@@ -99,6 +101,19 @@ module shim {
 
   pure def hasWaiter(state: ShimState, nonce: Nonce): bool =
     state.waiters.keys().contains(nonce)
+
+  /// The nonce a reply frame or a timeout refers to, if any.
+  pure def nonceOf(input: ShimInput): Option[Nonce] =
+    match input {
+      | FrameSInput(msg) =>
+        match msg {
+          | Ack(ack) => Some(ack.nonce)
+          | LookupReply(reply) => Some(reply.nonce)
+          | _ => None
+        }
+      | LookupTimeoutSInput(nonce) => Some(nonce)
+      | _ => None
+    }
 
   /// The hub a lookup sweep that started at `start` asks on its `attempt`-th
   /// try.
@@ -203,78 +218,5 @@ module shim {
       | GetTxSInput(lookup) => getTransaction(state, lookup.query, lookup.start)
       | FrameSInput(msg) => receive(state, msg)
       | LookupTimeoutSInput(nonce) => lookupTimeout(state, nonce)
-    }
-
-  // ------------------------------------------------------------------------
-  // Byzantine relation
-  // ------------------------------------------------------------------------
-
-  pure val SEND_OBSERVATIONS =
-    Set(SentOk, SentToOperator, SendUnavailable, SendInvalid, SendTooLarge)
-
-  /// Every lookup answer that can be built from `universe` and `heights`.
-  pure def lookupObservations(universe: Set[Payload], heights: Set[Height]): Set[LookupObs] =
-    tuples(universe, heights)
-      .map(((payload, height)) => Tx({ payload: payload, height: height }))
-      .union(Set(Pending, NotFound, Unavailable))
-
-  /// The nonce a reply frame or a timeout refers to, if any.
-  pure def nonceOf(input: ShimInput): Option[Nonce] =
-    match input {
-      | FrameSInput(msg) =>
-        match msg {
-          | Ack(ack) => Some(ack.nonce)
-          | LookupReply(reply) => Some(reply.nonce)
-          | _ => None
-        }
-      | LookupTimeoutSInput(nonce) => Some(nonce)
-      | _ => None
-    }
-
-  /// The transitions of a Byzantine shim. It sees every transaction in the
-  /// clear and is the only thing the wallet talks to, so it is free in what it
-  /// tells the wallet, what it hands the operator and what it sends the hubs:
-  ///
-  /// - a send is answered with anything, with nothing sent; or handed to the
-  ///   operator whatever its class; or answered with anything while a frame
-  ///   carrying any payload of `universe` goes to any one hub;
-  /// - a lookup is answered with anything, at once or when a reply or a
-  ///   timeout would have resolved it.
-  ///
-  /// The honest transition is always a member.
-  pure def byzShimResults(
-    state: ShimState,
-    input: ShimInput,
-    universe: Set[Payload],
-    heights: Set[Height],
-  ): Set[ShimResult] =
-    val honest = Set(shim(state, input))
-    val lies = lookupObservations(universe, heights)
-    match input {
-      | SendTxSInput(send) =>
-        val unsent = SEND_OBSERVATIONS.map(obs => state.toSendDoneOutput(send.input, obs))
-        val misrouted = match send.input {
-          | Clean(sent) =>
-            tuples(universe, state.hubs.indices(), SEND_OBSERVATIONS).map(((payload, i, obs)) =>
-              { ...state, nextNonce: state.nextNonce + 1 }.toDivertedOutput(
-                sent,
-                Set({ hub: state.hubs[i], msg: Submit({ nonce: state.nextNonce, payload: payload }) }),
-                obs))
-              .union(Set(state.toForwardOutput(sent)))
-          | _ => Set()
-        }
-        honest.union(unsent).union(misrouted)
-      | GetTxSInput(lookup) =>
-        honest.union(lies.map(result => state.toLookupDoneOutput(lookup.query, result)))
-      | _ =>
-        match nonceOf(input) {
-          | None => honest
-          | Some(nonce) =>
-            if (not(state.hasWaiter(nonce))) honest
-            else
-              val forgotten = { ...state, waiters: state.waiters.mapRemove(nonce) }
-              val waiter = state.waiters.get(nonce)
-              honest.union(lies.map(result => forgotten.toLookupDoneOutput(waiter.query, result)))
-        }
     }
 }

@@ -17,7 +17,6 @@ module shimTest {
   pure val pBigPlain = { ...payload("big-plain", PassThrough), oversize: true }
 
   pure val PAYLOADS = Set(pOrchard, pPlain, pJunk, pBig, pBigPlain)
-  pure val HEIGHTS = Set(0, 4)
   pure val SEND_INPUTS = PAYLOADS.map(p => Clean(p)).union(Set(Unreadable, EmptyBody))
 
   pure val dispatching = initialShim(["h1", "h2"])
@@ -180,7 +179,7 @@ module shimTest {
   }
 
   // ------------------------------------------------------------------------
-  // Totality and the Byzantine relation
+  // Totality
   // ------------------------------------------------------------------------
 
   /// F11. The function answers every input in every state, and an invalid
@@ -193,28 +192,4 @@ module shimTest {
         result.state.nextNonce >= state.nextNonce,
         isError(result.out) implies result.state == state,
       }))
-
-  /// F12. The Byzantine relation contains the honest transition.
-  run byzantineContainsHonestTest =
-    assert(tuples(STATES, INPUTS).forall(((state, input)) =>
-      byzShimResults(state, input, PAYLOADS, HEIGHTS).contains(shim(state, input))))
-
-  run byzantineShimTest = all {
-    // It can hand a migration to the operator.
-    assert(byzShimResults(dispatching, send(Clean(pOrchard), 2), PAYLOADS, HEIGHTS)
-      .contains(dispatching.toForwardOutput(pOrchard))),
-    // It can tell the wallet ok and send nothing.
-    assert(byzShimResults(single, send(Clean(pOrchard), 1), PAYLOADS, HEIGHTS)
-      .contains(single.toSendDoneOutput(Clean(pOrchard), SentOk))),
-    // It can answer a lookup with a transaction that has another txid.
-    assert(byzShimResults(dispatching, getTx("orchard", 0), PAYLOADS, HEIGHTS)
-      .contains(dispatching.toLookupDoneOutput("orchard", Tx({ payload: pPlain, height: 4 })))),
-    // It can send a hub something other than what the wallet sent.
-    assert(byzShimResults(dispatching, send(Clean(pOrchard), 2), PAYLOADS, HEIGHTS).exists(result =>
-      result.out == DivertedOutput({
-        payload: pOrchard,
-        frames: Set({ hub: "h2", msg: Submit({ nonce: 0, payload: pJunk }) }),
-        told: SentOk,
-      }))),
-  }
 }

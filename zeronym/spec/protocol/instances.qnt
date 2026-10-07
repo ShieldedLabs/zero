@@ -43,7 +43,7 @@ module configs {
   // Configurations
   // ------------------------------------------------------------------------
 
-  pure val allHonest: Roles = { shim: Honest, hubs: Map("h1" -> Honest), indexer: Honest }
+  pure val allHonest: Roles = { hubs: Map("h1" -> Honest), indexer: Honest }
 
   /// One hub, the mixnet transport, every component honest, a timely tip.
   ///
@@ -85,7 +85,6 @@ module configs {
   }
 
   // One Byzantine component at a time.
-  pure val byzShim = { ...baseline, roles: { ...allHonest, shim: Byzantine } }
   pure val byzHub = { ...baseline, roles: { ...allHonest, hubs: Map("h1" -> Byzantine) } }
   pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
 
@@ -105,20 +104,6 @@ module baseline {
   import types.* from "./types"
   import configs.*
   import protocol(CONFIG = baseline).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module byzShim {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = byzShim).* from "./protocol"
 
   run assumptionsTest = all {
     assert(standingAssumptions),
