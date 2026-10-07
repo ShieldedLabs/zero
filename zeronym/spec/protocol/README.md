@@ -452,11 +452,6 @@ One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 | `awaitAckByzIndexer` | 1 | `AwaitVerdict` | H / H / **B** | timely |
 | `replicated` | 2 | `DispatchOnly` | H / H, H / H | timely |
 | `replicatedOneByz` | 2 | `DispatchOnly` | H / H, **B** / H | timely |
-| `flakyTip` | 1 | `DispatchOnly` | H / H / H | may regress |
-| `flakyTipNoSlack` | 1 | `DispatchOnly` | H / H / H | may regress; `reorgSlackFits` false |
-| `flakyTipSlowFlight` | 1 | `DispatchOnly` | H / H / H | may regress; `flightWithinMargin` false |
-| `staleLag` | 1 | `DispatchOnly` | H / H / H | may lag; `staleSlackFits` false, as shipped |
-| `staleLagWithSlack` | 1 | `DispatchOnly` | H / H / H | may lag; `staleSlackFits` true |
 
 The schedule is the shipped one scaled down, keeping the relations between the
 numbers:

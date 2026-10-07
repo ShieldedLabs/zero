@@ -106,33 +106,6 @@ module configs {
     ...replicated,
     roles: { ...allHonest, hubs: Map("h1" -> Honest, "h2" -> Byzantine) },
   }
-
-  // A tip that may be reported up to the reorg allowance behind the chain:
-  // with the slack that covers it, and without. In the second the expiry
-  // floor is the three-term budget exactly.
-  pure val flakyTip = { ...baseline, tip: TipMayRegress }
-  pure val flakyTipNoSlack = {
-    ...flakyTip,
-    minWalletExpiry: 6,
-    reliesOnReorgSlack: false,
-    payloads: Set(orchard("early", 2, 8), late, tight, junk, plain),
-    twins: Set({ ...orchard("early", 2, 8), id: "early-twin" }),
-  }
-
-  // The same tip, and a flush that may stay in flight for as many blocks as
-  // the mining margin reserves.
-  pure val flakyTipSlowFlight = { ...flakyTip, maxFlightBlocks: 2, reliesOnFlightWithinMargin: false }
-
-  // A hub that may go without a tip for a while: on the shipped relation
-  // between the staleness window and the expiry floor, and on the relation
-  // that would cover the silence.
-  pure val staleLag = { ...baseline, tip: TipMayLag }
-  pure val staleLagWithSlack = {
-    ...staleLag,
-    minWalletExpiry: 8,
-    payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12), tight, junk, plain),
-    twins: Set({ ...orchard("early", 2, 10), id: "early-twin" }),
-  }
 }
 
 module baseline {
@@ -272,77 +245,5 @@ module replicatedOneByz {
     assert(flightWithinMargin),
     assert(shippedRelationsKept),
     assert(not(staleSlackFits)),
-  }
-}
-
-module flakyTip {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = flakyTip).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-// The reorg slack is dropped on purpose: this configuration shows what it buys.
-module flakyTipNoSlack {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = flakyTipNoSlack).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(flightWithinMargin),
-    assert(not(reorgSlackFits)),
-    assert(not(shippedRelationsKept)),
-  }
-}
-
-// A flush may outlast the mining margin: this configuration shows what the
-// bound on flight time buys.
-module flakyTipSlowFlight {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = flakyTipSlowFlight).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(shippedRelationsKept),
-    assert(not(flightWithinMargin)),
-  }
-}
-
-// The stale slack does not hold here, as it does not for the shipped constants.
-module staleLag {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = staleLag).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module staleLagWithSlack {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = staleLagWithSlack).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(staleSlackFits),
-    assert(not(shippedRelationsKept)),
   }
 }

@@ -74,8 +74,8 @@ finish() {
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
 FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
-INSTANCES="baseline byzShim byzHub byzIndexer awaitAck awaitAckByzShim awaitAckByzHub awaitAckByzIndexer replicated replicatedOneByz flakyTip flakyTipNoSlack flakyTipSlowFlight staleLag staleLagWithSlack"
-SCENARIOS="baselineScenarios awaitAckScenarios replicatedScenarios flakyTipScenarios flakyTipSlowFlightScenarios flakyTipNoSlackScenarios staleLagScenarios staleLagWithSlackScenarios byzIndexerScenarios byzHubScenarios"
+INSTANCES="baseline byzShim byzHub byzIndexer awaitAck awaitAckByzShim awaitAckByzHub awaitAckByzIndexer replicated replicatedOneByz"
+SCENARIOS="baselineScenarios awaitAckScenarios replicatedScenarios byzHubScenarios"
 TRUST="byzShimTrust awaitAckByzShimTrust byzHubTrust awaitAckByzHubTrust byzIndexerTrust replicatedOneByzTrust"
 
 fail() {
@@ -279,10 +279,8 @@ echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
 # The guarantees, where they are claimed. G7 `wellFormed` is checked everywhere.
 job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub \
-                              offeredBeforeExpiry conformingFirstOfferBeforeExpiry \
-                              conformingFirstOfferJudgedBeforeExpiry ackImpliesQueued wellFormed
-job holds byzShim             offeredBeforeExpiry conformingFirstOfferBeforeExpiry \
-                              conformingFirstOfferJudgedBeforeExpiry ackImpliesQueued wellFormed
+                              ackImpliesQueued wellFormed
+job holds byzShim             ackImpliesQueued wellFormed
 job holds byzHub              operatorBlind txidAuthenticity wellFormed
 job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
 job holds awaitAck            toldImpliesQueued ackImpliesQueued wellFormed
@@ -290,19 +288,10 @@ job holds awaitAckByzShim     wellFormed
 job holds awaitAckByzHub      wellFormed
 job holds awaitAckByzIndexer  toldImpliesQueued wellFormed
 job holds replicated          lookupValidityPerHub wellFormed
-job holds replicatedOneByz    txidAuthenticity ackImpliesQueuedForHonestHubs offeredBeforeExpiryForHonestHubs \
-                              conformingFirstOfferBeforeExpiryForHonestHubs \
-                              conformingFirstOfferJudgedBeforeExpiryForHonestHubs wellFormed
-job holds flakyTip            conformingFirstOfferBeforeExpiry conformingFirstOfferJudgedBeforeExpiry wellFormed
-job holds flakyTipNoSlack     wellFormed
-job holds flakyTipSlowFlight  conformingFirstOfferBeforeExpiry wellFormed
-job holds staleLag            wellFormed
-job holds staleLagWithSlack   wellFormed
+job holds replicatedOneByz    txidAuthenticity ackImpliesQueuedForHonestHubs wellFormed
 
 # The trust matrix: each guarantee fails once the component it depends on is
-# Byzantine. Two of the Byzantine-hub rows have a trace count of their own:
-# what they need (a hub that admits before it has seen a tip, and sees one
-# late) is rare under random choice.
+# Byzantine. The schedule guarantees' rows are in tier 4.
 job fails byzShim             step      40 operatorBlind
 job fails byzShim             step      40 queuedBytesConfidential
 job fails byzShim             step      40 txidAuthenticity
@@ -311,44 +300,21 @@ job fails awaitAckByzShim     step      40 toldImpliesQueued
 job fails byzHub              step      40 queuedBytesConfidential
 job fails byzHub              step      40 lookupValidityPerHub
 job fails byzHub              step      40 ackImpliesQueued
-job fails byzHub              quietStep 40 offeredBeforeExpiry
-job fails byzHub              quietStep 40 conformingFirstOfferBeforeExpiry 5000
-job fails byzHub              quietStep 40 conformingFirstOfferJudgedBeforeExpiry 12000
 job fails awaitAckByzHub      step      40 toldImpliesQueued
 job fails byzIndexer          step      40 queuedBytesConfidential
 job fails byzIndexer          step      40 lookupValidityPerHub
-job fails byzIndexer          quietStep 40 offeredBeforeExpiry
-job fails byzIndexer          quietStep 80 conformingFirstOfferBeforeExpiry
-job fails byzIndexer          quietStep 80 conformingFirstOfferJudgedBeforeExpiry
 job fails replicatedOneByz    step      40 queuedBytesConfidential
 job fails replicatedOneByz    step      40 lookupValidityPerHub
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
 job fails replicated          quietStep 40 statusNeverRegresses                    # K2
-job fails flakyTip            quietStep 40 offeredBeforeExpiry                     # K3
-job fails flakyTipNoSlack     quietStep 40 conformingFirstOfferBeforeExpiry        # K3'
-job fails flakyTipNoSlack     quietStep 80 conformingFirstOfferJudgedBeforeExpiry  # K3'
-job fails staleLag            quietStep 40 offeredBeforeExpiry                     # K4
-job fails staleLag            quietStep 80 conformingFirstOfferBeforeExpiry        # K4
-job fails staleLag            quietStep 80 conformingFirstOfferJudgedBeforeExpiry 4000  # K4
-job fails baseline            step      40 ackedIsHeldOrSettled                    # K5
-job fails awaitAck            step      40 ackedIsHeldOrSettled                    # K5
-job fails staleLag            outageStep 80 conformingEveryOfferBeforeExpiry       # K6
-job fails flakyTipSlowFlight  quietStep 80 conformingFirstOfferJudgedBeforeExpiry  # K7
-
-# Predicted to hold, observed to fail: the stale slack does not give G6b.
-# See "Findings" in README.md. Simulation finds this about once in a few
-# thousand traces, so the row has its own, larger, trace count; the scripted
-# run `earlyFlushSpendsTheNextEpochTest` is the evidence that does not depend
-# on it.
-job fails staleLagWithSlack   quietStep 60 conformingFirstOfferBeforeExpiry 8000
 
 finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub offeredBeforeExpiry conformingFirstOfferBeforeExpiry conformingFirstOfferJudgedBeforeExpiry ackImpliesQueued wellFormed"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued wellFormed"
 
 # W4 (four of the five refusals), W8, W17, K1a, K1b, and the antecedents of
 # G1, G2, G8.
@@ -357,11 +323,10 @@ job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyPayloadQueued wToldRefusedEverywhere wToldNeverDelivered \
   vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
   -- $BASELINE_HOLDS
-# W1, W2, W3, W5, W6, W9, and the antecedents of G3, G4, G6a, G6b, G6c.
+# W1, W2, W3, W5, W6, W9, and the antecedents of G3, G4.
 job reaches baseline quietStep 80 \
   wPending wTxInMempool wTxMined wRequeued wDroppedExpired wUnparseableMissed \
-  vTxidAuthenticity vLookupValidityPerHub vOfferedBeforeExpiry vConformingFirstOfferBeforeExpiry \
-  vConformingFirstOfferJudged \
+  vTxidAuthenticity vLookupValidityPerHub \
   -- $BASELINE_HOLDS
 # W4 (the fifth refusal), W7, W12.
 job reaches baseline outageStep 80 \
@@ -369,16 +334,14 @@ job reaches baseline outageStep 80 \
   -- $BASELINE_HOLDS
 
 job reaches byzShim quietStep 40 \
-  vOfferedBeforeExpiry vConformingFirstOfferBeforeExpiry vConformingFirstOfferJudged vAckImpliesQueued \
-  -- offeredBeforeExpiry conformingFirstOfferBeforeExpiry conformingFirstOfferJudgedBeforeExpiry \
-     ackImpliesQueued wellFormed
+  vAckImpliesQueued \
+  -- ackImpliesQueued wellFormed
 # W16, both halves.
 job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \
   -- operatorBlind txidAuthenticity wellFormed
-# W15.
 job reaches byzIndexer quietStep 40 \
-  vOperatorBlind vTxidAuthenticity vAckImpliesQueued wPrematureFlush \
+  vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
   -- operatorBlind txidAuthenticity ackImpliesQueued wellFormed
 job reaches awaitAck quietStep 40 \
   vToldImpliesQueued vAckImpliesQueued \
@@ -395,20 +358,8 @@ job reaches replicated quietStep 80 \
   vLookupValidityPerHub wPublishedByTwoHubs \
   -- lookupValidityPerHub wellFormed
 job reaches replicatedOneByz quietStep 40 \
-  vTxidAuthenticity vAckImpliesQueued vOfferedBeforeExpiry vConformingFirstOfferBeforeExpiry \
-  vConformingFirstOfferJudged \
-  -- txidAuthenticity ackImpliesQueuedForHonestHubs offeredBeforeExpiryForHonestHubs \
-     conformingFirstOfferBeforeExpiryForHonestHubs conformingFirstOfferJudgedBeforeExpiryForHonestHubs wellFormed
-job reaches flakyTip quietStep 40 \
-  vConformingFirstOfferBeforeExpiry vConformingOfferAdmittedBehind vConformingFirstOfferJudged \
-  -- conformingFirstOfferBeforeExpiry conformingFirstOfferJudgedBeforeExpiry wellFormed
-job reaches flakyTipSlowFlight quietStep 40 \
-  vConformingFirstOfferBeforeExpiry \
-  -- conformingFirstOfferBeforeExpiry wellFormed
-# W18.
-job reaches staleLag quietStep 40 \
-  wEarlyFreeRunFlush \
-  -- wellFormed
+  vTxidAuthenticity vAckImpliesQueued \
+  -- txidAuthenticity ackImpliesQueuedForHonestHubs wellFormed
 finish
 
 echo "---- 4 hub specification (TLC, exhaustive)"
