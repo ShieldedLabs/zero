@@ -335,11 +335,14 @@ module protocol {
     commit(s.countSend().shimStepped(result, None), WalletSend({ input: input, handedOver: handedOver })),
   }
 
-  action walletSend = {
-    nondet input = oneOf(SEND_INPUTS)
-    nondet handedOver = oneOf(0.to(HUB_ORDER.length()))
-    nondet result = oneOf(shimResults(s.shim, SendTxSInput({ input: input, handedOver: handedOver })))
-    walletSendWith(input, handedOver, result)
+  action walletSend = all {
+    s.wallet.sends < MAX_REQUESTS,
+    {
+      nondet input = oneOf(SEND_INPUTS)
+      nondet handedOver = oneOf(0.to(HUB_ORDER.length()))
+      nondet result = oneOf(shimResults(s.shim, SendTxSInput({ input: input, handedOver: handedOver })))
+      walletSendWith(input, handedOver, result)
+    },
   }
 
   /// The txids of the transactions the wallet has handed the shim. A wallet
@@ -358,6 +361,7 @@ module protocol {
   }
 
   action walletGet = all {
+    s.wallet.gets < MAX_REQUESTS,
     walletTxids != Set(),
     {
       nondet query = oneOf(walletTxids)
@@ -666,6 +670,7 @@ module protocol {
   }
 
   action thirdPartyLookup = all {
+    s.thirdParty.requests < MAX_REQUESTS,
     s.tpTxids() != Set(),
     {
       nondet txid = oneOf(s.tpTxids())
@@ -687,6 +692,7 @@ module protocol {
   }
 
   action thirdPartySubmit = all {
+    s.thirdParty.requests < MAX_REQUESTS,
     s.tpPayloads() != Set(),
     {
       nondet payload = oneOf(s.tpPayloads())
@@ -770,12 +776,14 @@ module protocol {
     chainAdvance, chainMine,
   }
 
-  /// The same, during an indexer outage: every flush comes back unjudged.
+  /// The protocol during an indexer outage: every flush comes back unjudged,
+  /// while outsiders go on submitting.
   action outageStep = any {
     walletSend, walletGet,
     shimReceive,
     hubReceive, hubObserveTip, hubTipStale, hubFlushBegin, indexerUnreachable, hubFlushEnd,
     chainAdvance,
+    outsiderStep,
   }
 
   // ------------------------------------------------------------------------

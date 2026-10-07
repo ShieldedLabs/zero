@@ -677,6 +677,41 @@ module staleLagWithSlackScenarios {
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: atFloor, height: 8, attempt: 0, nth: 0 }))
       .expect(vConformingFirstOfferBeforeExpiry and conformingFirstOfferBeforeExpiry)
+
+  /// This configuration's second migration: built at height 4, expiring at
+  /// the floor.
+  pure val lateAtFloor = orchard("late", 4, 11)
+
+  /// Found by simulation; the slack does not cover it. A stale hub's
+  /// free-running clock reads 6 at true height 4, and the flush scheduled for
+  /// 6 runs then, with nothing to publish. When the hub sees the tip again the
+  /// chain is at 5, and admission, which knows the tip and not the schedule's
+  /// history, counts on the flush at 6. That flush has already happened. The
+  /// transaction waits for the one at 9, and a second, shorter silence makes
+  /// that one late too: it is published at 11, with no margin.
+  ///
+  /// Neither half is enough alone at these numbers. Without the early flush
+  /// the transaction goes out at 6; without the second silence, at 9.
+  run earlyFlushSpendsTheNextEpochTest =
+    started
+      .then(3.reps(_ => chainAdvance))
+      .then(hubTipStaleWith("h1", 6))
+      .then(hubFlushBeginWith("h1"))
+      .expect(s.height() == 4 and s.hubs.get("h1").lastEpoch == Some(2))
+      .then(sendToAll(lateAtFloor))
+      .then(block)
+      .expect(s.hubs.get("h1").cadence == Tracking and s.hubs.get("h1").tip == Some(5))
+      .then(deliverSubmit("h1", 0, lateAtFloor))
+      .expect(audit.admitted.get(("h1", lateAtFloor)) == { height: 5, tip: 5 })
+      .then(blocks(3))
+      // Height 8. The boundary at 6 has passed and nothing was flushed.
+      .expect(audit.offers == Set() and s.queuedAt("h1") == Set(lateAtFloor))
+      .then(3.reps(_ => chainAdvance))
+      .then(hubTipStaleWith("h1", 11))
+      .then(hubFlushBeginWith("h1"))
+      .expect(conforming(lateAtFloor, MIN_WALLET_EXPIRY) and staleSlackFits)
+      .expect(audit.offers == Set({ hub: "h1", payload: lateAtFloor, height: 11, attempt: 0, nth: 0 }))
+      .expect(not(conformingFirstOfferBeforeExpiry))
 }
 
 module byzIndexerScenarios {
