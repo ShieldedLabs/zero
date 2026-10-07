@@ -100,6 +100,9 @@ module protocol {
   pure val UNIVERSE = PAYLOADS.union(TWINS).union(TP_PAYLOADS)
   /// Every height a Byzantine component may claim.
   pure val HEIGHTS = 0.to(MAX_HEIGHT)
+  /// Every height a free-running cadence clock may read: up to one flush
+  /// interval past the last block.
+  pure val CLOCK_HEIGHTS = 0.to(MAX_HEIGHT + FLUSH_INTERVAL)
   /// What a wallet may send.
   pure val SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
   /// Every transaction id there is.
@@ -292,12 +295,12 @@ module protocol {
   /// The tips the indexer may report to a hub now.
   def reportableTips: Set[Height] =
     match ROLES.indexer {
-      | Byzantine => byzTips(MAX_HEIGHT)
+      | Byzantine => byzTips(HEIGHTS)
       | Honest =>
         match TIP {
-          | TipTimely => honestTips(s.indexer, 0)
-          | TipMayRegress => honestTips(s.indexer, REORG_ALLOWANCE)
-          | TipMayLag => honestTips(s.indexer, 0)
+          | TipTimely => honestTips(s.indexer, 0, HEIGHTS)
+          | TipMayRegress => honestTips(s.indexer, REORG_ALLOWANCE, HEIGHTS)
+          | TipMayLag => honestTips(s.indexer, 0, HEIGHTS)
         }
     }
 
@@ -308,10 +311,11 @@ module protocol {
   /// The heights a stale hub's free-running clock may read now: up to an
   /// interval ahead of the chain, and not behind it unless `FREE_RUN` allows.
   def freeRunEstimates(id: HubId): Set[Height] =
-    match FREE_RUN {
-      | NotSlower => s.height().to(s.height() + FLUSH_INTERVAL)
-      | MayBeSlower => s.hubs.get(id).observedTip().to(s.height() + FLUSH_INTERVAL)
+    val earliest = match FREE_RUN {
+      | NotSlower => s.height()
+      | MayBeSlower => s.hubs.get(id).observedTip()
     }
+    CLOCK_HEIGHTS.filter(estimate => earliest <= estimate and estimate <= s.height() + FLUSH_INTERVAL)
 
   /// Whether the next block may arrive. This is where the timing assumptions
   /// live: a block is held back until every hub has done what the tip model

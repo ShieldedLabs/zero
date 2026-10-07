@@ -149,9 +149,10 @@ module indexer {
     else INotFound
 
   /// The tips an honest indexer may report when reports can trail the true
-  /// height by up to `slack` blocks.
-  pure def honestTips(state: IndexerState, slack: int): Set[Height] =
-    (if (state.height > slack) state.height - slack else 0).to(state.height)
+  /// height by up to `slack` blocks. `heights` is every height there is: the
+  /// answer is a part of a fixed range, never a range with a moving bound.
+  pure def honestTips(state: IndexerState, slack: int, heights: Set[Height]): Set[Height] =
+    heights.filter(height => state.height - slack <= height and height <= state.height)
 
   // ------------------------------------------------------------------------
   // Byzantine relation
@@ -208,7 +209,7 @@ module indexer {
       | _ => outputs.map(output => { state: indexerApply(state, input, output), out: output })
     }
 
-  /// The tips a Byzantine indexer may report: anything up to `maxHeight`.
-  pure def byzTips(maxHeight: Height): Set[Height] =
-    0.to(maxHeight)
+  /// The tips a Byzantine indexer may report: any height there is.
+  pure def byzTips(heights: Set[Height]): Set[Height] =
+    heights
 }

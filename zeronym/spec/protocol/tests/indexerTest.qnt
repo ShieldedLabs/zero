@@ -98,9 +98,9 @@ module indexerTest {
   }
 
   run tipReportsTest = all {
-    assert(honestTips(empty, 0) == Set(4)),
-    assert(honestTips(empty, 1) == Set(3, 4)),
-    assert(honestTips(initialIndexer(1), 3) == Set(0, 1)),
+    assert(honestTips(empty, 0, 0.to(7)) == Set(4)),
+    assert(honestTips(empty, 1, 0.to(7)) == Set(3, 4)),
+    assert(honestTips(initialIndexer(1), 3, 0.to(7)) == Set(0, 1)),
   }
 
   /// F12. The Byzantine relation contains every honest transition, and every
@@ -111,7 +111,7 @@ module indexerTest {
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
       honestIndexerOutputs(state, input).subseteq(byzIndexerOutputs(state, input, UNIVERSE, HEIGHTS)))),
     assert(tuples(STATES, 0.to(3)).forall(((state, slack)) =>
-      honestTips(state, slack).subseteq(byzTips(7)))),
+      honestTips(state, slack, 0.to(7)).subseteq(byzTips(0.to(7))))),
   }
 
   run byzantineIndexerTest = all {
