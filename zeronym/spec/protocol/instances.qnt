@@ -43,7 +43,7 @@ module configs {
   // Configurations
   // ------------------------------------------------------------------------
 
-  pure val allHonest: Roles = { hubs: Map("h1" -> Honest), indexer: Honest }
+  pure val allHonest: Roles = { hub: Honest, indexer: Honest }
 
   /// One hub, the mixnet transport, every component honest, a timely tip.
   ///
@@ -65,7 +65,6 @@ module configs {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
     tpPayloads: Set(garbage, bloat),
-    hubs: ["h1"],
     flushInterval: 3,
     miningMargin: 2,
     deliveryLag: 1,
@@ -85,19 +84,9 @@ module configs {
   }
 
   // One Byzantine component at a time.
-  pure val byzHub = { ...baseline, roles: { ...allHonest, hubs: Map("h1" -> Byzantine) } }
+  pure val byzHub = { ...baseline, roles: { ...allHonest, hub: Byzantine } }
   pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
 
-  // Two hubs sharing one chain.
-  pure val replicated = {
-    ...baseline,
-    hubs: ["h1", "h2"],
-    roles: { ...allHonest, hubs: Map("h1" -> Honest, "h2" -> Honest) },
-  }
-  pure val replicatedOneByz = {
-    ...replicated,
-    roles: { ...allHonest, hubs: Map("h1" -> Honest, "h2" -> Byzantine) },
-  }
 }
 
 module baseline {
@@ -132,34 +121,6 @@ module byzIndexer {
   import types.* from "./types"
   import configs.*
   import protocol(CONFIG = byzIndexer).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module replicated {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = replicated).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module replicatedOneByz {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = replicatedOneByz).* from "./protocol"
 
   run assumptionsTest = all {
     assert(standingAssumptions),

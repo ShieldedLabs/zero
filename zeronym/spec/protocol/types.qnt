@@ -12,7 +12,6 @@ module types {
   type TxId = str
   type Height = int
   type Nonce = int
-  type HubId = str
 
   // ------------------------------------------------------------------------
   // Transactions
@@ -134,17 +133,17 @@ module types {
   // Participants
   // ------------------------------------------------------------------------
 
-  /// A network address. The third party is any client of a hub's public,
+  /// A network address. The third party is any client of the hub's public,
   /// unauthenticated address other than the shim.
-  type Addr = ShimAddr | HubAddr(HubId) | ThirdPartyAddr
+  type Addr = ShimAddr | HubAddr | ThirdPartyAddr
 
   /// Whether a component follows the protocol. A Byzantine component is not
   /// marked in any message or state: it simply draws its transitions from a
   /// wider relation than the honest one.
   type Role = Honest | Byzantine
 
-  /// The role of each component. Each hub has its own.
-  type Roles = { hubs: HubId -> Role, indexer: Role }
+  /// The role of each component.
+  type Roles = { hub: Role, indexer: Role }
 
   /// How a hub's view of the chain tip relates to the true height.
   ///
@@ -197,7 +196,6 @@ module types {
     payloads: Set[Payload],
     twins: Set[Payload],
     tpPayloads: Set[Payload],
-    hubs: List[HubId],
     flushInterval: int,
     miningMargin: int,
     deliveryLag: int,

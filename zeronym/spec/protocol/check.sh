@@ -74,9 +74,9 @@ finish() {
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
 FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
-INSTANCES="baseline byzHub byzIndexer replicated replicatedOneByz"
-SCENARIOS="baselineScenarios replicatedScenarios byzHubScenarios"
-TRUST="byzHubTrust byzIndexerTrust replicatedOneByzTrust"
+INSTANCES="baseline byzHub byzIndexer"
+SCENARIOS="baselineScenarios byzHubScenarios"
+TRUST="byzHubTrust byzIndexerTrust"
 
 fail() {
   echo "FAIL  $1"
@@ -282,8 +282,6 @@ job holds baseline            operatorBlind queuedBytesConfidential txidAuthenti
                               ackImpliesQueued wellFormed
 job holds byzHub              operatorBlind txidAuthenticity wellFormed
 job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
-job holds replicated          lookupValidityPerHub wellFormed
-job holds replicatedOneByz    txidAuthenticity ackImpliesQueuedForHonestHubs wellFormed
 
 # The trust matrix: each guarantee fails once the component it depends on is
 # Byzantine. The schedule guarantees' rows are in tier 4.
@@ -292,12 +290,9 @@ job fails byzHub              step      40 lookupValidityPerHub
 job fails byzHub              step      40 ackImpliesQueued
 job fails byzIndexer          step      40 queuedBytesConfidential
 job fails byzIndexer          step      40 lookupValidityPerHub
-job fails replicatedOneByz    step      40 queuedBytesConfidential
-job fails replicatedOneByz    step      40 lookupValidityPerHub
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
-job fails replicated          quietStep 40 statusNeverRegresses                    # K2
 
 finish
 
@@ -329,17 +324,6 @@ job reaches byzHub quietStep 40 \
 job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
   -- operatorBlind txidAuthenticity ackImpliesQueued wellFormed
-# W13, K1c.
-job reaches replicated step 40 \
-  wFailoverAnswered wToldPrefixOnly \
-  -- lookupValidityPerHub wellFormed
-# W14.
-job reaches replicated quietStep 80 \
-  vLookupValidityPerHub wPublishedByTwoHubs \
-  -- lookupValidityPerHub wellFormed
-job reaches replicatedOneByz quietStep 40 \
-  vTxidAuthenticity vAckImpliesQueued \
-  -- txidAuthenticity ackImpliesQueuedForHonestHubs wellFormed
 finish
 
 echo "---- 4 hub specification (TLC, exhaustive)"

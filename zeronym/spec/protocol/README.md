@@ -125,14 +125,14 @@ definitions they justify.
 | Area | What is modelled | Why |
 |---|---|---|
 | Wallet / shim front door | `SendTransaction` input as `Clean(payload) \| Unreadable \| EmptyBody`; routing to divert / forward / fail-closed; `GetTransaction` always to the hub | S1, S3, S4. `divert.qnt` omits it |
-| Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; waiter kinds; lookup starting at a nondeterministic hub (the cursor, S27), timeout and failover; submit fan-out including the prefix send (S29); submit mode `DispatchOnly \| AwaitVerdict` | S6-S9. `AwaitVerdict` is the one HTTP difference this model represents (who the wallet hears from); the others are listed out of scope |
+| Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
 | Hub | lifecycle; admission with all five refusals; queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash | S10-S19 |
 | Chain / indexer | height; per-txid status; what the indexer has been offered; verdict and lookup-answer relations | S15, S22 |
 | Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
-| Trust | role `Honest \| Byzantine` for shim, hub, hub indexer | S23 |
-| Third party | a client of the hubs' public, unauthenticated address: looks up txids it knows; submits payloads it has learned and payloads of its own making; its payload knowledge is derived from what it can observe | S13, S25 |
+| Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
+| Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned and payloads of its own making; its payload knowledge is derived from what it can observe | S13, S25 |
 | Network | drop, duplicate, delay, reorder; cannot forge |  |
-| Replication | `HUBS` is a set; one shared chain | S24 |
+| Hubs | one; see [One hub](#one-hub) | S24 |
 | Tip | `TipTimely \| TipMayRegress \| TipMayLag`, the observed tip and the cadence height as two hub clocks, `REORG_ALLOWANCE`, `STALE_WINDOW` and the wallet expiry floor as constants | S17, S26, S32 |
 
 ### Out of the model
@@ -148,6 +148,7 @@ definitions they justify.
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
+| More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
 | Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
@@ -156,16 +157,71 @@ definitions they justify.
 | More than one Byzantine component at once | The trust matrix is single-fault |
 | A model-based test harness for the Rust | Later work; see "Model-based testing, later" |
 
+### One hub
+
+The spec checks one hub; production runs one or more, replicated: every shim
+sends every submission to every hub, and each hub that receives a migration
+queues and broadcasts it. The single hub is a scope choice, not a claim about
+production.
+
+Lost, observed at `83133e3` with two hubs. Each row is a result a one-hub spec
+cannot check; the gate rows and runs named are that commit's:
+
+| Result at `83133e3` | Backing there | Now |
+|---|---|---|
+| K2 cause (f): one hub says pending, the next poll starts at a hub that never received the frame and its not-found is final | `hubsDisagreeTest`; `fails replicated quietStep 40 statusNeverRegresses` | lost |
+| K1c: told ok after a partial send. Under the replicate rule this is also an anonymity cost: the migration sits in a strict subset of the hubs' batches, and an observer of the broadcasts learns which | `toldOkAfterPrefixSendTest`; `reaches replicated step 40 wToldPrefixOnly` | lost |
+| W14: duplicate publication by two hubs, and a second enclave holding the plaintext; accepted deliberately in production (`zeronym/shim/src/nym.rs:641-647`) | `publishedByBothHubsTest`; `reaches replicated quietStep 80 wPublishedByTwoHubs` | lost |
+| W13: a lookup moves on after a timeout and the next hub answers | `lookupFailsOverOnTimeoutTest`; `reaches replicated step 40 wFailoverAnswered` | lost; see the lookup concern below |
+| G4 holds with two honest hubs | `holds replicated lookupValidityPerHub` | lost as a check; argued below |
+| G2 is required of every hub | `oneReplicaServesQueuedBodyTest` and control; `fails replicatedOneByz step 40 queuedBytesConfidential` | the leak survives as `hubServesQueuedBodyTest` on `byzHub`; that an honest replica beside it does not help is lost as a check |
+| G4 is required of every hub, and the cursor can land on the lying one | `cursorLandsOnLyingReplicaTest` and control; `fails replicatedOneByz step 40 lookupValidityPerHub` | `hubDeniesQueuedTest` on `byzHub` survives. Lost: that the lie reaches the wallet while an honest replica holds the transaction, because the cursor chose the liar |
+| G3 survives a Byzantine replica | `wrongTransactionIsRefusedTest`; `holds replicatedOneByz txidAuthenticity` | the run is on `byzHub` now |
+| The honest hub keeps G8, G6a, G6b and G6c beside a Byzantine one | `honestReplicaKeepsItsGuaranteesTest`; `holds replicatedOneByz ackImpliesQueuedForHonestHubs` and the three `...ForHonestHubs` G6 rows | lost as a check; argued below. The Byzantine halves survive as `hubAcksWithoutAdmittingTest` and `hubAdmitsPastExpiryRuleTest` |
+| "Some honest hub queued it after told ok" is not a guarantee | the same run, its first half | lost. Its one-hub shadow is K1b |
+
+What one hub keeps. `Unavailable` is exempt from G4, so a lookup that
+production would complete at another address and the model answers
+`Unavailable` loses only a success path. K2 still fails: its causes (a) to (e)
+are one-hub runs. The already-known verdict stays reachable: published bytes
+resubmitted to the same hub are queued and offered again (K2 b and c).
+
+**Composition, argued and not checked.** Assumption: hubs share no state but
+the chain and the indexer, and each property below is about one hub's own
+queue, acks, replies and schedule.
+
+- Compose per hub: G1 (the shim alone); G3 (the shim's txid check on each
+  reply); G4, which is why its name keeps "per hub": an answer was true at the
+  hub that gave it; G8; G6a, G6b and G6c, which read offer and verdict
+  heights, not verdict values, so another hub publishing first changes nothing
+  they read; K5.
+- Compose only if every hub is honest: G2. One Byzantine replica holds the
+  same bytes and can give them away.
+- Do not compose: K1 (two hubs add K1c and its anonymity cost); K2 (two hubs
+  add cause f); duplicate publication; which hub answers a lookup.
+
+**The lookup-routing concern, unexamined, not a bug.** Lookups are not
+replicated. `each_target` (`zeronym/shim/src/nym.rs:746-797`, comment at
+`:729-745`) starts at a rotating cursor and moves to the next address only on
+a timeout; any other outcome from the first address that answers is final.
+That is a choice of hub by apparent liveness on the read path, the pattern
+`zeronym/shim/src/nym.rs:630-633` forbids for submits: whoever can make one hub
+time out decides which hub answers a wallet's lookup, and learns which txids
+it asks about. A one-hub spec cannot express it.
+
+Not checked: whether a rotated or dead address has any protocol-visible effect
+beyond loss in the soup.
+
 ### Assumptions
 
-- **Roles.** The shim and the hubs run in enclaves and are honest in the
-  baseline. The shim, each hub and the hubs' indexer can each be made
-  Byzantine, one at a time. A Byzantine component draws its transitions from a
+- **Roles.** The shim and the hub run in enclaves and are honest in the
+  baseline. The shim is honest in every configuration; the hub and its
+  indexer can each be made Byzantine, one at a time. A Byzantine component draws its transitions from a
   wider relation than the honest one; no message, state field or observation
   records which it drew.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or
   read them.
-- **Third party.** A client of the hubs' public address. It looks up txids it
+- **Third party.** A client of the hub's public address. It looks up txids it
   knows and submits payloads it has learned or made. It cannot read or forge
   frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
@@ -178,7 +234,7 @@ definitions they justify.
   the code does not enforce this. A hub whose flush is in flight does not look
   at the tip.
 - **Tip.** In every model a due flush has begun before the next block.
-  `TipTimely`: every running, idle hub asks for the tip at each block. An
+  `TipTimely`: a running, idle hub asks for the tip at each block. An
   honest indexer answers with the true height; a Byzantine one is asked just
   as often and controls only the answer. `TipMayRegress`: a tip
   report may trail the chain by up to `REORG_ALLOWANCE`. `TipMayLag`: a hub may
@@ -187,7 +243,7 @@ definitions they justify.
   behind the chain (`freeRunNotSlowerThanChain`) and at most one flush interval
   ahead of it.
 - **Wallets.** A supported ("conforming") wallet sets an expiry at least
-  `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches a
+  `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the
   hub within `DELIVERY_LAG` blocks. A wallet asks only about transactions it
   has sent.
 - **Honest indexer.** Answers lookups from chain state or "unavailable". A
@@ -207,7 +263,7 @@ stateDiagram-v2
     Inspect --> FailClosed: Unreadable or EmptyBody
     Inspect --> Framing: Clean and class OrchardTouching or Unparseable
     Framing --> FailClosed: oversize
-    Framing --> Dispatched: frames to a non-empty prefix of the hubs, fresh nonce each
+    Framing --> Dispatched: one frame to the hub, fresh nonce
     Framing --> FailClosed: no frame handed over
     Dispatched --> ToldOk
     Forwarded --> [*]
@@ -219,13 +275,12 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Awaiting: send Lookup to the hub the cursor points at, fresh nonce
-    Awaiting --> Awaiting: timeout and hubs remain, fresh nonce to next hub
+    [*] --> Awaiting: send Lookup to the hub, fresh nonce
     Awaiting --> Awaiting: wrong-kind or unknown-nonce frame ignored
     Awaiting --> Pending: reply found, height 0, no body
     Awaiting --> Tx: reply found, body txid equals query
     Awaiting --> NotFound: reply not_found, or found that fails L4
-    Awaiting --> Unavailable: reply error, or timeout on last hub
+    Awaiting --> Unavailable: reply error, or timeout
     Pending --> [*]
     Tx --> [*]
     NotFound --> [*]
@@ -360,7 +415,7 @@ pure.
 | `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply`, `sizeOf` |
 | `indexer.qnt` | `indexer` | The chain and indexer as a relation: honest and Byzantine outputs, and their effect |
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
-| `shim.qnt` | `shim` | `shim(state, input)`; routing, the lookup sweep, reply correlation |
+| `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, A1-A3, the run vocabulary |
@@ -400,12 +455,12 @@ goes.
 | Component | Inputs | Outputs | Seam in the implementation |
 |---|---|---|---|
 | `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
-| `shim` | `SendTxSInput` (with how many hub addresses take a frame), `GetTxSInput` (with where the cursor points), `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
+| `shim` | `SendTxSInput` (with whether the transport took the frame), `GetTxSInput`, `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
 | indexer | `BroadcastIInput`, `LookupIInput`, `AdvanceIInput`, `MineIInput` | `VerdictOutput`, `AnswerOutput`, `NoIndexerOutput` | the mock indexer in `hub/tests/common/mod.rs` |
 
 ### Roles
 
-`ROLES` gives the shim, each hub and the indexer a role. An honest component
+`ROLES` gives the hub and the indexer a role. An honest component
 takes exactly the transition its function gives. A Byzantine one takes any
 member of a finite set that contains it (F12):
 
@@ -435,13 +490,11 @@ abstract indexer per hub was a decision of the design.
 One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 (`PAYLOADS`, `FLUSH_INTERVAL`, `ROLES`, `TIP`, ...).
 
-| Module | Hubs | Roles (hubs / indexer) | Tip |
-|---|---|---|---|
-| `baseline` | 1 | H / H | timely |
-| `byzHub` | 1 | **B** / H | timely |
-| `byzIndexer` | 1 | H / **B** | timely for honest reports |
-| `replicated` | 2 | H, H / H | timely |
-| `replicatedOneByz` | 2 | H, **B** / H | timely |
+| Module | Roles (hub / indexer) | Tip |
+|---|---|---|
+| `baseline` | H / H | timely |
+| `byzHub` | **B** / H | timely |
+| `byzIndexer` | H / **B** | timely for honest reports |
 
 The schedule is the shipped one scaled down, keeping the relations between the
 numbers:
@@ -526,7 +579,7 @@ tried by hand, with the result shown, and reverted:
 | G1 | `shim` forwards an unparseable body | violated on `baseline` |
 | G2 | `hub` answers a queue hit with the queued body | violated on `baseline` |
 | G3 | `interpretReply` skips the txid comparison | **holds on `baseline`**; violated on `byzHub` and `byzIndexer` |
-| G4 | `hub` answers not-found on a queue hit | violated on `baseline` and `replicated` |
+| G4 | `hub` answers not-found on a queue hit | violated on `baseline` |
 | G8 | `hub` acks accepted without inserting | violated on `baseline` |
 | G6a | `hub` admits without the expiry check | violated on `baseline` |
 
@@ -558,40 +611,27 @@ chain cannot pass a running, idle hub that has not asked.
 | G1 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | holds (`byzHub`); a twin and a false height are both served (W16) | holds (`byzIndexer`) |
-| G4 | holds (`baseline`, `replicated`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
+| G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
 | G8 | holds (`baseline`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
 | G6a | holds (`baseline`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
 | G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | A3 | not run (TLC, `baseline`) | **required**: `hubAdmitsWhileDrainingTest` | not run |
 
-One Byzantine replica out of two (`replicatedOneByz`):
-
-| Property | Observed | Backing |
-|---|---|---|
-| G2 | required of every hub | `oneReplicaServesQueuedBodyTest` |
-| G4 | required of every hub | `cursorLandsOnLyingReplicaTest` |
-| G3 | holds | simulation; `wrongTransactionIsRefusedTest` |
-| G8, G6a, G6b, G6c for the honest hub | hold | simulation of `ackImpliesQueuedForHonestHubs`, `offeredBeforeExpiryForHonestHubs`, `conformingFirstOfferBeforeExpiryForHonestHubs`, `conformingFirstOfferJudgedBeforeExpiryForHonestHubs`; `honestReplicaKeepsItsGuaranteesTest` |
-| "some honest hub queued it" after told ok | not a guarantee | `honestReplicaKeepsItsGuaranteesTest` |
-
-The `...ForHonestHubs` names are the same predicates restricted to the hubs
-whose role is honest. They are not weaker properties.
-
 There is no Byzantine-shim column: the shim sees every migration in plaintext
 and controls everything the wallet observes, so every wallet-facing guarantee
 assumes an honest (attested) shim. G3 is the only wallet-facing guarantee that
 survives a Byzantine hub or indexer, and it authenticates the txid only. G1
-depends on the shim alone. Replication does not dilute trust: one Byzantine
-replica is enough to void G2 and G4. A3 needs the hub: its "required"
+depends on the shim alone. With more than one hub, G2 is required of every
+hub (argued, see [One hub](#one-hub)). A3 needs the hub: its "required"
 cell is a scripted step, and its "holds" cells are the unrun TLC property.
 
 ### Known gaps, with every component honest
 
 | Id | What is lost | Where | Form | Observed | Scripted runs |
 |---|---|---|---|---|---|
-| K1 | Told ok does not mean any hub ever admits it | `baseline`, `replicated` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered`, `wToldPrefixOnly` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest`, `toldOkAfterPrefixSendTest` |
-| K2 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | `baseline`, `replicated` | violated invariant | violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest`, `hubsDisagreeTest` |
+| K1 | Told ok does not mean the hub ever admits it | `baseline` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest` |
+| K2 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | `baseline` | violated invariant | violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest` |
 | K3 | G6a for a tight-expiry transaction: admitted against a tip reported below a boundary already flushed | `flakyTip` | violated invariant | violated, as predicted | `tightExpiryAdmittedBehindFlushedBoundaryTest` |
 | K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
 | K4 | G6a, and G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
@@ -608,13 +648,13 @@ that pays for blocks arriving while the batch is in flight, and nothing in the
 code bounds a flight in blocks.
 
 K1 is not stated as a violated invariant because the invariant is false on the
-ordinary success path too: the wallet is told ok before any hub has the
+ordinary success path too: the wallet is told ok before the hub has the
 frame. In `toldOkAndNeverDeliveredTest` the run ends with the
 frame undelivered, and nothing obliges the network ever to deliver it.
 
 ### Witnesses
 
-Each has a scripted run and is counted in tier 3b.
+Each has a scripted run and, except W15 and W18, is counted in tier 3b.
 
 | Id | Witness | Name | Configuration |
 |---|---|---|---|
@@ -624,21 +664,17 @@ Each has a scripted run and is counted in tier 3b.
 | W8 | **Accepted disclosure**: a third party that knows a txid learns it is queued. The hub withholds the bytes, not the fact. See the quoted comment under [Scope](#scope) | `wQueuedDisclosed` | `baseline` |
 | W9 | a queued payload the hub cannot parse is asked for and missed | `wUnparseableMissed` | `baseline` |
 | W12 | a queue holds more than its capacity after a requeue | `wQueueOverCapacity` | `baseline` |
-| W13 | a lookup moves on after a timeout and the next hub answers | `wFailoverAnswered` | `replicated` |
-| W14 | two hubs publish the same payload in their own flushes | `wPublishedByTwoHubs` | `replicated` |
-| W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | `wPrematureFlush` | `byzIndexer` |
+| W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | scripted run `tipAheadOfChainFlushesEarlyTest` (hub specification) | `byzIndexer` |
 | W16 | **Twin served**: the wallet is served a twin of what it sent, and a transaction at a false height; G3 holds throughout | `wTwinServed`, `wFalseHeightServed` | `byzHub` |
 | W17 | the third party's own payload is queued | `wThirdPartyPayloadQueued` | `baseline` |
-| W18 | **Early flush by the free-running clock**: a stale hub's clock is ahead of the chain and it flushes before the true boundary, every component honest | `wEarlyFreeRunFlush` | `staleLag` |
+| W18 | **Early flush by the free-running clock**: a stale hub's clock is ahead of the chain and it flushes before the true boundary, every component honest | scripted run `freeRunningClockFlushesEarlyTest` (hub specification) | `staleLag` |
 
 Non-vacuity: for each guarantee, a state where its antecedent holds, reached on
 every configuration where the guarantee is claimed: `vOperatorBlind`,
 `vQueuedBytesConfidential`, `vTxidAuthenticity`, `vLookupValidityPerHub` (the
-log has a pending, a served transaction and a not-found), `vToldImpliesQueued`,
-`vOfferedBeforeExpiry`, `vConformingFirstOfferBeforeExpiry`,
-`vConformingFirstOfferJudged`, `vAckImpliesQueued`,
-and on `flakyTip` also `vConformingOfferAdmittedBehind` (a conforming first
-offer of a payload admitted while the hub's tip was behind the chain).
+log has a pending, a served transaction and a not-found), `vAckImpliesQueued`.
+The antecedents of G6a, G6b and G6c are reachability rows of the hub
+specification.
 
 ### Two-state properties: not checked
 
@@ -648,15 +684,15 @@ form, and typechecked. **None has been run.**
 | Id | Name | What it says | Class |
 |---|---|---|---|
 | A1 | `chainMonotone` | A transaction's chain status never moves backwards | assumption about the environment |
-| A2 | `neverEvict` | An entry leaves a hub's queue only into a flush, or because the hub went down | guarantee |
+| A2 | `neverEvict` | An entry leaves the hub's queue only into a flush, or because the hub went down | guarantee |
 | A3 | `drainIsFinal` | A draining honest hub's queue gains only what a flush hands back | guarantee |
 
-A3 is stated over the honest hubs only. Draining is an admission rule, and a
+A3 is stated of an honest hub only. Draining is an admission rule, and a
 Byzantine hub is not bound by admission rules: `hubAdmitsWhileDrainingTest`
 takes a submission into the queue after the drain began, and its control
 refuses the same frame. That run asserts the step, because the simulator
-does not check `temporal` definitions. A2 is stated over every hub: the
-Byzantine hub relation only ever adds to a queue.
+does not check `temporal` definitions. A2 is stated whatever the hub's role:
+the Byzantine hub relation only ever adds to a queue.
 
 No liveness property is claimed: the network may lose everything, and nobody
 waits for an ack.
@@ -741,7 +777,7 @@ unacceptable. The schedule is now scaled with a margin of 2, flight time is
 bounded by `MAX_FLIGHT_BLOCKS`, and G6c is checked at the verdict. Observed:
 G6c holds on `baseline`, `flakyTip` and `byzShim`, and for the honest hub of
 `replicatedOneByz`; it fails wherever G6b fails, and on `flakyTipSlowFlight`
-where G6b holds.
+where G6b holds. (`byzShim` and `replicatedOneByz` have since been removed.)
 
 **6. The second clause of G1, "and no lookup", is not stated.** No output of
 the shim function routes a lookup to the operator, so the clause would hold by
@@ -954,7 +990,6 @@ quint verify --main=byzHub --invariant=txidAuthenticity --max-steps=12 zeronym/s
 quint verify --main=byzIndexer --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzIndexer --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzIndexer --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=flakyTip --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
 
 The same for G6c, and the configurations whose point is a violation (each
@@ -963,12 +998,6 @@ should report one; `flakyTipNoSlack` and `flakyTipSlowFlight` satisfy every
 
 ```sh
 quint verify --main=baseline --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=flakyTip --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=flakyTipNoSlack --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=flakyTipSlowFlight --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=staleLag --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=staleLagWithSlack --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=ackedIsHeldOrSettled --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
 
 Several of the scripted counterexamples are longer than 12 steps, so
@@ -996,8 +1025,6 @@ quint verify --main=baseline --invariant='not(wToldRefusedEverywhere)' --max-ste
 quint verify --main=baseline --invariant='not(wToldNeverDelivered)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzHub --invariant='not(wTwinServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzHub --invariant='not(wFalseHeightServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzIndexer --invariant='not(wPrematureFlush)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=staleLag --invariant='not(wEarlyFreeRunFlush)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
 
 The two-state properties, with TLC (also `QUINT_TLC=1 sh check.sh`):

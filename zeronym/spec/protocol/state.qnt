@@ -27,15 +27,15 @@ module state {
   /// how many requests of each kind it has made.
   type Wallet = { log: List[WalletEvent], sends: int, gets: int }
 
-  /// The third party: a client of the hubs' public address that is not the
+  /// The third party: a client of the hub's public address that is not the
   /// shim. `txids` are the transaction ids it has learned out of band; `own`
   /// are payloads of its own making.
   type ThirdParty = { txids: Set[TxId], own: Set[Payload], nextNonce: Nonce, requests: int }
 
-  /// - `polled`: the hubs whose cadence loop has asked for the tip since the
+  /// - `polled`: whether the hub's cadence loop has asked for the tip since the
   ///   last block arrived.
-  /// - `flightBlocks`: for each hub, the blocks that have arrived since its
-  ///   flush in flight began; zero while no flush is in flight. Both are the
+  /// - `flightBlocks`: the blocks that have arrived since the hub's flush in
+  ///   flight began; zero while no flush is in flight. Both are the
   ///   environment's bookkeeping of time; no component reads them.
   /// - `operator`: every transaction the shim has handed the operator's
   ///   indexer. The operator is assumed to publish nothing itself.
@@ -43,9 +43,9 @@ module state {
   ///   by the disclosure step and by nothing else.
   type System = {
     indexer: IndexerState,
-    hubs: HubId -> HubState,
-    polled: Set[HubId],
-    flightBlocks: HubId -> int,
+    hub: HubState,
+    polled: bool,
+    flightBlocks: int,
     shim: ShimState,
     net: Net,
     wallet: Wallet,
@@ -54,14 +54,14 @@ module state {
     disclosed: Set[Payload],
   }
 
-  /// The system at rest: the chain at `height`, every hub started and waiting
+  /// The system at rest: the chain at `height`, the hub started and waiting
   /// for its first tip, nothing sent.
   pure def initialSystem(config: Config, params: HubParams, height: Height): System = {
     indexer: initialIndexer(height),
-    hubs: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => startingHub(params)),
-    polled: Set(),
-    flightBlocks: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => 0),
-    shim: initialShim(config.hubs),
+    hub: startingHub(params),
+    polled: false,
+    flightBlocks: 0,
+    shim: initialShim,
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
     operator: Set(),
@@ -74,73 +74,62 @@ module state {
   /// component then took.
   type Label =
     | Init
-    | WalletSend({ input: SendInput, handedOver: int })
-    | WalletGet({ query: TxId, start: int })
+    | WalletSend({ input: SendInput, handedOver: bool })
+    | WalletGet(TxId)
     | ShimReceive(Mail)
     | ShimLookupTimeout(Nonce)
-    | HubReceive({ hub: HubId, mail: Mail })
-    | HubObserveTip({ hub: HubId, tip: Height })
-    | HubTipStale({ hub: HubId, estimate: Height })
-    | HubFlushBegin(HubId)
-    | IndexerVerdict({ hub: HubId, payload: Payload })
-    | HubFlushEnd(HubId)
-    | HubBeginDrain(HubId)
-    | HubCrash(HubId)
-    | HubRestart(HubId)
+    | HubReceive(Mail)
+    | HubObserveTip(Height)
+    | HubTipStale(Height)
+    | HubFlushBegin
+    | IndexerVerdict(Payload)
+    | HubFlushEnd
+    | HubBeginDrain
+    | HubCrash
+    | HubRestart
     | ChainAdvance
     | ChainMine(TxId)
     | ThirdPartyLearnsTxid(TxId)
-    | ThirdPartyLookup({ txid: TxId, hub: HubId })
-    | ThirdPartySubmit({ payload: Payload, hub: HubId })
+    | ThirdPartyLookup(TxId)
+    | ThirdPartySubmit(Payload)
     | ByzDisclose(Payload)
 
   /// What an observer of the run has recorded. It is not protocol state: no
   /// component reads it, and it is derived at every step from the states
   /// before and after, never from what a component reports about itself.
   ///
-  /// - `everQueued`: every payload that has been in a hub's queue.
-  /// - `admitted`: for a payload's first entry into a hub's queue, the true
-  ///   chain height at that moment and the tip the hub believed in.
+  /// - `everQueued`: every payload that has been in the hub's queue.
+  /// - `admitted`: for a payload's first entry into the queue, the true chain
+  ///   height at that moment and the tip the hub believed in.
   /// - `offers`: every time a flush put a payload in flight: the true chain
   ///   height, the requeues the entry had had (`attempt`), and how many times
-  ///   this hub had offered the payload before (`nth`).
+  ///   the hub had offered the payload before (`nth`).
   /// - `verdicts`: every time an entry in flight got its answer from the
   ///   indexer: the true chain height at that moment, which offer of the
   ///   payload it answers (`nth`), and whether a node judged the transaction
   ///   (`final`) or nothing did and it was set aside for requeue.
   /// - `windows`: for each lookup the shim has sent, the answers that were
-  ///   true at the hub it asked at some point while it waited.
+  ///   true at the hub at some point while it waited.
   /// - `refusals`: the admission refusals that have been sent.
   /// - `dropped`: entries a requeue gave up on, with the requeues they had had.
-  type Offer = { hub: HubId, payload: Payload, height: Height, attempt: int, nth: int }
-  type Judgement = { hub: HubId, payload: Payload, height: Height, nth: int, final: bool }
+  type Offer = { payload: Payload, height: Height, attempt: int, nth: int }
+  type Judgement = { payload: Payload, height: Height, nth: int, final: bool }
   type Audit = {
-    everQueued: HubId -> Set[Payload],
-    admitted: (HubId, Payload) -> { height: Height, tip: Height },
+    everQueued: Set[Payload],
+    admitted: Payload -> { height: Height, tip: Height },
     offers: Set[Offer],
     verdicts: Set[Judgement],
     windows: Nonce -> Set[LookupObs],
     refusals: Set[Refusal],
-    dropped: Set[{ hub: HubId, payload: Payload, attempts: int }],
+    dropped: Set[{ payload: Payload, attempts: int }],
   }
 
   // ------------------------------------------------------------------------
   // Views
   // ------------------------------------------------------------------------
 
-  pure def hubIds(s: System): Set[HubId] =
-    s.hubs.keys()
-
   pure def height(s: System): Height =
     s.indexer.height
-
-  /// The payloads in `hub`'s queue.
-  pure def queuedAt(s: System, hub: HubId): Set[Payload] =
-    s.hubs.get(hub).queued()
-
-  /// The payloads `hub` has out with a flush.
-  pure def inFlightAt(s: System, hub: HubId): Set[Payload] =
-    s.hubs.get(hub).inFlight()
 
   /// Where `txid` stands on the chain.
   pure def onChain(s: System, txid: TxId): Inclusion =
@@ -162,65 +151,58 @@ module state {
         | _ => acc
       })
 
-  /// The submissions `client` has addressed to `hub`, as (nonce, payload).
-  pure def submissions(s: System, client: Addr, hub: HubId): Set[(Nonce, Payload)] =
+  /// The submissions `client` has addressed to the hub, as (nonce, payload).
+  pure def submissions(s: System, client: Addr): Set[(Nonce, Payload)] =
     s.net.fold(Set(), (acc, mail) =>
       match mail.msg {
         | Submit(submit) =>
-          if (mail.src == client and mail.dst == HubAddr(hub))
-            acc.union(Set((submit.nonce, submit.payload)))
+          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((submit.nonce, submit.payload)))
           else acc
         | _ => acc
       })
 
-  /// The acks `hub` has sent `client`, as (nonce, ack).
-  pure def acks(s: System, hub: HubId, client: Addr): Set[(Nonce, WireAck)] =
+  /// The acks the hub has sent `client`, as (nonce, ack).
+  pure def acks(s: System, client: Addr): Set[(Nonce, WireAck)] =
     s.net.fold(Set(), (acc, mail) =>
       match mail.msg {
         | Ack(ack) =>
-          if (mail.src == HubAddr(hub) and mail.dst == client) acc.union(Set((ack.nonce, ack.ack)))
+          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((ack.nonce, ack.ack)))
           else acc
         | _ => acc
       })
 
-  /// The payloads `hub` has acknowledged as accepted, to any client.
-  pure def ackedAt(s: System, hub: HubId): Set[Payload] =
+  /// The payloads the hub has acknowledged as accepted, to any client.
+  pure def acked(s: System): Set[Payload] =
     Set(ShimAddr, ThirdPartyAddr).map(client =>
-      tuples(s.submissions(client, hub), s.acks(hub, client))
+      tuples(s.submissions(client), s.acks(client))
         .filter(((submit, ack)) => submit._1 == ack._1 and ack._2 == WAccepted)
         .map(((submit, _)) => submit._2)
     ).flatten()
 
-  /// The lookups `client` has addressed to hubs, as (nonce, hub, txid).
-  pure def lookups(s: System, client: Addr): Set[(Nonce, HubId, TxId)] =
+  /// The lookups `client` has addressed to the hub, as (nonce, txid).
+  pure def lookups(s: System, client: Addr): Set[(Nonce, TxId)] =
     s.net.fold(Set(), (acc, mail) =>
       match mail.msg {
         | Lookup(lookup) =>
-          match mail.dst {
-            | HubAddr(hub) =>
-              if (mail.src == client) acc.union(Set((lookup.nonce, hub, lookup.txid))) else acc
-            | _ => acc
-          }
+          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((lookup.nonce, lookup.txid)))
+          else acc
         | _ => acc
       })
 
-  /// The lookup replies addressed to `client`, as (nonce, hub, reply).
-  pure def replies(s: System, client: Addr): Set[(Nonce, HubId, WireReply)] =
+  /// The lookup replies the hub has addressed to `client`, as (nonce, reply).
+  pure def replies(s: System, client: Addr): Set[(Nonce, WireReply)] =
     s.net.fold(Set(), (acc, mail) =>
       match mail.msg {
         | LookupReply(reply) =>
-          match mail.src {
-            | HubAddr(hub) =>
-              if (mail.dst == client) acc.union(Set((reply.nonce, hub, reply.reply))) else acc
-            | _ => acc
-          }
+          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((reply.nonce, reply.reply)))
+          else acc
         | _ => acc
       })
 
   /// The transaction bodies in lookup replies addressed to `client`.
   pure def repliedBodies(s: System, client: Addr): Set[Payload] =
     s.replies(client).fold(Set(), (acc, reply) =>
-      match reply._3 {
+      match reply._2 {
         | WFound(found) =>
           match found.body {
             | Some(payload) => acc.union(Set(payload))
@@ -245,7 +227,7 @@ module state {
   ///
   /// This is derived from what the third party can observe. Nothing updates it
   /// when a transaction is published, so a property over it constrains what
-  /// the hubs put in their replies.
+  /// the hub puts in its replies.
   pure def tpLearned(s: System): Set[Payload] =
     s.repliedBodies(ThirdPartyAddr).union(s.operator).union(s.disclosed).exclude(s.thirdParty.own)
 
@@ -267,17 +249,15 @@ module state {
         | _ => acc
       })
 
-  /// The payloads addressed to `hub` by anyone: what it has received or may
+  /// The payloads addressed to the hub by anyone: what it has received or may
   /// yet receive.
-  pure def seenByHub(s: System, hub: HubId): Set[Payload] =
-    Set(ShimAddr, ThirdPartyAddr).map(client =>
-      s.submissions(client, hub).map(submit => submit._2)).flatten()
+  pure def seenByHub(s: System): Set[Payload] =
+    Set(ShimAddr, ThirdPartyAddr).map(client => s.submissions(client).map(submit => submit._2)).flatten()
 
   /// What the Byzantine components, taken together, are able to reveal.
   pure def disclosable(s: System, roles: Roles): Set[Payload] =
     (if (roles.indexer == Byzantine) s.indexer.offered else Set())
-      .union(s.hubIds().filter(hub => roles.hubs.get(hub) == Byzantine)
-        .map(hub => s.seenByHub(hub)).flatten())
+      .union(if (roles.hub == Byzantine) s.seenByHub() else Set())
 
   // ------------------------------------------------------------------------
   // Putting outputs where they go
@@ -291,7 +271,7 @@ module state {
 
   /// The system after the shim took `result`. `via` is the nonce of the frame
   /// that was delivered to it, if the step was a delivery: it is recorded with
-  /// a lookup answer so the answer can be traced to the hub that gave it.
+  /// a lookup answer so the answer can be traced to the reply that gave it.
   pure def shimStepped(s: System, result: ShimResult, via: Option[Nonce]): System =
     val stepped = { ...s, shim: result.state }
     match result.out {
@@ -299,50 +279,44 @@ module state {
         { ...stepped, operator: stepped.operator.union(Set(payload)) }
           .logged(Sent({ input: Clean(payload), obs: SentToOperator }))
       | DivertedOutput(diverted) =>
-        val dispatched = stepped.posted(diverted.frames.map(frame =>
-          { src: ShimAddr, dst: HubAddr(frame.hub), msg: frame.msg }))
-        dispatched.logged(Sent({ input: Clean(diverted.payload), obs: diverted.told }))
+        stepped.posted(Set({ src: ShimAddr, dst: HubAddr, msg: diverted.frame }))
+          .logged(Sent({ input: Clean(diverted.payload), obs: diverted.told }))
       | SendDoneOutput(done) => stepped.logged(Sent(done))
-      | LookupSentOutput(sent) =>
-        stepped.posted(Set({ src: ShimAddr, dst: HubAddr(sent.frame.hub), msg: sent.frame.msg }))
+      | LookupSentOutput(frame) => stepped.posted(Set({ src: ShimAddr, dst: HubAddr, msg: frame }))
       | LookupDoneOutput(done) =>
         stepped.logged(Got({ query: done.query, obs: done.result, via: via }))
       | NoShimOutput => stepped
       | ShimErrorOutput(_) => stepped
     }
 
-  /// The system after `hub` moved to `state` on its own schedule. A hub with
+  /// The system after the hub moved to `state` on its own schedule. A hub with
   /// no flush in flight has no flight time.
-  pure def hubMoved(s: System, hub: HubId, state: HubState): System =
-    { ...s,
-      hubs: s.hubs.set(hub, state),
-      flightBlocks: if (state.flush == Idle) s.flightBlocks.set(hub, 0) else s.flightBlocks,
-    }
+  pure def hubMoved(s: System, state: HubState): System =
+    { ...s, hub: state, flightBlocks: if (state.flush == Idle) 0 else s.flightBlocks }
 
-  /// The system after one more block: the chain is a block higher, no hub has
-  /// asked for the new tip yet, and every flush in flight has been out one
+  /// The system after one more block: the chain is a block higher, the hub has
+  /// not asked for the new tip yet, and a flush in flight has been out one
   /// block longer.
   pure def blockArrived(s: System): System =
     { ...s,
       indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput),
-      polled: Set(),
-      flightBlocks: s.hubs.keys().mapBy(hub =>
-        if (s.hubs.get(hub).flush == Idle) 0 else s.flightBlocks.get(hub) + 1),
+      polled: false,
+      flightBlocks: if (s.hub.flush == Idle) 0 else s.flightBlocks + 1,
     }
 
-  /// The system after `hub` took `result` on a frame from `client`. Its ack or
-  /// lookup reply is put on the wire and sent back; nothing else a hub outputs
-  /// leaves it.
-  pure def hubReplied(s: System, hub: HubId, client: Addr, result: HubResult): System =
-    val stepped = { ...s, hubs: s.hubs.set(hub, result.state) }
+  /// The system after the hub took `result` on a frame from `client`. Its ack
+  /// or lookup reply is put on the wire and sent back; nothing else a hub
+  /// outputs leaves it.
+  pure def hubReplied(s: System, client: Addr, result: HubResult): System =
+    val stepped = { ...s, hub: result.state }
     match result.out {
       | AckOutput(ack) =>
         stepped.posted(Set({
-          src: HubAddr(hub), dst: client, msg: Ack({ nonce: ack.nonce, ack: renderAck(ack.kind) }),
+          src: HubAddr, dst: client, msg: Ack({ nonce: ack.nonce, ack: renderAck(ack.kind) }),
         }))
       | LookupReplyOutput(reply) =>
         stepped.posted(Set({
-          src: HubAddr(hub), dst: client,
+          src: HubAddr, dst: client,
           msg: LookupReply({ nonce: reply.nonce, reply: render(reply.outcome) }),
         }))
       | _ => stepped
@@ -364,12 +338,12 @@ module state {
   pure def countGet(s: System): System =
     { ...s, wallet: { ...s.wallet, gets: s.wallet.gets + 1 } }
 
-  /// The third party sends `msg` to `hub`, under a nonce of its own.
-  pure def thirdPartySent(s: System, hub: HubId, msg: Msg): System =
+  /// The third party sends `msg` to the hub, under a nonce of its own.
+  pure def thirdPartySent(s: System, msg: Msg): System =
     { ...s,
       thirdParty: { ...s.thirdParty,
         nextNonce: s.thirdParty.nextNonce + 1,
         requests: s.thirdParty.requests + 1,
       },
-    }.posted(Set({ src: ThirdPartyAddr, dst: HubAddr(hub), msg: msg }))
+    }.posted(Set({ src: ThirdPartyAddr, dst: HubAddr, msg: msg }))
 }

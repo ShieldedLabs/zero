@@ -29,7 +29,7 @@ module properties {
   // The audit record
   // ------------------------------------------------------------------------
 
-  /// The true answer to a lookup for `query` at `hub`, read off the hub's
+  /// The true answer to a lookup for `query` at the hub, read off its
   /// queue and the chain. The queue comes first, as it does in the hub.
   ///
   /// `NotFound` is the true answer for a transaction that is with a flush and
@@ -46,8 +46,8 @@ module properties {
   /// > is the wrong trade.
   ///
   /// It is also the true answer for a queued payload that does not parse.
-  pure def truth(s: System, hub: HubId, query: TxId): LookupObs =
-    if (s.queuedAt(hub).exists(payload => payload.txid == Some(query)))
+  pure def truth(s: System, query: TxId): LookupObs =
+    if (s.hub.queued().exists(payload => payload.txid == Some(query)))
       Pending
     else if (s.indexer.txs.keys().contains(query))
       val tx = s.indexer.txs.get(query)
@@ -55,8 +55,8 @@ module properties {
     else
       NotFound
 
-  pure def initialAudit(s: System): Audit = {
-    everQueued: s.hubIds().mapBy(_ => Set()),
+  pure val initialAudit: Audit = {
+    everQueued: Set(),
     admitted: Map(),
     offers: Set(),
     verdicts: Set(),
@@ -75,83 +75,75 @@ module properties {
       | WQueueFull => if (phase == Draining) HubDraining else Full
     }
 
+  /// How many times the hub has offered `payload`.
+  pure def offersOf(audit: Audit, payload: Payload): int =
+    audit.offers.filter(offer => offer.payload == payload).size()
+
   /// The audit record after one step, from the states before and after it.
   pure def advance(audit: Audit, pre: System, post: System): Audit =
-    val hubs = post.hubIds()
-    val entered = hubs.map(hub =>
-      post.queuedAt(hub).map(payload => (hub, payload))).flatten()
     // A flush that was idle and is now broadcasting has just put its batch in
     // flight.
-    val offered = hubs.map(hub =>
-      match post.hubs.get(hub).flush {
-        | Broadcasting(flush) =>
-          if (pre.hubs.get(hub).flush == Idle)
-            flush.batch.keys().map(payload => {
-              hub: hub,
-              payload: payload,
-              height: post.height(),
-              attempt: flush.batch.get(payload),
-              nth: audit.offers.filter(offer => offer.hub == hub and offer.payload == payload).size(),
-            })
-          else Set()
-        | Idle => Set()
-      }).flatten()
+    val offered = match post.hub.flush {
+      | Broadcasting(flush) =>
+        if (pre.hub.flush == Idle)
+          flush.batch.keys().map(payload => {
+            payload: payload,
+            height: post.height(),
+            attempt: flush.batch.get(payload),
+            nth: audit.offersOf(payload),
+          })
+        else Set()
+      | Idle => Set()
+    }
     // An entry that was awaiting a verdict and no longer is, in a flush still
     // in flight, has just had its answer. A node judged it unless it was set
     // aside for requeue.
-    val judged = hubs.map(hub =>
-      match pre.hubs.get(hub).flush {
-        | Broadcasting(before) =>
-          match post.hubs.get(hub).flush {
-            | Broadcasting(after) =>
-              before.batch.keys().exclude(after.batch.keys()).map(payload => {
-                hub: hub,
-                payload: payload,
-                height: post.height(),
-                nth: audit.offers.filter(offer => offer.hub == hub and offer.payload == payload).size() - 1,
-                final: not(after.unplaced.keys().contains(payload)),
-              })
-            | Idle => Set()
-          }
-        | Idle => Set()
-      }).flatten()
+    val judged = match pre.hub.flush {
+      | Broadcasting(before) =>
+        match post.hub.flush {
+          | Broadcasting(after) =>
+            before.batch.keys().exclude(after.batch.keys()).map(payload => {
+              payload: payload,
+              height: post.height(),
+              nth: audit.offersOf(payload) - 1,
+              final: not(after.unplaced.keys().contains(payload)),
+            })
+          | Idle => Set()
+        }
+      | Idle => Set()
+    }
     // A flush that has ended, other than a final one, gave up on every entry
     // nothing judged that is not back in the queue.
-    val dropped = hubs.map(hub =>
-      match pre.hubs.get(hub).flush {
-        | Broadcasting(flush) =>
-          if (post.hubs.get(hub).flush == Idle and not(flush.final) and post.hubs.get(hub).phase != Down)
-            flush.unplaced.keys().exclude(post.queuedAt(hub)).map(payload =>
-              { hub: hub, payload: payload, attempts: flush.unplaced.get(payload) })
-          else Set()
-        | Idle => Set()
-      }).flatten()
+    val dropped = match pre.hub.flush {
+      | Broadcasting(flush) =>
+        if (post.hub.flush == Idle and not(flush.final) and post.hub.phase != Down)
+          flush.unplaced.keys().exclude(post.hub.queued()).map(payload =>
+            { payload: payload, attempts: flush.unplaced.get(payload) })
+        else Set()
+      | Idle => Set()
+    }
     // The lookups the shim is waiting on, or was until this step, each widen
-    // their window by what is true at the hub they went to.
+    // their window by what is true at the hub.
     val waiting = pre.shim.waiters.keys().union(post.shim.waiters.keys())
     val windows = post.lookups(ShimAddr)
       .filter(lookup => waiting.contains(lookup._1))
       .fold(audit.windows, (acc, lookup) =>
         val seen = if (acc.keys().contains(lookup._1)) acc.get(lookup._1) else Set()
-        acc.put(lookup._1, seen.union(Set(truth(post, lookup._2, lookup._3)))))
+        acc.put(lookup._1, seen.union(Set(truth(post, lookup._2)))))
     val refused = post.net.exclude(pre.net).fold(Set(), (acc, mail) =>
       match mail.msg {
         | Ack(ack) =>
           match ack.ack {
-            | WRefused(code) =>
-              match mail.src {
-                | HubAddr(hub) => acc.union(Set(refusalBehind(code, pre.hubs.get(hub).phase)))
-                | _ => acc
-              }
+            | WRefused(code) => acc.union(Set(refusalBehind(code, pre.hub.phase)))
             | WAccepted => acc
           }
         | _ => acc
       })
     {
-      everQueued: hubs.mapBy(hub => audit.everQueued.get(hub).union(post.queuedAt(hub))),
-      admitted: entered.fold(audit.admitted, (acc, entry) =>
-        if (acc.keys().contains(entry)) acc
-        else acc.put(entry, { height: post.height(), tip: post.hubs.get(entry._1).observedTip() })),
+      everQueued: audit.everQueued.union(post.hub.queued()),
+      admitted: post.hub.queued().fold(audit.admitted, (acc, payload) =>
+        if (acc.keys().contains(payload)) acc
+        else acc.put(payload, { height: post.height(), tip: post.hub.observedTip() })),
       offers: audit.offers.union(offered),
       verdicts: audit.verdicts.union(judged),
       windows: windows,
@@ -195,9 +187,8 @@ module properties {
   /// G4. Every lookup answer other than `Unavailable` was true, at the hub
   /// that gave it, at some point between the request and the answer.
   ///
-  /// It is a statement about one request and one hub. It does not say that
-  /// successive answers agree, nor that hubs agree with each other; see
-  /// `statusNeverRegresses`.
+  /// It is a statement about one request. It does not say that successive
+  /// answers agree; see `statusNeverRegresses`.
   pure def lookupValidityPerHubIn(s: System, audit: Audit): bool =
     s.events().forall(event =>
       match event {
@@ -217,59 +208,51 @@ module properties {
   /// mined `miningMargin` blocks after the true height it was published at.
   pure def offeredInTime(s: System, offer: Offer): bool =
     match offer.payload.expiry {
-      | Some(expiry) => expiry >= offer.height + s.hubs.get(offer.hub).params.miningMargin
+      | Some(expiry) => expiry >= offer.height + s.hub.params.miningMargin
       | None => true
     }
 
-  /// Whether `payload` reached `hub` as a supported wallet's would: it honours
-  /// the expiry floor, and it first entered the queue within the delivery lag
-  /// of the height it was built at.
-  pure def isConformingAndTimely(s: System, audit: Audit, hub: HubId, payload: Payload): bool =
-    val params = s.hubs.get(hub).params
+  /// Whether `payload` reached the hub as a supported wallet's would: it
+  /// honours the expiry floor, and it first entered the queue within the
+  /// delivery lag of the height it was built at.
+  pure def isConformingAndTimely(s: System, audit: Audit, payload: Payload): bool =
+    val params = s.hub.params
     and {
       conforming(payload, params.minWalletExpiry),
-      audit.admitted.keys().contains((hub, payload)),
-      audit.admitted.get((hub, payload)).height <= payload.created + params.deliveryLag,
+      audit.admitted.keys().contains(payload),
+      audit.admitted.get(payload).height <= payload.created + params.deliveryLag,
     }
 
   // G6 comes in three parts. G6a and G6b are about the moment a flush begins:
   // how much of the mining margin is left when the hub hands the batch over.
   // They do not say a node accepts the transaction, because the chain may move
   // while the batch is in flight. G6c is about the moment a node judges it.
+  // The hub specification checks all three exhaustively; here they are the
+  // closing assertions of scripted runs.
 
-  /// G6a. Every transaction one of `hubs` offers is offered with the mining
-  /// margin to spare: whatever was admitted, on every attempt. A claim about
-  /// the margin left at the offer, not about acceptance.
-  pure def offeredBeforeExpiryIn(s: System, audit: Audit, hubs: Set[HubId]): bool =
-    audit.offers.forall(offer => hubs.contains(offer.hub) implies offeredInTime(s, offer))
+  /// G6a. Every transaction the hub offers is offered with the mining margin
+  /// to spare: whatever was admitted, on every attempt. A claim about the
+  /// margin left at the offer, not about acceptance.
+  pure def offeredBeforeExpiryIn(s: System, audit: Audit): bool =
+    audit.offers.forall(offer => offeredInTime(s, offer))
 
-  /// G6b. The same, for supported wallets only and for the first time a hub
-  /// offers the transaction. It says nothing about a later offer of an entry
-  /// that was requeued; see `conformingEveryOfferBeforeExpiry`. Like G6a it is
-  /// a claim about the margin left at the offer.
-  pure def conformingFirstOfferBeforeExpiryIn(s: System, audit: Audit, hubs: Set[HubId]): bool =
+  /// G6b. The same, for supported wallets only and for the first time the hub
+  /// offers the transaction. Like G6a it is a claim about the margin left at
+  /// the offer.
+  pure def conformingFirstOfferBeforeExpiryIn(s: System, audit: Audit): bool =
     audit.offers.forall(offer =>
-      and {
-        hubs.contains(offer.hub),
-        offer.nth == 0,
-        isConformingAndTimely(s, audit, offer.hub, offer.payload),
-      } implies offeredInTime(s, offer))
+      offer.nth == 0 and isConformingAndTimely(s, audit, offer.payload) implies offeredInTime(s, offer))
 
   /// G6c. The end-to-end claim: when a node judges the first offer of a
   /// supported wallet's transaction, the transaction has not expired. It can
   /// still be mined in the next block, so the node does not turn it away for
   /// its expiry.
-  ///
-  /// The margin is what pays for the blocks that arrive while the batch is in
-  /// flight. G6c therefore needs G6b and one thing more: that fewer blocks
-  /// than the mining margin arrive during a flush (`flightWithinMargin`).
-  pure def conformingFirstOfferJudgedBeforeExpiryIn(s: System, audit: Audit, hubs: Set[HubId]): bool =
+  pure def conformingFirstOfferJudgedBeforeExpiryIn(s: System, audit: Audit): bool =
     audit.verdicts.forall(verdict =>
       and {
-        hubs.contains(verdict.hub),
         verdict.nth == 0,
         verdict.final,
-        isConformingAndTimely(s, audit, verdict.hub, verdict.payload),
+        isConformingAndTimely(s, audit, verdict.payload),
       } implies
         match verdict.payload.expiry {
           | Some(expiry) => expiry > verdict.height
@@ -280,13 +263,9 @@ module properties {
   /// is down holds nothing and knows nothing; every nonce in use was minted.
   pure def wellFormedIn(s: System): bool =
     and {
-      s.hubIds().forall(hub =>
-        val state = s.hubs.get(hub)
-        and {
-          state.queued().forall(payload =>
-            state.queue.get(payload) >= 0 and state.queue.get(payload) <= state.params.maxAttempts),
-          state.phase == Down implies state == downHub(state.params),
-        }),
+      s.hub.queued().forall(payload =>
+        s.hub.queue.get(payload) >= 0 and s.hub.queue.get(payload) <= s.hub.params.maxAttempts),
+      s.hub.phase == Down implies s.hub == downHub(s.hub.params),
       s.shim.waiters.keys().forall(nonce => nonce < s.shim.nextNonce),
       s.net.forall(mail =>
         match mail.msg {
@@ -298,11 +277,10 @@ module properties {
         }),
     }
 
-  /// G8. An accepted ack from one of `hubs` is for a payload that hub had
-  /// queued by the time it acked. It holds whether or not anyone waits for
-  /// the ack.
-  pure def ackImpliesQueuedIn(s: System, audit: Audit, hubs: Set[HubId]): bool =
-    hubs.forall(hub => s.ackedAt(hub).subseteq(audit.everQueued.get(hub)))
+  /// G8. An accepted ack from the hub is for a payload it had queued by the
+  /// time it acked. It holds whether or not anyone waits for the ack.
+  pure def ackImpliesQueuedIn(s: System, audit: Audit): bool =
+    s.acked().subseteq(audit.everQueued)
 
   // ------------------------------------------------------------------------
   // Known gaps
@@ -312,8 +290,7 @@ module properties {
   /// served, it is not later pending or missing; once pending, it is not later
   /// missing. This does not hold. Replies are reordered; a published
   /// transaction can be queued again; a flush empties the queue before the
-  /// chain has the batch; the node can reject at flush; and two hubs need not
-  /// agree.
+  /// chain has the batch; and the node can reject at flush.
   pure def statusNeverRegressesIn(s: System): bool =
     val log = s.wallet.log
     tuples(log.indices(), log.indices()).forall(((i, j)) =>
@@ -338,72 +315,34 @@ module properties {
           | _ => true
         })
 
-  /// K5. A payload a hub has acknowledged is accounted for: the hub still
-  /// holds it, queued or in flight; or the chain has it; or a node judged it
-  /// when this hub offered it, and said accepted, already known or rejected.
-  /// Being offered is not enough: an offer nothing judged settles nothing.
-  ///
-  /// This does not hold. The queue lives in memory: a crash after the ack
-  /// loses it, and so does a final flush that finds the indexer unreachable.
-  pure def ackedIsHeldOrSettledIn(s: System, audit: Audit): bool =
-    s.hubIds().forall(hub =>
-      s.ackedAt(hub).forall(payload =>
-        or {
-          s.queuedAt(hub).contains(payload),
-          s.inFlightAt(hub).contains(payload),
-          s.indexer.published().contains(payload),
-          audit.verdicts.exists(verdict =>
-            verdict.hub == hub and verdict.payload == payload and verdict.final),
-        }))
+  // K1. "Told ok" promises nothing about the hub. It is stated as two
+  // reachable states, not as a violated invariant, because the invariant is
+  // false on the ordinary success path too: the wallet is told before the hub
+  // has the frame.
 
-  /// K6. G6b without its restriction to the first offer. This does not hold
-  /// once a hub is stale: requeue judges an entry at the observed tip, which
-  /// has stopped, while the flush schedule runs on.
-  pure def conformingEveryOfferBeforeExpiryIn(s: System, audit: Audit): bool =
-    audit.offers.forall(offer => isConformingAndTimely(s, audit, offer.hub, offer.payload) implies offeredInTime(s, offer))
+  /// The nonces of the shim's submissions of `payload`.
+  pure def shimSubmissionsOf(s: System, payload: Payload): Set[Nonce] =
+    s.submissions(ShimAddr).filter(submit => submit._2 == payload).map(submit => submit._1)
 
-  // K1. "Told ok" promises nothing about any hub. It is
-  // stated as three reachable states, not as a violated invariant, because the
-  // invariant is false on the ordinary success path too: the wallet is told
-  // before any hub has the frame.
-
-  /// The shim's submissions of `payload`, as (hub, nonce).
-  pure def shimSubmissionsOf(s: System, payload: Payload): Set[(HubId, Nonce)] =
-    s.hubIds().map(hub =>
-      s.submissions(ShimAddr, hub).filter(submit => submit._2 == payload).map(submit => (hub, submit._1))
-    ).flatten()
-
-  pure def neverQueued(s: System, audit: Audit, payload: Payload): bool =
-    s.hubIds().forall(hub => not(audit.everQueued.get(hub).contains(payload)))
-
-  /// K1a. The wallet was told ok; every submission that reached a hub was
-  /// refused; no hub ever queued the payload.
+  /// K1a. The wallet was told ok; every submission that reached the hub was
+  /// refused; the hub never queued the payload.
   pure def wToldRefusedEverywhereIn(s: System, audit: Audit): bool =
     s.toldOk().exists(payload =>
       val submitted = s.shimSubmissionsOf(payload)
       and {
-        neverQueued(s, audit, payload),
+        not(audit.everQueued.contains(payload)),
         submitted != Set(),
-        submitted.forall(submit =>
-          s.acks(submit._1, ShimAddr).exists(ack => ack._1 == submit._2 and ack._2 != WAccepted)),
+        submitted.forall(nonce => s.acks(ShimAddr).exists(ack => ack._1 == nonce and ack._2 != WAccepted)),
       })
 
-  /// K1b. The wallet was told ok; no hub has answered any of the frames; no
-  /// hub ever queued the payload. The network may leave it so forever.
+  /// K1b. The wallet was told ok; the hub has answered none of the frames and
+  /// never queued the payload. The network may leave it so forever.
   pure def wToldNeverDeliveredIn(s: System, audit: Audit): bool =
     s.toldOk().exists(payload =>
       and {
-        neverQueued(s, audit, payload),
-        s.shimSubmissionsOf(payload).forall(submit =>
-          not(s.acks(submit._1, ShimAddr).exists(ack => ack._1 == submit._2))),
+        not(audit.everQueued.contains(payload)),
+        s.shimSubmissionsOf(payload).forall(nonce => not(s.acks(ShimAddr).exists(ack => ack._1 == nonce))),
       })
-
-  /// K1c. The wallet was told ok though the sweep stopped early: some hub was
-  /// never sent the payload.
-  pure def wToldPrefixOnlyIn(s: System): bool =
-    s.toldOk().exists(payload =>
-      val reached = s.shimSubmissionsOf(payload).map(submit => submit._1)
-      reached != Set() and reached != s.hubIds())
 
   // ------------------------------------------------------------------------
   // Witnesses
@@ -440,16 +379,15 @@ module properties {
   pure def wRefused(audit: Audit, refusal: Refusal): bool =
     audit.refusals.contains(refusal)
 
-  /// W5. An entry nothing judged is back in a queue.
+  /// W5. An entry nothing judged is back in the queue.
   pure def wRequeuedIn(s: System): bool =
-    s.hubIds().exists(hub =>
-      s.queuedAt(hub).exists(payload => s.hubs.get(hub).queue.get(payload) > 0))
+    s.hub.queued().exists(payload => s.hub.queue.get(payload) > 0)
 
   /// W6. A requeue dropped an entry that could no longer survive the next
   /// flush: it was given up on while it still had attempts left.
   pure def wDroppedExpiredIn(s: System, audit: Audit): bool =
     audit.dropped.exists(entry =>
-      entry.attempts + 1 <= s.hubs.get(entry.hub).params.maxAttempts)
+      entry.attempts + 1 <= s.hub.params.maxAttempts)
 
   /// W7. A requeue dropped an entry that was out of attempts: one with no
   /// expiry, which nothing else would ever have stopped.
@@ -457,7 +395,7 @@ module properties {
     audit.dropped.exists(entry => entry.payload.expiry == None)
 
   /// W8. The accepted disclosure: a third party that knows a txid learns that
-  /// it is queued at a hub. The hub withholds the bytes; it does not withhold
+  /// it is queued at the hub. The hub withholds the bytes; it does not withhold
   /// the fact. The implementation leaves this open on purpose
   /// (`zeronym/hub/src/server.rs`, in `Hub::lookup`):
   ///
@@ -468,14 +406,10 @@ module properties {
   /// > is left open deliberately.
   pure def wQueuedDisclosedIn(s: System): bool =
     tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
-      and {
-        lookup._1 == reply._1,
-        lookup._2 == reply._2,
-        reply._3 == WFound({ body: None, height: MEMPOOL_HEIGHT }),
-      })
+      lookup._1 == reply._1 and reply._2 == WFound({ body: None, height: MEMPOOL_HEIGHT }))
 
-  /// W9. A hub holds a payload it cannot parse; the wallet that sent it asks
-  /// that hub for it and is told not found. An entry without a txid can never
+  /// W9. The hub holds a payload it cannot parse; the wallet that sent it asks
+  /// for it and is told not found. An entry without a txid can never
   /// be hit.
   pure def wUnparseableMissedIn(s: System): bool =
     tuples(s.events(), s.lookups(ShimAddr)).exists(((event, lookup)) =>
@@ -484,54 +418,16 @@ module properties {
           and {
             got.obs == NotFound,
             got.via == Some(lookup._1),
-            s.queuedAt(lookup._2).exists(payload =>
+            s.hub.queued().exists(payload =>
               payload.txid == None and walletTxid(payload) == got.query),
           }
         | _ => false
       })
 
-  /// W12. A queue holds more than its capacity: requeue honours the older
+  /// W12. The queue holds more than its capacity: requeue honours the older
   /// promise over the newer limit.
   pure def wQueueOverCapacityIn(s: System): bool =
-    s.hubIds().exists(hub => s.queuedAt(hub).size() > s.hubs.get(hub).params.queueCap)
-
-  /// W13. A lookup has moved on from a hub that did not answer, and the next
-  /// hub has answered it.
-  pure def wFailoverAnsweredIn(s: System): bool =
-    s.shim.waiters.keys().exists(nonce =>
-      s.shim.waiters.get(nonce).attempt > 0 and
-        s.replies(ShimAddr).exists(reply => reply._1 == nonce and reply._3 != WError))
-
-  /// W14. Two hubs have each published the same payload, in their own flushes,
-  /// and it is on the chain: replication, not failover.
-  pure def wPublishedByTwoHubsIn(s: System, audit: Audit): bool =
-    s.indexer.published().exists(payload =>
-      and {
-        audit.offers.filter(offer => offer.payload == payload).map(offer => offer.hub).size() > 1,
-        s.hubIds().forall(hub =>
-          not(s.queuedAt(hub).contains(payload)) and not(s.inFlightAt(hub).contains(payload))),
-      })
-
-  /// A hub is publishing a scheduled batch for an epoch the chain has not
-  /// reached: its cadence clock is ahead of the true height. The batch is
-  /// smaller than the schedule intended.
-  pure def flushesAheadOfChain(s: System, hub: HubId): bool =
-    val state = s.hubs.get(hub)
-    match state.flush {
-      | Broadcasting(flush) =>
-        not(flush.final) and state.cadenceEpoch() > s.height() / state.params.flushInterval
-      | Idle => false
-    }
-
-  /// W15. Premature flush: a hub that follows its tip flushes ahead of the
-  /// chain, because the tip it was given is ahead of the chain.
-  pure def wPrematureFlushIn(s: System): bool =
-    s.hubIds().exists(hub => s.hubs.get(hub).cadence == Tracking and flushesAheadOfChain(s, hub))
-
-  /// W18. Early flush: a stale hub flushes ahead of the chain, because its
-  /// free-running clock is ahead of the chain.
-  pure def wEarlyFreeRunFlushIn(s: System): bool =
-    s.hubIds().exists(hub => s.hubs.get(hub).cadence != Tracking and flushesAheadOfChain(s, hub))
+    s.hub.queued().size() > s.hub.params.queueCap
 
   /// W16a. The wallet is served a twin of what it sent: other bytes, same txid.
   pure def wTwinServedIn(s: System): bool =
@@ -551,9 +447,9 @@ module properties {
         | _ => false
       })
 
-  /// W17. A hub has queued a payload of the third party's own making.
+  /// W17. The hub has queued a payload of the third party's own making.
   pure def wThirdPartyPayloadQueuedIn(s: System): bool =
-    s.hubIds().exists(hub => s.queuedAt(hub).intersect(s.thirdParty.own) != Set())
+    s.hub.queued().intersect(s.thirdParty.own) != Set()
 
   // ------------------------------------------------------------------------
   // Non-vacuity: the antecedent of each guarantee is reachable
@@ -579,37 +475,15 @@ module properties {
       s.wasGiven(obs => obs == NotFound),
     }
 
-  pure def vOfferedBeforeExpiryIn(audit: Audit): bool =
-    audit.offers.exists(offer => isSome(offer.payload.expiry))
-
-  pure def vConformingFirstOfferBeforeExpiryIn(s: System, audit: Audit): bool =
-    audit.offers.exists(offer =>
-      and {
-        isSome(offer.payload.expiry),
-        offer.nth == 0,
-        isConformingAndTimely(s, audit, offer.hub, offer.payload),
-      })
-
-  /// The same, for a payload admitted while the hub's tip was behind the chain.
-  pure def vConformingOfferAdmittedBehindIn(s: System, audit: Audit): bool =
-    audit.offers.exists(offer =>
-      and {
-        isSome(offer.payload.expiry),
-        offer.nth == 0,
-        isConformingAndTimely(s, audit, offer.hub, offer.payload),
-        val entry = audit.admitted.get((offer.hub, offer.payload))
-        entry.tip < entry.height,
-      })
-
   pure def vConformingFirstOfferJudgedIn(s: System, audit: Audit): bool =
     audit.verdicts.exists(verdict =>
       and {
         isSome(verdict.payload.expiry),
         verdict.nth == 0,
         verdict.final,
-        isConformingAndTimely(s, audit, verdict.hub, verdict.payload),
+        isConformingAndTimely(s, audit, verdict.payload),
       })
 
   pure def vAckImpliesQueuedIn(s: System): bool =
-    s.hubIds().exists(hub => s.ackedAt(hub) != Set())
+    s.acked() != Set()
 }
