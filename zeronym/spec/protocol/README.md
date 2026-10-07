@@ -775,6 +775,84 @@ Not built. The specification is shaped so it can be:
   to be bound to real nonces as frames appear. A payload's `id` maps to a
   fixture. The frames a step emits are `s.net` after it minus before.
 
+## The hub specification under TLC
+
+`hubMachine.qnt` is one hub, the chain and the two things the hub asks its
+indexer, built on the same `hub(state, input)` as everything else. Its
+observer keeps four sets of payloads and one height and no history, which is
+what lets TLC visit every reachable state. `tlc.sh FILE MAIN INIT STEP
+INVARIANT` checks one invariant of one configuration and prints `holds
+<distinct states> <depth>` or `violated <trace length>`; anything else,
+including a run that TLC has not finished in five minutes, is a failure.
+
+A configuration is a value held in the state and selected by a named init
+(`initTimely`, ...), whose guard is the assumptions that configuration is
+checked under. A guard that is false leaves no initial state, and `tlc.sh`
+fails on that.
+
+Measured on the machine this was written on (Apple silicon, 16 cores, 64 GB;
+Quint 0.33.0, Apalache 0.62.1, Java 27), under today's definition of
+timeliness and the hub function before the capacity refusals are removed.
+Every run had a five-minute limit. Times are for the whole route (compile,
+export, TLC), of which compile and export are about 10 s; "peak" is the
+resident size of the largest process.
+
+Exhausting each configuration (`step`, an invariant that is true everywhere):
+
+| Configuration | Payloads | Distinct states | Depth | 8 workers, 8 GB | 2 workers, 4 GB |
+|---|---|---|---|---|---|
+| `timely` | 3 | 189 297 | 44 | 17 s, 3.1 GB | 27 s, 1.9 GB |
+| `flakyTip` | 3 | 1 319 986 | 44 | 67 s, 6.3 GB | 165 s, 4.4 GB |
+| `flakyTipNoSlack` | 3 | 1 319 986 | 44 | 72 s, 6.3 GB | 166 s, 4.4 GB |
+| `flakyTipSlowFlight` | 3 | 1 761 078 | 45 | 95 s, 6.8 GB | 229 s, 4.4 GB (122 s with 4 workers) |
+| `staleLag` | 3 | not exhausted: 6 521 452 at depth 32, 679 376 on the queue | | 300 s, 8.5 GB | |
+| `staleLag` | 2 (`early`, `late`) | 1 130 260 | 42 | 62 s, 6.1 GB | 139 s, 4.4 GB |
+| `staleLagWithSlack` | 3 | not exhausted: 7 713 309 at depth 34, 580 992 on the queue | | 300 s, 8.6 GB | |
+| `staleLagWithSlack` | 2 (`early`, `late`) | 1 131 714 | 42 | 63 s, 6.2 GB | 141 s, 4.4 GB |
+
+The 8-worker runs were two at a time and the 2-worker runs three at a time,
+on 16 cores, so each is slower than it would be alone; the two timeouts were
+measured that way and were not repeated alone. The two lagging-tip
+configurations are therefore checked with two payloads. What that costs: with
+`tight`, TLC's counterexample to G6a on `staleLag` is 8 states long; without
+it, 13. No verdict differs.
+
+Verdicts (`step` unless said; 8 workers, 8 GB; every row 11 to 17 s):
+
+| Configuration | Invariant | Verdict |
+|---|---|---|
+| `timely` | G6a and G6b and G6c | holds, 189 297 states, depth 44 |
+| `timely` | `conformingEveryOfferBeforeExpiry` (K6's predicate) | holds, 189 297 states, depth 44 |
+| `timely` | `ackedIsHeldOrSettled` (K5) | violated: 5 states under `step`, 8 under `noCrashStep`, 10 under `quietStep` |
+| `flakyTip` | G6a (K3) | violated, 8 states |
+| `flakyTip` | G6b; G6c | violated, 18; 19 states |
+| `flakyTipSlowFlight` | G6b; G6c (K7) | violated, 18; 14 states |
+| `flakyTipNoSlack` | G6b (K3') | violated, 12 states |
+| `staleLag` | G6a; G6b; G6c; K6 | violated, 13; 13; 14; 13 states |
+| `staleLagWithSlack` | G6b; G6c | violated, 19; 20 states |
+
+G6b and G6c are violated on `flakyTip` and G6b on `flakyTipSlowFlight`, where
+simulation of the whole protocol reports that they hold. The counterexample
+needs a crash and a late duplicate of a submission that was first admitted on
+time; it is about what "timely" means across a restart.
+
+Reachability, each as `not(..)` and each violated: on `timely`,
+`wOfferWithExpiry` (6 states), `wConformingFirstOffer` (6),
+`wConformingFirstOfferInFlightABlock` (7), `wOffered` (7), `wRequeued` (9),
+`wDown` (2), `wRestartedOwing` (6), `wBlockInFlight` (7), `wStopped` (4); on
+`flakyTip`, the first three (6, 6, 7); `wStale` on `staleLag` (9) and on
+`staleLagWithSlack` (6).
+
+Configuration in the state against configuration as a constant, on `timely`
+with G6a, G6b and G6c: the compiled JSON is 13.7 MB with named inits and
+23.6 MB with `const CONFIG` and an instance module; both give 189 297 states
+at depth 44. TLC alone took 5 s on the constant form; the named form was timed
+only as a whole row (17 s, beside another run). Named inits are kept.
+
+Not measured: Apalache at bounded depths on this machine (one attempt failed
+on its configuration and was not repeated); the route with an empty `~/.quint`
+and Quint fetched by `npx`.
+
 ## Bounded model checking (not run)
 
 **None of the commands in this section has been executed.** Both backends need

@@ -25,8 +25,10 @@
 # assignments of the init operator, which TLC rejects. That is a workaround
 # for the export, tied to the pinned versions below.
 #
-# TLC_WORKERS and TLC_HEAP size the run. QUINT is the Quint command. TLC_TRACE,
-# if set, names a file that receives TLC's output when it finds a violation.
+# TLC_WORKERS and TLC_HEAP size the run, and TLC_TIMEOUT (seconds) bounds it: a
+# run that TLC has not finished by then is a failure, never a verdict. QUINT is
+# the Quint command. TLC_TRACE, if set, names a file that receives TLC's output
+# when it finds a violation.
 set -u
 
 QUINT=${QUINT:-"npx --yes @informalsystems/quint@0.33.0"}
@@ -36,6 +38,7 @@ APALACHE=$HOME/.quint/apalache-dist-$APALACHE_VERSION/apalache
 JAR=$APALACHE/lib/apalache.jar
 WORKERS=${TLC_WORKERS:-2}
 HEAP=${TLC_HEAP:-4g}
+TIMEOUT=${TLC_TIMEOUT:-300}
 
 die() {
   echo "FAIL  $1" >&2
@@ -89,7 +92,8 @@ if ! "$APALACHE/bin/apalache-mc" typecheck --out-dir="$work/apalache" \
 fi
 grep -q "^-* MODULE export -*\$" export.tla 2>/dev/null || die "export: no TLA+ module was written"
 
-# The filter. It rewrites `x' := e` to `x := e` in the definitions named
+# The filter. It rewrites `x' := e` to `x := e` (the export may break the line
+# after the prime) in the definitions named
 # `initWith` and INIT and in no other, so a step action whose name merely
 # contains "init" keeps its assignments. Exactly one of the two holds
 # assignments (`initWith`); any other count means the export is not shaped as
@@ -104,7 +108,7 @@ if ! awk -v names="initWith $init" -v expected=1 '
   }
   /^$/ { inside = 0 }
   inside {
-    if (gsub(/\047 :=/, " :=") > 0 && fresh) { changed++; fresh = 0 }
+    if (gsub(/\047 :=/, " :=") + sub(/\047$/, "") > 0 && fresh) { changed++; fresh = 0 }
     if ($0 ~ /[A-Za-z0-9_]\047/) { left++ }
   }
   { sub(/ MODULE export /, " MODULE " module " ") ; print }
@@ -123,8 +127,20 @@ fi
 # at its height bound.
 printf 'INIT q_init\nNEXT q_step\nINVARIANT q_inv\n' >"$main.cfg"
 java "-Xmx$HEAP" -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -deadlock -workers "$WORKERS" \
-  -metadir "$work/states" -config "$main.cfg" "$main.tla" >tlc.log 2>&1
+  -metadir "$work/states" -config "$main.cfg" "$main.tla" >tlc.log 2>&1 &
+tlc=$!
+(sleep "$TIMEOUT" && touch "$work/timed-out" && kill "$tlc") >/dev/null 2>&1 &
+watchdog=$!
+wait "$tlc"
 status=$?
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
+
+# Out of time. How far TLC got is reported, as its last progress line has it.
+if [ -f "$work/timed-out" ]; then
+  reached=$(sed -n 's/^Progress(\([0-9]*\)).*, \([0-9,]*\) distinct states found.*, \([0-9,]*\) states left on queue.*/\2 distinct states, depth \1, \3 on queue/p' tlc.log | tail -1)
+  die "tlc: not exhausted in $TIMEOUT s (${reached:-no progress reported})"
+fi
 
 # A dead init (a guard that is false) leaves TLC with nothing to explore, and
 # it reports "No error has been found".

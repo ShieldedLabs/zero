@@ -446,7 +446,7 @@ module hub {
         | LookupHInput(lookup) =>
           val bodies = Set(None).union(universe.map(payload => Some(payload)))
           val answers = tuples(bodies, heights)
-            .map(((body, height)) => IFound({ body: body, height: height }))
+            .map(((body, claimed)) => IFound({ body: body, height: claimed }))
             .union(Set(INotFound, IUnavailable))
           val outcomes = Set(QueueHit).union(answers.map(answer => FromIndexer(answer)))
           honest.union(outcomes.map(outcome => state.toLookupReplyOutput(lookup.nonce, outcome)))

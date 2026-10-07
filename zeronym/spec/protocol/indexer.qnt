@@ -88,13 +88,13 @@ module indexer {
   pure def indexerApply(state: IndexerState, input: IndexerInput, output: IndexerOutput): IndexerState =
     match input {
       | BroadcastIInput(payload) =>
-        val seen = { ...state, offered: state.offered.union(Set(payload)) }
+        val noted = { ...state, offered: state.offered.union(Set(payload)) }
         match payload.txid {
           | Some(txid) =>
             if (output == VerdictOutput(Accepted))
-              { ...seen, txs: seen.txs.put(txid, { payload: payload, at: InMempool }) }
-            else seen
-          | None => seen
+              { ...noted, txs: noted.txs.put(txid, { payload: payload, at: InMempool }) }
+            else noted
+          | None => noted
         }
       | LookupIInput(_) => state
       | AdvanceIInput => { ...state, height: state.height + 1 }
@@ -181,7 +181,7 @@ module indexer {
       | LookupIInput(_) =>
         val bodies = Set(None).union(state.servable(universe).map(payload => Some(payload)))
         tuples(bodies, heights)
-          .map(((body, height)) => AnswerOutput(IFound({ body: body, height: height })))
+          .map(((body, claimed)) => AnswerOutput(IFound({ body: body, height: claimed })))
           .union(Set(AnswerOutput(INotFound), AnswerOutput(IUnavailable)))
           .union(honestIndexerOutputs(state, input))
       | AdvanceIInput => honestIndexerOutputs(state, input)
