@@ -12,8 +12,8 @@ modify.
 ## What "holds" means here
 
 **Bounded random simulation.** Every "holds" below was produced by
-`quint run`: fixed constants, at most 40 or 80 steps per trace, 2000 random
-traces per run, one seed. It is not a proof and it is not exhaustive to any
+`quint run`: fixed constants, at most 40, 60 or 80 steps per trace, 2000
+random traces per run (a few rows more), one seed. It is not a proof and it is not exhaustive to any
 depth. A property that "holds" is one no sampled trace violated.
 
 **`quint verify` has not been run**, on Apalache or on TLC, by anyone, on any
@@ -42,16 +42,16 @@ specification. No Java is needed.
 |---|---|---|---|
 | 1 | typecheck | `quint typecheck` on every file | ok |
 | 2 | tests | `quint test` on the spells, the four functional test files, each scenario and trust module, each configuration | all pass |
-| 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` | "holds" rows hold; "fails" rows are violated |
+| 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` ("fails" rows: 40 to 80 steps, a few with more traces) | "holds" rows hold; "fails" rows are violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 5 | two-state properties | `QUINT_TLC=1`, opt-in, **never run** | unknown |
 
 Measured on the machine it was written on (Apple silicon, Quint's Rust
-evaluator): 3 min 24 s wall with four rows at a time (`QUINT_JOBS=4`, the
-default), about 11 minutes of CPU. `QUINT_SAMPLES` changes the trace count.
-The rarest witnesses are reached in only 3 to 6 of the 2000 traces, so a lower
-count risks losing them. One "fails" row has a count of its own, 15000; see
-finding 2.
+evaluator): 4 min 40 s wall with four rows at a time (`QUINT_JOBS=4`, the
+default), about 14 minutes of CPU. It has not been timed on a CI runner.
+`QUINT_SAMPLES` changes the trace count. The rarest witnesses are reached in
+only 2 to 6 of the 2000 traces, so a lower count risks losing them. Five
+"fails" rows have a larger count of their own, written on the row.
 
 Tier 3 "fails" rows and tier 3b run under `step` or under one of two narrower
 relations, `quietStep` (no faults, no outsiders) and `outageStep` (the indexer
@@ -166,8 +166,16 @@ definitions they justify.
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** A transaction's status only moves forward: no reorg of an included
   transaction, no mempool eviction. The operator's indexer publishes nothing.
-- **Tip.** `TipTimely`: every running hub observes each block before the next,
-  and a due flush has begun before the next block. `TipMayRegress`: a tip
+- **Flight time.** At most `MAX_FLIGHT_BLOCKS` blocks arrive while one flush
+  is in flight, and that is fewer than the mining margin
+  (`flightWithinMargin`). The implementation bounds each call to the indexer
+  (`RPC_TIMEOUT`, `hub/src/chain.rs`), not the batch, and neither in blocks:
+  the code does not enforce this. A hub whose flush is in flight does not look
+  at the tip.
+- **Tip.** In every model a due flush has begun before the next block.
+  `TipTimely`: every running, idle hub asks for the tip at each block. An
+  honest indexer answers with the true height; a Byzantine one is asked just
+  as often and controls only the answer. `TipMayRegress`: a tip
   report may trail the chain by up to `REORG_ALLOWANCE`. `TipMayLag`: a hub may
   hear nothing for a while, and is stale once the silence reaches
   `STALE_WINDOW` blocks; a stale hub's free-running clock is assumed never
@@ -331,6 +339,14 @@ flowchart LR
 
 The zero-body indexer answer is not something the honest indexer relation produces, but the honest hub and honest shim pass it through (S22), and one endpoint out of several is enough to inject it (S28). It is therefore reachable only in `byzIndexer`, where "Byzantine indexer" includes "one misbehaving endpoint".
 
+The encoding is not injective at that point, and that is by design: the pending
+sentinel has no bytes to tell it apart by. The shim reads both as pending, for
+every query (F2), so a wallet cannot tell "queued at the hub" from "an indexer
+said found and returned nothing". `meaning` gives the two different meanings;
+`interpretReply` after `render` gives one observation. `indexerForgesPendingTest`
+is the trace-level consequence: the wallet is told pending for a transaction
+nobody holds, and G4 fails.
+
 ## Layout
 
 Only `protocol.qnt` declares a constant or a variable. Every other module is
@@ -348,7 +364,7 @@ pure.
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, A1-A3, the run vocabulary |
-| `instances.qnt` | `configs`, then one module per configuration | The fourteen configurations |
+| `instances.qnt` | `configs`, then one module per configuration | The fifteen configurations |
 | `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14 |
 | `tests/scenariosTest.qnt` | one module per configuration used | Witnesses and pinned gap causes |
 | `tests/trustTest.qnt` | one module per Byzantine configuration | One run and one control per "required" cell |
@@ -409,7 +425,12 @@ symmetric: the tip is the maximum over endpoints, a lookup takes the first
 "found", a broadcast takes the best verdict. So **one** misbehaving endpoint is
 enough to raise the tip, inject a lookup answer or change a verdict, while
 lowering or freezing the tip takes **every** endpoint. Each indexer cell below
-says which it needs.
+says which it needs. That is prose about the abstraction: the model has one
+abstract indexer, standing for the fold over all endpoints, and **does not
+enforce** the difference. Its Byzantine relation can report any tip, high or
+low. Modelling the endpoints as a set, so that the transition relation itself
+separates "one endpoint" from "all of them", was considered and not done: one
+abstract indexer per hub was a decision of the design.
 
 ### Configurations
 
@@ -430,6 +451,7 @@ One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 | `replicatedOneByz` | 2 | `DispatchOnly` | H / H, **B** / H | timely |
 | `flakyTip` | 1 | `DispatchOnly` | H / H / H | may regress |
 | `flakyTipNoSlack` | 1 | `DispatchOnly` | H / H / H | may regress; `reorgSlackFits` false |
+| `flakyTipSlowFlight` | 1 | `DispatchOnly` | H / H / H | may regress; `flightWithinMargin` false |
 | `staleLag` | 1 | `DispatchOnly` | H / H / H | may lag; `staleSlackFits` false, as shipped |
 | `staleLagWithSlack` | 1 | `DispatchOnly` | H / H / H | may lag; `staleSlackFits` true |
 
@@ -439,17 +461,34 @@ numbers:
 | | Interval | Margin | Delivery lag | Reorg allowance | Staleness window | Expiry floor |
 |---|---|---|---|---|---|---|
 | Shipped | 20 | 4 | 6 | 10 | 12 blocks (15 min at 75 s) | 40 |
-| Model | 3 | 1 | 1 | 1 | 3 | 6 |
+| Model | 3 | 2 | 1 | 1 | 3 | 7 |
 
-The slack `floor - (interval + margin + lag)` equals the reorg allowance in
-both (10 and 1). `interval + margin + lag + (window - 1)` exceeds the floor by
-one in both (41 > 40, 7 > 6). `flakyTipNoSlack` uses a floor of 5 and
-`staleLagWithSlack` a floor of 7. Also: at most 2 requeues, room for 2 entries,
+The relations kept, each asserted by `assumptionsTest` through
+`shippedRelationsKept`:
+
+- the slack `floor - (interval + margin + lag)` equals the reorg allowance
+  (10 and 1);
+- the staleness window exceeds the margin (12 > 4, 3 > 2) and the slack
+  (12 > 10, 3 > 1);
+- `interval + margin + lag + (window - 1)` exceeds the floor by exactly one
+  (41 = 40 + 1, 8 = 7 + 1);
+- `interval + lag + (window - 1)` does not exceed it (37 <= 40, 6 <= 7).
+
+The margin is 2, not 1, so that one block can arrive while a flush is in flight
+and still be inside it: `MAX_FLIGHT_BLOCKS` is 1 everywhere except
+`flakyTipSlowFlight`, where it is 2. `flakyTipNoSlack` uses a floor of 6 and
+`staleLagWithSlack` a floor of 8; those two do not keep the relations, and
+their tests assert that. Also: at most 2 requeues, room for 2 entries,
 heights up to 12, at most 3 sends and 3 lookups by the wallet and 3 requests by
 the third party.
 
 Each configuration has an `assumptionsTest`. The simulator does not enforce
-`assume`, so that test is the check that counts.
+`assume`, so that test is the check that counts. Every `assume` in
+`protocol.qnt` is true of every configuration. `reorgSlackFits` and
+`flightWithinMargin` are assumed only where the configuration says it relies on
+them (`reliesOnReorgSlack`, `reliesOnFlightWithinMargin`); `flakyTipNoSlack`
+and `flakyTipSlowFlight` each drop one, and their tests assert it is false.
+`staleSlackFits` is never assumed.
 
 ## Properties
 
@@ -458,7 +497,7 @@ Each configuration has an `assumptionsTest`. The simulator does not enforce
 | Id | Statement | Test |
 |---|---|---|
 | F1 | `interpretReply(render(o), q) == meaning(o, q)` for every outcome a queue or an honest indexer produces | `wireTest::renderThenInterpretIsMeaningTest` |
-| F2 | The documented collision: a queue hit and an indexer's "found, height 0, no body" render to the same reply. `render` is injective on honest outcomes | `wireTest::sentinelCollisionTest` |
+| F2 | The documented collision: a queue hit and an indexer's "found, height 0, no body" render to the same reply, and the shim reads both as pending for every query. `render` is injective on honest outcomes | `wireTest::sentinelCollisionTest` |
 | F3 | The shim serves a transaction only if its txid is the one asked for. A twin is served; the height is passed through unchecked | `wireTest::servedOnlyOnMatchingTxidTest` |
 | F4 | An error never becomes "not found" | `wireTest::errorIsNeverNotFoundTest` |
 | F5 | The shim forwards only cleanly read pass-through transactions | `shimTest::onlyPassThroughIsForwardedTest` |
@@ -481,8 +520,9 @@ Each configuration has an `assumptionsTest`. The simulator does not enforce
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true. It does not say that successive answers agree, or that hubs agree |
 | G5 | `toldImpliesQueued` | A wallet told ok can rely on some hub having queued the transaction. Claimed under `AwaitVerdict` only |
-| G6a | `offeredBeforeExpiry` | Every transaction a hub publishes is published with the mining margin to spare: whatever was admitted, on every attempt. Claimed under a timely tip |
-| G6b | `conformingFirstOfferBeforeExpiry` | The same for supported wallets and for the first time a hub publishes the transaction. Nothing about a later offer of a requeued entry |
+| G6a | `offeredBeforeExpiry` | Every transaction a hub offers is offered with the mining margin to spare: whatever was admitted, on every attempt. About the margin left when the flush begins, not about acceptance. Claimed under a timely tip |
+| G6b | `conformingFirstOfferBeforeExpiry` | The same for supported wallets and for the first time a hub offers the transaction. Nothing about a later offer of a requeued entry. Also about the margin at the offer |
+| G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and `flightWithinMargin` |
 | G7 | `wellFormed` | Structural sanity; checked in every configuration; not a trust-matrix row |
 | G8 | `ackImpliesQueued` | An accepted ack from a hub is for a payload that hub had queued by then, whether or not anyone waits for the ack |
 
@@ -514,8 +554,17 @@ the component is Byzantine and the guarantee fails, followed by its control
 (same wallet inputs, honest transition, guarantee holds); the simulation row
 for such a cell shows polarity only.
 
-Every cell was a prediction. **Observed verdicts agree with the predictions in
-every cell of this table except the G6b entries marked below.**
+Every cell was a prediction, except the G6c row, which was added after review
+and derived by running. **Observed verdicts agree with the predictions in every
+cell of this table except the G6b entries marked below.**
+
+The two tip-withholding runs in the indexer column have the hub ask for the tip
+at every block and the indexer answer with a stale one; their controls are the
+same polls answered truthfully. The simulation rows for those cells classify a
+verdict line and cannot say which lie a trace used. The counterexamples the
+simulator finds at seed 7 were read by hand and both use reports below the true
+height. With truthful answers `byzIndexer` behaves as `baseline`, where the
+chain cannot pass a running, idle hub that has not asked.
 
 | | All honest | Byzantine shim | Byzantine hub | Byzantine indexer |
 |---|---|---|---|---|
@@ -527,6 +576,7 @@ every cell of this table except the G6b entries marked below.**
 | G8 | holds (`baseline`, `awaitAck`) | holds (`byzShim`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
 | G6a | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
 | G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 
 One Byzantine replica out of two (`replicatedOneByz`):
 
@@ -535,7 +585,7 @@ One Byzantine replica out of two (`replicatedOneByz`):
 | G2 | required of every hub | `oneReplicaServesQueuedBodyTest` |
 | G4 | required of every hub | `cursorLandsOnLyingReplicaTest` |
 | G3 | holds | simulation; `wrongTransactionIsRefusedTest` |
-| G8, G6a, G6b for the honest hub | hold | simulation of `ackImpliesQueuedForHonestHubs`, `offeredBeforeExpiryForHonestHubs`, `conformingFirstOfferBeforeExpiryForHonestHubs`; `honestReplicaKeepsItsGuaranteesTest` |
+| G8, G6a, G6b, G6c for the honest hub | hold | simulation of `ackImpliesQueuedForHonestHubs`, `offeredBeforeExpiryForHonestHubs`, `conformingFirstOfferBeforeExpiryForHonestHubs`, `conformingFirstOfferJudgedBeforeExpiryForHonestHubs`; `honestReplicaKeepsItsGuaranteesTest` |
 | G5 | not applicable | `AwaitVerdict` has one hub |
 | "some honest hub queued it" after told ok | not a guarantee | `honestReplicaKeepsItsGuaranteesTest` |
 
@@ -555,10 +605,18 @@ replica is enough to void G2 and G4.
 | K1 | Under `DispatchOnly`, told ok does not mean any hub ever admits it | `baseline`, `replicated` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered`, `wToldPrefixOnly` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest`, `toldOkAfterPrefixSendTest` |
 | K2 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | `baseline`, `replicated` | violated invariant | violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest`, `hubsDisagreeTest` |
 | K3 | G6a for a tight-expiry transaction: admitted against a tip reported below a boundary already flushed | `flakyTip` | violated invariant | violated, as predicted | `tightExpiryAdmittedBehindFlushedBoundaryTest` |
-| K3' | G6b when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
-| K4 | G6a, and G6b on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
-| K5 | `ackedIsHeldOrOffered`: an acknowledged payload is still held, or was offered | `baseline`, `awaitAck` | violated invariant | violated by a crash. **Not violated by a failed final flush**, which was predicted as a second cause | `ackedThenCrashedTest`, `toldOkAdmittedThenLostTest`, `ackedThenLostAtDrainTest` |
+| K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
+| K4 | G6a, and G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
+| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `baseline`, `awaitAck` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `toldOkAdmittedThenLostTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
 | K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
+
+| K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
+
+K7 was added after review. The four-term budget (`reorgSlackFits`) holds with
+equality in the shipped constants, so a transaction that uses all of it is
+offered with exactly the mining margin left. The margin is then the only thing
+that pays for blocks arriving while the batch is in flight, and nothing in the
+code bounds a flight in blocks.
 
 K1 is not stated as a violated invariant because the invariant is false on the
 ordinary success path too: under `DispatchOnly` the wallet is told ok before
@@ -588,7 +646,8 @@ Non-vacuity: for each guarantee, a state where its antecedent holds, reached on
 every configuration where the guarantee is claimed: `vOperatorBlind`,
 `vQueuedBytesConfidential`, `vTxidAuthenticity`, `vLookupValidityPerHub` (the
 log has a pending, a served transaction and a not-found), `vToldImpliesQueued`,
-`vOfferedBeforeExpiry`, `vConformingFirstOfferBeforeExpiry`, `vAckImpliesQueued`,
+`vOfferedBeforeExpiry`, `vConformingFirstOfferBeforeExpiry`,
+`vConformingFirstOfferJudged`, `vAckImpliesQueued`,
 and on `flakyTip` also `vConformingOfferAdmittedBehind` (a conforming first
 offer of a payload admitted while the hub's tip was behind the chain).
 
@@ -615,17 +674,19 @@ changed to make a prediction come out.
 **1. K4, confirmed: a short tip silence costs a supported wallet its mining
 margin, on the shipped relation between the constants.** In
 `silenceAcrossBoundaryMissesMarginTest`: a transaction built at height 2 with
-expiry 8 (the floor) is admitted at 3. The hub last sees the tip at 5, one
+expiry 9 (the floor) is admitted at 3. The hub last sees the tip at 5, one
 block short of the flush at 6. Its cadence follows the tip it last saw, so
-nothing is flushed until it goes stale at 8. The transaction is published at
-height 8: not yet expired, and without the block the margin reserves
-(`8 < 8 + 1`). With the shipped numbers the same shape gives a first offer at
-`created + 6 + 20 + 11 = created + 37` against an expiry of `created + 40`:
-three blocks of margin where four are reserved. `staleSlackFits`
-(`interval + margin + lag + window - 1 <= floor`) is false of the shipped
-constants (41 > 40). The one-block figure depends on reading 15 minutes as
-exactly 12 blocks; blocks are not that regular, so the real shortfall is
-sometimes larger.
+nothing is flushed until it goes stale at 8. The transaction is offered at
+height 8 with one block of margin where two are reserved (`9 < 8 + 2`). One
+block then arrives while the batch is in flight, which the model permits and
+the margin exists to pay for, and at height 9 no honest node can accept it:
+G6b and G6c both fail. With the shipped numbers the same shape gives a first
+offer at `created + 6 + 20 + 11 = created + 37` against an expiry of
+`created + 40`: three blocks of margin where four are reserved.
+`staleSlackFits` (`interval + margin + lag + window - 1 <= floor`) is false of
+the shipped constants (41 > 40). The one-block figure depends on reading 15
+minutes as exactly 12 blocks; blocks are not that regular, so the real
+shortfall is sometimes larger.
 
 **2. The relation that fixes K4 does not give G6b: an early free-running flush
 spends the next epoch.** This was predicted to hold on `staleLagWithSlack` and
@@ -636,23 +697,31 @@ tip again, at 5. Admission knows the tip and not the schedule's history: it
 admits a transaction counting on the flush at 6. That flush has already
 happened; the cadence loop flushes only when the epoch exceeds the last one it
 recorded. The transaction waits for the flush at 9, and a further silence of
-two blocks, short of the staleness window, makes that one late: it is published
-at 11 with expiry 11. By the arithmetic of that run each half alone is
-harmless at these numbers; simulation finds the combination about once in ten
-thousand traces.
-The implementation's comment calls a free-running clock that runs ahead "the
-safe direction". It is safe for what is in the queue when it runs. It is not
-safe for what is admitted after the tip returns, while the chain is still
-behind an epoch the clock has already spent. The model bounds how far ahead the
-clock may be (one interval); the code does not, and a clock further ahead
-would spend more than one epoch. That last sentence is a reading of
-`cadence_height` in `hub/src/batcher.rs`, not something the model shows.
+two blocks, short of the staleness window, makes that one late: it is offered
+at 11 with expiry 12, half its margin gone, and after one block in flight the
+node cannot accept it. By the arithmetic of that run each half alone is
+harmless at these numbers; simulation finds the combination about once in a few
+thousand traces of 60 steps. The implementation's comment calls a free-running
+clock that runs ahead "the safe direction". It is safe for what is in the queue
+when it runs. It is not safe for what is admitted after the tip returns, while
+the chain is still behind an epoch the clock has already spent.
 
-**3. K5: a failed final flush does not violate `ackedIsHeldOrOffered`.** The
-entry was offered, which is all the invariant asks. The transaction is lost all
-the same, and `ackedThenLostAtDrainTest` pins that: hub stopped, nothing held,
-nothing on the chain, an accepted ack in the soup. The invariant is violated by
-a crash only.
+The model lets the free-running clock be at most one flush interval ahead of
+the chain, so it can spend one epoch and no more. `cadence_height`
+(`hub/src/batcher.rs`) adds elapsed time over the nominal block time with no
+cap. Reading that code, a clock further ahead would record a later epoch and
+skip more than one boundary. **That is a reading of the code. The model does
+not exhibit it and no run here shows it.**
+
+**3. K5: an acknowledged payload can be lost three ways, all with every
+component honest.** The invariant first written, "held or offered", counted an
+offer at the start of a flush as settling the payload, and so was not violated
+by a final flush that nothing judged. Review pointed that out. It is restated
+as `ackedIsHeldOrSettled`: held by the hub, or on the chain, or judged by a
+node. That is violated by a crash (`ackedThenCrashedTest`), by a draining hub's
+final flush that finds the indexer unreachable (`ackedThenLostAtDrainTest`),
+and by a requeue that drops an entry as expired after an outage
+(`requeueAndDropTest`). The third was not predicted; simulation found it.
 
 **4. G3 does not depend on the shim's txid check when every component is
 honest.** Removing the comparison from `interpretReply` leaves G3 holding on
@@ -662,11 +731,21 @@ claimed to matter. G3 is kept as a guarantee: it is falsifiable where it is
 claimed "by the check", and other changes to honest code would break it on
 `baseline`.
 
-**5. G6b needs the hub, but not for the predicted reason.** A hub that admits
+**5. G6b and G6c need the hub, but not for the predicted reason.** A hub that admits
 past the expiry rule cannot break G6b, because the expiry rule never refuses a
 conforming, timely transaction (F7). What breaks it is a hub that admits while
 it has no tip, when an honest hub refuses everything
 (`hubAdmitsBeforeFirstTipTest`).
+
+**7. G6 stops at the offer; G6c and K7 were added to see past it.** G6a and
+G6b stamp an offer when the flush begins. The node judges later, and the chain
+may have moved. With the first scaling (margin 1) the runs that showed "the
+slack is exactly enough" ended one enabled block before the transaction became
+unacceptable. The schedule is now scaled with a margin of 2, flight time is
+bounded by `MAX_FLIGHT_BLOCKS`, and G6c is checked at the verdict. Observed:
+G6c holds on `baseline`, `flakyTip` and `byzShim`, and for the honest hub of
+`replicatedOneByz`; it fails wherever G6b fails, and on `flakyTipSlowFlight`
+where G6b holds.
 
 **6. The second clause of G1, "and no lookup", is not stated.** No output of
 the shim function routes a lookup to the operator, so the clause would hold by
@@ -718,6 +797,24 @@ quint verify --main=awaitAck --invariant=ackImpliesQueued --max-steps=12 zeronym
 quint verify --main=awaitAckByzIndexer --invariant=toldImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=flakyTip --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
+
+The same for G6c, and the configurations whose point is a violation (each
+should report one; `flakyTipNoSlack` and `flakyTipSlowFlight` satisfy every
+`assume`, so a checker that honours `assume` still has states to explore):
+
+```sh
+quint verify --main=baseline --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=byzShim --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=flakyTip --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=flakyTipNoSlack --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=flakyTipSlowFlight --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=staleLag --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=staleLagWithSlack --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
+quint verify --main=baseline --invariant=ackedIsHeldOrSettled --max-steps=12 zeronym/spec/protocol/instances.qnt
+```
+
+Several of the scripted counterexamples are longer than 12 steps, so
+`--max-steps=12` may not reach these violations; raise it as needed.
 
 Each witness, as a reachability check that should report a violation:
 
