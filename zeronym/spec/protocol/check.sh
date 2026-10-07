@@ -74,9 +74,9 @@ finish() {
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
 FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
-INSTANCES="baseline byzShim byzHub byzIndexer awaitAck awaitAckByzShim awaitAckByzHub awaitAckByzIndexer replicated replicatedOneByz"
-SCENARIOS="baselineScenarios awaitAckScenarios replicatedScenarios byzHubScenarios"
-TRUST="byzShimTrust awaitAckByzShimTrust byzHubTrust awaitAckByzHubTrust byzIndexerTrust replicatedOneByzTrust"
+INSTANCES="baseline byzShim byzHub byzIndexer replicated replicatedOneByz"
+SCENARIOS="baselineScenarios replicatedScenarios byzHubScenarios"
+TRUST="byzShimTrust byzHubTrust byzIndexerTrust replicatedOneByzTrust"
 
 fail() {
   echo "FAIL  $1"
@@ -283,10 +283,6 @@ job holds baseline            operatorBlind queuedBytesConfidential txidAuthenti
 job holds byzShim             ackImpliesQueued wellFormed
 job holds byzHub              operatorBlind txidAuthenticity wellFormed
 job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
-job holds awaitAck            toldImpliesQueued ackImpliesQueued wellFormed
-job holds awaitAckByzShim     wellFormed
-job holds awaitAckByzHub      wellFormed
-job holds awaitAckByzIndexer  toldImpliesQueued wellFormed
 job holds replicated          lookupValidityPerHub wellFormed
 job holds replicatedOneByz    txidAuthenticity ackImpliesQueuedForHonestHubs wellFormed
 
@@ -296,11 +292,9 @@ job fails byzShim             step      40 operatorBlind
 job fails byzShim             step      40 queuedBytesConfidential
 job fails byzShim             step      40 txidAuthenticity
 job fails byzShim             step      40 lookupValidityPerHub
-job fails awaitAckByzShim     step      40 toldImpliesQueued
 job fails byzHub              step      40 queuedBytesConfidential
 job fails byzHub              step      40 lookupValidityPerHub
 job fails byzHub              step      40 ackImpliesQueued
-job fails awaitAckByzHub      step      40 toldImpliesQueued
 job fails byzIndexer          step      40 queuedBytesConfidential
 job fails byzIndexer          step      40 lookupValidityPerHub
 job fails replicatedOneByz    step      40 queuedBytesConfidential
@@ -343,12 +337,6 @@ job reaches byzHub quietStep 40 \
 job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
   -- operatorBlind txidAuthenticity ackImpliesQueued wellFormed
-job reaches awaitAck quietStep 40 \
-  vToldImpliesQueued vAckImpliesQueued \
-  -- toldImpliesQueued ackImpliesQueued wellFormed
-job reaches awaitAckByzIndexer quietStep 40 \
-  vToldImpliesQueued \
-  -- toldImpliesQueued wellFormed
 # W13, K1c.
 job reaches replicated step 40 \
   wFailoverAnswered wToldPrefixOnly \

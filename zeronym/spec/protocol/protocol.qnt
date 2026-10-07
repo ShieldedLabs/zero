@@ -92,7 +92,6 @@ module protocol {
   pure val MAX_HEIGHT = CONFIG.maxHeight
   pure val MAX_REQUESTS = CONFIG.maxRequests
 
-  pure val SUBMIT_MODE = CONFIG.submitMode
   pure val ROLES = CONFIG.roles
   pure val TIP = CONFIG.tip
 
@@ -188,10 +187,6 @@ module protocol {
     ROLES.hubs.keys() == HUBS,
   }
 
-  /// Only the HTTP transport returns the hub's decision to the wallet, and it
-  /// has one hub address.
-  pure val awaitVerdictSingleHub = SUBMIT_MODE == AwaitVerdict implies HUBS.size() == 1
-
   /// The assumptions every configuration meets. `reorgSlackFits` and
   /// `flightWithinMargin` are kept apart: a configuration says whether it
   /// relies on each, and some exist to show what happens without one.
@@ -201,7 +196,6 @@ module protocol {
     flushIntervalPositive,
     hubsNonEmpty,
     payloadsWellFormed,
-    awaitVerdictSingleHub,
   }
 
   assume _ = budgetFits
@@ -211,7 +205,6 @@ module protocol {
   assume _ = flushIntervalPositive
   assume _ = hubsNonEmpty
   assume _ = payloadsWellFormed
-  assume _ = awaitVerdictSingleHub
 
   // ------------------------------------------------------------------------
   // State
@@ -453,23 +446,6 @@ module protocol {
       nondet nonce = oneOf(s.shim.waiters.keys())
       nondet result = oneOf(shimResults(s.shim, LookupTimeoutSInput(nonce)))
       shimLookupTimeoutWith(nonce, result)
-    },
-  }
-
-  /// The shim gives up waiting for an ack.
-  action shimAckTimeoutWith(nonce: Nonce, result: ShimResult): bool = all {
-    s.shim.hasWaiter(nonce),
-    shimResults(s.shim, AckTimeoutSInput(nonce)).contains(result),
-    not(isShimError(result.out)),
-    commit(s.shimStepped(result, None), ShimAckTimeout(nonce)),
-  }
-
-  action shimAckTimeout = all {
-    s.shim.waiters.keys() != Set(),
-    {
-      nondet nonce = oneOf(s.shim.waiters.keys())
-      nondet result = oneOf(shimResults(s.shim, AckTimeoutSInput(nonce)))
-      shimAckTimeoutWith(nonce, result)
     },
   }
 
@@ -775,7 +751,7 @@ module protocol {
 
   /// A fault: a timeout, a shutdown, a crash, a restart.
   action faultStep = any {
-    shimLookupTimeout, shimAckTimeout, hubBeginDrain, hubCrash, hubRestart,
+    shimLookupTimeout, hubBeginDrain, hubCrash, hubRestart,
   }
 
   /// A step by someone outside the protocol: the third party, or a Byzantine
@@ -848,7 +824,6 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
-  val toldImpliesQueued = toldImpliesQueuedIn(s, audit)
   val offeredBeforeExpiry = offeredBeforeExpiryIn(s, audit, HUBS)
   val conformingFirstOfferBeforeExpiry = conformingFirstOfferBeforeExpiryIn(s, audit, HUBS)
   val conformingFirstOfferJudgedBeforeExpiry = conformingFirstOfferJudgedBeforeExpiryIn(s, audit, HUBS)
@@ -908,7 +883,6 @@ module protocol {
   val vQueuedBytesConfidential = vQueuedBytesConfidentialIn(s)
   val vTxidAuthenticity = vTxidAuthenticityIn(s)
   val vLookupValidityPerHub = vLookupValidityPerHubIn(s)
-  val vToldImpliesQueued = vToldImpliesQueuedIn(s)
   val vOfferedBeforeExpiry = vOfferedBeforeExpiryIn(audit)
   val vConformingFirstOfferBeforeExpiry = vConformingFirstOfferBeforeExpiryIn(s, audit)
   val vConformingOfferAdmittedBehind = vConformingOfferAdmittedBehindIn(s, audit)
@@ -1052,9 +1026,6 @@ module protocol {
   /// The shim's wait under `nonce` times out.
   action timeOutLookup(nonce: Nonce): bool =
     shimLookupTimeoutWith(nonce, shim(s.shim, LookupTimeoutSInput(nonce)))
-
-  action timeOutAck(nonce: Nonce): bool =
-    shimAckTimeoutWith(nonce, shim(s.shim, AckTimeoutSInput(nonce)))
 
   /// An honest indexer gives `verdict` on `payload`, with the effect that
   /// verdict has.

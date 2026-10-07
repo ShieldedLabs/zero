@@ -157,12 +157,6 @@ module types {
   /// How a stale hub's free-running cadence clock relates to the true height.
   type FreeRun = NotSlower | MayBeSlower
 
-  /// Who the wallet hears from on a diverted send. `DispatchOnly` is the mixnet
-  /// transport: the shim answers once a frame is handed over and never waits
-  /// for the ack. `AwaitVerdict` is the HTTP transport: the hub's decision is
-  /// the answer.
-  type SubmitMode = DispatchOnly | AwaitVerdict
-
   // ------------------------------------------------------------------------
   // What the wallet observes
   // ------------------------------------------------------------------------
@@ -170,7 +164,6 @@ module types {
   /// The answer to a `SendTransaction`.
   type SendObs =
     | SentOk            // diverted; error code 0
-    | SentRejected      // the hub refused it
     | SentToOperator    // not a migration; the operator's indexer has it
     | SendUnavailable   // failed closed: unreadable body, or no hub reachable
     | SendInvalid       // empty body
@@ -217,7 +210,6 @@ module types {
     maxFlightBlocks: int,
     maxHeight: Height,
     maxRequests: int,
-    submitMode: SubmitMode,
     roles: Roles,
     tip: TipModel,
     // Which of the two optional timing relations this configuration relies

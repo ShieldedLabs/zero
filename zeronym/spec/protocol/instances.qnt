@@ -78,7 +78,6 @@ module configs {
     maxFlightBlocks: 1,
     maxHeight: 12,
     maxRequests: 3,
-    submitMode: DispatchOnly,
     roles: allHonest,
     tip: TipTimely,
     reliesOnReorgSlack: true,
@@ -89,12 +88,6 @@ module configs {
   pure val byzShim = { ...baseline, roles: { ...allHonest, shim: Byzantine } }
   pure val byzHub = { ...baseline, roles: { ...allHonest, hubs: Map("h1" -> Byzantine) } }
   pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
-
-  // The HTTP transport: the wallet's answer is the hub's decision.
-  pure val awaitAck = { ...baseline, submitMode: AwaitVerdict }
-  pure val awaitAckByzShim = { ...byzShim, submitMode: AwaitVerdict }
-  pure val awaitAckByzHub = { ...byzHub, submitMode: AwaitVerdict }
-  pure val awaitAckByzIndexer = { ...byzIndexer, submitMode: AwaitVerdict }
 
   // Two hubs sharing one chain.
   pure val replicated = {
@@ -154,62 +147,6 @@ module byzIndexer {
   import types.* from "./types"
   import configs.*
   import protocol(CONFIG = byzIndexer).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module awaitAck {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = awaitAck).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module awaitAckByzShim {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = awaitAckByzShim).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module awaitAckByzHub {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = awaitAckByzHub).* from "./protocol"
-
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
-}
-
-module awaitAckByzIndexer {
-  import types.* from "./types"
-  import configs.*
-  import protocol(CONFIG = awaitAckByzIndexer).* from "./protocol"
 
   run assumptionsTest = all {
     assert(standingAssumptions),

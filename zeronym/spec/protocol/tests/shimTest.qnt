@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 
-/// The shim function, checked with two hubs under both submit modes.
+/// The shim function, checked with one hub and with two.
 module shimTest {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
@@ -20,8 +20,8 @@ module shimTest {
   pure val HEIGHTS = Set(0, 4)
   pure val SEND_INPUTS = PAYLOADS.map(p => Clean(p)).union(Set(Unreadable, EmptyBody))
 
-  pure val dispatching = initialShim(["h1", "h2"], DispatchOnly)
-  pure val awaiting = initialShim(["h1"], AwaitVerdict)
+  pure val dispatching = initialShim(["h1", "h2"])
+  pure val single = initialShim(["h1"])
 
   pure def after(state: ShimState, input: ShimInput): ShimState = shim(state, input).state
   pure def outputOf(state: ShimState, input: ShimInput): ShimOutput = shim(state, input).out
@@ -44,12 +44,10 @@ module shimTest {
   pure def reply(nonce: Nonce, given: WireReply): ShimInput =
     FrameSInput(LookupReply({ nonce: nonce, reply: given }))
 
-  /// Nonces 0 and 1 wait on acks nobody reads; nonce 2 is a lookup at `h2`.
+  /// Nonces 0 and 1 went out with a submission; nonce 2 is a lookup at `h2`.
   pure val busy = dispatching.after(send(Clean(pOrchard), 2)).after(getTx("orchard", 1))
-  /// Nonce 0 is a submission whose ack is the wallet's answer.
-  pure val pendingSend = awaiting.after(send(Clean(pOrchard), 1))
 
-  pure val STATES = Set(dispatching, awaiting, busy, pendingSend, awaiting.after(getTx("orchard", 0)))
+  pure val STATES = Set(dispatching, single, busy, single.after(getTx("orchard", 0)))
 
   pure val INPUTS: Set[ShimInput] =
     tuples(SEND_INPUTS, 0.to(3)).map(((input, handedOver)) => send(input, handedOver))
@@ -59,7 +57,6 @@ module shimTest {
       .union(0.to(3).map(nonce => reply(nonce, WNotFound)))
       .union(0.to(3).map(nonce => reply(nonce, WFound({ body: Some(pOrchard), height: 4 }))))
       .union(0.to(3).map(nonce => LookupTimeoutSInput(nonce)))
-      .union(0.to(3).map(nonce => AckTimeoutSInput(nonce)))
       .union(Set(
         FrameSInput(Submit({ nonce: 0, payload: pOrchard })),
         FrameSInput(Lookup({ nonce: 0, txid: "orchard" })),
@@ -87,7 +84,7 @@ module shimTest {
       == DivertedOutput({
         payload: pJunk,
         frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pJunk }) }),
-        told: Some(SentOk),
+        told: SentOk,
       })),
   }
 
@@ -96,7 +93,7 @@ module shimTest {
     assert(outputOf(dispatching, send(EmptyBody, 2)) == SendDoneOutput({ input: EmptyBody, obs: SendInvalid })),
     assert(outputOf(dispatching, send(Clean(pBig), 2)) == SendDoneOutput({ input: Clean(pBig), obs: SendTooLarge })),
     // No frame handed over: the hub is unreachable.
-    assert(Set(dispatching, awaiting).forall(state =>
+    assert(Set(dispatching, single).forall(state =>
       outputOf(state, send(Clean(pOrchard), 0)) == SendDoneOutput({ input: Clean(pOrchard), obs: SendUnavailable }))),
     // None of these leaves anything behind.
     assert(Set(send(Unreadable, 2), send(EmptyBody, 2), send(Clean(pBig), 2), send(Clean(pOrchard), 0))
@@ -112,37 +109,19 @@ module shimTest {
         { hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) },
         { hub: "h2", msg: Submit({ nonce: 1, payload: pOrchard }) },
       ),
-      told: Some(SentOk),
+      told: SentOk,
     })),
     // A sweep that stopped after the first address still tells the wallet ok.
     assert(outputOf(dispatching, send(Clean(pOrchard), 1)) == DivertedOutput({
       payload: pOrchard,
       frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) }),
-      told: Some(SentOk),
+      told: SentOk,
     })),
     assert(dispatching.after(send(Clean(pOrchard), 2)).nextNonce == 2),
-    // The ack is never awaited: it clears the waiter and tells nobody.
+    // A submission leaves nothing to wait on, and an ack tells nobody.
+    assert(dispatching.after(send(Clean(pOrchard), 2)).waiters == Map()),
     assert(outputOf(busy, ack(0, WRefused(WQueueFull))) == NoShimOutput),
-    assert(not(busy.after(ack(0, WRefused(WQueueFull))).hasWaiter(0))),
-    assert(outputOf(busy, AckTimeoutSInput(1)) == NoShimOutput),
-    assert(not(busy.after(AckTimeoutSInput(1)).hasWaiter(1))),
-  }
-
-  run awaitVerdictTest = all {
-    // One hub, and nothing is told until it answers.
-    assert(outputOf(awaiting, send(Clean(pOrchard), 1)) == DivertedOutput({
-      payload: pOrchard,
-      frames: Set({ hub: "h1", msg: Submit({ nonce: 0, payload: pOrchard }) }),
-      told: None,
-    })),
-    assert(outputOf(pendingSend, ack(0, WAccepted)) == SendDoneOutput({ input: Clean(pOrchard), obs: SentOk })),
-    assert(outputOf(pendingSend, ack(0, WRefused(WTipStale)))
-      == SendDoneOutput({ input: Clean(pOrchard), obs: SentRejected })),
-    assert(outputOf(pendingSend, AckTimeoutSInput(0))
-      == SendDoneOutput({ input: Clean(pOrchard), obs: SendUnavailable })),
-    assert(pendingSend.after(ack(0, WAccepted)).waiters == Map()),
-    // A second ack for the same nonce finds nothing waiting.
-    assert(outputOf(pendingSend.after(ack(0, WAccepted)), ack(0, WRefused(WTipStale))) == NoShimOutput),
+    assert(busy.after(ack(0, WRefused(WQueueFull))) == busy),
   }
 
   // ------------------------------------------------------------------------
@@ -157,7 +136,7 @@ module shimTest {
       == LookupSentOutput({ frame: { hub: "h2", msg: Lookup({ nonce: 0, txid: "orchard" }) } })),
     assert(isError(outputOf(dispatching, getTx("orchard", 2)))),
     // No hub configured to ask: unavailable.
-    assert(outputOf(initialShim([], DispatchOnly), getTx("orchard", 0))
+    assert(outputOf(initialShim([]), getTx("orchard", 0))
       == LookupDoneOutput({ query: "orchard", result: Unavailable })),
     // Each reply arm.
     assert(outputOf(busy, reply(2, WFound({ body: None, height: MEMPOOL_HEIGHT })))
@@ -185,18 +164,16 @@ module shimTest {
     assert(outputOf(busy.after(LookupTimeoutSInput(2)), reply(2, WNotFound)) == NoShimOutput),
     assert(isError(outputOf(busy, LookupTimeoutSInput(0)))),
     assert(isError(outputOf(busy, LookupTimeoutSInput(9)))),
-    assert(isError(outputOf(busy, AckTimeoutSInput(2)))),
   }
 
   run correlationTest = all {
     // An unknown nonce is dropped.
     assert(outputOf(busy, ack(9, WAccepted)) == NoShimOutput and busy.after(ack(9, WAccepted)) == busy),
     assert(outputOf(busy, reply(9, WNotFound)) == NoShimOutput and busy.after(reply(9, WNotFound)) == busy),
-    // The wrong kind of reply for a known nonce is ignored, and the request
-    // keeps waiting.
+    // An ack under a lookup's nonce is ignored, and the lookup keeps waiting.
+    // A reply under a submission's nonce is dropped.
     assert(outputOf(busy, ack(2, WAccepted)) == NoShimOutput and busy.after(ack(2, WAccepted)) == busy),
     assert(outputOf(busy, reply(0, WNotFound)) == NoShimOutput and busy.after(reply(0, WNotFound)) == busy),
-    assert(outputOf(pendingSend, reply(0, WNotFound)) == NoShimOutput),
     // Request frames are not replies.
     assert(isError(outputOf(busy, FrameSInput(Submit({ nonce: 0, payload: pOrchard }))))),
     assert(isError(outputOf(busy, FrameSInput(Lookup({ nonce: 2, txid: "orchard" }))))),
@@ -227,20 +204,17 @@ module shimTest {
     assert(byzShimResults(dispatching, send(Clean(pOrchard), 2), PAYLOADS, HEIGHTS)
       .contains(dispatching.toForwardOutput(pOrchard))),
     // It can tell the wallet ok and send nothing.
-    assert(byzShimResults(awaiting, send(Clean(pOrchard), 1), PAYLOADS, HEIGHTS)
-      .contains(awaiting.toSendDoneOutput(Clean(pOrchard), SentOk))),
+    assert(byzShimResults(single, send(Clean(pOrchard), 1), PAYLOADS, HEIGHTS)
+      .contains(single.toSendDoneOutput(Clean(pOrchard), SentOk))),
     // It can answer a lookup with a transaction that has another txid.
     assert(byzShimResults(dispatching, getTx("orchard", 0), PAYLOADS, HEIGHTS)
       .contains(dispatching.toLookupDoneOutput("orchard", Tx({ payload: pPlain, height: 4 })))),
-    // It can resolve an awaited submission against the hub's answer.
-    assert(byzShimResults(pendingSend, ack(0, WRefused(WTipStale)), PAYLOADS, HEIGHTS)
-      .contains(awaiting.with("nextNonce", 1).toSendDoneOutput(Clean(pOrchard), SentOk))),
     // It can send a hub something other than what the wallet sent.
     assert(byzShimResults(dispatching, send(Clean(pOrchard), 2), PAYLOADS, HEIGHTS).exists(result =>
       result.out == DivertedOutput({
         payload: pOrchard,
         frames: Set({ hub: "h2", msg: Submit({ nonce: 0, payload: pJunk }) }),
-        told: Some(SentOk),
+        told: SentOk,
       }))),
   }
 }

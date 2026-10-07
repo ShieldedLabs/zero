@@ -21,30 +21,24 @@ module shim {
   /// A frame on its way to a hub.
   type Frame = { hub: HubId, msg: Msg }
 
-  /// What the shim remembers about a request it has sent.
-  ///
-  /// - An ack waiter exists for every submission. Only under `AwaitVerdict` is
-  ///   anyone waiting on it (`awaited`); under `DispatchOnly` the wallet has
-  ///   its answer already and the ack, if it comes, is discarded.
-  /// - A lookup waiter remembers where the sweep over the hubs started and how
-  ///   many hubs it has tried.
-  type Waiter =
-    | AckWaiter({ payload: Payload, awaited: bool })
-    | LookupWaiter({ query: TxId, start: int, attempt: int })
+  /// What the shim remembers about a lookup it has sent: where the sweep over
+  /// the hubs started and how many hubs it has tried. A submission leaves
+  /// nothing behind: the wallet has its answer when the frames are handed
+  /// over, and an ack, if one comes, is discarded.
+  type Waiter = { query: TxId, start: int, attempt: int }
 
   /// - `hubs`: the hub addresses, in configured order.
-  /// - `waiters`: the outstanding requests, by nonce.
+  /// - `waiters`: the outstanding lookups, by nonce.
   /// - `nextNonce`: the source of fresh nonces. A counter stands for a random
   ///   value nobody else can guess.
   type ShimState = {
     hubs: List[HubId],
-    mode: SubmitMode,
     waiters: Nonce -> Waiter,
     nextNonce: Nonce,
   }
 
-  pure def initialShim(hubs: List[HubId], mode: SubmitMode): ShimState =
-    { hubs: hubs, mode: mode, waiters: Map(), nextNonce: 0 }
+  pure def initialShim(hubs: List[HubId]): ShimState =
+    { hubs: hubs, waiters: Map(), nextNonce: 0 }
 
   // ------------------------------------------------------------------------
   // Inputs and outputs
@@ -59,12 +53,11 @@ module shim {
     | GetTxSInput({ query: TxId, start: int })
     | FrameSInput(Msg)             // a frame arrives from the network
     | LookupTimeoutSInput(Nonce)   // no reply to a lookup in time
-    | AckTimeoutSInput(Nonce)      // no ack in time
 
   type ShimOutput =
     | ForwardOutput(Payload)                                      // to the operator's indexer
-    // `payload` is what the wallet sent; `told` is its answer, if it has one yet.
-    | DivertedOutput({ payload: Payload, frames: Set[Frame], told: Option[SendObs] })
+    // `payload` is what the wallet sent; `told` is its answer.
+    | DivertedOutput({ payload: Payload, frames: Set[Frame], told: SendObs })
     | SendDoneOutput({ input: SendInput, obs: SendObs })
     | LookupSentOutput({ frame: Frame })
     | LookupDoneOutput({ query: TxId, result: LookupObs })
@@ -76,7 +69,7 @@ module shim {
   pure def toForwardOutput(state: ShimState, payload: Payload): ShimResult =
     { state: state, out: ForwardOutput(payload) }
 
-  pure def toDivertedOutput(state: ShimState, payload: Payload, frames: Set[Frame], told: Option[SendObs]): ShimResult =
+  pure def toDivertedOutput(state: ShimState, payload: Payload, frames: Set[Frame], told: SendObs): ShimResult =
     { state: state, out: DivertedOutput({ payload: payload, frames: frames, told: told }) }
 
   pure def toSendDoneOutput(state: ShimState, input: SendInput, obs: SendObs): ShimResult =
@@ -117,28 +110,18 @@ module shim {
   // ------------------------------------------------------------------------
 
   /// Divert a migration: one frame per hub address, each under a fresh nonce,
-  /// to the first `handedOver` addresses.
-  ///
-  /// Under `DispatchOnly` the wallet is told ok as soon as one frame has been
-  /// handed over, whether or not the sweep reached the later addresses, and
-  /// no ack is waited for. Under `AwaitVerdict` there is one hub, and the
-  /// wallet's answer is that hub's.
+  /// to the first `handedOver` addresses. The wallet is told ok as soon as one
+  /// frame has been handed over, whether or not the sweep reached the later
+  /// addresses, and no ack is waited for.
   pure def divert(state: ShimState, payload: Payload, handedOver: int): ShimResult =
-    val reach = match state.mode {
-      | DispatchOnly => handedOver
-      | AwaitVerdict => if (handedOver > 0) 1 else 0
-    }
-    val targets = state.hubs.slice(0, reach)
+    val targets = state.hubs.slice(0, handedOver)
     if (targets.length() == 0)
       state.toSendDoneOutput(Clean(payload), SendUnavailable)
     else
-      val awaited = state.mode == AwaitVerdict
       val frames = targets.indices().map(i =>
         { hub: targets[i], msg: Submit({ nonce: state.nextNonce + i, payload: payload }) })
-      val waiting = targets.indices().fold(state.waiters, (waiters, i) =>
-        waiters.put(state.nextNonce + i, AckWaiter({ payload: payload, awaited: awaited })))
-      { ...state, waiters: waiting, nextNonce: state.nextNonce + targets.length() }
-        .toDivertedOutput(payload, frames, if (awaited) None else Some(SentOk))
+      { ...state, nextNonce: state.nextNonce + targets.length() }
+        .toDivertedOutput(payload, frames, SentOk)
 
   /// Route a `SendTransaction`. Nothing but a cleanly read pass-through
   /// transaction ever reaches the operator; everything else is diverted or
@@ -164,7 +147,7 @@ module shim {
   pure def askHub(state: ShimState, query: TxId, start: int, attempt: int): ShimResult =
     val nonce = state.nextNonce
     { ...state,
-      waiters: state.waiters.put(nonce, LookupWaiter({ query: query, start: start, attempt: attempt })),
+      waiters: state.waiters.put(nonce, { query: query, start: start, attempt: attempt }),
       nextNonce: nonce + 1,
     }.toLookupSentOutput({ hub: state.sweepTarget(start, attempt), msg: Lookup({ nonce: nonce, txid: query }) })
 
@@ -183,60 +166,29 @@ module shim {
     if (not(state.hasWaiter(nonce)))
       state.toShimErrorOutput("no request is waiting under this nonce")
     else
-      match state.waiters.get(nonce) {
-        | AckWaiter(_) => state.toShimErrorOutput("not a lookup")
-        | LookupWaiter(waiter) =>
-          val forgotten = { ...state, waiters: state.waiters.mapRemove(nonce) }
-          if (waiter.attempt + 1 < state.hubs.length())
-            askHub(forgotten, waiter.query, waiter.start, waiter.attempt + 1)
-          else
-            forgotten.toLookupDoneOutput(waiter.query, Unavailable)
-      }
-
-  /// A submission got no ack in time.
-  pure def ackTimeout(state: ShimState, nonce: Nonce): ShimResult =
-    if (not(state.hasWaiter(nonce)))
-      state.toShimErrorOutput("no request is waiting under this nonce")
-    else
-      match state.waiters.get(nonce) {
-        | LookupWaiter(_) => state.toShimErrorOutput("not a submission")
-        | AckWaiter(waiter) =>
-          val forgotten = { ...state, waiters: state.waiters.mapRemove(nonce) }
-          if (waiter.awaited) forgotten.toSendDoneOutput(Clean(waiter.payload), SendUnavailable)
-          else forgotten.toNoShimOutput()
-      }
+      val waiter = state.waiters.get(nonce)
+      val forgotten = { ...state, waiters: state.waiters.mapRemove(nonce) }
+      if (waiter.attempt + 1 < state.hubs.length())
+        askHub(forgotten, waiter.query, waiter.start, waiter.attempt + 1)
+      else
+        forgotten.toLookupDoneOutput(waiter.query, Unavailable)
 
   // ------------------------------------------------------------------------
   // Frames from the network
   // ------------------------------------------------------------------------
 
-  /// A frame arrives. It is matched to a request by its nonce alone. A frame
-  /// under an unknown nonce is dropped. A frame of the wrong kind for a known
-  /// nonce is ignored and the request keeps waiting.
+  /// A frame arrives. A lookup reply is matched to its lookup by its nonce
+  /// alone; under an unknown nonce it is dropped. An ack is dropped: nobody
+  /// waits for one.
   pure def receive(state: ShimState, msg: Msg): ShimResult =
     match msg {
-      | Ack(ack) =>
-        if (not(state.hasWaiter(ack.nonce))) state.toNoShimOutput()
-        else
-          match state.waiters.get(ack.nonce) {
-            | LookupWaiter(_) => state.toNoShimOutput()
-            | AckWaiter(waiter) =>
-              val forgotten = { ...state, waiters: state.waiters.mapRemove(ack.nonce) }
-              if (waiter.awaited)
-                forgotten.toSendDoneOutput(
-                  Clean(waiter.payload),
-                  if (ack.ack == WAccepted) SentOk else SentRejected)
-              else forgotten.toNoShimOutput()
-          }
+      | Ack(_) => state.toNoShimOutput()
       | LookupReply(reply) =>
         if (not(state.hasWaiter(reply.nonce))) state.toNoShimOutput()
         else
-          match state.waiters.get(reply.nonce) {
-            | AckWaiter(_) => state.toNoShimOutput()
-            | LookupWaiter(waiter) =>
-              { ...state, waiters: state.waiters.mapRemove(reply.nonce) }
-                .toLookupDoneOutput(waiter.query, interpretReply(reply.reply, waiter.query))
-          }
+          val waiter = state.waiters.get(reply.nonce)
+          { ...state, waiters: state.waiters.mapRemove(reply.nonce) }
+            .toLookupDoneOutput(waiter.query, interpretReply(reply.reply, waiter.query))
       | Submit(_) => state.toShimErrorOutput("not a reply frame")
       | Lookup(_) => state.toShimErrorOutput("not a reply frame")
     }
@@ -251,7 +203,6 @@ module shim {
       | GetTxSInput(lookup) => getTransaction(state, lookup.query, lookup.start)
       | FrameSInput(msg) => receive(state, msg)
       | LookupTimeoutSInput(nonce) => lookupTimeout(state, nonce)
-      | AckTimeoutSInput(nonce) => ackTimeout(state, nonce)
     }
 
   // ------------------------------------------------------------------------
@@ -259,7 +210,7 @@ module shim {
   // ------------------------------------------------------------------------
 
   pure val SEND_OBSERVATIONS =
-    Set(SentOk, SentRejected, SentToOperator, SendUnavailable, SendInvalid, SendTooLarge)
+    Set(SentOk, SentToOperator, SendUnavailable, SendInvalid, SendTooLarge)
 
   /// Every lookup answer that can be built from `universe` and `heights`.
   pure def lookupObservations(universe: Set[Payload], heights: Set[Height]): Set[LookupObs] =
@@ -277,7 +228,6 @@ module shim {
           | _ => None
         }
       | LookupTimeoutSInput(nonce) => Some(nonce)
-      | AckTimeoutSInput(nonce) => Some(nonce)
       | _ => None
     }
 
@@ -289,8 +239,7 @@ module shim {
   ///   operator whatever its class; or answered with anything while a frame
   ///   carrying any payload of `universe` goes to any one hub;
   /// - a lookup is answered with anything, at once or when a reply or a
-  ///   timeout would have resolved it;
-  /// - an awaited submission is resolved with anything.
+  ///   timeout would have resolved it.
   ///
   /// The honest transition is always a member.
   pure def byzShimResults(
@@ -310,7 +259,7 @@ module shim {
               { ...state, nextNonce: state.nextNonce + 1 }.toDivertedOutput(
                 sent,
                 Set({ hub: state.hubs[i], msg: Submit({ nonce: state.nextNonce, payload: payload }) }),
-                Some(obs)))
+                obs))
               .union(Set(state.toForwardOutput(sent)))
           | _ => Set()
         }
@@ -324,15 +273,8 @@ module shim {
             if (not(state.hasWaiter(nonce))) honest
             else
               val forgotten = { ...state, waiters: state.waiters.mapRemove(nonce) }
-              match state.waiters.get(nonce) {
-                | LookupWaiter(waiter) =>
-                  honest.union(lies.map(result => forgotten.toLookupDoneOutput(waiter.query, result)))
-                | AckWaiter(waiter) =>
-                  if (waiter.awaited)
-                    honest.union(SEND_OBSERVATIONS.map(obs =>
-                      forgotten.toSendDoneOutput(Clean(waiter.payload), obs)))
-                  else honest
-              }
+              val waiter = state.waiters.get(nonce)
+              honest.union(lies.map(result => forgotten.toLookupDoneOutput(waiter.query, result)))
         }
     }
 }

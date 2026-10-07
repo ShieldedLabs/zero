@@ -94,37 +94,6 @@ module byzShimTrust {
       .expect(lookupValidityPerHub)
 }
 
-module awaitAckByzShimTrust {
-  import basicSpells.* from "../spells/basicSpells"
-  import types.* from "../types"
-  import wire.* from "../wire"
-  import indexer.* from "../indexer"
-  import hub.* from "../hub"
-  import shim.* from "../shim"
-  import state.* from "../state"
-  import configs.* from "../instances"
-  import protocol(CONFIG = awaitAckByzShim).* from "../protocol"
-
-  /// G5 needs the shim. It tells the wallet ok and sends nothing.
-  run toldOkWithoutSendingTest =
-    started
-      .then(block)
-      .then(walletSendWith(Clean(early), 1, s.shim.toSendDoneOutput(Clean(early), SentOk)))
-      .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
-      .expect(s.net == Set() and audit.everQueued.get("h1") == Set())
-      .expect(not(toldImpliesQueued))
-
-  run toldOkWithoutSendingControlTest =
-    started
-      .then(block)
-      .then(sendToAll(early))
-      .then(deliverSubmit("h1", 0, early))
-      .then(deliverToShim(ackMail("h1", 0, WAccepted)))
-      .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
-      .expect(audit.everQueued.get("h1") == Set(early))
-      .expect(toldImpliesQueued)
-}
-
 module byzHubTrust {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
@@ -234,42 +203,6 @@ module byzHubTrust {
       .expect(s.acks("h1", ShimAddr) == Set((0, WAccepted)) and s.queuedAt("h1") == Set(early))
       .expect(ackImpliesQueued)
 
-}
-
-module awaitAckByzHubTrust {
-  import basicSpells.* from "../spells/basicSpells"
-  import types.* from "../types"
-  import wire.* from "../wire"
-  import indexer.* from "../indexer"
-  import hub.* from "../hub"
-  import shim.* from "../shim"
-  import state.* from "../state"
-  import configs.* from "../instances"
-  import protocol(CONFIG = awaitAckByzHub).* from "../protocol"
-
-  /// G5 needs the hub. The wallet's answer is the hub's word, and the hub
-  /// says accepted without queueing anything.
-  run toldOkOnAFalseAckTest =
-    started
-      .then(block)
-      .then(sendToAll(early))
-      .then(hubReceiveWith(
-        "h1", submitMail("h1", 0, early), INotFound,
-        s.hubs.get("h1").toAckOutput(0, Admitted),
-      ))
-      .then(deliverToShim(ackMail("h1", 0, WAccepted)))
-      .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
-      .expect(audit.everQueued.get("h1") == Set())
-      .expect(not(toldImpliesQueued))
-
-  run toldOkOnAFalseAckControlTest =
-    started
-      .then(block)
-      .then(sendToAll(early))
-      .then(deliverSubmit("h1", 0, early))
-      .then(deliverToShim(ackMail("h1", 0, WAccepted)))
-      .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
-      .expect(toldImpliesQueued)
 }
 
 module byzIndexerTrust {
@@ -442,8 +375,8 @@ module replicatedOneByzTrust {
   /// refuses and publishes it late. Both are failures of that replica alone.
   ///
   /// And the wallet, told ok, has no honest hub holding its first migration:
-  /// the honest hub's frame was never delivered. Under `DispatchOnly` that is
-  /// not something replication promises.
+  /// the honest hub's frame was never delivered. That is not something
+  /// replication promises.
   run honestReplicaKeepsItsGuaranteesTest =
     started
       .then(block)

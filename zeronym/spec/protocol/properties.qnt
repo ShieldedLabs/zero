@@ -213,13 +213,6 @@ module properties {
         | _ => true
       })
 
-  /// G5. A wallet told its transaction was diverted can rely on some hub
-  /// having queued it. Claimed when the wallet's answer is the hub's
-  /// (`AwaitVerdict`); see `wToldNeverDelivered` for when it is not.
-  pure def toldImpliesQueuedIn(s: System, audit: Audit): bool =
-    s.toldOk().forall(payload =>
-      s.hubIds().exists(hub => audit.everQueued.get(hub).contains(payload)))
-
   /// Whether an offer left the mining margin: the transaction can still be
   /// mined `miningMargin` blocks after the true height it was published at.
   pure def offeredInTime(s: System, offer: Offer): bool =
@@ -369,7 +362,7 @@ module properties {
   pure def conformingEveryOfferBeforeExpiryIn(s: System, audit: Audit): bool =
     audit.offers.forall(offer => isConformingAndTimely(s, audit, offer.hub, offer.payload) implies offeredInTime(s, offer))
 
-  // K1. Under `DispatchOnly`, "told ok" promises nothing about any hub. It is
+  // K1. "Told ok" promises nothing about any hub. It is
   // stated as three reachable states, not as a violated invariant, because the
   // invariant is false on the ordinary success path too: the wallet is told
   // before any hub has the frame.
@@ -506,11 +499,8 @@ module properties {
   /// hub has answered it.
   pure def wFailoverAnsweredIn(s: System): bool =
     s.shim.waiters.keys().exists(nonce =>
-      match s.shim.waiters.get(nonce) {
-        | LookupWaiter(waiter) =>
-          waiter.attempt > 0 and s.replies(ShimAddr).exists(reply => reply._1 == nonce and reply._3 != WError)
-        | _ => false
-      })
+      s.shim.waiters.get(nonce).attempt > 0 and
+        s.replies(ShimAddr).exists(reply => reply._1 == nonce and reply._3 != WError))
 
   /// W14. Two hubs have each published the same payload, in their own flushes,
   /// and it is on the chain: replication, not failover.
@@ -588,9 +578,6 @@ module properties {
       s.vTxidAuthenticityIn(),
       s.wasGiven(obs => obs == NotFound),
     }
-
-  pure def vToldImpliesQueuedIn(s: System): bool =
-    s.toldOk() != Set()
 
   pure def vOfferedBeforeExpiryIn(audit: Audit): bool =
     audit.offers.exists(offer => isSome(offer.payload.expiry))

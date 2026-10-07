@@ -146,7 +146,8 @@ definitions they justify.
 | Multiple indexer endpoints and their folds | One abstract indexer per model stands for all of a hub's endpoints. Because the folds are asymmetric (S28), this document states for each Byzantine-indexer behaviour whether one lying endpoint suffices or all must lie |
 | Wire codecs `ZNS1` / `ZNA1` / `ZNL1` / `ZNR1` and the golden vectors (`zeronym/hub/src/wire.rs:576-579`) | Byte layouts are scoped out and are pinned by the Rust tests in both crates; the abstract `render` / `interpretReply` layer is the level this spec works at. The spec does not claim to bind the codec |
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
-| Two or more hubs under `AwaitVerdict` | Does not exist in code: HTTP is one address (S31) and Nym never awaits the ack (S7). `awaitVerdictSingleHub` stays an assumption |
+| The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
+| The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
 | Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
 | Byte layout, malformed frames, `bad_frame` | Sum types make them unrepresentable; pinned by the Rust golden vectors |
@@ -205,16 +206,11 @@ stateDiagram-v2
     Inspect --> FailClosed: Unreadable or EmptyBody
     Inspect --> Framing: Clean and class OrchardTouching or Unparseable
     Framing --> FailClosed: oversize
-    Framing --> Dispatched: DispatchOnly, frames to a non-empty prefix of the hubs, fresh nonce each
-    Framing --> FailClosed: DispatchOnly, no frame handed over
-    Framing --> AwaitingAck: AwaitVerdict
+    Framing --> Dispatched: frames to a non-empty prefix of the hubs, fresh nonce each
+    Framing --> FailClosed: no frame handed over
     Dispatched --> ToldOk
-    AwaitingAck --> ToldOk: Ack accepted
-    AwaitingAck --> ToldRejected: Ack refused
-    AwaitingAck --> FailClosed: timeout
     Forwarded --> [*]
     ToldOk --> [*]
-    ToldRejected --> [*]
     FailClosed --> [*]
 ```
 
@@ -403,7 +399,7 @@ goes.
 | Component | Inputs | Outputs | Seam in the implementation |
 |---|---|---|---|
 | `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
-| `shim` | `SendTxSInput` (with how many hub addresses take a frame), `GetTxSInput` (with where the cursor points), `FrameSInput`, `LookupTimeoutSInput`, `AckTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
+| `shim` | `SendTxSInput` (with how many hub addresses take a frame), `GetTxSInput` (with where the cursor points), `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
 | indexer | `BroadcastIInput`, `LookupIInput`, `AdvanceIInput`, `MineIInput` | `VerdictOutput`, `AnswerOutput`, `NoIndexerOutput` | the mock indexer in `hub/tests/common/mod.rs` |
 
 ### Roles
@@ -440,18 +436,14 @@ abstract indexer per hub was a decision of the design.
 One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 (`PAYLOADS`, `FLUSH_INTERVAL`, `ROLES`, `TIP`, ...).
 
-| Module | Hubs | Submit mode | Roles (shim / hubs / indexer) | Tip |
-|---|---|---|---|---|
-| `baseline` | 1 | `DispatchOnly` | H / H / H | timely |
-| `byzShim` | 1 | `DispatchOnly` | **B** / H / H | timely |
-| `byzHub` | 1 | `DispatchOnly` | H / **B** / H | timely |
-| `byzIndexer` | 1 | `DispatchOnly` | H / H / **B** | timely for honest reports |
-| `awaitAck` | 1 | `AwaitVerdict` | H / H / H | timely |
-| `awaitAckByzShim` | 1 | `AwaitVerdict` | **B** / H / H | timely |
-| `awaitAckByzHub` | 1 | `AwaitVerdict` | H / **B** / H | timely |
-| `awaitAckByzIndexer` | 1 | `AwaitVerdict` | H / H / **B** | timely |
-| `replicated` | 2 | `DispatchOnly` | H / H, H / H | timely |
-| `replicatedOneByz` | 2 | `DispatchOnly` | H / H, **B** / H | timely |
+| Module | Hubs | Roles (shim / hubs / indexer) | Tip |
+|---|---|---|---|
+| `baseline` | 1 | H / H / H | timely |
+| `byzShim` | 1 | **B** / H / H | timely |
+| `byzHub` | 1 | H / **B** / H | timely |
+| `byzIndexer` | 1 | H / H / **B** | timely for honest reports |
+| `replicated` | 2 | H / H, H / H | timely |
+| `replicatedOneByz` | 2 | H / H, **B** / H | timely |
 
 The schedule is the shipped one scaled down, keeping the relations between the
 numbers:
@@ -517,7 +509,6 @@ and `flakyTipSlowFlight` each drop one, and their tests assert it is false.
 | G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it, the operator's view and explicit disclosures; nothing updates it at publication |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true. It does not say that successive answers agree, or that hubs agree |
-| G5 | `toldImpliesQueued` | A wallet told ok can rely on some hub having queued the transaction. Claimed under `AwaitVerdict` only |
 | G6a | `offeredBeforeExpiry` | Every transaction a hub offers is offered with the mining margin to spare: whatever was admitted, on every attempt. About the margin left when the flush begins, not about acceptance. Claimed under a timely tip |
 | G6b | `conformingFirstOfferBeforeExpiry` | The same for supported wallets and for the first time a hub offers the transaction. Nothing about a later offer of a requeued entry. Also about the margin at the offer |
 | G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and `flightWithinMargin` |
@@ -538,7 +529,7 @@ tried by hand, with the result shown, and reverted:
 | G2 | `hub` answers a queue hit with the queued body | violated on `baseline` |
 | G3 | `interpretReply` skips the txid comparison | **holds on `baseline`**; violated on `byzHub` and `byzIndexer` |
 | G4 | `hub` answers not-found on a queue hit | violated on `baseline` and `replicated` |
-| G5, G8 | `hub` acks accepted without inserting | G5 violated on `awaitAck`, G8 on `baseline` |
+| G8 | `hub` acks accepted without inserting | violated on `baseline` |
 | G6a | `hub` admits without the expiry check | violated on `baseline` |
 
 The G3 row is not what was predicted; see [Findings](#findings).
@@ -570,8 +561,7 @@ chain cannot pass a running, idle hub that has not asked.
 | G2 | holds (`baseline`) | **required**: `shimDisclosesPlaintextTest` | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | **required**: `shimServesAnotherTransactionTest` | holds (`byzHub`); a twin and a false height are both served (W16) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`, `replicated`) | **required**: `shimInventsStatusTest` | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
-| G5 | holds (`awaitAck`) | **required**: `toldOkWithoutSendingTest` | **required**: `toldOkOnAFalseAckTest` | holds (`awaitAckByzIndexer`) |
-| G8 | holds (`baseline`, `awaitAck`) | holds (`byzShim`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
+| G8 | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
 | G6a | holds (`baseline`) | holds (`byzShim`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
 | G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | holds (`byzShim`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
@@ -585,13 +575,12 @@ One Byzantine replica out of two (`replicatedOneByz`):
 | G4 | required of every hub | `cursorLandsOnLyingReplicaTest` |
 | G3 | holds | simulation; `wrongTransactionIsRefusedTest` |
 | G8, G6a, G6b, G6c for the honest hub | hold | simulation of `ackImpliesQueuedForHonestHubs`, `offeredBeforeExpiryForHonestHubs`, `conformingFirstOfferBeforeExpiryForHonestHubs`, `conformingFirstOfferJudgedBeforeExpiryForHonestHubs`; `honestReplicaKeepsItsGuaranteesTest` |
-| G5 | not applicable | `AwaitVerdict` has one hub |
 | "some honest hub queued it" after told ok | not a guarantee | `honestReplicaKeepsItsGuaranteesTest` |
 
 The `...ForHonestHubs` names are the same predicates restricted to the hubs
 whose role is honest. They are not weaker properties.
 
-In short: a Byzantine shim voids every wallet-facing guarantee (G1-G5); the
+In short: a Byzantine shim voids every wallet-facing guarantee (G1-G4); the
 hub-side G6 and G8 survive it. G3 is the only wallet-facing guarantee that
 survives a Byzantine hub or indexer, and it authenticates the txid only. G1
 depends on the shim alone. Replication does not dilute trust: one Byzantine
@@ -602,12 +591,12 @@ cell is a scripted step, and its "holds" cells are the unrun TLC property.
 
 | Id | What is lost | Where | Form | Observed | Scripted runs |
 |---|---|---|---|---|---|
-| K1 | Under `DispatchOnly`, told ok does not mean any hub ever admits it | `baseline`, `replicated` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered`, `wToldPrefixOnly` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest`, `toldOkAfterPrefixSendTest` |
+| K1 | Told ok does not mean any hub ever admits it | `baseline`, `replicated` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered`, `wToldPrefixOnly` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest`, `toldOkAfterPrefixSendTest` |
 | K2 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | `baseline`, `replicated` | violated invariant | violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest`, `hubsDisagreeTest` |
 | K3 | G6a for a tight-expiry transaction: admitted against a tip reported below a boundary already flushed | `flakyTip` | violated invariant | violated, as predicted | `tightExpiryAdmittedBehindFlushedBoundaryTest` |
 | K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
 | K4 | G6a, and G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
-| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `baseline`, `awaitAck` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `toldOkAdmittedThenLostTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
+| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `baseline` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `toldOkAdmittedThenLostTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
 | K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
 
 | K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
@@ -620,8 +609,8 @@ that pays for blocks arriving while the batch is in flight, and nothing in the
 code bounds a flight in blocks.
 
 K1 is not stated as a violated invariant because the invariant is false on the
-ordinary success path too: under `DispatchOnly` the wallet is told ok before
-any hub has the frame. In `toldOkAndNeverDeliveredTest` the run ends with the
+ordinary success path too: the wallet is told ok before any hub has the
+frame. In `toldOkAndNeverDeliveredTest` the run ends with the
 frame undelivered, and nothing obliges the network ever to deliver it.
 
 ### Witnesses
@@ -670,8 +659,8 @@ refuses the same frame. That run asserts the step, because the simulator
 does not check `temporal` definitions. A2 is stated over every hub: the
 Byzantine hub relation only ever adds to a queue.
 
-No liveness property is claimed: the network may lose everything, and under
-`DispatchOnly` nobody waits for an ack.
+No liveness property is claimed: the network may lose everything, and nobody
+waits for an ack.
 
 ## Findings
 
@@ -969,9 +958,6 @@ quint verify --main=byzHub --invariant=txidAuthenticity --max-steps=12 zeronym/s
 quint verify --main=byzIndexer --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzIndexer --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzIndexer --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=awaitAck --invariant=toldImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=awaitAck --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=awaitAckByzIndexer --invariant=toldImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=flakyTip --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
 

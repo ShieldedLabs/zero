@@ -61,7 +61,7 @@ module state {
     hubs: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => startingHub(params)),
     polled: Set(),
     flightBlocks: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => 0),
-    shim: initialShim(config.hubs, config.submitMode),
+    shim: initialShim(config.hubs),
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
     operator: Set(),
@@ -78,7 +78,6 @@ module state {
     | WalletGet({ query: TxId, start: int })
     | ShimReceive(Mail)
     | ShimLookupTimeout(Nonce)
-    | ShimAckTimeout(Nonce)
     | HubReceive({ hub: HubId, mail: Mail })
     | HubObserveTip({ hub: HubId, tip: Height })
     | HubTipStale({ hub: HubId, estimate: Height })
@@ -255,10 +254,10 @@ module state {
   pure def tpPayloads(s: System): Set[Payload] =
     s.tpLearned().union(s.indexer.published()).union(s.thirdParty.own)
 
-  /// The payloads the wallet has handed the shim: every send that was
-  /// answered, and every send still waiting for a hub's decision.
+  /// The payloads the wallet has handed the shim: every send is answered at
+  /// once.
   pure def sentByWallet(s: System): Set[Payload] =
-    val answered = s.events().fold(Set(), (acc, event) =>
+    s.events().fold(Set(), (acc, event) =>
       match event {
         | Sent(done) =>
           match done.input {
@@ -267,12 +266,6 @@ module state {
           }
         | _ => acc
       })
-    val waiting = s.shim.waiters.keys().fold(Set(), (acc, nonce) =>
-      match s.shim.waiters.get(nonce) {
-        | AckWaiter(waiter) => acc.union(Set(waiter.payload))
-        | _ => acc
-      })
-    answered.union(waiting)
 
   /// The payloads the shim has seen in the clear: every transaction the wallet
   /// handed it, and every body a hub returned to it.
@@ -314,10 +307,7 @@ module state {
       | DivertedOutput(diverted) =>
         val dispatched = stepped.posted(diverted.frames.map(frame =>
           { src: ShimAddr, dst: HubAddr(frame.hub), msg: frame.msg }))
-        match diverted.told {
-          | Some(obs) => dispatched.logged(Sent({ input: Clean(diverted.payload), obs: obs }))
-          | None => dispatched
-        }
+        dispatched.logged(Sent({ input: Clean(diverted.payload), obs: diverted.told }))
       | SendDoneOutput(done) => stepped.logged(Sent(done))
       | LookupSentOutput(sent) =>
         stepped.posted(Set({ src: ShimAddr, dst: HubAddr(sent.frame.hub), msg: sent.frame.msg }))

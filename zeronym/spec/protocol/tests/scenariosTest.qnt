@@ -143,7 +143,7 @@ module baselineScenarios {
       .expect(s.wallet.log == [Sent({ input: Clean(tight), obs: SentOk })])
       .expect(s.acks("h1", ShimAddr) == Set((0, WRefused(WExpiryTooTight))))
       .expect(audit.everQueued.get("h1") == Set())
-      .expect(wToldRefusedEverywhere and not(toldImpliesQueued))
+      .expect(wToldRefusedEverywhere)
 
   /// K1b. The frame is never delivered. Nothing obliges the network to.
   run toldOkAndNeverDeliveredTest =
@@ -153,7 +153,7 @@ module baselineScenarios {
       .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
       .expect(s.net == Set(submitMail("h1", 0, early)))
       .expect(audit.everQueued.get("h1") == Set())
-      .expect(wToldNeverDelivered and not(toldImpliesQueued))
+      .expect(wToldNeverDelivered)
 
   // ------------------------------------------------------------------------
   // K2. The status a wallet sees goes backwards
@@ -253,42 +253,6 @@ module baselineScenarios {
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
 }
 
-module awaitAckScenarios {
-  import basicSpells.* from "../spells/basicSpells"
-  import types.* from "../types"
-  import wire.* from "../wire"
-  import indexer.* from "../indexer"
-  import hub.* from "../hub"
-  import shim.* from "../shim"
-  import state.* from "../state"
-  import configs.* from "../instances"
-  import protocol(CONFIG = awaitAck).* from "../protocol"
-
-  /// Under `AwaitVerdict` the wallet hears nothing until the hub answers, and
-  /// then hears the hub's decision.
-  run toldWhatTheHubDecidedTest =
-    started
-      .then(block)
-      .then(sendToAll(early))
-      .expect(s.wallet.log == [] and s.sentByWallet() == Set(early))
-      .then(deliverSubmit("h1", 0, early))
-      .then(deliverToShim(ackMail("h1", 0, WAccepted)))
-      .expect(lastEvent == Sent({ input: Clean(early), obs: SentOk }))
-      .expect(vToldImpliesQueued and toldImpliesQueued)
-      // A transaction the hub refuses is reported as refused.
-      .then(blocks(1))
-      .then(sendToAll(tight))
-      .then(deliverSubmit("h1", 1, tight))
-      .then(deliverToShim(ackMail("h1", 1, WRefused(WExpiryTooTight))))
-      .expect(lastEvent == Sent({ input: Clean(tight), obs: SentRejected }))
-      // And silence fails closed.
-      .then(sendToAll(junk))
-      .then(timeOutAck(2))
-      .expect(lastEvent == Sent({ input: Clean(junk), obs: SendUnavailable }))
-      .expect(toldImpliesQueued)
-
-}
-
 module replicatedScenarios {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
@@ -342,9 +306,8 @@ module replicatedScenarios {
         Got({ query: "early", obs: Pending, via: Some(2) }),
         Got({ query: "early", obs: NotFound, via: Some(3) }),
       ])
-      // No lookup is outstanding: the shim asked nobody else. (Nonces 0 and 1
-      // are the acks nobody waits for.)
-      .expect(s.shim.waiters.keys() == Set(0, 1))
+      // No lookup is outstanding: the shim asked nobody else.
+      .expect(s.shim.waiters.keys() == Set())
       // Each hub told the truth about itself.
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
 
