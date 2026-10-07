@@ -57,6 +57,21 @@ jobs:
       - name: Divert protocol model
         run: sh zeronym/spec/check.sh
 
+  # The standalone Quint specification of the whole protocol: typecheck, tests
+  # and bounded random simulation. No model checker, so no Java.
+  spec-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Same reasoning as `spec`: it runs code fetched at run time.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Protocol specification
+        run: sh zeronym/spec/protocol/check.sh
+
   tests:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
