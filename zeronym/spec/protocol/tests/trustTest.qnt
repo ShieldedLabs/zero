@@ -262,11 +262,12 @@ module byzHubTrust {
       .expect(audit.offers == Set())
       .expect(offeredBeforeExpiry)
 
-  /// G6b needs the hub. A supported wallet's transaction is refused by an
+  /// G6b and G6c need the hub. A supported wallet's transaction is refused by an
   /// honest hub only for reasons that are not about the transaction. This hub
   /// takes one while it has not yet seen a tip, when an honest hub refuses
   /// everything. It first sees the chain at height 7, adopts that epoch
-  /// without flushing, and publishes at 9, past the expiry of 8.
+  /// without flushing, and offers the transaction at 9, its expiry, when no
+  /// node can take it.
   run hubAdmitsBeforeFirstTipTest =
     init
       .then(2.reps(_ => chainAdvance))
@@ -283,6 +284,9 @@ module byzHubTrust {
       .expect(conforming(early, MIN_WALLET_EXPIRY))
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 9, attempt: 0, nth: 0 }))
       .expect(not(conformingFirstOfferBeforeExpiry))
+      .expect(not(s.indexer.isAcceptable(early)))
+      .then(judge("h1", early, Rejected))
+      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
 
   run hubAdmitsBeforeFirstTipControlTest =
     init
@@ -295,7 +299,7 @@ module byzHubTrust {
       .then(blocks(2))
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set())
-      .expect(conformingFirstOfferBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
 }
 
 module awaitAckByzHubTrust {
@@ -348,7 +352,8 @@ module byzIndexerTrust {
   // A hub folds several indexer endpoints into one answer. A lookup answer
   // comes from the first endpoint that says found, so one misbehaving endpoint
   // is enough for the first two runs. The tip is the maximum over endpoints,
-  // so holding it back, as the last two do, takes every endpoint.
+  // so holding it back, as the last two do, takes every endpoint. The model
+  // has one abstract indexer and does not enforce that difference.
 
   /// G2 needs the indexer. It is offered a batch, reports nothing judged, and
   /// then serves the unpublished bytes in a lookup answer, which the honest
@@ -405,50 +410,80 @@ module byzIndexerTrust {
       .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
       .expect(lookupValidityPerHub)
 
-  /// G6a needs the indexer. It stops reporting tip progress at height 2 while
-  /// the chain goes on, then reports the truth at 5. The flush scheduled for
-  /// 3 runs at 5, where a transaction expiring at 5 has no margin left.
+  /// G6a needs the indexer. The hub asks for the tip at every block. From
+  /// height 3 the indexer goes on answering 2, and at height 5 it answers
+  /// truthfully. The flush scheduled for 3 runs at 5, where a transaction
+  /// expiring at 5 has no margin left.
   run indexerWithholdsTipTest =
     started
       .then(block)
       .then(submitTo("h1", 0, tight))
-      .then(3.reps(_ => chainAdvance))
-      .expect(s.height() == 5 and s.hubs.get("h1").tip == Some(2))
-      .then(observe("h1"))
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 2))
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 2))
+      .then(chainAdvance)
+      .expect(s.height() == 5 and s.hubs.get("h1").tip == Some(2) and not(chainMayAdvance))
+      .then(hubObserveTipWith("h1", 5))
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: tight, height: 5, attempt: 0, nth: 0 }))
       .expect(not(offeredBeforeExpiry))
 
+  /// The same polls, answered truthfully.
   run indexerWithholdsTipControlTest =
     started
       .then(block)
       .then(submitTo("h1", 0, tight))
-      .then(block)
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 3))
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: tight, height: 3, attempt: 0, nth: 0 }))
+      .then(judge("h1", tight, Accepted))
+      .then(hubFlushEndWith("h1"))
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 4))
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 5))
+      .expect(s.height() == 5 and audit.offers.size() == 1)
       .expect(offeredBeforeExpiry)
 
-  /// G6b needs the indexer. The same silence, kept up to height 8, does it to
-  /// a supported wallet's transaction.
+  /// G6b and G6c need the indexer. The same lie, kept up to height 8, does it
+  /// to a supported wallet's transaction: it is offered at 8 with expiry 9,
+  /// and after one block in flight the node cannot take it.
   run indexerWithholdsTipFromConformingTest =
     started
       .then(block)
       .then(submitTo("h1", 0, early))
-      .then(6.reps(_ => chainAdvance))
-      .then(observe("h1"))
+      .then(5.reps(_ => chainAdvance.then(hubObserveTipWith("h1", 2))))
+      .then(chainAdvance)
+      .expect(s.height() == 8 and s.hubs.get("h1").tip == Some(2))
+      .then(hubObserveTipWith("h1", 8))
       .then(hubFlushBeginWith("h1"))
       .expect(conforming(early, MIN_WALLET_EXPIRY) and audit.admitted.get(("h1", early)).height == 2)
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 8, attempt: 0, nth: 0 }))
       .expect(not(conformingFirstOfferBeforeExpiry))
+      .then(chainAdvance)
+      .expect(not(s.indexer.isAcceptable(early)))
+      .then(judge("h1", early, Rejected))
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 9, nth: 0, final: true }))
+      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
 
+  /// The same polls, answered truthfully: offered at 3, and accepted after a
+  /// block in flight.
   run indexerWithholdsTipFromConformingControlTest =
     started
       .then(block)
       .then(submitTo("h1", 0, early))
-      .then(block)
+      .then(chainAdvance)
+      .then(hubObserveTipWith("h1", 3))
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 3, attempt: 0, nth: 0 }))
-      .expect(conformingFirstOfferBeforeExpiry)
+      .then(chainAdvance)
+      .then(judge("h1", early, Accepted))
+      .then(hubFlushEndWith("h1"))
+      .expect(s.onChain("early") == InMempool)
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 4, nth: 0, final: true }))
+      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
 }
 
 module replicatedOneByzTrust {

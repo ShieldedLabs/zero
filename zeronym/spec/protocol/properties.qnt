@@ -59,6 +59,7 @@ module properties {
     everQueued: s.hubIds().mapBy(_ => Set()),
     admitted: Map(),
     offers: Set(),
+    verdicts: Set(),
     windows: Map(),
     refusals: Set(),
     dropped: Set(),
@@ -93,6 +94,25 @@ module properties {
               nth: audit.offers.filter(offer => offer.hub == hub and offer.payload == payload).size(),
             })
           else Set()
+        | Idle => Set()
+      }).flatten()
+    // An entry that was awaiting a verdict and no longer is, in a flush still
+    // in flight, has just had its answer. A node judged it unless it was set
+    // aside for requeue.
+    val judged = hubs.map(hub =>
+      match pre.hubs.get(hub).flush {
+        | Broadcasting(before) =>
+          match post.hubs.get(hub).flush {
+            | Broadcasting(after) =>
+              before.batch.keys().exclude(after.batch.keys()).map(payload => {
+                hub: hub,
+                payload: payload,
+                height: post.height(),
+                nth: audit.offers.filter(offer => offer.hub == hub and offer.payload == payload).size() - 1,
+                final: not(after.unplaced.keys().contains(payload)),
+              })
+            | Idle => Set()
+          }
         | Idle => Set()
       }).flatten()
     // A flush that has ended, other than a final one, gave up on every entry
@@ -133,6 +153,7 @@ module properties {
         if (acc.keys().contains(entry)) acc
         else acc.put(entry, { height: post.height(), tip: post.hubs.get(entry._1).observedTip() })),
       offers: audit.offers.union(offered),
+      verdicts: audit.verdicts.union(judged),
       windows: windows,
       refusals: audit.refusals.union(refused),
       dropped: audit.dropped.union(dropped),
@@ -207,32 +228,60 @@ module properties {
       | None => true
     }
 
-  /// Whether a payload reached `offer.hub` as a supported wallet's would: it
-  /// honours the expiry floor, and it first entered the queue within the
-  /// delivery lag of the height it was built at.
-  pure def isConformingAndTimely(s: System, audit: Audit, offer: Offer): bool =
-    val params = s.hubs.get(offer.hub).params
+  /// Whether `payload` reached `hub` as a supported wallet's would: it honours
+  /// the expiry floor, and it first entered the queue within the delivery lag
+  /// of the height it was built at.
+  pure def isConformingAndTimely(s: System, audit: Audit, hub: HubId, payload: Payload): bool =
+    val params = s.hubs.get(hub).params
     and {
-      conforming(offer.payload, params.minWalletExpiry),
-      audit.admitted.keys().contains((offer.hub, offer.payload)),
-      audit.admitted.get((offer.hub, offer.payload)).height <= offer.payload.created + params.deliveryLag,
+      conforming(payload, params.minWalletExpiry),
+      audit.admitted.keys().contains((hub, payload)),
+      audit.admitted.get((hub, payload)).height <= payload.created + params.deliveryLag,
     }
 
-  /// G6a. Every transaction one of `hubs` publishes is published with the
-  /// mining margin to spare: whatever was admitted, on every attempt.
+  // G6 comes in three parts. G6a and G6b are about the moment a flush begins:
+  // how much of the mining margin is left when the hub hands the batch over.
+  // They do not say a node accepts the transaction, because the chain may move
+  // while the batch is in flight. G6c is about the moment a node judges it.
+
+  /// G6a. Every transaction one of `hubs` offers is offered with the mining
+  /// margin to spare: whatever was admitted, on every attempt. A claim about
+  /// the margin left at the offer, not about acceptance.
   pure def offeredBeforeExpiry(s: System, audit: Audit, hubs: Set[HubId]): bool =
     audit.offers.forall(offer => hubs.contains(offer.hub) implies offeredInTime(s, offer))
 
   /// G6b. The same, for supported wallets only and for the first time a hub
-  /// publishes the transaction. It says nothing about a later offer of an
-  /// entry that was requeued; see `conformingEveryOfferBeforeExpiry`.
+  /// offers the transaction. It says nothing about a later offer of an entry
+  /// that was requeued; see `conformingEveryOfferBeforeExpiry`. Like G6a it is
+  /// a claim about the margin left at the offer.
   pure def conformingFirstOfferBeforeExpiry(s: System, audit: Audit, hubs: Set[HubId]): bool =
     audit.offers.forall(offer =>
       and {
         hubs.contains(offer.hub),
         offer.nth == 0,
-        isConformingAndTimely(s, audit, offer),
+        isConformingAndTimely(s, audit, offer.hub, offer.payload),
       } implies offeredInTime(s, offer))
+
+  /// G6c. The end-to-end claim: when a node judges the first offer of a
+  /// supported wallet's transaction, the transaction has not expired. It can
+  /// still be mined in the next block, so the node does not turn it away for
+  /// its expiry.
+  ///
+  /// The margin is what pays for the blocks that arrive while the batch is in
+  /// flight. G6c therefore needs G6b and one thing more: that fewer blocks
+  /// than the mining margin arrive during a flush (`flightWithinMargin`).
+  pure def conformingFirstOfferJudgedBeforeExpiry(s: System, audit: Audit, hubs: Set[HubId]): bool =
+    audit.verdicts.forall(verdict =>
+      and {
+        hubs.contains(verdict.hub),
+        verdict.nth == 0,
+        verdict.final,
+        isConformingAndTimely(s, audit, verdict.hub, verdict.payload),
+      } implies
+        match verdict.payload.expiry {
+          | Some(expiry) => expiry > verdict.height
+          | None => true
+        })
 
   /// G7. Structural sanity: a queued entry is within its attempts; a hub that
   /// is down holds nothing and knows nothing; every nonce in use was minted.
@@ -296,23 +345,29 @@ module properties {
           | _ => true
         })
 
-  /// K5. A payload a hub has acknowledged is still held by it, or has been
-  /// offered to the chain. This does not hold: the queue lives in memory, and
-  /// a crash after the ack loses it.
-  pure def ackedIsHeldOrOffered(s: System, audit: Audit): bool =
+  /// K5. A payload a hub has acknowledged is accounted for: the hub still
+  /// holds it, queued or in flight; or the chain has it; or a node judged it
+  /// when this hub offered it, and said accepted, already known or rejected.
+  /// Being offered is not enough: an offer nothing judged settles nothing.
+  ///
+  /// This does not hold. The queue lives in memory: a crash after the ack
+  /// loses it, and so does a final flush that finds the indexer unreachable.
+  pure def ackedIsHeldOrSettled(s: System, audit: Audit): bool =
     s.hubIds().forall(hub =>
       s.ackedAt(hub).forall(payload =>
         or {
           s.queuedAt(hub).contains(payload),
           s.inFlightAt(hub).contains(payload),
-          audit.offers.exists(offer => offer.hub == hub and offer.payload == payload),
+          s.indexer.published().contains(payload),
+          audit.verdicts.exists(verdict =>
+            verdict.hub == hub and verdict.payload == payload and verdict.final),
         }))
 
   /// K6. G6b without its restriction to the first offer. This does not hold
   /// once a hub is stale: requeue judges an entry at the observed tip, which
   /// has stopped, while the flush schedule runs on.
   pure def conformingEveryOfferBeforeExpiry(s: System, audit: Audit): bool =
-    audit.offers.forall(offer => isConformingAndTimely(s, audit, offer) implies offeredInTime(s, offer))
+    audit.offers.forall(offer => isConformingAndTimely(s, audit, offer.hub, offer.payload) implies offeredInTime(s, offer))
 
   // K1. Under `DispatchOnly`, "told ok" promises nothing about any hub. It is
   // stated as three reachable states, not as a violated invariant, because the
@@ -545,7 +600,7 @@ module properties {
       and {
         isSome(offer.payload.expiry),
         offer.nth == 0,
-        isConformingAndTimely(s, audit, offer),
+        isConformingAndTimely(s, audit, offer.hub, offer.payload),
       })
 
   /// The same, for a payload admitted while the hub's tip was behind the chain.
@@ -554,9 +609,18 @@ module properties {
       and {
         isSome(offer.payload.expiry),
         offer.nth == 0,
-        isConformingAndTimely(s, audit, offer),
+        isConformingAndTimely(s, audit, offer.hub, offer.payload),
         val entry = audit.admitted.get((offer.hub, offer.payload))
         entry.tip < entry.height,
+      })
+
+  pure def vConformingFirstOfferJudged(s: System, audit: Audit): bool =
+    audit.verdicts.exists(verdict =>
+      and {
+        isSome(verdict.payload.expiry),
+        verdict.nth == 0,
+        verdict.final,
+        isConformingAndTimely(s, audit, verdict.hub, verdict.payload),
       })
 
   pure def vAckImpliesQueued(s: System): bool =

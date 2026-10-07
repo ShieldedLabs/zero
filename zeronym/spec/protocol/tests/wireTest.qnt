@@ -51,9 +51,17 @@ module wireTest {
 
   /// F2. The documented collision: a queue hit and an indexer answer of
   /// "found, height 0, no body" are the same reply, though they mean different
-  /// things. No two honest outcomes collide.
+  /// things. The wallet cannot tell them apart: it is told pending for both,
+  /// so an indexer that answers that way for a transaction nobody holds makes
+  /// the wallet see pending (`indexerForgesPendingTest` is that run). No two
+  /// honest outcomes collide.
   run sentinelCollisionTest = all {
     assert(render(QueueHit) == render(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT })))),
+    assert(QUERIES.forall(query =>
+      and {
+        interpretReply(render(QueueHit), query) == Pending,
+        interpretReply(render(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT }))), query) == Pending,
+      })),
     assert(QUERIES.forall(query =>
       meaning(QueueHit, query)
         != meaning(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT })), query))),

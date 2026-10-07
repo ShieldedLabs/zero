@@ -9,8 +9,8 @@
 /// record that makes it fail.
 ///
 /// The schedule in every configuration: the chain starts at height 1, a flush
-/// is scheduled at heights 3, 6, 9 and 12, and a published transaction needs
-/// one more block to be mined. Shim nonces count up from 0, one per frame.
+/// is scheduled at heights 3, 6, 9 and 12, and the mining margin is 2 blocks.
+/// Shim nonces count up from 0, one per frame.
 
 module baselineScenarios {
   import basicSpells.* from "../spells/basicSpells"
@@ -54,6 +54,7 @@ module baselineScenarios {
       .expect(wPending and wTxInMempool and wTxMined)
       .expect(operatorBlind and queuedBytesConfidential and txidAuthenticity and lookupValidityPerHub)
       .expect(offeredBeforeExpiry and conformingFirstOfferBeforeExpiry and ackImpliesQueued and wellFormed)
+      .expect(vConformingFirstOfferJudged and conformingFirstOfferJudgedBeforeExpiry)
       .expect(statusNeverRegresses)
 
   /// A pass-through transaction goes to the operator and nowhere else.
@@ -297,15 +298,15 @@ module baselineScenarios {
     started
       .then(block)
       .then(submitTo("h1", 0, early))
-      .expect(s.acks("h1", ShimAddr) == Set((0, WAccepted)) and ackedIsHeldOrOffered)
+      .expect(s.acks("h1", ShimAddr) == Set((0, WAccepted)) and ackedIsHeldOrSettled)
       .then(hubCrashWith("h1"))
       .expect(s.hubs.get("h1") == downHub(HUB_PARAMS))
       .expect(audit.offers == Set() and s.onChain("early") == Absent)
-      .expect(not(ackedIsHeldOrOffered) and ackImpliesQueued)
+      .expect(not(ackedIsHeldOrSettled) and ackImpliesQueued)
 
   /// K5b. The final flush of a draining hub finds the indexer unreachable.
-  /// The entry was offered, which is all `ackedIsHeldOrOffered` asks, so that
-  /// invariant still holds here; the transaction is lost all the same.
+  /// The entry was offered and nothing judged it; the hub stops, and the
+  /// transaction is held nowhere.
   run ackedThenLostAtDrainTest =
     started
       .then(block)
@@ -316,14 +317,15 @@ module baselineScenarios {
       .expect(s.queuedAt("h1") == Set() and s.inFlightAt("h1") == Set() and s.onChain("early") == Absent)
       .expect(s.acks("h1", ShimAddr) == Set((0, WAccepted)))
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 2, attempt: 0, nth: 0 }))
-      .expect(ackedIsHeldOrOffered)
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 2, nth: 0, final: false }))
+      .expect(not(ackedIsHeldOrSettled))
 
   // ------------------------------------------------------------------------
   // K6, control
   // ------------------------------------------------------------------------
 
   /// The wallet inputs of K6 under a timely tip. The second requeue is judged
-  /// at tip 9, finds that an expiry of 10 does not survive the flush at 12,
+  /// at tip 9, finds that an expiry of 11 does not survive the flush at 12,
   /// and drops the entry: it is never offered past its expiry.
   run requeueUnderTimelyTipDropsTest =
     started
@@ -389,7 +391,7 @@ module awaitAckScenarios {
       .then(hubCrashWith("h1"))
       .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
       .expect(s.queuedAt("h1") == Set() and audit.offers == Set() and s.onChain("early") == Absent)
-      .expect(toldImpliesQueued and not(ackedIsHeldOrOffered))
+      .expect(toldImpliesQueued and not(ackedIsHeldOrSettled))
 }
 
 module replicatedScenarios {
@@ -500,7 +502,9 @@ module flakyTipScenarios {
 
   /// A supported wallet's transaction, admitted the same way and then flushed
   /// one block late because the tip is reported one block back. The reorg
-  /// slack is exactly what it needs.
+  /// slack leaves it exactly the mining margin at the offer. One block arrives
+  /// while the batch is in flight, which the margin is there to pay for, and
+  /// the node still accepts it.
   run conformingSurvivesRegressionTest =
     started
       .then(blocks(2))
@@ -512,7 +516,53 @@ module flakyTipScenarios {
       .then(hubObserveTipWith("h1", 6))
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 7, attempt: 0, nth: 0 }))
+      .expect(early.expiry == Some(7 + MINING_MARGIN))
       .expect(vConformingOfferAdmittedBehind and conformingFirstOfferBeforeExpiry and offeredBeforeExpiry)
+      .then(chainAdvance)
+      .expect(s.height() == 8 and s.flightBlocks.get("h1") == MAX_FLIGHT_BLOCKS and not(chainMayAdvance))
+      .then(judge("h1", early, Accepted))
+      .then(hubFlushEndWith("h1"))
+      .expect(s.onChain("early") == InMempool)
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 8, nth: 0, final: true }))
+      .expect(vConformingFirstOfferJudged and conformingFirstOfferJudgedBeforeExpiry)
+}
+
+module flakyTipSlowFlightScenarios {
+  import basicSpells.* from "../spells/basicSpells"
+  import types.* from "../types"
+  import wire.* from "../wire"
+  import indexer.* from "../indexer"
+  import hub.* from "../hub"
+  import shim.* from "../shim"
+  import state.* from "../state"
+  import configs.* from "../instances"
+  import protocol(CONFIG = flakyTipSlowFlight).* from "../protocol"
+
+  /// K7. The steps of `conformingSurvivesRegressionTest`, with the batch in
+  /// flight for two blocks, as many as the margin reserves. The offer left the
+  /// whole margin, and G6b holds. By the time the node looks, the transaction
+  /// can no longer be mined: the budget had already spent the slack, and the
+  /// flight spent the margin.
+  run slowFlightSpendsTheMarginTest =
+    started
+      .then(blocks(2))
+      .then(hubFlushBeginWith("h1"))
+      .then(hubObserveTipWith("h1", 2))
+      .then(submitTo("h1", 0, early))
+      .then(blocks(2))
+      .then(2.reps(_ => chainAdvance))
+      .then(hubObserveTipWith("h1", 6))
+      .then(hubFlushBeginWith("h1"))
+      .expect(audit.offers == Set({ hub: "h1", payload: early, height: 7, attempt: 0, nth: 0 }))
+      .then(2.reps(_ => chainAdvance))
+      .expect(s.height() == 9 and early.expiry == Some(9))
+      // An honest node cannot take it now; it is rejected.
+      .expect(not(s.indexer.isAcceptable(early)))
+      .expect(not(honestIndexerOutputs(s.indexer, BroadcastIInput(early)).contains(VerdictOutput(Accepted))))
+      .then(judge("h1", early, Rejected))
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 9, nth: 0, final: true }))
+      .expect(not(flightWithinMargin))
+      .expect(conformingFirstOfferBeforeExpiry and not(conformingFirstOfferJudgedBeforeExpiry))
 }
 
 module flakyTipNoSlackScenarios {
@@ -527,8 +577,8 @@ module flakyTipNoSlackScenarios {
   import protocol(CONFIG = flakyTipNoSlack).* from "../protocol"
 
   /// This configuration's migration from a supported wallet: built at height
-  /// 2, expiring exactly at the floor of 5 blocks.
-  pure val atFloor = orchard("early", 2, 7)
+  /// 2, expiring exactly at the floor of 6 blocks.
+  pure val atFloor = orchard("early", 2, 8)
 
   /// K3'. The steps of `conformingSurvivesRegressionTest` with the expiry
   /// floor equal to the three-term budget. The flush is one block late and
@@ -565,8 +615,10 @@ module staleLagScenarios {
   /// K4. The hub hears nothing after height 5, one block short of the flush
   /// at 6, while the chain goes on. Its cadence still follows the tip it last
   /// saw, so nothing is flushed until it goes stale at height 8. A supported
-  /// wallet's transaction, expiring at 8, is published at 8: not yet expired,
-  /// and without the block the mining margin reserves.
+  /// wallet's transaction, expiring at 9, is offered at 8: not yet expired,
+  /// with one block of margin where two are reserved. One block arrives while
+  /// the batch is in flight, as the margin allows for, and the node can no
+  /// longer take it.
   run silenceAcrossBoundaryMissesMarginTest =
     started
       .then(block)
@@ -582,12 +634,18 @@ module staleLagScenarios {
       .expect(conforming(early, MIN_WALLET_EXPIRY))
       .expect(audit.admitted.get(("h1", early)) == { height: 3, tip: 3 })
       .expect(audit.offers == Set({ hub: "h1", payload: early, height: 8, attempt: 0, nth: 0 }))
-      .expect(early.expiry == Some(8) and MINING_MARGIN == 1)
+      .expect(early.expiry == Some(9) and MINING_MARGIN == 2)
       .expect(not(conformingFirstOfferBeforeExpiry) and not(offeredBeforeExpiry))
+      .then(chainAdvance)
+      .expect(s.height() == 9 and s.flightBlocks.get("h1") == MAX_FLIGHT_BLOCKS and flightWithinMargin)
+      .expect(not(s.indexer.isAcceptable(early)))
+      .then(judge("h1", early, Rejected))
+      .expect(audit.verdicts == Set({ hub: "h1", payload: early, height: 9, nth: 0, final: true }))
+      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
 
   /// K6. A stale hub's flush finds the indexer unreachable, twice. Requeue
   /// judges the entry at the observed tip, which stopped at 5: the next flush
-  /// it knows of is the one at 6, so an expiry of 10 looks safe both times.
+  /// it knows of is the one at 6, so an expiry of 11 looks safe both times.
   /// The free-running schedule offers it again at 12.
   run requeuedPastExpiryTest =
     started
@@ -617,7 +675,7 @@ module staleLagScenarios {
         { hub: "h1", payload: late, height: 9, attempt: 1, nth: 1 },
         { hub: "h1", payload: late, height: 12, attempt: 2, nth: 2 },
       ))
-      .expect(late.expiry == Some(10))
+      .expect(late.expiry == Some(11))
       // The first offer was in time, which is all G6b covers.
       .expect(not(conformingEveryOfferBeforeExpiry) and conformingFirstOfferBeforeExpiry)
 
@@ -659,11 +717,12 @@ module staleLagWithSlackScenarios {
   import protocol(CONFIG = staleLagWithSlack).* from "../protocol"
 
   /// This configuration's migration from a supported wallet: built at height
-  /// 2, expiring at the floor of 7 blocks.
-  pure val atFloor = orchard("early", 2, 9)
+  /// 2, expiring at the floor of 8 blocks.
+  pure val atFloor = orchard("early", 2, 10)
 
   /// The steps of K4 with an expiry floor one block higher, which is the
-  /// relation `staleSlackFits` asks for. The same late flush leaves the margin.
+  /// relation `staleSlackFits` asks for. The same late flush leaves the
+  /// margin, and after a block in flight the node accepts.
   run sameSilenceWithSlackKeepsMarginTest =
     started
       .then(block)
@@ -677,10 +736,16 @@ module staleLagWithSlackScenarios {
       .then(hubFlushBeginWith("h1"))
       .expect(audit.offers == Set({ hub: "h1", payload: atFloor, height: 8, attempt: 0, nth: 0 }))
       .expect(vConformingFirstOfferBeforeExpiry and conformingFirstOfferBeforeExpiry)
+      .then(chainAdvance)
+      .expect(s.height() == 9 and s.flightBlocks.get("h1") == MAX_FLIGHT_BLOCKS)
+      .then(judge("h1", atFloor, Accepted))
+      .expect(s.onChain("early") == InMempool)
+      .expect(audit.verdicts == Set({ hub: "h1", payload: atFloor, height: 9, nth: 0, final: true }))
+      .expect(conformingFirstOfferJudgedBeforeExpiry)
 
   /// This configuration's second migration: built at height 4, expiring at
   /// the floor.
-  pure val lateAtFloor = orchard("late", 4, 11)
+  pure val lateAtFloor = orchard("late", 4, 12)
 
   /// Found by simulation; the slack does not cover it. A stale hub's
   /// free-running clock reads 6 at true height 4, and the flush scheduled for
@@ -688,7 +753,8 @@ module staleLagWithSlackScenarios {
   /// chain is at 5, and admission, which knows the tip and not the schedule's
   /// history, counts on the flush at 6. That flush has already happened. The
   /// transaction waits for the one at 9, and a second, shorter silence makes
-  /// that one late too: it is published at 11, with no margin.
+  /// that one late too: it is offered at 11 with expiry 12, one block of
+  /// margin where two are reserved, and a block in flight uses that up.
   ///
   /// Neither half is enough alone at these numbers. Without the early flush
   /// the transaction goes out at 6; without the second silence, at 9.
@@ -712,6 +778,10 @@ module staleLagWithSlackScenarios {
       .expect(conforming(lateAtFloor, MIN_WALLET_EXPIRY) and staleSlackFits)
       .expect(audit.offers == Set({ hub: "h1", payload: lateAtFloor, height: 11, attempt: 0, nth: 0 }))
       .expect(not(conformingFirstOfferBeforeExpiry))
+      .then(chainAdvance)
+      .expect(s.height() == 12 and not(s.indexer.isAcceptable(lateAtFloor)))
+      .then(judge("h1", lateAtFloor, Rejected))
+      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
 }
 
 module byzIndexerScenarios {

@@ -83,6 +83,9 @@ module protocol {
   /// Entries a hub's admission will hold.
   pure val QUEUE_CAP = CONFIG.queueCap
 
+  /// Blocks that may arrive while one flush is in flight.
+  pure val MAX_FLIGHT_BLOCKS = CONFIG.maxFlightBlocks
+
   /// Bounds of the model: the chain stops growing at `MAX_HEIGHT`, and the
   /// wallet makes at most `MAX_REQUESTS` sends and as many lookups, as does
   /// the third party.
@@ -134,6 +137,28 @@ module protocol {
   pure val reorgSlackFits =
     FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + REORG_ALLOWANCE <= MIN_WALLET_EXPIRY
 
+  /// Fewer blocks arrive while a flush is in flight than the mining margin
+  /// reserves. The margin is measured from the height at which a flush begins;
+  /// every block that arrives before the node judges a transaction is taken
+  /// out of it. The implementation bounds each call to the indexer
+  /// (`RPC_TIMEOUT`, `zeronym/hub/src/chain.rs`) and not the batch as a whole,
+  /// and bounds neither in blocks, so this is an assumption about the
+  /// environment that the code does not enforce.
+  pure val flightWithinMargin = MAX_FLIGHT_BLOCKS < MINING_MARGIN
+
+  /// The relations between the shipped constants that the scaled-down schedule
+  /// is meant to keep: the slack left by the startup budget equals the reorg
+  /// allowance; the staleness window exceeds both the margin and that slack;
+  /// the budget with the longest non-stale silence added exceeds the expiry
+  /// floor by exactly one block, and without the margin it fits.
+  pure val shippedRelationsKept = and {
+    MIN_WALLET_EXPIRY - (FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG) == REORG_ALLOWANCE,
+    STALE_WINDOW > MINING_MARGIN,
+    STALE_WINDOW > REORG_ALLOWANCE,
+    FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + (STALE_WINDOW - 1) == MIN_WALLET_EXPIRY + 1,
+    FLUSH_INTERVAL + DELIVERY_LAG + (STALE_WINDOW - 1) <= MIN_WALLET_EXPIRY,
+  }
+
   /// The same budget with the longest silence that does not yet make a hub
   /// stale. It is named, not assumed: the shipped constants do not meet it.
   pure val staleSlackFits =
@@ -164,8 +189,9 @@ module protocol {
   /// has one hub address.
   pure val awaitVerdictSingleHub = SUBMIT_MODE == AwaitVerdict implies HUBS.size() == 1
 
-  /// The assumptions every configuration is expected to meet. The two slack
-  /// relations are kept apart: some configurations exist to drop one.
+  /// The assumptions every configuration meets. `reorgSlackFits` and
+  /// `flightWithinMargin` are kept apart: a configuration says whether it
+  /// relies on each, and some exist to show what happens without one.
   pure val standingAssumptions = and {
     budgetFits,
     freeRunNotSlowerThanChain,
@@ -176,7 +202,8 @@ module protocol {
   }
 
   assume _ = budgetFits
-  assume _ = reorgSlackFits
+  assume _ = CONFIG.reliesOnReorgSlack implies reorgSlackFits
+  assume _ = CONFIG.reliesOnFlightWithinMargin implies flightWithinMargin
   assume _ = freeRunNotSlowerThanChain
   assume _ = flushIntervalPositive
   assume _ = hubsNonEmpty
@@ -290,10 +317,15 @@ module protocol {
   /// live: a block is held back until every hub has done what the tip model
   /// says it does within a block.
   ///
-  /// In every model, a flush that is due has begun.
+  /// In every model, a flush that is due has begun, and no flush has been in
+  /// flight for `MAX_FLIGHT_BLOCKS` blocks already. A hub whose flush is in
+  /// flight is not looking at the tip, so the clauses below bind a hub only
+  /// while it is idle.
   ///
-  /// - `TipTimely`: every running hub has observed the current block. With an
-  ///   honest indexer its lag is therefore zero at every block.
+  /// - `TipTimely`: every running hub has asked for the tip since the last
+  ///   block. An honest indexer answers with the true height, so the hub's lag
+  ///   is zero at every block. A Byzantine one is asked just as often; what it
+  ///   controls is the answer.
   /// - `TipMayRegress`: no running hub is further behind than the allowance.
   /// - `TipMayLag`: a hub whose silence has reached the staleness window has
   ///   become stale, and a stale hub's free-running clock has caught up with
@@ -301,19 +333,21 @@ module protocol {
   def chainMayAdvance: bool = and {
     s.height() < MAX_HEIGHT,
     HUBS.forall(id => not(s.hubs.get(id).isFlushDue())),
+    HUBS.forall(id => s.flightBlocks.get(id) < MAX_FLIGHT_BLOCKS or s.hubs.get(id).flush == Idle),
     HUBS.forall(id =>
       val state = s.hubs.get(id)
-      match TIP {
-        | TipTimely =>
-          ROLES.indexer == Byzantine or (state.phase == Running implies lagOf(id) == 0)
-        | TipMayRegress =>
-          state.phase == Running implies lagOf(id) <= REORG_ALLOWANCE
-        | TipMayLag =>
-          and {
-            state.phase == Running implies lagOf(id) < STALE_WINDOW,
-            (state.phase == Stale and FREE_RUN == NotSlower) implies state.cadenceHeight() >= s.height(),
-          }
-      }),
+      state.flush == Idle implies
+        match TIP {
+          | TipTimely =>
+            state.phase == Running implies s.polled.contains(id)
+          | TipMayRegress =>
+            state.phase == Running implies lagOf(id) <= REORG_ALLOWANCE
+          | TipMayLag =>
+            and {
+              state.phase == Running implies lagOf(id) < STALE_WINDOW,
+              (state.phase == Stale and FREE_RUN == NotSlower) implies state.cadenceHeight() >= s.height(),
+            }
+        }),
   }
 
   // ------------------------------------------------------------------------
@@ -485,17 +519,29 @@ module protocol {
       HUBS.contains(id),
       not(isHubError(result.out)),
       result.state != s.hubs.get(id),
-      commit({ ...around, hubs: around.hubs.set(id, result.state) }, label),
+      commit(around.hubMoved(id, result.state), label),
     }
 
   action hubTakes(id: HubId, input: HubInput, label: Label): bool =
     hubTakesIn(s, id, input, label)
 
   /// A hub's cadence loop observes the tip its indexer reports.
-  action hubObserveTipWith(id: HubId, tip: Height): bool = all {
-    reportableTips.contains(tip),
-    hubTakes(id, TipHInput(tip), HubObserveTip({ hub: id, tip: tip })),
-  }
+  ///
+  /// The poll is recorded whether or not the answer moves the hub's tip: a hub
+  /// that asked and was told nothing new has still asked. A second poll in the
+  /// same block that changes nothing is not taken.
+  action hubObserveTipWith(id: HubId, tip: Height): bool =
+    val result = hub(s.hubs.get(id), TipHInput(tip))
+    all {
+      HUBS.contains(id),
+      reportableTips.contains(tip),
+      not(isHubError(result.out)),
+      result.state != s.hubs.get(id) or not(s.polled.contains(id)),
+      commit(
+        { ...s.hubMoved(id, result.state), polled: s.polled.union(Set(id)) },
+        HubObserveTip({ hub: id, tip: tip }),
+      ),
+    }
 
   action hubObserveTip = {
     nondet id = oneOf(HUBS)
@@ -609,7 +655,7 @@ module protocol {
   /// The chain grows by one block.
   action chainAdvance = all {
     chainMayAdvance,
-    commit({ ...s, indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput) }, ChainAdvance),
+    commit(s.blockArrived(), ChainAdvance),
   }
 
   /// The transactions waiting in the mempool.
@@ -800,6 +846,7 @@ module protocol {
   val toldImpliesQueued = P::toldImpliesQueued(s, audit)
   val offeredBeforeExpiry = P::offeredBeforeExpiry(s, audit, HUBS)
   val conformingFirstOfferBeforeExpiry = P::conformingFirstOfferBeforeExpiry(s, audit, HUBS)
+  val conformingFirstOfferJudgedBeforeExpiry = P::conformingFirstOfferJudgedBeforeExpiry(s, audit, HUBS)
   val wellFormed = P::wellFormed(s)
   val ackImpliesQueued = P::ackImpliesQueued(s, audit, HUBS)
 
@@ -809,6 +856,8 @@ module protocol {
   // coincide.
   val offeredBeforeExpiryForHonestHubs = P::offeredBeforeExpiry(s, audit, HONEST_HUBS)
   val conformingFirstOfferBeforeExpiryForHonestHubs = P::conformingFirstOfferBeforeExpiry(s, audit, HONEST_HUBS)
+  val conformingFirstOfferJudgedBeforeExpiryForHonestHubs =
+    P::conformingFirstOfferJudgedBeforeExpiry(s, audit, HONEST_HUBS)
   val ackImpliesQueuedForHonestHubs = P::ackImpliesQueued(s, audit, HONEST_HUBS)
 
   // ------------------------------------------------------------------------
@@ -816,7 +865,7 @@ module protocol {
   // ------------------------------------------------------------------------
 
   val statusNeverRegresses = P::statusNeverRegresses(s)
-  val ackedIsHeldOrOffered = P::ackedIsHeldOrOffered(s, audit)
+  val ackedIsHeldOrSettled = P::ackedIsHeldOrSettled(s, audit)
   val conformingEveryOfferBeforeExpiry = P::conformingEveryOfferBeforeExpiry(s, audit)
 
   // ------------------------------------------------------------------------
@@ -858,6 +907,7 @@ module protocol {
   val vOfferedBeforeExpiry = P::vOfferedBeforeExpiry(audit)
   val vConformingFirstOfferBeforeExpiry = P::vConformingFirstOfferBeforeExpiry(s, audit)
   val vConformingOfferAdmittedBehind = P::vConformingOfferAdmittedBehind(s, audit)
+  val vConformingFirstOfferJudged = P::vConformingFirstOfferJudged(s, audit)
   val vAckImpliesQueued = P::vAckImpliesQueued(s)
 
   // ------------------------------------------------------------------------

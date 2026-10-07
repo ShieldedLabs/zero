@@ -214,10 +214,15 @@ module types {
     minWalletExpiry: int,
     maxAttempts: int,
     queueCap: int,
+    maxFlightBlocks: int,
     maxHeight: Height,
     maxRequests: int,
     submitMode: SubmitMode,
     roles: Roles,
     tip: TipModel,
+    // Which of the two optional timing relations this configuration relies
+    // on. A configuration that exists to show what one of them buys drops it.
+    reliesOnReorgSlack: bool,
+    reliesOnFlightWithinMargin: bool,
   }
 }

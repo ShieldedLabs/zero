@@ -15,15 +15,15 @@ module configs {
   // Transactions
   // ------------------------------------------------------------------------
   //
-  // The schedule below flushes every 3 blocks with a mining margin of 1 and a
-  // delivery lag of 1, and supports wallets that set an expiry 6 blocks out.
+  // The schedule below flushes every 3 blocks with a mining margin of 2 and a
+  // delivery lag of 1, and supports wallets that set an expiry 7 blocks out.
 
   pure def orchard(id: str, created: Height, expiry: Height): Payload =
     { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, oversize: false }
 
   /// Two migrations from supported wallets, built at heights 2 and 4.
-  pure val early = orchard("early", 2, 8)
-  pure val late = orchard("late", 4, 10)
+  pure val early = orchard("early", 2, 9)
+  pure val late = orchard("late", 4, 11)
   /// A migration whose wallet set its expiry tighter than the supported floor.
   pure val tight = orchard("tight", 2, 5)
   /// Bytes the shim cannot parse and neither can a hub: no txid, no expiry.
@@ -49,33 +49,40 @@ module configs {
   ///
   /// The schedule is the shipped one scaled down (shipped: interval 20,
   /// margin 4, lag 6, reorg allowance 10, staleness window 12 blocks, expiry
-  /// floor 40), keeping the relations between the numbers that matter:
+  /// floor 40), keeping the relations between the numbers that matter
+  /// (`shippedRelationsKept` in `protocol.qnt`):
   ///
   /// - the slack `floor - (interval + margin + lag)` equals the reorg
   ///   allowance (10 there, 1 here);
   /// - the staleness window is larger than the margin and than the slack;
   /// - `interval + margin + lag + (window - 1)` exceeds the floor by one
-  ///   (41 > 40 there, 7 > 6 here), while `interval + lag + (window - 1)` does
-  ///   not (37 <= 40, 6 <= 6).
+  ///   (41 > 40 there, 8 > 7 here), while `interval + lag + (window - 1)` does
+  ///   not (37 <= 40, 6 <= 7).
+  ///
+  /// The margin is 2, the smallest that leaves room for a block to arrive
+  /// while a flush is in flight (`maxFlightBlocks`).
   pure val baseline: Config = {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
     tpPayloads: Set(garbage, bloat),
     hubs: ["h1"],
     flushInterval: 3,
-    miningMargin: 1,
+    miningMargin: 2,
     deliveryLag: 1,
     reorgAllowance: 1,
     staleWindow: 3,
     freeRun: NotSlower,
-    minWalletExpiry: 6,
+    minWalletExpiry: 7,
     maxAttempts: 2,
     queueCap: 2,
+    maxFlightBlocks: 1,
     maxHeight: 12,
     maxRequests: 3,
     submitMode: DispatchOnly,
     roles: allHonest,
     tip: TipTimely,
+    reliesOnReorgSlack: true,
+    reliesOnFlightWithinMargin: true,
   }
 
   // One Byzantine component at a time.
@@ -101,14 +108,20 @@ module configs {
   }
 
   // A tip that may be reported up to the reorg allowance behind the chain:
-  // with the slack that covers it, and without.
+  // with the slack that covers it, and without. In the second the expiry
+  // floor is the three-term budget exactly.
   pure val flakyTip = { ...baseline, tip: TipMayRegress }
   pure val flakyTipNoSlack = {
     ...flakyTip,
-    minWalletExpiry: 5,
-    payloads: Set(orchard("early", 2, 7), late, tight, junk, plain),
-    twins: Set({ ...orchard("early", 2, 7), id: "early-twin" }),
+    minWalletExpiry: 6,
+    reliesOnReorgSlack: false,
+    payloads: Set(orchard("early", 2, 8), late, tight, junk, plain),
+    twins: Set({ ...orchard("early", 2, 8), id: "early-twin" }),
   }
+
+  // The same tip, and a flush that may stay in flight for as many blocks as
+  // the mining margin reserves.
+  pure val flakyTipSlowFlight = { ...flakyTip, maxFlightBlocks: 2, reliesOnFlightWithinMargin: false }
 
   // A hub that may go without a tip for a while: on the shipped relation
   // between the staleness window and the expiry floor, and on the relation
@@ -116,9 +129,9 @@ module configs {
   pure val staleLag = { ...baseline, tip: TipMayLag }
   pure val staleLagWithSlack = {
     ...staleLag,
-    minWalletExpiry: 7,
-    payloads: Set(orchard("early", 2, 9), orchard("late", 4, 11), tight, junk, plain),
-    twins: Set({ ...orchard("early", 2, 9), id: "early-twin" }),
+    minWalletExpiry: 8,
+    payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12), tight, junk, plain),
+    twins: Set({ ...orchard("early", 2, 10), id: "early-twin" }),
   }
 }
 
@@ -130,6 +143,9 @@ module baseline {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -141,6 +157,9 @@ module byzShim {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -152,6 +171,9 @@ module byzHub {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -163,6 +185,9 @@ module byzIndexer {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -174,6 +199,9 @@ module awaitAck {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -185,6 +213,9 @@ module awaitAckByzShim {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -196,6 +227,9 @@ module awaitAckByzHub {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -207,6 +241,9 @@ module awaitAckByzIndexer {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -218,6 +255,9 @@ module replicated {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -229,6 +269,9 @@ module replicatedOneByz {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -240,6 +283,9 @@ module flakyTip {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
+    assert(not(staleSlackFits)),
   }
 }
 
@@ -251,7 +297,24 @@ module flakyTipNoSlack {
 
   run assumptionsTest = all {
     assert(standingAssumptions),
+    assert(flightWithinMargin),
     assert(not(reorgSlackFits)),
+    assert(not(shippedRelationsKept)),
+  }
+}
+
+// A flush may outlast the mining margin: this configuration shows what the
+// bound on flight time buys.
+module flakyTipSlowFlight {
+  import types.* from "./types"
+  import configs.*
+  import protocol(CONFIG = flakyTipSlowFlight).* from "./protocol"
+
+  run assumptionsTest = all {
+    assert(standingAssumptions),
+    assert(reorgSlackFits),
+    assert(shippedRelationsKept),
+    assert(not(flightWithinMargin)),
   }
 }
 
@@ -264,6 +327,8 @@ module staleLag {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
+    assert(shippedRelationsKept),
     assert(not(staleSlackFits)),
   }
 }
@@ -276,6 +341,8 @@ module staleLagWithSlack {
   run assumptionsTest = all {
     assert(standingAssumptions),
     assert(reorgSlackFits),
+    assert(flightWithinMargin),
     assert(staleSlackFits),
+    assert(not(shippedRelationsKept)),
   }
 }

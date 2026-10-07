@@ -76,6 +76,11 @@ module wire {
   /// the intent, written without reference to the wire; `interpretReply` after
   /// `render` is the mechanism, and the two agree on every outcome a queue or
   /// an honest indexer produces.
+  ///
+  /// They disagree on one outcome an honest indexer never produces: an indexer
+  /// answer of "found, height 0, no body". It means nothing was returned, and
+  /// on the wire it is the hub's own "queued here", so the wallet is told
+  /// pending. The encoding is not injective there, and the shim cannot tell.
   pure def meaning(outcome: HubOutcome, query: TxId): LookupObs =
     match outcome {
       | QueueHit => Pending

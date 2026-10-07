@@ -32,6 +32,11 @@ module state {
   /// are payloads of its own making.
   type ThirdParty = { txids: Set[TxId], own: Set[Payload], nextNonce: Nonce, requests: int }
 
+  /// - `polled`: the hubs whose cadence loop has asked for the tip since the
+  ///   last block arrived.
+  /// - `flightBlocks`: for each hub, the blocks that have arrived since its
+  ///   flush in flight began; zero while no flush is in flight. Both are the
+  ///   environment's bookkeeping of time; no component reads them.
   /// - `operator`: every transaction the shim has handed the operator's
   ///   indexer. The operator is assumed to publish nothing itself.
   /// - `disclosed`: payloads a Byzantine component has revealed. It is written
@@ -39,6 +44,8 @@ module state {
   type System = {
     indexer: IndexerState,
     hubs: HubId -> HubState,
+    polled: Set[HubId],
+    flightBlocks: HubId -> int,
     shim: ShimState,
     net: Net,
     wallet: Wallet,
@@ -52,6 +59,8 @@ module state {
   pure def initialSystem(config: Config, params: HubParams, height: Height): System = {
     indexer: initialIndexer(height),
     hubs: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => startingHub(params)),
+    polled: Set(),
+    flightBlocks: config.hubs.indices().map(i => config.hubs[i]).mapBy(_ => 0),
     shim: initialShim(config.hubs, config.submitMode),
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
@@ -96,15 +105,21 @@ module state {
   /// - `offers`: every time a flush put a payload in flight: the true chain
   ///   height, the requeues the entry had had (`attempt`), and how many times
   ///   this hub had offered the payload before (`nth`).
+  /// - `verdicts`: every time an entry in flight got its answer from the
+  ///   indexer: the true chain height at that moment, which offer of the
+  ///   payload it answers (`nth`), and whether a node judged the transaction
+  ///   (`final`) or nothing did and it was set aside for requeue.
   /// - `windows`: for each lookup the shim has sent, the answers that were
   ///   true at the hub it asked at some point while it waited.
   /// - `refusals`: the admission refusals that have been sent.
   /// - `dropped`: entries a requeue gave up on, with the requeues they had had.
   type Offer = { hub: HubId, payload: Payload, height: Height, attempt: int, nth: int }
+  type Judgement = { hub: HubId, payload: Payload, height: Height, nth: int, final: bool }
   type Audit = {
     everQueued: HubId -> Set[Payload],
     admitted: (HubId, Payload) -> { height: Height, tip: Height },
     offers: Set[Offer],
+    verdicts: Set[Judgement],
     windows: Nonce -> Set[LookupObs],
     refusals: Set[Refusal],
     dropped: Set[{ hub: HubId, payload: Payload, attempts: int }],
@@ -310,6 +325,25 @@ module state {
         stepped.logged(Got({ query: done.query, obs: done.result, via: via }))
       | NoShimOutput => stepped
       | ShimErrorOutput(_) => stepped
+    }
+
+  /// The system after `hub` moved to `state` on its own schedule. A hub with
+  /// no flush in flight has no flight time.
+  pure def hubMoved(s: System, hub: HubId, state: HubState): System =
+    { ...s,
+      hubs: s.hubs.set(hub, state),
+      flightBlocks: if (state.flush == Idle) s.flightBlocks.set(hub, 0) else s.flightBlocks,
+    }
+
+  /// The system after one more block: the chain is a block higher, no hub has
+  /// asked for the new tip yet, and every flush in flight has been out one
+  /// block longer.
+  pure def blockArrived(s: System): System =
+    { ...s,
+      indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput),
+      polled: Set(),
+      flightBlocks: s.hubs.keys().mapBy(hub =>
+        if (s.hubs.get(hub).flush == Idle) 0 else s.flightBlocks.get(hub) + 1),
     }
 
   /// The system after `hub` took `result` on a frame from `client`. Its ack or
