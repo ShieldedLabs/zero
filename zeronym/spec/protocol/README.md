@@ -1007,3 +1007,21 @@ only as a whole row (17 s, beside another run). Named inits are kept.
 Not measured: Apalache at bounded depths on this machine (one attempt failed
 on its configuration and was not repeated); the route with an empty `~/.quint`
 and Quint fetched by `npx`.
+
+## The protocol specification under TLC (measured once, not a gate)
+
+Measured once at step 19, on the all-honest configuration with
+`maxRequests` 2 and invariant `wellFormed`, through `tlc.sh` with 4 workers,
+an 8 GB heap and a 300 s limit (the plan said 10 minutes; the cap used for
+every TLC run here is 5). A tier 1-3 gate shared the machine for most of the
+run. The compiled JSON is 39.2 MB (133.0 MB before step 18, with a constant
+and an instance module). TLC did not exhaust it: after 300 s it had
+6 942 646 distinct states at depth 11, with 5 392 316 still on the queue,
+and a resident set of 6.3 GB. The queue grew by about 1.2 million states a
+minute throughout (0.10 M at 4 s, 1.66 M at 64 s, 2.99 M, 4.20 M, 5.39 M at
+244 s) and the depth reached only 11, against the 40 to 80 steps the
+simulation rows use. Exhaustive checking of the protocol specification does
+not look feasible at this bound in minutes; it would need the bound lowered
+to one request of each kind, or the soup and the wallet's log bounded, and
+whether either is enough was not measured. The protocol gate stays
+simulation.
