@@ -418,7 +418,7 @@ pure.
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
 | `abstractHub.qnt` | `abstractHub` | The hub as the protocol sees it: `AHub`, its honest and Byzantine answers, its internal moves |
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
-| `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
+| `state.qnt` | `state` | `System`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, the run vocabulary |
 | `instances.qnt` | `configs`, then one module per configuration | The three configurations: `baseline`, `byzHub`, `byzIndexer` |
@@ -871,8 +871,6 @@ Not built. The specification is shaped so it can be:
 
 - Every branch of `step` is a named action and every choice is a named `nondet`
   inside it, so `--mbt` traces carry `mbt::actionTaken` and `mbt::nondetPicks`.
-- `lastAction` records the step and the input it gave a component, in the
-  state, so scripted runs carry the same information.
 - Each step gives one input to one component function and applies one output;
   the pairs map onto the seams in the table above.
 - All protocol state is in `s`. `audit` is a monitor a harness ignores.

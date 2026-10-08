@@ -61,26 +61,6 @@ module state {
     disclosed: Set(),
   }
 
-  /// The step that produced a state, with the choices that identify it. It
-  /// names the input a component was given, never the transition the
-  /// component then took.
-  type Label =
-    | Init
-    | WalletSend({ input: SendInput, handedOver: bool })
-    | WalletGet(TxId)
-    | ShimReceive(Mail)
-    | ShimLookupTimeout(Nonce)
-    | HubReceive(Mail)
-    | HubTake
-    | IndexerVerdict(Payload)
-    | HubReturn(Set[Payload])
-    | HubLose
-    | ChainMine(TxId)
-    | ThirdPartyLearnsTxid(TxId)
-    | ThirdPartyLookup(TxId)
-    | ThirdPartySubmit(Payload)
-    | ByzDisclose(Payload)
-
   /// What an observer of the run has recorded. It is not protocol state: no
   /// component reads it, and it is derived at every step from the states
   /// before and after, never from what a component reports about itself.

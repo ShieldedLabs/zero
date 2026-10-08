@@ -103,14 +103,11 @@ module protocol {
   var s: System
   /// The observer's record of the run. No step reads it.
   var audit: Audit
-  /// The step that produced the current state.
-  var lastAction: Label
 
   /// The only writer of the variables.
-  action commit(post: System, label: Label): bool = all {
+  action commit(post: System): bool = all {
     s' = post,
     audit' = advance(audit, s, post),
-    lastAction' = label,
   }
 
   pure val INITIAL = initialSystem(CONFIG)
@@ -118,7 +115,6 @@ module protocol {
   action init = all {
     s' = INITIAL,
     audit' = initialAudit,
-    lastAction' = Init,
   }
 
   // ------------------------------------------------------------------------
@@ -168,7 +164,7 @@ module protocol {
     val result = shim(s.shim, SendTxSInput({ input: input, handedOver: handedOver }))
     all {
       not(isShimError(result.out)),
-      commit(s.countSend().shimStepped(result, None), WalletSend({ input: input, handedOver: handedOver })),
+      commit(s.countSend().shimStepped(result, None)),
     },
   }
 
@@ -193,7 +189,7 @@ module protocol {
     val result = shim(s.shim, GetTxSInput(query))
     all {
       not(isShimError(result.out)),
-      commit(s.countGet().shimStepped(result, None), WalletGet(query)),
+      commit(s.countGet().shimStepped(result, None)),
     },
   }
 
@@ -225,7 +221,7 @@ module protocol {
     val result = shim(s.shim, FrameSInput(mail.msg))
     all {
       not(isShimError(result.out)),
-      commit(s.shimStepped(result, nonceOf(FrameSInput(mail.msg))), ShimReceive(mail)),
+      commit(s.shimStepped(result, nonceOf(FrameSInput(mail.msg)))),
     },
   }
 
@@ -243,7 +239,7 @@ module protocol {
     val result = shim(s.shim, LookupTimeoutSInput(nonce))
     all {
       not(isShimError(result.out)),
-      commit(s.shimStepped(result, None), ShimLookupTimeout(nonce)),
+      commit(s.shimStepped(result, None)),
     },
   }
 
@@ -275,7 +271,7 @@ module protocol {
     hubDeliverable.contains(mail),
     lookupAnswers(s.indexer, mail.msg).contains(answer),
     hubReceipts(mail, answer).contains(result),
-    commit(s.hubReplied(mail, result), HubReceive(mail)),
+    commit(s.hubReplied(mail, result)),
   }
 
   action hubReceive = all {
@@ -292,7 +288,7 @@ module protocol {
   /// the schedule, so these steps are the same whatever its role.
   action hubTake = all {
     s.hub.queue != Set(),
-    commit({ ...s, hub: s.hub.take() }, HubTake),
+    commit({ ...s, hub: s.hub.take() }),
   }
 
   /// The verdict an indexer output carries. Read only where it carries one.
@@ -311,7 +307,7 @@ module protocol {
     indexerResults(s.indexer, BroadcastIInput(payload)).contains(result),
     result.out == VerdictOutput(verdictIn(result.out)),
     val hub = if (verdictIn(result.out) == Retryable) s.hub else s.hub.settle(payload)
-    commit({ ...s, indexer: result.state, hub: hub }, IndexerVerdict(payload)),
+    commit({ ...s, indexer: result.state, hub: hub }),
   }
 
   action indexerVerdict = all {
@@ -328,7 +324,7 @@ module protocol {
   action hubReturnWith(kept: Set[Payload]): bool = all {
     s.hub.held != Set(),
     kept.subseteq(s.hub.held),
-    commit({ ...s, hub: s.hub.giveBack(kept) }, HubReturn(kept)),
+    commit({ ...s, hub: s.hub.giveBack(kept) }),
   }
 
   action hubReturn = all {
@@ -343,7 +339,7 @@ module protocol {
   /// flush.
   action hubLose = all {
     s.hub != emptyAHub,
-    commit({ ...s, hub: emptyAHub }, HubLose),
+    commit({ ...s, hub: emptyAHub }),
   }
 
   // ------------------------------------------------------------------------
@@ -357,7 +353,7 @@ module protocol {
   /// A mempool transaction is included in the current block.
   action chainMineWith(txid: TxId): bool = all {
     mempool.contains(txid),
-    commit({ ...s, indexer: indexerApply(s.indexer, MineIInput(txid), NoIndexerOutput) }, ChainMine(txid)),
+    commit({ ...s, indexer: indexerApply(s.indexer, MineIInput(txid), NoIndexerOutput) }),
   }
 
   action chainMine = all {
@@ -381,10 +377,7 @@ module protocol {
   /// queries.
   action thirdPartyLearnsTxidWith(txid: TxId): bool = all {
     unknownTxids.contains(txid),
-    commit(
-      { ...s, thirdParty: { ...s.thirdParty, txids: s.thirdParty.txids.union(Set(txid)) } },
-      ThirdPartyLearnsTxid(txid),
-    ),
+    commit({ ...s, thirdParty: { ...s.thirdParty, txids: s.thirdParty.txids.union(Set(txid)) } }),
   }
 
   action thirdPartyLearnsTxid = all {
@@ -400,7 +393,7 @@ module protocol {
   action thirdPartyLookupWith(txid: TxId): bool = all {
     s.thirdParty.requests < MAX_REQUESTS,
     s.tpTxids().contains(txid),
-    commit(s.thirdPartySent(Lookup({ nonce: s.thirdParty.nextNonce, txid: txid })), ThirdPartyLookup(txid)),
+    commit(s.thirdPartySent(Lookup({ nonce: s.thirdParty.nextNonce, txid: txid }))),
   }
 
   action thirdPartyLookup = all {
@@ -417,10 +410,7 @@ module protocol {
   action thirdPartySubmitWith(payload: Payload): bool = all {
     s.thirdParty.requests < MAX_REQUESTS,
     s.tpPayloads().contains(payload),
-    commit(
-      s.thirdPartySent(Submit({ nonce: s.thirdParty.nextNonce, payload: payload })),
-      ThirdPartySubmit(payload),
-    ),
+    commit(s.thirdPartySent(Submit({ nonce: s.thirdParty.nextNonce, payload: payload }))),
   }
 
   action thirdPartySubmit = all {
@@ -439,7 +429,7 @@ module protocol {
   /// A Byzantine component reveals a payload it has seen.
   action byzDiscloseWith(payload: Payload): bool = all {
     undisclosed.contains(payload),
-    commit({ ...s, disclosed: s.disclosed.union(Set(payload)) }, ByzDisclose(payload)),
+    commit({ ...s, disclosed: s.disclosed.union(Set(payload)) }),
   }
 
   action byzDisclose = all {
