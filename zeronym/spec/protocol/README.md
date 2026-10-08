@@ -562,8 +562,8 @@ Which components must be honest for each guarantee. Single-fault. "holds" is a
 tier 3 simulation row on the named configuration, with its antecedent witnessed
 there in tier 3b. "required" is a scripted run in `tests/trustTest.qnt` in which
 the component is Byzantine and the guarantee fails, followed by its control
-(same wallet inputs, honest transition, guarantee holds); the simulation row
-for such a cell shows polarity only.
+(same wallet inputs, honest transition, guarantee holds). Such a cell has no
+simulation row.
 
 Every cell was a prediction, except the G6c row, which was added after review
 and derived by running. **Observed verdicts agree with the predictions in every
@@ -626,7 +626,8 @@ frame undelivered, and nothing obliges the network ever to deliver it.
 
 ### Witnesses
 
-Each has a scripted run and, except W15 and W18, is counted in tier 3b.
+Each has a scripted run. W8, W16 and W17 are also counted in tier 3b; W1-W3,
+W9, W15 and W18 are scripted only.
 W4 (each refusal) and W5-W7 (requeued, dropped as expired, dropped as
 exhausted) were witnesses here; they read the hub's internals and are gone
 with the real hub. F8 produces each refusal and F9 each requeue outcome; the

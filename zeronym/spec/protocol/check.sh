@@ -11,9 +11,10 @@
 #   2  quint test: the functional layer and the scripted runs, among them
 #      `liveInitsTest`, which starts from every named init.
 #   3  quint run: invariants. "holds" rows are the guarantees, on the
-#      configurations where they are claimed. "fails" rows are the known gaps
-#      and the guarantees under the Byzantine component they depend on; such a
-#      row shows polarity only, and the scripted run in tier 2 carries the cause.
+#      configurations where they are claimed. The "fails" row is K2, a known
+#      gap; it shows polarity only, and the scripted runs in tier 2 carry the
+#      causes. A guarantee under the Byzantine component it depends on has a
+#      scripted run and its control, and no row here.
 #   3b quint run: witnesses. Every listed state must be reached in at least
 #      one trace. These runs also re-check the configuration's guarantees, on
 #      longer traces and under the narrower step relations, which get deeper
@@ -276,14 +277,6 @@ job holds baseline            operatorBlind queuedBytesConfidential txidAuthenti
 job holds byzHub              operatorBlind txidAuthenticity wellFormed
 job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
 
-# The trust matrix: each guarantee fails once the component it depends on is
-# Byzantine. The schedule guarantees' rows are in tier 4.
-job fails byzHub              step      40 queuedBytesConfidential
-job fails byzHub              step      40 lookupValidityPerHub
-job fails byzHub              step      40 ackImpliesQueued
-job fails byzIndexer          step      40 queuedBytesConfidential
-job fails byzIndexer          step      40 lookupValidityPerHub
-
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
 
@@ -298,9 +291,8 @@ job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyPayloadQueued wToldRefusedEverywhere wToldNeverDelivered \
   vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
   -- $BASELINE_HOLDS
-# W1, W2, W3, W9, and the antecedents of G3, G4.
+# The antecedents of G3, G4.
 job reaches baseline quietStep 80 \
-  wPending wTxInMempool wTxMined wUnparseableMissed \
   vTxidAuthenticity vLookupValidityPerHub \
   -- $BASELINE_HOLDS
 
