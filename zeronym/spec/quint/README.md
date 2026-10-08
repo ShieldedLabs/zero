@@ -356,7 +356,9 @@ Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default; se
 
 A configuration is a value held in the state and selected by a named init.
 
-Protocol specification (at most 3 sends and 3 lookups by the wallet, 3 requests by the third party):
+#### Protocol specification
+
+At most 3 sends and 3 lookups by the wallet, 3 requests by the third party.
 
 | Configuration | Hub | Indexer |
 |---|---|---|
@@ -364,7 +366,9 @@ Protocol specification (at most 3 sends and 3 lookups by the wallet, 3 requests 
 | `byzHub` | **Byzantine** | honest |
 | `byzIndexer` | honest | **Byzantine** |
 
-Hub specification. The schedule flushes every 3 blocks with a mining margin of 2, a delivery lag of 1, a reorg allowance of 1, a staleness window of 3 and an expiry floor of 7. It is the shipped schedule scaled down (interval 20, margin 4, lag 6, reorg allowance 10, staleness window 12 blocks, expiry floor 40), keeping the relations between the constants that the findings turn on.
+#### Hub specification
+
+The schedule flushes every 3 blocks with a mining margin of 2, a delivery lag of 1, a reorg allowance of 1, a staleness window of 3 and an expiry floor of 7. It is the shipped schedule scaled down (interval 20, margin 4, lag 6, reorg allowance 10, staleness window 12 blocks, expiry floor 40), keeping the relations between the constants that the findings turn on.
 
 | Configuration | Differs from `timely` by | For |
 |---|---|---|
@@ -402,9 +406,12 @@ TLC runs with deadlock checking off, so a machine whose steps had died would hol
 
 </details>
 
-### The abstraction lemma
+<details>
+<summary>The abstraction lemma</summary>
 
 The protocol specification's hub is the abstract one in `abstractHub.qnt`. `hubTest` checks, over every reachable state of the real hub function and every input, that each real step is a step of the abstract hub (`abstractionTest`, `byzantineAbstractionTest`), and that each abstract move has a real step behind it (`realisesTest`). So an invariant that holds over the abstract hub, and reads only queue membership and wire replies, holds over the real one: that covers G2, G3 and G4. It does not transfer reachability: the abstract hub answers where the real one is down or stale, so a violation shown over it is a state of the abstract hub. The reachable set is computed at a smaller schedule than the hub specification's and carried over by argument.
+
+</details>
 
 ### Layout
 
