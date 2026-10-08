@@ -6,9 +6,6 @@ It is written from the protocol, not from the code's structure: it says what a
 wallet can rely on, which components each guarantee trusts, where the known
 gaps are, and it checks each of those statements.
 
-It is separate from `zeronym/spec/divert.qnt`, which it does not replace or
-modify.
-
 ## What "holds" means here
 
 **Bounded random simulation.** Every "holds" below was produced by
