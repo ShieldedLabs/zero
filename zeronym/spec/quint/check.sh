@@ -269,6 +269,22 @@ typecheck() {
   fi
 }
 
+# Quint, through npx, and its Rust evaluator are fetched on first use, into
+# caches that rows run in parallel would fill at the same time. One run here
+# fetches both before any row starts.
+echo "---- 0 toolchain"
+mkdir "$results/warm"
+printf 'module warm {\n  var x: int\n  action init = x'"'"' = 0\n  action step = x'"'"' = x\n}\n' \
+  >"$results/warm/warm.qnt"
+if out=$($QUINT run "$results/warm/warm.qnt" --max-samples=1 --max-steps=1 --backend="$BACKEND" 2>&1); then
+  echo "ok    quint $($QUINT --version 2>/dev/null), $BACKEND evaluator"
+else
+  echo "$out" | tail -25
+  fail "toolchain: quint run failed"
+  exit 1
+fi
+rm -rf "$results/warm"
+
 echo "---- 1 typecheck"
 for file in $SPELLS $MODULES $FUNCTIONAL; do
   job typecheck "${file%:*}"
