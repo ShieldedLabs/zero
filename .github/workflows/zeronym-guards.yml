@@ -76,7 +76,7 @@ jobs:
 
   # The hub specification checked exhaustively with TLC, which needs Java. The
   # Apalache distribution that carries TLC is fetched by Quint on first use.
-  # About 7.5 minutes on a 16-core machine with four rows at a time. Rows that
+  # About 8.5 minutes on a 16-core machine with four rows at a time. Rows that
   # expect a violation run TLC on one worker, so the trace lengths are
   # shortest; two rows at a time with 6 GB each fit a 4-core, 16 GB runner.
   spec-protocol-tlc:

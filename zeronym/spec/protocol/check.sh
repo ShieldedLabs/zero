@@ -293,9 +293,10 @@ echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
 BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued"
 
-# W8, K1a, K1b, and the antecedents of G1, G2, G8.
+# W8, W19, K1a, K1b, and the antecedents of G1, G2, G8. W19 is G2's reply-body
+# branch, which `vQueuedBytesConfidential` does not reach on its own.
 job reaches baseline step 40 \
-  wQueuedDisclosed wToldRefusedEverywhere wToldNeverDelivered \
+  wQueuedDisclosed wThirdPartyServedBody wToldRefusedEverywhere wToldNeverDelivered \
   vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
   -- $BASELINE_HOLDS
 # The antecedents of G3, G4.

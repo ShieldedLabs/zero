@@ -19,6 +19,7 @@ module trustTest {
   import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import protocol.* from "../protocol"
+  import realisations as R from "./realisations"
 
   // ------------------------------------------------------------------------
   // A Byzantine hub (`byzHub`)
@@ -40,6 +41,7 @@ module trustTest {
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
+      .expect(R::realisedBy(s, R::hubLeaksBody))
 
   run hubServesQueuedBodyControlTest =
     initByzHub
@@ -63,6 +65,7 @@ module trustTest {
       .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
       .expect(s.hub.queue == Set(early) and audit.windows.get(1) == Set(Pending))
       .expect(not(lookupValidityPerHub))
+      .expect(R::realisedBy(s, R::hubDeniesQueued))
 
   run hubDeniesQueuedControlTest =
     initByzHub
@@ -87,6 +90,7 @@ module trustTest {
       .expect(s.onChain("early") == InMempool)
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
+      .expect(R::realisedBy(s, R::hubFalseHeight))
 
   run hubServesFalseHeightControlTest =
     initByzHub
@@ -104,6 +108,7 @@ module trustTest {
       .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WAccepted }))
       .expect(s.hub.queue == Set() and audit.everQueued == Set())
       .expect(not(ackImpliesQueued))
+      .expect(R::realisedBy(s, R::hubAcksUnqueued))
 
   run hubAcksWithoutAdmittingControlTest =
     initByzHub
@@ -155,6 +160,7 @@ module trustTest {
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
+      .expect(R::realisedBy(s, R::indexerLeaksBody))
 
   run indexerServesUnpublishedBodyControlTest =
     initByzIndexer
@@ -179,6 +185,7 @@ module trustTest {
       .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
       .expect(audit.everQueued == Set() and audit.windows.get(1) == Set(NotFound))
       .expect(not(lookupValidityPerHub))
+      .expect(R::realisedBy(s, R::indexerForgesPending))
 
   run indexerForgesPendingControlTest =
     initByzIndexer

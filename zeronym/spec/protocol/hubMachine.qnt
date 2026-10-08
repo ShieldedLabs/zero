@@ -154,11 +154,14 @@ module hubMachine {
   /// The payloads that have entered this hub's queue since it last came up.
   var seen: Set[Payload]
   /// Those that first did so within the delivery lag of the height they were
-  /// built at. Both are forgotten when the hub goes down, as its queue is: a
-  /// hub cannot be held to an arrival it no longer knows of.
+  /// built at.
   var onTime: Set[Payload]
-  /// The payloads a flight has carried, once that flight has had a node's
-  /// answer for them or has ended.
+  /// The payloads a flight of this run of the process has carried, once that
+  /// flight has had a node's answer for them or has ended. `seen`, `onTime`
+  /// and `offered` are forgotten together when the hub goes down, as its
+  /// queue is: a hub cannot be held to an arrival it no longer knows of, and
+  /// a restarted hub's entries start again at no attempts
+  /// (`zeronym/hub/src/queue.rs:334`).
   var offered: Set[Payload]
   /// The payloads acknowledged as accepted that no node has judged since.
   var owed: Set[Payload]
@@ -275,7 +278,9 @@ module hubMachine {
 
   action chainKept = all { height' = height, onChain' = onChain, polled' = polled }
   action admissionsKept = all { seen' = seen, onTime' = onTime }
-  action admissionsForgotten = all { seen' = Set(), onTime' = Set() }
+  /// The hub went down. `owed` is kept: an acknowledged payload lost with the
+  /// process is K5.
+  action runForgotten = all { seen' = Set(), onTime' = Set(), offered' = Set() }
   action memoryKept = all { admissionsKept, offered' = offered, owed' = owed }
 
   /// The hub takes `input` on its own schedule. A step that would change
@@ -375,8 +380,7 @@ module hubMachine {
     all {
       hubTakes(FlushDueHInput),
       flightStart' = if (result.state.flush == Idle) 0 else height,
-      if (result.state.phase == Stopped) admissionsForgotten else admissionsKept,
-      offered' = offered,
+      if (result.state.phase == Stopped) runForgotten else all { admissionsKept, offered' = offered },
       owed' = owed,
       chainKept,
     }
@@ -414,10 +418,10 @@ module hubMachine {
     val result = hub(h, FlushDoneHInput)
     all {
       hubTakes(FlushDoneHInput),
-      offered' = offered.union(h.inFlight()),
       flightStart' = 0,
       owed' = owed,
-      if (result.state.phase == Stopped) admissionsForgotten else admissionsKept,
+      if (result.state.phase == Stopped) runForgotten
+      else all { admissionsKept, offered' = offered.union(h.inFlight()) },
       chainKept,
     }
 
@@ -433,10 +437,9 @@ module hubMachine {
   /// out is over.
   action crash = all {
     hubTakes(CrashHInput),
-    offered' = offered.union(h.inFlight()),
     flightStart' = 0,
     owed' = owed,
-    admissionsForgotten,
+    runForgotten,
     chainKept,
   }
 
@@ -543,7 +546,8 @@ module hubMachine {
   def isConformingAndOnTime(payload: Payload): bool =
     conforming(payload, cfg.params.minWalletExpiry) and onTime.contains(payload)
 
-  /// Whether the flight `payload` is on, if any, is its first.
+  /// Whether the flight `payload` is on, if any, is its first since the hub
+  /// last came up.
   def isFirstOffer(payload: Payload): bool =
     not(offered.contains(payload))
 

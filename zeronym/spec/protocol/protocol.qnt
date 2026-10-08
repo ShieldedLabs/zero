@@ -560,6 +560,13 @@ module protocol {
         | _ => false
       })
 
+  /// W19. A third party is given a transaction's bytes in a lookup reply.
+  /// With every component honest these are published bytes, served from the
+  /// indexer: the branch of G2 that `vQueuedBytesConfidential` alone does not
+  /// reach, since `plain` at the operator satisfies it.
+  pure def wThirdPartyServedBodyIn(s: System): bool =
+    s.repliedBodies(ThirdPartyAddr) != Set()
+
   /// W16a. The wallet is served a twin of what it sent: other bytes, same txid.
   pure def wTwinServedIn(s: System): bool =
     s.wasGiven(obs =>
@@ -1065,6 +1072,7 @@ module protocol {
   val wTxMined = wTxMinedIn(s)
   val wQueuedDisclosed = wQueuedDisclosedIn(s)
   val wUnparseableMissed = wUnparseableMissedIn(s)
+  val wThirdPartyServedBody = wThirdPartyServedBodyIn(s)
   val wTwinServed = wTwinServedIn(s)
   val wFalseHeightServed = wFalseHeightServedIn(s)
 

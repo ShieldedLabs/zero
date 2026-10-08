@@ -18,6 +18,7 @@ module scenariosTest {
   import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import protocol.* from "../protocol"
+  import realisations as R from "./realisations"
 
   /// Every named init is live: its guard holds and it starts a run.
   run liveInitsTest =
@@ -72,6 +73,20 @@ module scenariosTest {
       .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
       .expect(wQueuedDisclosed)
       .expect(s.tpLearned() == Set() and queuedBytesConfidential)
+      .expect(R::realisedBy(s, R::w8))
+
+  /// W19. Once `early` is published its txid is public, and a third party
+  /// that asks is served its bytes from the indexer. G2 holds: they are
+  /// public.
+  run thirdPartyIsServedPublishedBodyTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(flush([early], Accepted))
+      .then(thirdPartyLookupWith("early"))
+      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", chainAnswer(s.indexer, "early")))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
+      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
+      .expect(wThirdPartyServedBody and vQueuedBytesConfidential and queuedBytesConfidential)
 
   /// A lookup that gets no reply in time fails closed, and G4 holds of it.
   run lookupTimesOutTest =
@@ -90,6 +105,7 @@ module scenariosTest {
       .then(lookUp(1, "junk"))
       .expect(lastEvent == Got({ query: "junk", obs: NotFound, via: Some(1) }))
       .expect(wUnparseableMissed and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::w9))
 
   // ------------------------------------------------------------------------
   // K1. Told ok, and no hub ever has it
@@ -106,6 +122,7 @@ module scenariosTest {
       .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WRefused(WExpiryTooTight) }))
       .expect(audit.everQueued == Set())
       .expect(wToldRefusedEverywhere)
+      .expect(R::realisedBy(s, R::k1a))
 
   /// K1b. The frame is never delivered. Nothing obliges the network to.
   run toldOkAndNeverDeliveredTest =
@@ -138,6 +155,7 @@ module scenariosTest {
       ])
       // Each answer was true when it was given.
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::k2a))
 
   /// K2b. The wallet sends published bytes again. The hub's memory of them
   /// went with the flush, so they are admitted and pending once more.
@@ -155,6 +173,7 @@ module scenariosTest {
         Got({ query: "early", obs: Pending, via: Some(3) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::k2bc))
 
   /// K2c. The same, done by a third party: the bytes are public once
   /// published, and submission is open to anyone.
@@ -172,6 +191,7 @@ module scenariosTest {
         Got({ query: "early", obs: Pending, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::k2bc))
 
   /// K2d. The flush window: the queue is empty and the chain does not have
   /// the batch yet.
@@ -187,6 +207,7 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::k2d))
 
   /// K2e. The node rejects the transaction at flush. It was pending; now it
   /// is nowhere.
@@ -202,6 +223,7 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+      .expect(R::realisedBy(s, R::k2e))
 
   // ------------------------------------------------------------------------
   // A Byzantine hub (`byzHub`)
@@ -223,4 +245,5 @@ module scenariosTest {
       .expect(s.onChain("early") == Absent)
       .expect(wTwinServed and wFalseHeightServed)
       .expect(txidAuthenticity and not(lookupValidityPerHub))
+      .expect(R::realisedBy(s, R::w16))
 }

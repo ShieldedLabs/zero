@@ -45,8 +45,9 @@ either the tier fails. `CHECK_TIERS=simulation` runs tiers 1 to 3b and
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
 Measured on the machine it was written on (Apple silicon, 16 cores, Quint's
-Rust evaluator): 9 min 27 s wall for all four tiers with four rows at a time
-(`QUINT_JOBS=4`, the default), of which tiers 1 to 3 are about 2 minutes. It
+Rust evaluator): about 10 minutes wall for all four tiers with four rows at
+a time (`QUINT_JOBS=4`, the default), of which tiers 1 to 3 are about 2
+minutes. It
 has not been timed on a CI runner. `QUINT_SAMPLES` changes the trace count.
 The rarest witness, `vLookupValidityPerHub`, is reached in 2 of the 2000
 traces, so a lower count risks losing it.
@@ -435,7 +436,8 @@ declares a constant. Every other module is pure.
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
 | `protocol.qnt` | `protocol` | The transactions and the three configurations; `System`, `Audit`, where each output goes and the derived views; `truth`, the audit monitor `advance`, the guarantees, gaps and witnesses; the variables, `commit`, the named inits, the steps, the property aliases, the run vocabulary |
 | `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F15; A2-A3 and the abstraction lemma in `hubTest.qnt` |
-| `tests/realisedRunsTest.qnt` | `realisedRunsTest` | The hub inputs of each pinned run, replayed through the real hub |
+| `tests/realisations.qnt` | `realisations` | The hub inputs, replies and final hub of each pinned run, and `realisedBy`, which each of those runs ends with. No runs of its own |
+| `tests/realisedRunsTest.qnt` | `realisedRunsTest` | Each realisation, replayed through the real hub |
 | `tests/scenariosTest.qnt` | `scenariosTest` | Witnesses and pinned gap causes; `liveInitsTest` |
 | `tests/trustTest.qnt` | `trustTest` | One run and one control per "required" cell |
 
@@ -653,7 +655,7 @@ frame undelivered, and nothing obliges the network ever to deliver it.
 
 ### Witnesses
 
-Each has a scripted run. W8 and W16 are also counted in tier 3b; W1-W3,
+Each has a scripted run. W8, W16 and W19 are also counted in tier 3b; W1-W3,
 W9, W15 and W18 are scripted only.
 W4 (each refusal) and W5-W7 (requeued, dropped as expired, dropped as
 exhausted) were witnesses here; they read the hub's internals and are gone
@@ -669,11 +671,13 @@ hub specification reaches `wRequeued` under TLC and both drops in
 | W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | scripted run `tipAheadOfChainFlushesEarlyTest` (hub specification) | `byzIndexer` |
 | W16 | **Twin served**: the wallet is served a twin of what it sent, and a transaction at a false height; G3 holds throughout | `wTwinServed`, `wFalseHeightServed` | `byzHub` |
 | W18 | **Early flush by the free-running clock**: a stale hub's clock is ahead of the chain and it flushes before the true boundary, every component honest | scripted run `freeRunningClockFlushesEarlyTest` (hub specification) | `staleLag` |
+| W19 | A third party is served a published transaction's bytes from the indexer: the branch of G2 that `vQueuedBytesConfidential` does not reach on `baseline`, where `plain` at the operator satisfies it | `wThirdPartyServedBody` | `baseline` |
 
 Non-vacuity: for each guarantee, a state where its antecedent holds, reached on
 every configuration where the guarantee is claimed: `vOperatorBlind`,
-`vQueuedBytesConfidential`, `vTxidAuthenticity`, `vLookupValidityPerHub` (the
-log has a pending, a served transaction and a not-found), `vAckImpliesQueued`.
+`vQueuedBytesConfidential` (with W19 for its reply-body branch),
+`vTxidAuthenticity`, `vLookupValidityPerHub` (the log has a pending, a served
+transaction and a not-found), `vAckImpliesQueued`.
 The antecedents of G6a, G6b and G6c are reachability rows of the hub
 specification.
 
@@ -757,7 +761,10 @@ K1a, K2 (a) to (e), W8, W9, W16, and each "required" run of the trust matrix,
 it replays the hub inputs of the run through the real hub function from a
 starting hub on `timely`'s parameters, each lie as a member of the
 Byzantine relation, and checks the replies and the final queue. K1b has no
-hub step.
+hub step. Each realisation is a value in `tests/realisations.qnt`, and each of
+those protocol runs ends with `realisedBy`: the hub replies it sent, as a set
+(the soup has no order), and its final abstract hub are the realisation's. A
+protocol run edited without its realisation fails.
 
 No liveness property is claimed: the network may lose everything, and nobody
 waits for an ack.
@@ -882,6 +889,13 @@ throughout, and the reachability row `wTimelyQueuedBehindEpoch` shows that a
 timely payload does get queued while the cadence epoch is behind the one the
 hub last recorded, so the "holds" is not vacuous there.
 
+"First offer" is forgotten with them. A restarted hub's entries start again
+at no attempts (`zeronym/hub/src/queue.rs:334`), so the observer's `offered`
+is cleared whenever `seen` and `onTime` are. Until review round 2 it was kept
+across a crash, and a payload offered before a crash and resent on time
+afterwards had its first flight after the restart left out of G6b and G6c.
+Clearing it changes no verdict and no trace length (see the TLC section).
+
 The three facts the trace rests on were read in the code, and the model has
 each right. A restarted hub has no tip and no recorded epoch, and its first
 observation adopts the current epoch without flushing
@@ -998,6 +1012,11 @@ migrations, and `byzIndexer` with `early` and `tight`, which
 164 264 states, depth 36, in 24 s with 4 workers; G6c on `byzIndexer` is
 violated in 17 states, in 100 s with one worker; the other five rows have
 their recorded lengths.
+
+With `offered` forgotten when the hub goes down, as `seen` and `onTime` are
+(finding 8), the tier was re-run. Every verdict and every trace length is
+unchanged. The state counts fall: `timely` 141 492 states, depth 51;
+`flakyTip` 1 424 284, depth 43; `flakyTipSlowFlight` 156 352, depth 39.
 
 Reachability, each as `not(..)` and each violated: on `timely`,
 `wOfferWithExpiry` (6 states), `wConformingFirstOffer` (6),

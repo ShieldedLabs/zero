@@ -162,8 +162,8 @@ module hubScenariosTest {
       .expect(not(ackedIsHeldOrSettled))
 
   /// K5b. The final flush of a draining hub finds the indexer unreachable.
-  /// The entry was offered and nothing judged it; the hub stops, and the
-  /// transaction is held nowhere.
+  /// The entry was offered and nothing judged it; the hub stops, forgetting
+  /// the offer with the rest of its run, and the transaction is held nowhere.
   run ackedThenLostAtDrainTest =
     started(timely)
       .then(block)
@@ -171,7 +171,7 @@ module hubScenariosTest {
       .then(drain)
       .then(flush([early], Retryable))
       .expect(h.phase == Stopped and h.queued() == Set() and h.inFlight() == Set() and onChain == Set())
-      .expect(offered == Set(early) and owed == Set(early))
+      .expect(offered == Set() and owed == Set(early))
       .expect(not(ackedIsHeldOrSettled))
 
   /// K5c. A requeue gives an acknowledged entry up as expired. No crash and
