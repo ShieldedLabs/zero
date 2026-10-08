@@ -551,15 +551,10 @@ module hubMachine {
   def isFirstOffer(payload: Payload): bool =
     not(offered.contains(payload))
 
-  /// G6a. Every transaction the hub offers is offered with the mining margin
-  /// to spare: whatever was admitted, on every attempt. A claim about the
-  /// margin left at the offer, not about acceptance.
-  val offeredBeforeExpiry =
-    h.inFlight().forall(payload => marginLeft(payload, flightStart))
-
-  /// G6b. The same, for supported wallets only and for the first time the hub
-  /// offers the transaction. It says nothing about a later offer of an entry
-  /// that was requeued; see `conformingEveryOfferBeforeExpiry`.
+  /// G6b. A supported wallet's transaction is offered with the mining margin
+  /// to spare, the first time the hub offers it. A claim about the margin left
+  /// at the offer, not about acceptance. It says nothing about a later offer of
+  /// an entry that was requeued; see `conformingEveryOfferBeforeExpiry`.
   val conformingFirstOfferBeforeExpiry =
     h.inFlight().forall(payload =>
       isConformingAndOnTime(payload) and isFirstOffer(payload) implies marginLeft(payload, flightStart))
@@ -610,10 +605,6 @@ module hubMachine {
   // them a "holds" could be vacuous. The rest are one per family of steps: TLC
   // is run with deadlock checking off, so a configuration whose steps died
   // after `init` would otherwise hold everything on a handful of states.
-
-  /// An entry with an expiry is in flight.
-  val wOfferWithExpiry =
-    h.inFlight().exists(payload => isSome(payload.expiry))
 
   /// A supported wallet's transaction, with an expiry, is on its first flight.
   val wConformingFirstOffer =
@@ -668,7 +659,7 @@ module hubMachine {
 
   /// Every component honest, and a hub that sees each block before the next.
   pure val timely: HubConfig = {
-    payloads: Set(early, late, tight),
+    payloads: Set(early, late),
     params: {
       flushInterval: 3,
       miningMargin: 2,
@@ -692,32 +683,28 @@ module hubMachine {
   pure val flakyTipNoSlack: HubConfig = {
     ...flakyTip,
     params: { ...flakyTip.params, minWalletExpiry: 6 },
-    payloads: Set(orchard("early", 2, 8), late, tight),
+    payloads: Set(orchard("early", 2, 8), late),
   }
 
   // The same tip, and a flush that may stay in flight for as many blocks as
-  // the mining margin reserves. The supported wallets' migrations only: with
-  // `tight` as well TLC does not exhaust it in five minutes.
-  pure val flakyTipSlowFlight: HubConfig = { ...flakyTip, maxFlightBlocks: 2, payloads: Set(early, late) }
+  // the mining margin reserves.
+  pure val flakyTipSlowFlight: HubConfig = { ...flakyTip, maxFlightBlocks: 2 }
 
   // A hub that may go without a tip for a while: on the shipped relation
   // between the staleness window and the expiry floor, and on the relation
-  // that would cover the silence. These two carry the supported wallets'
-  // migrations only. A free-running clock multiplies the states, and with
-  // `tight` as well TLC does not exhaust either in five minutes. `tight` gives
-  // G6a a shorter counterexample on them (8 states against 13) and no check
-  // of them a different verdict.
-  pure val staleLag: HubConfig = { ...timely, tip: TipMayLag, payloads: Set(early, late) }
+  // that would cover the silence.
+  pure val staleLag: HubConfig = { ...timely, tip: TipMayLag }
   pure val staleLagWithSlack: HubConfig = {
     ...staleLag,
     params: { ...staleLag.params, minWalletExpiry: 8 },
     payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12)),
   }
 
-  // One Byzantine component at a time, on the schedule of `timely`. The
-  // Byzantine indexer gets one supported migration and `tight`: with three
+  // One Byzantine component at a time, on the schedule of `timely`, each
+  // with `tight` as well: a Byzantine hub admits what the expiry rule refuses.
+  // The Byzantine indexer gets one supported migration and `tight`: with three
   // payloads TLC does not reach its G6c counterexample in five minutes.
-  pure val byzHub: HubConfig = { ...timely, hubRole: Byzantine }
+  pure val byzHub: HubConfig = { ...timely, hubRole: Byzantine, payloads: Set(early, late, tight) }
   pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine, payloads: Set(early, tight) }
 
   /// Bytes neither the shim nor the hub can parse: no txid, no expiry. After

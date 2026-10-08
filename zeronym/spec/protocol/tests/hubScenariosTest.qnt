@@ -117,13 +117,13 @@ module hubScenariosTest {
       .then(block)
       .then(flushBegin)
       .expect(h.inFlight() == Set(early) and flightStart == 3)
-      .expect(wOfferWithExpiry and wConformingFirstOffer)
+      .expect(wConformingFirstOffer)
       .then(advance)
       .expect(height == 4 and not(mayAdvance) and wConformingFirstOfferInFlightABlock and wBlockInFlight)
       .then(judge(early, Accepted))
       .then(flushEnd)
       .expect(onChain == Set(early) and offered == Set(early) and owed == Set() and flightStart == 0)
-      .expect(offeredBeforeExpiry and conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
       .expect(conformingEveryOfferBeforeExpiry and ackedIsHeldOrSettled)
 
   /// K6, control. The wallet inputs of K6 under a timely tip. The second
@@ -175,19 +175,24 @@ module hubScenariosTest {
       .expect(not(ackedIsHeldOrSettled))
 
   /// K5c. A requeue gives an acknowledged entry up as expired. No crash and
-  /// no shutdown: the flush at 3 comes back unjudged, and an expiry of 5 does
-  /// not survive the flush at 6.
+  /// no shutdown: the flushes at 3 and at 6 both come back unjudged, and an
+  /// expiry of 9 does not survive the flush at 9.
   run requeueDropsAckedAsExpiredTest =
     started(timely)
       .then(block)
-      .then(deliver(tight))
+      .then(deliver(early))
       .then(block)
       .then(flushBegin)
-      .then(judge(tight, Retryable))
+      .then(judge(early, Retryable))
+      .expect(requeueReport == requeued(1, 0, 0))
+      .then(flushEnd)
+      .then(blocks(3))
+      .then(flushBegin)
+      .then(judge(early, Retryable))
       .expect(requeueReport == requeued(0, 1, 0))
       .then(flushEnd)
       .expect(h.phase == Running and h.queue == Map())
-      .expect(owed == Set(tight) and not(ackedIsHeldOrSettled))
+      .expect(owed == Set(early) and not(ackedIsHeldOrSettled))
 
   // ------------------------------------------------------------------------
   // The unknown upgrade
@@ -226,31 +231,14 @@ module hubScenariosTest {
       .expect(requeueReport == requeued(0, 0, 1))
       .then(flushEnd)
       .expect(h.queue == Map() and owed.contains(junk))
-      .expect(offeredBeforeExpiry)
 
   // ------------------------------------------------------------------------
   // A tip reported behind the chain
   // ------------------------------------------------------------------------
 
-  /// K3. A tight-expiry transaction is admitted against a tip reported one
-  /// block back, below a boundary the hub has already flushed. Admission
-  /// reasons that the next flush is at 3; it is at 6, after the expiry.
-  run tightExpiryAdmittedBehindFlushedBoundaryTest =
-    started(flakyTip)
-      .then(blocks(2))
-      .then(flushBegin)
-      .then(observeWith(2))
-      .then(deliver(tight))
-      .expect(height == 3 and h.tip == Some(2) and h.queued() == Set(tight))
-      .then(blocks(3))
-      .then(flushBegin)
-      .expect(flightStart == 6 and h.inFlight() == Set(tight))
-      // Not a supported wallet: the guarantee for those is untouched.
-      .expect(not(conforming(tight, cfg.params.minWalletExpiry)))
-      .expect(not(offeredBeforeExpiry) and conformingFirstOfferBeforeExpiry)
-
-  /// A supported wallet's transaction, admitted the same way and then flushed
-  /// one block late because the tip is reported one block back.
+  /// A supported wallet's transaction is admitted against a tip reported one
+  /// block back, below a boundary the hub has already flushed, and so flushed
+  /// one block late.
   run regressedTipDelaysFlush(c: HubConfig, payload: Payload): bool =
     started(c)
       .then(blocks(2))
@@ -271,7 +259,7 @@ module hubScenariosTest {
   run conformingSurvivesRegressionTest =
     regressedTipDelaysFlush(flakyTip, early)
       .expect(early.expiry == Some(7 + cfg.params.miningMargin))
-      .expect(offeredBeforeExpiry and conformingFirstOfferBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry)
       .then(advance)
       .expect(height == 8 and not(mayAdvance))
       .expect(wConformingFirstOfferInFlightABlock and conformingFirstOfferJudgedBeforeExpiry)
@@ -393,7 +381,7 @@ module hubScenariosTest {
   /// and the node can no longer take it.
   run silenceAcrossBoundaryMissesMarginTest =
     silenceAcrossBoundary(staleLag, early)
-      .expect(not(conformingFirstOfferBeforeExpiry) and not(offeredBeforeExpiry))
+      .expect(not(conformingFirstOfferBeforeExpiry))
       .then(advance)
       .expect(height == 9 and not(mayAdvance) and flightWithinMargin(cfg))
       .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
@@ -512,29 +500,6 @@ module hubScenariosTest {
   // A Byzantine hub
   // ------------------------------------------------------------------------
 
-  /// G6a needs the hub. It admits a transaction the expiry rule refuses: one
-  /// expiring at 5, taken at tip 3, when the next flush is at 6.
-  run hubAdmitsPastExpiryRuleTest =
-    started(byzHub)
-      .then(blocks(2))
-      .then(flushBegin)
-      .expect(decision(tight) == Refused(ExpiryTooTight))
-      .then(submitWith(tight, admitting(tight)))
-      .then(blocks(3))
-      .then(flushBegin)
-      .expect(flightStart == 6 and h.inFlight() == Set(tight))
-      .expect(not(offeredBeforeExpiry))
-
-  run hubAdmitsPastExpiryRuleControlTest =
-    started(byzHub)
-      .then(blocks(2))
-      .then(flushBegin)
-      .then(deliver(tight))
-      .expect(h.queued() == Set())
-      .then(blocks(3))
-      .then(flushBegin)
-      .expect(h.inFlight() == Set() and offeredBeforeExpiry)
-
   /// G6b and G6c need the hub. A supported wallet's transaction is refused by
   /// an honest hub only for reasons that are not about the transaction. This
   /// hub takes one while it has not yet seen a tip, when an honest hub
@@ -605,7 +570,7 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(height == 2 and h.tip == Some(3) and h.inFlight() == Set(early))
       .expect(flushesAheadOfChain)
-      .expect(offeredBeforeExpiry and conformingFirstOfferBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry)
 
   /// The hub asks for the tip at every block. The indexer goes on answering 2
   /// while `silence` more blocks arrive, and then answers truthfully. The
@@ -630,23 +595,9 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(flightStart == 3 and h.inFlight() == Set(payload))
 
-  /// G6a needs the indexer. With the tip withheld until height 5, a
-  /// transaction expiring at 5 is offered with no margin left.
-  run indexerWithholdsTipTest =
-    tipWithheld(tight, 3)
-      .expect(not(offeredBeforeExpiry))
-
-  run indexerWithholdsTipControlTest =
-    tipReported(tight)
-      .expect(offeredBeforeExpiry)
-      .then(judge(tight, Accepted))
-      .then(flushEnd)
-      .then(blocks(2))
-      .expect(height == 5 and offeredBeforeExpiry)
-
-  /// G6b and G6c need the indexer. The same lie, kept up to height 8, does it
-  /// to a supported wallet's transaction: it is offered at 8 with expiry 9,
-  /// and after one block in flight the node cannot take it.
+  /// G6b and G6c need the indexer. With the tip withheld up to height 8, a
+  /// supported wallet's transaction is offered at 8 with expiry 9, and after
+  /// one block in flight the node cannot take it.
   run indexerWithholdsTipFromConformingTest =
     tipWithheld(early, 6)
       .expect(conforming(early, cfg.params.minWalletExpiry) and onTime == Set(early))
