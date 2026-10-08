@@ -236,7 +236,7 @@ module hubMachine {
   def broadcastResults(payload: Payload): Set[IndexerResult] =
     match cfg.indexerRole {
       | Honest => honestIndexerResults(chain, BroadcastIInput(payload))
-      | Byzantine => byzIndexerResults(chain, BroadcastIInput(payload), cfg.payloads, CLOCK_HEIGHTS)
+      | Byzantine => byzIndexerResults(chain, BroadcastIInput(payload), cfg.payloads)
     }
 
   /// The indexer's transition that gives `given` on `payload` and relays the
@@ -266,7 +266,7 @@ module hubMachine {
     val input = SubmitHInput({ nonce: 0, payload: payload })
     match cfg.hubRole {
       | Honest => Set(hub(h, input))
-      | Byzantine => byzHubResults(h, input, cfg.payloads, Set())
+      | Byzantine => byzHubResults(h, input, cfg.payloads)
     }
 
   // ------------------------------------------------------------------------

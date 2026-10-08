@@ -48,7 +48,7 @@ module shimTest {
       .union(0.to(2).map(nonce => ack(nonce, WAccepted)))
       .union(0.to(2).map(nonce => ack(nonce, WRefused(WQueueFull))))
       .union(0.to(2).map(nonce => reply(nonce, WNotFound)))
-      .union(0.to(2).map(nonce => reply(nonce, WFound({ body: Some(pOrchard), height: 4 }))))
+      .union(0.to(2).map(nonce => reply(nonce, WFound({ body: Some(pOrchard), height: AtMined }))))
       .union(0.to(2).map(nonce => LookupTimeoutSInput(nonce)))
       .union(Set(
         FrameSInput(Submit({ nonce: 0, payload: pOrchard })),
@@ -109,11 +109,11 @@ module shimTest {
     assert(outputOf(initialShim, GetTxSInput("orchard")) == LookupSentOutput(Lookup({ nonce: 0, txid: "orchard" }))),
     assert(busy.waiters == Map(1 -> "orchard")),
     // Each reply arm.
-    assert(outputOf(busy, reply(1, WFound({ body: None, height: MEMPOOL_HEIGHT })))
+    assert(outputOf(busy, reply(1, WFound({ body: None, height: AtZero })))
       == LookupDoneOutput({ query: "orchard", result: Pending })),
-    assert(outputOf(busy, reply(1, WFound({ body: Some(pOrchard), height: 4 })))
-      == LookupDoneOutput({ query: "orchard", result: Tx({ payload: pOrchard, height: 4 }) })),
-    assert(outputOf(busy, reply(1, WFound({ body: Some(pPlain), height: 4 })))
+    assert(outputOf(busy, reply(1, WFound({ body: Some(pOrchard), height: AtMined })))
+      == LookupDoneOutput({ query: "orchard", result: Tx({ payload: pOrchard, height: AtMined }) })),
+    assert(outputOf(busy, reply(1, WFound({ body: Some(pPlain), height: AtMined })))
       == LookupDoneOutput({ query: "orchard", result: NotFound })),
     assert(outputOf(busy, reply(1, WNotFound)) == LookupDoneOutput({ query: "orchard", result: NotFound })),
     assert(outputOf(busy, reply(1, WError)) == LookupDoneOutput({ query: "orchard", result: Unavailable })),

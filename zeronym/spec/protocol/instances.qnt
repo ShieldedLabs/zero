@@ -49,7 +49,6 @@ module configs {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
     tpPayloads: Set(garbage),
-    maxHeight: 12,
     maxRequests: 3,
     roles: allHonest,
   }

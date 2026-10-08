@@ -16,7 +16,6 @@ module indexerTest {
   pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
 
   pure val UNIVERSE = Set(pA, pATwin, pB, pOld, pJunk)
-  pure val HEIGHTS = Set(0, 3, 7)
 
   pure def verdictOn(given: Verdict): IndexerOutput = VerdictOutput(given)
 
@@ -66,11 +65,11 @@ module indexerTest {
       == Set(AnswerOutput(INotFound), AnswerOutput(IUnavailable))),
     // A mempool transaction is found at height 0, with its bytes.
     assert(honestIndexerOutputs(withA, LookupIInput("ta"))
-      == Set(AnswerOutput(IFound({ body: Some(pA), height: MEMPOOL_HEIGHT })), AnswerOutput(IUnavailable))),
+      == Set(AnswerOutput(IFound({ body: Some(pA), height: AtZero })), AnswerOutput(IUnavailable))),
     assert(honestIndexerOutputs(minedA, LookupIInput("ta"))
-      == Set(AnswerOutput(IFound({ body: Some(pA), height: 5 })), AnswerOutput(IUnavailable))),
+      == Set(AnswerOutput(IFound({ body: Some(pA), height: AtMined })), AnswerOutput(IUnavailable))),
     assert(chainAnswer(empty, "ta") == INotFound),
-    assert(chainAnswer(minedA, "ta") == IFound({ body: Some(pA), height: 5 })),
+    assert(chainAnswer(minedA, "ta") == IFound({ body: Some(pA), height: AtMined })),
     // A lookup changes nothing.
     assert(STATES.forall(state =>
       honestIndexerResults(state, LookupIInput("ta")).forall(result => result.state == state))),
@@ -89,7 +88,7 @@ module indexerTest {
 
   run chainTest = all {
     assert(indexerApply(empty, AdvanceIInput, NoIndexerOutput).height == 5),
-    assert(minedA.inclusion("ta") == MinedAt(5)),
+    assert(minedA.inclusion("ta") == Mined),
     // Only a mempool transaction can be mined: not an absent one, not twice.
     assert(honestIndexerOutputs(withA, MineIInput("ta")) == Set(NoIndexerOutput)),
     assert(honestIndexerOutputs(empty, MineIInput("ta")) == Set()),
@@ -107,34 +106,46 @@ module indexerTest {
   /// honest tip report is one a Byzantine indexer could make.
   run byzantineContainsHonestTest = all {
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
-      honestIndexerResults(state, input).subseteq(byzIndexerResults(state, input, UNIVERSE, HEIGHTS)))),
+      honestIndexerResults(state, input).subseteq(byzIndexerResults(state, input, UNIVERSE)))),
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
-      honestIndexerOutputs(state, input).subseteq(byzIndexerOutputs(state, input, UNIVERSE, HEIGHTS)))),
+      honestIndexerOutputs(state, input).subseteq(byzIndexerOutputs(state, input, UNIVERSE)))),
     assert(tuples(STATES, 0.to(3)).forall(((state, slack)) =>
       honestTips(state, slack, 0.to(7)).subseteq(byzTips(0.to(7))))),
+  }
+
+  /// The protocol's relation, which has no chain height, contains the honest
+  /// relation, and is wider by the expiry clause only: it may accept an
+  /// expired transaction.
+  run heightlessCoversTest = all {
+    assert(tuples(STATES, INPUTS).forall(((state, input)) =>
+      honestIndexerResults(state, input).subseteq(heightlessIndexerResults(state, input)))),
+    assert(tuples(STATES, INPUTS).forall(((state, input)) =>
+      heightlessIndexerResults(state, input).exclude(honestIndexerResults(state, input)).forall(result =>
+        input == BroadcastIInput(pOld) and result.out == VerdictOutput(Accepted)))),
+    assert(heightlessIndexerResults(empty, BroadcastIInput(pOld)).exists(result => result.out == VerdictOutput(Accepted))),
   }
 
   run byzantineIndexerTest = all {
     // It may serve what it was offered and the chain has not published.
     assert(offeredB.servable(UNIVERSE) == Set(pB)),
-    assert(byzIndexerOutputs(offeredB, LookupIInput("tb"), UNIVERSE, HEIGHTS)
-      .contains(AnswerOutput(IFound({ body: Some(pB), height: 7 })))),
+    assert(byzIndexerOutputs(offeredB, LookupIInput("tb"), UNIVERSE)
+      .contains(AnswerOutput(IFound({ body: Some(pB), height: AtOther })))),
     // A twin of what it knows, too. Nothing else.
     assert(withA.servable(UNIVERSE) == Set(pA, pATwin)),
     assert(empty.servable(UNIVERSE) == Set()),
     // "Found, height 0, no body" for a transaction that does not exist.
-    assert(byzIndexerOutputs(empty, LookupIInput("ta"), UNIVERSE, HEIGHTS)
-      .contains(AnswerOutput(IFound({ body: None, height: MEMPOOL_HEIGHT })))),
+    assert(byzIndexerOutputs(empty, LookupIInput("ta"), UNIVERSE)
+      .contains(AnswerOutput(IFound({ body: None, height: AtZero })))),
     // The verdict and the effect are independent.
-    assert(byzIndexerResults(empty, BroadcastIInput(pA), UNIVERSE, HEIGHTS)
+    assert(byzIndexerResults(empty, BroadcastIInput(pA), UNIVERSE)
       .contains({ state: offeredB.with("offered", Set(pA)), out: verdictOn(Accepted) })),
-    assert(byzIndexerResults(empty, BroadcastIInput(pA), UNIVERSE, HEIGHTS)
+    assert(byzIndexerResults(empty, BroadcastIInput(pA), UNIVERSE)
       .contains({ state: withA, out: verdictOn(Rejected) })),
     // It cannot put an expired transaction on the chain.
-    assert(byzIndexerResults(empty, BroadcastIInput(pOld), UNIVERSE, HEIGHTS)
+    assert(byzIndexerResults(empty, BroadcastIInput(pOld), UNIVERSE)
       .forall(result => result.state.txs == Map())),
     // The chain's own steps are not the indexer's to change.
-    assert(byzIndexerResults(withA, AdvanceIInput, UNIVERSE, HEIGHTS) == honestIndexerResults(withA, AdvanceIInput)),
-    assert(byzIndexerResults(withA, MineIInput("ta"), UNIVERSE, HEIGHTS) == honestIndexerResults(withA, MineIInput("ta"))),
+    assert(byzIndexerResults(withA, AdvanceIInput, UNIVERSE) == honestIndexerResults(withA, AdvanceIInput)),
+    assert(byzIndexerResults(withA, MineIInput("ta"), UNIVERSE) == honestIndexerResults(withA, MineIInput("ta"))),
   }
 }

@@ -100,7 +100,7 @@ module indexer {
       | AdvanceIInput => { ...state, height: state.height + 1 }
       | MineIInput(txid) =>
         if (state.inclusion(txid) == InMempool)
-          { ...state, txs: state.txs.setBy(txid, tx => { ...tx, at: MinedAt(state.height) }) }
+          { ...state, txs: state.txs.setBy(txid, tx => { ...tx, at: Mined }) }
         else state
     }
 
@@ -140,6 +140,19 @@ module indexer {
     honestIndexerOutputs(state, input).map(output =>
       { state: indexerApply(state, input, output), out: output })
 
+  /// The honest relation as the protocol specification uses it, which has no
+  /// chain height: a broadcast that parses and is new may be accepted whatever
+  /// its expiry. It contains the honest relation (`heightlessCoversTest`).
+  pure def heightlessIndexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
+    val accepted = match input {
+      | BroadcastIInput(payload) =>
+        if (isSome(payload.txid) and not(state.isKnown(payload)))
+          Set({ state: indexerApply(state, input, VerdictOutput(Accepted)), out: VerdictOutput(Accepted) })
+        else Set()
+      | _ => Set()
+    }
+    honestIndexerResults(state, input).union(accepted)
+
   /// The truthful, available answer to a lookup: the one member of the honest
   /// relation that is not `IUnavailable`.
   pure def chainAnswer(state: IndexerState, txid: TxId): IndexerAnswer =
@@ -167,20 +180,15 @@ module indexer {
       known.exists(payload => candidate == payload or areTwins(candidate, payload)))
 
   /// The outputs a Byzantine indexer may give: any verdict, and any lookup
-  /// answer built from a payload it can serve, at any height in `heights`,
-  /// with or without a body.
-  pure def byzIndexerOutputs(
-    state: IndexerState,
-    input: IndexerInput,
-    universe: Set[Payload],
-    heights: Set[Height],
-  ): Set[IndexerOutput] =
+  /// answer built from a payload it can serve, at any height, with or without
+  /// a body.
+  pure def byzIndexerOutputs(state: IndexerState, input: IndexerInput, universe: Set[Payload]): Set[IndexerOutput] =
     match input {
       | BroadcastIInput(_) =>
         Set(Accepted, AlreadyKnown, Rejected, Retryable).map(verdict => VerdictOutput(verdict))
       | LookupIInput(_) =>
         val bodies = Set(None).union(state.servable(universe).map(payload => Some(payload)))
-        tuples(bodies, heights)
+        tuples(bodies, WIRE_HEIGHTS)
           .map(((body, claimed)) => AnswerOutput(IFound({ body: body, height: claimed })))
           .union(Set(AnswerOutput(INotFound), AnswerOutput(IUnavailable)))
           .union(honestIndexerOutputs(state, input))
@@ -193,13 +201,8 @@ module indexer {
   /// relay a transaction it claims to have rejected, or sit on one it claims to
   /// have accepted. It cannot make the network take a transaction a node would
   /// refuse: the chain itself stays honest.
-  pure def byzIndexerResults(
-    state: IndexerState,
-    input: IndexerInput,
-    universe: Set[Payload],
-    heights: Set[Height],
-  ): Set[IndexerResult] =
-    val outputs = byzIndexerOutputs(state, input, universe, heights)
+  pure def byzIndexerResults(state: IndexerState, input: IndexerInput, universe: Set[Payload]): Set[IndexerResult] =
+    val outputs = byzIndexerOutputs(state, input, universe)
     match input {
       | BroadcastIInput(payload) =>
         val withheld = indexerApply(state, input, VerdictOutput(Retryable))

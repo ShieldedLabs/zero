@@ -48,9 +48,10 @@ module state {
     disclosed: Set[Payload],
   }
 
-  /// The system at rest: the chain at `height`, the hub empty, nothing sent.
-  pure def initialSystem(config: Config, height: Height): System = {
-    indexer: initialIndexer(height),
+  /// The system at rest: the chain and the hub empty, nothing sent. The
+  /// protocol has no chain height, and the indexer's stays at 0.
+  pure def initialSystem(config: Config): System = {
+    indexer: initialIndexer(0),
     hub: emptyAHub,
     shim: initialShim,
     net: Set(),
@@ -74,7 +75,6 @@ module state {
     | IndexerVerdict(Payload)
     | HubReturn(Set[Payload])
     | HubLose
-    | ChainAdvance
     | ChainMine(TxId)
     | ThirdPartyLearnsTxid(TxId)
     | ThirdPartyLookup(TxId)
@@ -96,9 +96,6 @@ module state {
   // ------------------------------------------------------------------------
   // Views
   // ------------------------------------------------------------------------
-
-  pure def height(s: System): Height =
-    s.indexer.height
 
   /// Where `txid` stands on the chain.
   pure def onChain(s: System, txid: TxId): Inclusion =
@@ -257,10 +254,6 @@ module state {
       | NoShimOutput => stepped
       | ShimErrorOutput(_) => stepped
     }
-
-  /// The system after one more block.
-  pure def blockArrived(s: System): System =
-    { ...s, indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput) }
 
   /// The system after the hub answered `answer` to the request `mail`. The
   /// reply goes back to its sender under its nonce.

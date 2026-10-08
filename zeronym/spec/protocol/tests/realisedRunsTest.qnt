@@ -29,7 +29,6 @@ module realisedRunsTest {
     maxAttempts: 2,
   }
   pure val UNIVERSE = baseline.payloads.union(baseline.twins).union(baseline.tpPayloads)
-  pure val HEIGHTS = 0.to(baseline.maxHeight)
 
   type Step = Do(HubInput) | Lie({ input: HubInput, out: HubOutput })
 
@@ -38,7 +37,7 @@ module realisedRunsTest {
     LookupHInput({ nonce: nonce, txid: txid, answer: answer })
   pure def judged(payload: Payload, verdict: Verdict): HubInput =
     VerdictHInput({ payload: payload, verdict: verdict })
-  pure def found(body: Option[Payload], height: Height): IndexerAnswer = IFound({ body: body, height: height })
+  pure def found(body: Option[Payload], height: WireHeight): IndexerAnswer = IFound({ body: body, height: height })
   pure def tips(heights: List[Height]): List[Step] = heights.foldl([], (acc, h) => acc.append(Do(TipHInput(h))))
   pure def does(inputs: List[HubInput]): List[Step] = inputs.foldl([], (acc, i) => acc.append(Do(i)))
 
@@ -62,7 +61,7 @@ module realisedRunsTest {
       }
       val taken = match step {
         | Do(_) => not(match result.out { | HubErrorOutput(_) => true | _ => false })
-        | Lie(lie) => byzHubResults(acc.state, lie.input, UNIVERSE, HEIGHTS).contains(result)
+        | Lie(lie) => byzHubResults(acc.state, lie.input, UNIVERSE).contains(result)
       }
       { state: result.state, ok: acc.ok and taken, replies: acc.replies.concat(result.out.replyOf()) })
     { ok: end.ok, replies: end.replies, last: { queue: end.state.queued(), held: end.state.inFlight() } }
@@ -71,8 +70,8 @@ module realisedRunsTest {
     replay(steps) == { ok: true, replies: replies, last: last }
 
   pure val accepted = AAck(WAccepted)
-  pure val pending = AWire(WFound({ body: None, height: MEMPOOL_HEIGHT }))
-  pure val inMempool = AWire(WFound({ body: Some(early), height: MEMPOOL_HEIGHT }))
+  pure val pending = AWire(WFound({ body: None, height: AtZero }))
+  pure val inMempool = AWire(WFound({ body: Some(early), height: AtZero }))
   pure val queuedEarly = { queue: Set(early), held: Set() }
 
   /// Running at height 2 with `early` queued, as most runs begin.
@@ -86,11 +85,11 @@ module realisedRunsTest {
       [AAck(WRefused(WExpiryTooTight))], emptyAHub)),
     // K2a: pending, then in the mempool.
     assert(realises(earlyQueued.append(Do(look(1, "early", INotFound))).concat(tips([3])).concat(flushed(early, Accepted))
-      .append(Do(look(2, "early", found(Some(early), MEMPOOL_HEIGHT)))),
+      .append(Do(look(2, "early", found(Some(early), AtZero)))),
       [accepted, pending, inMempool], emptyAHub)),
     // K2b and K2c (the resubmission comes from the wallet or the third party).
-    assert(realises(earlyPublished.append(Do(look(1, "early", found(Some(early), MEMPOOL_HEIGHT)))).append(Do(sub(2, early)))
-      .append(Do(look(3, "early", found(Some(early), MEMPOOL_HEIGHT)))),
+    assert(realises(earlyPublished.append(Do(look(1, "early", found(Some(early), AtZero)))).append(Do(sub(2, early)))
+      .append(Do(look(3, "early", found(Some(early), AtZero)))),
       [accepted, inMempool, accepted, pending], queuedEarly)),
     // K2d: the flush window.
     assert(realises(earlyQueued.append(Do(look(1, "early", INotFound))).concat(tips([3])).append(Do(FlushDueHInput))
@@ -113,25 +112,25 @@ module realisedRunsTest {
 
   run realisedByzantineRunsTest = all {
     // G2, the hub: the queued bytes, to a third party.
-    assert(realises(earlyQueued.append(lieAbout(0, INotFound, FromIndexer(found(Some(early), MEMPOOL_HEIGHT)))),
+    assert(realises(earlyQueued.append(lieAbout(0, INotFound, FromIndexer(found(Some(early), AtZero)))),
       [accepted, inMempool], queuedEarly)),
     // G4, the hub: not found for a queued transaction.
     assert(realises(earlyQueued.append(lieAbout(1, INotFound, FromIndexer(INotFound))),
       [accepted, AWire(WNotFound)], queuedEarly)),
     // G4, the hub: a false height.
-    assert(realises(earlyPublished.append(lieAbout(1, found(Some(early), MEMPOOL_HEIGHT), FromIndexer(found(Some(early), 9)))),
-      [accepted, AWire(WFound({ body: Some(early), height: 9 }))], emptyAHub)),
+    assert(realises(earlyPublished.append(lieAbout(1, found(Some(early), AtZero), FromIndexer(found(Some(early), AtOther)))),
+      [accepted, AWire(WFound({ body: Some(early), height: AtOther }))], emptyAHub)),
     // G8, the hub: accepted and not queued.
     assert(realises(tips([1, 2]).append(Lie({ input: sub(0, early), out: AckOutput({ nonce: 0, kind: Admitted }) })),
       [accepted], emptyAHub)),
     // W16: a twin at a false height.
-    assert(realises(earlyQueued.append(lieAbout(1, INotFound, FromIndexer(found(Some(earlyTwin), 9)))),
-      [accepted, AWire(WFound({ body: Some(earlyTwin), height: 9 }))], queuedEarly)),
+    assert(realises(earlyQueued.append(lieAbout(1, INotFound, FromIndexer(found(Some(earlyTwin), AtOther)))),
+      [accepted, AWire(WFound({ body: Some(earlyTwin), height: AtOther }))], queuedEarly)),
     // G2, the indexer: the honest hub forwards the unpublished bytes.
     assert(realises(earlyQueued.concat(tips([3])).concat(does([FlushDueHInput, judged(early, Retryable),
-      look(0, "early", found(Some(early), MEMPOOL_HEIGHT))])),
+      look(0, "early", found(Some(early), AtZero))])),
       [accepted, inMempool], { queue: Set(), held: Set(early) })),
     // G4, the indexer: a forged pending for a transaction nobody queued.
-    assert(realises(tips([1, 2]).append(Do(look(1, "early", found(None, MEMPOOL_HEIGHT)))), [pending], emptyAHub)),
+    assert(realises(tips([1, 2]).append(Do(look(1, "early", found(None, AtZero)))), [pending], emptyAHub)),
   }
 }

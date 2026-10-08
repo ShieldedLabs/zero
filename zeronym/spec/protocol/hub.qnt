@@ -416,14 +416,13 @@ module hub {
   ///   or not, independently of the answer and of every admission rule;
   /// - a lookup is answered with any outcome: a queue hit, or anything an
   ///   indexer could say, with a body drawn from `universe` or none, at any
-  ///   height in `heights`.
+  ///   height.
   ///
   /// The honest transition is always a member.
   pure def byzHubResults(
     state: HubState,
     input: HubInput,
     universe: Set[Payload],
-    heights: Set[Height],
   ): Set[HubResult] =
     val honest = Set(hub(state, input))
     if (not(state.isServing())) honest
@@ -439,7 +438,7 @@ module hub {
             after.toAckOutput(submit.nonce, kind)))
         | LookupHInput(lookup) =>
           val bodies = Set(None).union(universe.map(payload => Some(payload)))
-          val answers = tuples(bodies, heights)
+          val answers = tuples(bodies, WIRE_HEIGHTS)
             .map(((body, claimed)) => IFound({ body: body, height: claimed }))
             .union(Set(INotFound, IUnavailable))
           val outcomes = Set(QueueHit).union(answers.map(answer => FromIndexer(answer)))

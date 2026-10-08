@@ -65,24 +65,18 @@ module protocol {
   /// Payloads of the third party's own making.
   pure val TP_PAYLOADS = CONFIG.tpPayloads
 
-  /// Bounds of the model: the chain stops growing at `MAX_HEIGHT`, and the
-  /// wallet makes at most `MAX_REQUESTS` sends and as many lookups, as does
-  /// the third party.
-  pure val MAX_HEIGHT = CONFIG.maxHeight
+  /// The bound of the model: the wallet makes at most `MAX_REQUESTS` sends
+  /// and as many lookups, as does the third party.
   pure val MAX_REQUESTS = CONFIG.maxRequests
 
   pure val ROLES = CONFIG.roles
 
   /// Every payload that exists. A Byzantine component builds its lies from it.
   pure val UNIVERSE = PAYLOADS.union(TWINS).union(TP_PAYLOADS)
-  /// Every height a Byzantine component may claim.
-  pure val HEIGHTS = 0.to(MAX_HEIGHT)
   /// What a wallet may send.
   pure val SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
   /// Every transaction id there is.
   pure val TXIDS = txidsOf(UNIVERSE)
-  /// The height the chain starts at. Height 0 is kept for "in the mempool".
-  pure val GENESIS_HEIGHT = 1
 
   // ------------------------------------------------------------------------
   // Assumptions
@@ -97,7 +91,6 @@ module protocol {
     UNIVERSE.size() == UNIVERSE.map(payload => payload.id).size(),
     PAYLOADS.intersect(TP_PAYLOADS) == Set(),
     TWINS.forall(twin => PAYLOADS.exists(payload => areTwins(twin, payload))),
-    UNIVERSE.forall(payload => payload.created >= GENESIS_HEIGHT),
   }
 
   assume _ = payloadsWellFormed
@@ -120,7 +113,7 @@ module protocol {
     lastAction' = label,
   }
 
-  pure val INITIAL = initialSystem(CONFIG, GENESIS_HEIGHT)
+  pure val INITIAL = initialSystem(CONFIG)
 
   action init = all {
     s' = INITIAL,
@@ -135,13 +128,13 @@ module protocol {
   pure def hubAnswers(h: AHub, request: ARequest): Set[AAnswer] =
     match ROLES.hub {
       | Honest => honestAnswers(h, request)
-      | Byzantine => byzantineAnswers(h, request, UNIVERSE, HEIGHTS)
+      | Byzantine => byzantineAnswers(h, request, UNIVERSE)
     }
 
   pure def indexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
     match ROLES.indexer {
-      | Honest => honestIndexerResults(state, input)
-      | Byzantine => byzIndexerResults(state, input, UNIVERSE, HEIGHTS)
+      | Honest => heightlessIndexerResults(state, input)
+      | Byzantine => byzIndexerResults(state, input, UNIVERSE)
     }
 
   /// What the indexer may answer a hub's lookup for the transaction `msg`
@@ -172,11 +165,6 @@ module protocol {
   action walletSendWith(input: SendInput, handedOver: bool): bool = all {
     s.wallet.sends < MAX_REQUESTS,
     SEND_INPUTS.contains(input),
-    // A wallet cannot send a transaction before it has built it.
-    match input {
-      | Clean(payload) => payload.created <= s.height()
-      | _ => true
-    },
     val result = shim(s.shim, SendTxSInput({ input: input, handedOver: handedOver }))
     all {
       not(isShimError(result.out)),
@@ -362,12 +350,6 @@ module protocol {
   // Chain
   // ------------------------------------------------------------------------
 
-  /// The chain grows by one block.
-  action chainAdvance = all {
-    s.height() < MAX_HEIGHT,
-    commit(s.blockArrived(), ChainAdvance),
-  }
-
   /// The transactions waiting in the mempool.
   def mempool: Set[TxId] =
     s.indexer.txs.keys().filter(txid => s.onChain(txid) == InMempool)
@@ -492,7 +474,7 @@ module protocol {
     walletSend, walletGet,
     shimReceive,
     hubReceive, hubTake, indexerVerdict, hubReturn,
-    chainAdvance, chainMine,
+    chainMine,
     faultStep,
     outsiderStep,
   }
@@ -507,7 +489,7 @@ module protocol {
     walletSend, walletGet,
     shimReceive,
     hubReceive, hubTake, indexerVerdict, hubReturn,
-    chainAdvance, chainMine,
+    chainMine,
   }
 
   // ------------------------------------------------------------------------
@@ -650,12 +632,6 @@ module protocol {
       state: indexerApply(s.indexer, BroadcastIInput(payload), VerdictOutput(verdict)),
       out: VerdictOutput(verdict),
     })
-
-  /// One block arrives.
-  run block = chainAdvance
-
-  /// `count` blocks arrive.
-  run blocks(count: int): bool = count.reps(_ => block)
 
   /// The wallet sends `payload`, and the frame under `nonce` reaches the hub.
   run submitTo(nonce: Nonce, payload: Payload): bool =

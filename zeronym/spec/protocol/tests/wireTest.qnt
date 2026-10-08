@@ -13,7 +13,7 @@ module wireTest {
   pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
 
   pure val PAYLOADS = Set(pA, pATwin, pB, pJunk)
-  pure val HEIGHTS = Set(MEMPOOL_HEIGHT, 1, 5)
+  pure val HEIGHTS = WIRE_HEIGHTS
   pure val QUERIES = Set("ta", "tb", "unknown")
   pure val BODIES = Set(None).union(PAYLOADS.map(payload => Some(payload)))
 
@@ -56,15 +56,15 @@ module wireTest {
   /// the wallet see pending (`indexerForgesPendingTest` is that run). No two
   /// honest outcomes collide.
   run sentinelCollisionTest = all {
-    assert(render(QueueHit) == render(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT })))),
+    assert(render(QueueHit) == render(FromIndexer(IFound({ body: None, height: AtZero })))),
     assert(QUERIES.forall(query =>
       and {
         interpretReply(render(QueueHit), query) == Pending,
-        interpretReply(render(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT }))), query) == Pending,
+        interpretReply(render(FromIndexer(IFound({ body: None, height: AtZero }))), query) == Pending,
       })),
     assert(QUERIES.forall(query =>
       meaning(QueueHit, query)
-        != meaning(FromIndexer(IFound({ body: None, height: MEMPOOL_HEIGHT })), query))),
+        != meaning(FromIndexer(IFound({ body: None, height: AtZero })), query))),
     assert(tuples(HONEST_OUTCOMES, HONEST_OUTCOMES).forall(((left, right)) =>
       left != right implies render(left) != render(right))),
   }
@@ -79,10 +79,10 @@ module wireTest {
       })),
     // Found with no body at a mined height is not a transaction and not the
     // pending sentinel.
-    assert(interpretReply(WFound({ body: None, height: 5 }), "ta") == NotFound),
+    assert(interpretReply(WFound({ body: None, height: AtMined }), "ta") == NotFound),
     // A twin of the transaction asked for is served.
-    assert(interpretReply(WFound({ body: Some(pATwin), height: 5 }), "ta")
-      == Tx({ payload: pATwin, height: 5 })),
+    assert(interpretReply(WFound({ body: Some(pATwin), height: AtMined }), "ta")
+      == Tx({ payload: pATwin, height: AtMined })),
     // The height is passed through as given.
     assert(HEIGHTS.forall(height =>
       interpretReply(WFound({ body: Some(pA), height: height }), "ta")

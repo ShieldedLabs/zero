@@ -82,24 +82,28 @@ module types {
   // ------------------------------------------------------------------------
 
   /// Where a transaction stands on the chain. It only ever moves forward.
-  type Inclusion = Absent | InMempool | MinedAt(Height)
+  type Inclusion = Absent | InMempool | Mined
 
-  /// The height a lookup answer carries for a transaction still in the mempool.
-  pure val MEMPOOL_HEIGHT: Height = 0
+  /// The height a lookup answer carries, relative to the transaction it names:
+  /// 0, meaning the mempool; the height it was mined at; or any other height.
+  /// No answer is compared against the chain height except through this.
+  type WireHeight = AtZero | AtMined | AtOther
+
+  pure val WIRE_HEIGHTS = Set(AtZero, AtMined, AtOther)
 
   /// The height a lookup answer carries for `inclusion`.
-  pure def answerHeight(inclusion: Inclusion): Height =
+  pure def answerHeight(inclusion: Inclusion): WireHeight =
     match inclusion {
-      | MinedAt(height) => height
-      | InMempool => MEMPOOL_HEIGHT
-      | Absent => MEMPOOL_HEIGHT
+      | Mined => AtMined
+      | InMempool => AtZero
+      | Absent => AtZero
     }
 
   /// An indexer's answer to a transaction lookup. An honest indexer always
   /// returns a body with `IFound`; the type admits a missing one because the
   /// hub forwards whatever it is given.
   type IndexerAnswer =
-    | IFound({ body: Option[Payload], height: Height })
+    | IFound({ body: Option[Payload], height: WireHeight })
     | INotFound
     | IUnavailable
 
@@ -168,7 +172,7 @@ module types {
   /// The answer to a `GetTransaction`.
   type LookupObs =
     | Pending                                   // found, height 0, no body
-    | Tx({ payload: Payload, height: Height })  // the transaction, as served
+    | Tx({ payload: Payload, height: WireHeight })  // the transaction, as served
     | NotFound
     | Unavailable                               // failed closed
 
@@ -186,14 +190,13 @@ module types {
   /// one output the step produced.
   type Result[s, o] = { state: s, out: o }
 
-  /// One configuration of the protocol: the transactions in play, the hub
-  /// schedule, the bounds of the model, and the trust and timing assumptions.
-  /// Field by field it is the list of constants in `protocol.qnt`.
+  /// One configuration of the protocol: the transactions in play, the bound
+  /// of the model, and the roles. Field by field it is the list of constants
+  /// in `protocol.qnt`.
   type Config = {
     payloads: Set[Payload],
     twins: Set[Payload],
     tpPayloads: Set[Payload],
-    maxHeight: Height,
     maxRequests: int,
     roles: Roles,
   }

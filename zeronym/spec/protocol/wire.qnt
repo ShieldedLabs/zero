@@ -19,7 +19,7 @@ module wire {
   /// A lookup reply's disposition. Only `WFound` has room for a height and a
   /// body; a `not_found` or an `error` that carries either does not decode.
   type WireReply =
-    | WFound({ body: Option[Payload], height: Height })
+    | WFound({ body: Option[Payload], height: WireHeight })
     | WNotFound
     | WError
 
@@ -61,7 +61,7 @@ module wire {
   /// bytes to whoever asked. An indexer answer is forwarded as it came.
   pure def render(outcome: HubOutcome): WireReply =
     match outcome {
-      | QueueHit => WFound({ body: None, height: MEMPOOL_HEIGHT })
+      | QueueHit => WFound({ body: None, height: AtZero })
       | FromIndexer(answer) =>
         match answer {
           | IFound(found) => WFound(found)
@@ -111,7 +111,7 @@ module wire {
     match reply {
       | WFound(found) =>
         match found.body {
-          | None => if (found.height == MEMPOOL_HEIGHT) Pending else NotFound
+          | None => if (found.height == AtZero) Pending else NotFound
           | Some(payload) =>
             if (payload.txid == Some(query))
               Tx({ payload: payload, height: found.height })

@@ -28,7 +28,6 @@ module hubTest {
   pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
 
   pure val PAYLOADS = Set(pA, pB, pC, pTight, pJunk)
-  pure val HEIGHTS = Set(0, 4)
   pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)
 
   /// The state after `input`.
@@ -71,7 +70,7 @@ module hubTest {
     PAYLOADS.map(payload => submit(payload))
       .union(Set(
         LookupHInput({ nonce: 1, txid: "a", answer: INotFound }),
-        LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: 4 }) }),
+        LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: AtMined }) }),
         TipHInput(0), TipHInput(4), TipHInput(5), TipHInput(6), TipHInput(9),
         StaleHInput(4), StaleHInput(8), StaleHInput(9),
         FlushDueHInput, FlushDoneHInput, DrainHInput, CrashHInput, RestartHInput,
@@ -153,10 +152,10 @@ module hubTest {
 
   run lookupTest = all {
     // A queue hit, whatever the indexer would have said.
-    assert(outputOf(holding, LookupHInput({ nonce: 7, txid: "a", answer: IFound({ body: Some(pA), height: 4 }) }))
+    assert(outputOf(holding, LookupHInput({ nonce: 7, txid: "a", answer: IFound({ body: Some(pA), height: AtMined }) }))
       == LookupReplyOutput({ nonce: 7, outcome: QueueHit })),
     // A miss forwards the indexer's answer as it came.
-    assert(Set(INotFound, IUnavailable, IFound({ body: Some(pB), height: 4 }), IFound({ body: None, height: 0 }))
+    assert(Set(INotFound, IUnavailable, IFound({ body: Some(pB), height: AtMined }), IFound({ body: None, height: AtZero }))
       .forall(answer =>
         outputOf(holding, LookupHInput({ nonce: 7, txid: "b", answer: answer }))
           == LookupReplyOutput({ nonce: 7, outcome: FromIndexer(answer) }))),
@@ -312,20 +311,20 @@ module hubTest {
   /// F12. The Byzantine relation contains the honest transition.
   run byzantineContainsHonestTest =
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
-      byzHubResults(state, input, PAYLOADS, HEIGHTS).contains(hub(state, input))))
+      byzHubResults(state, input, PAYLOADS).contains(hub(state, input))))
 
   /// F13, companion. A Byzantine hub can accept a payload it does not hold,
   /// can hold one admission would refuse, and can answer a lookup with a
   /// queued body.
   run byzantineHubTest = all {
-    assert(byzHubResults(running(5), submit(pA), PAYLOADS, HEIGHTS).exists(result =>
+    assert(byzHubResults(running(5), submit(pA), PAYLOADS).exists(result =>
       result.out == AckOutput({ nonce: 0, kind: Admitted }) and not(result.state.queued().contains(pA)))),
-    assert(byzHubResults(running(5), submit(pTight), PAYLOADS, HEIGHTS).exists(result =>
+    assert(byzHubResults(running(5), submit(pTight), PAYLOADS).exists(result =>
       result.state.queued().contains(pTight))),
-    assert(byzHubResults(holding, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS, HEIGHTS)
-      .contains(holding.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(pA), height: 0 }))))),
+    assert(byzHubResults(holding, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS)
+      .contains(holding.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(pA), height: AtZero }))))),
     // It still cannot act while it is not running.
-    assert(byzHubResults(down, submit(pA), PAYLOADS, HEIGHTS) == Set(hub(down, submit(pA)))),
+    assert(byzHubResults(down, submit(pA), PAYLOADS) == Set(hub(down, submit(pA)))),
   }
 
   // ------------------------------------------------------------------------
@@ -351,7 +350,7 @@ module hubTest {
 
   /// The states a Byzantine hub may move to on a submission.
   pure def byzantineSteps(state: HubState): Set[HubState] =
-    REACH_PAYLOADS.map(payload => byzHubResults(state, submit(payload), REACH_PAYLOADS, HEIGHTS)
+    REACH_PAYLOADS.map(payload => byzHubResults(state, submit(payload), REACH_PAYLOADS)
       .map(result => result.state)).flatten()
 
   pure def successors(state: HubState): Set[HubState] =
@@ -416,9 +415,9 @@ module hubTest {
     }
 
   pure val LOOKUPS: Set[HubInput] =
-    Set(INotFound, IUnavailable, IFound({ body: Some(pA), height: 4 }))
+    Set(INotFound, IUnavailable, IFound({ body: Some(pA), height: AtMined }))
       .map(answer => LookupHInput({ nonce: 1, txid: "a", answer: answer }))
-      .union(Set(LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: 4 }) })))
+      .union(Set(LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: AtMined }) })))
 
   /// An error changes nothing. A request is one of `answers`; anything else
   /// is an internal move with no reply.
@@ -445,8 +444,8 @@ module hubTest {
   run byzantineAbstractionTest =
     assert(REACH.forall(state =>
       REACH_PAYLOADS.map(payload => submit(payload)).union(LOOKUPS).forall(input =>
-        byzHubResults(state, input, PAYLOADS, HEIGHTS).forall(result =>
-          isAbstracted(state, input, result, (h, request) => byzantineAnswers(h, request, PAYLOADS, HEIGHTS))))))
+        byzHubResults(state, input, PAYLOADS).forall(result =>
+          isAbstracted(state, input, result, (h, request) => byzantineAnswers(h, request, PAYLOADS))))))
 
   /// Each abstract move has a concrete step that projects onto it.
   pure def realises(state: HubState, input: HubInput, move: AHub, reply: Option[AReply]): bool =

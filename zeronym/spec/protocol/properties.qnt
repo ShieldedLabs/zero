@@ -222,7 +222,7 @@ module properties {
   pure def wTxInMempoolIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
-        | Tx(tx) => tx.height == MEMPOOL_HEIGHT
+        | Tx(tx) => tx.height == AtZero
         | _ => false
       })
 
@@ -230,7 +230,7 @@ module properties {
   pure def wTxMinedIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
-        | Tx(tx) => tx.height != MEMPOOL_HEIGHT
+        | Tx(tx) => tx.height == AtMined
         | _ => false
       })
 
@@ -246,7 +246,7 @@ module properties {
   /// > is left open deliberately.
   pure def wQueuedDisclosedIn(s: System): bool =
     tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
-      lookup._1 == reply._1 and reply._2 == WFound({ body: None, height: MEMPOOL_HEIGHT }))
+      lookup._1 == reply._1 and reply._2 == WFound({ body: None, height: AtZero }))
 
   /// W9. The hub holds a payload it cannot parse; the wallet that sent it asks
   /// for it and is told not found. An entry without a txid can never
@@ -272,12 +272,17 @@ module properties {
       })
 
   /// W16b. The wallet is served a transaction at a height that cannot be
-  /// true: the chain does not have it, or has not got that far.
+  /// true: the chain does not have it, or has it in the mempool and the
+  /// height says mined, or the height is not where it was mined.
   pure def wFalseHeightServedIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
         | Tx(tx) =>
-          tx.height > s.height() or not(s.indexer.published().exists(payload => payload.txid == tx.payload.txid))
+          val at = match tx.payload.txid {
+            | Some(txid) => s.onChain(txid)
+            | None => Absent
+          }
+          or { at == Absent, tx.height == AtOther, tx.height == AtMined and at != Mined }
         | _ => false
       })
 

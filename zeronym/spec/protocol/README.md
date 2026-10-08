@@ -120,7 +120,7 @@ definitions they justify.
 | Wallet / shim front door | `SendTransaction` input as `Clean(payload) \| Unreadable \| EmptyBody`; routing to divert / forward / fail-closed; `GetTransaction` always to the hub | S1, S3, S4. `divert.qnt` omits it |
 | Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
 | Hub | In the hub specification: lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash. In the protocol specification: the abstract hub, a queue and the entries out with a flush, which accepts, refuses, takes, settles, gives back and loses (see [The abstraction lemma](#the-abstraction-lemma)) | S10-S19 |
-| Chain / indexer | height; per-txid status; what the indexer has been offered; verdict and lookup-answer relations | S15, S22 |
+| Chain / indexer | per-txid status (absent, mempool, mined); what the indexer has been offered; verdict and lookup-answer relations. A lookup answer's height is 0, the height the transaction was mined at, or another (`WireHeight`). The protocol specification has no chain height and no block clock, and its verdict relation has no expiry clause (`heightlessIndexerResults`); the hub specification keeps the chain height, which its tip and expiry rules read | S15, S22 |
 | Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
 | Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
 | Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned and payloads of its own making; its payload knowledge is derived from what it can observe | S13, S25 |
@@ -350,7 +350,7 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> Absent
     Absent --> Mempool: a broadcast is accepted
-    Mempool --> Mined: included at a height
+    Mempool --> Mined: included in a block
     Mined --> [*]
 ```
 
@@ -499,8 +499,8 @@ One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
 | `byzHub` | **B** / H |
 | `byzIndexer` | H / **B** |
 
-Heights up to 12, at most 3 sends and 3 lookups by the wallet and 3 requests
-by the third party. Each configuration's `assumptionsTest` asserts
+At most 3 sends and 3 lookups by the wallet and 3 requests by the third
+party. Each configuration's `assumptionsTest` asserts
 `payloadsWellFormed`; the simulator does not enforce `assume`. The hub
 specification's configurations, its scaled-down schedule and the relations
 it keeps with the shipped one are in `hubMachine.qnt`.
@@ -523,6 +523,7 @@ it keeps with the shipped one are in `hubMachine.qnt`.
 | F10 | A draining hub refuses under the queue-full code | `wireTest::ackRenderingTest` |
 | F11 | `hub` and `shim` are total; an invalid input returns an error and changes nothing | `hubTest::totalityTest`, `shimTest::totalityTest` |
 | F12 | Each Byzantine relation contains the honest transition | `byzantineContainsHonestTest` in `hubTest`, `shimTest`, `indexerTest` |
+| F15 | The protocol's heightless verdict relation contains the honest one and is wider only by the expiry clause | `indexerTest::heightlessCoversTest` |
 | F13 | An accepted ack is given only for a payload the hub then holds; a Byzantine hub can do otherwise | `hubTest::ackImpliesQueuedTest`, `hubTest::byzantineHubTest` |
 | F14 | The tip rule: first observation adopted; forward followed; a drop within the allowance followed; a larger drop ignored | `hubTest::tipRuleTest` |
 

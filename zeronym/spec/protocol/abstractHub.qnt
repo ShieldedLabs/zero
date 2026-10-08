@@ -47,14 +47,14 @@ module abstractHub {
 
   /// A Byzantine hub queues a submission or not, whatever it answers, and
   /// answers a lookup with anything: a body from `universe` or none, at any
-  /// height in `heights`, or not found, or an error.
-  pure def byzantineAnswers(h: AHub, request: ARequest, universe: Set[Payload], heights: Set[Height]): Set[AAnswer] =
+  /// height, or not found, or an error.
+  pure def byzantineAnswers(h: AHub, request: ARequest, universe: Set[Payload]): Set[AAnswer] =
     match request {
       | ASubmit(payload) =>
         tuples(Set(h, { ...h, queue: h.queue.union(Set(payload)) }), WIRE_ACKS)
           .map(((after, ack)) => { hub: after, reply: AAck(ack) })
       | ALookup(_) =>
-        tuples(Set(None).union(universe.map(payload => Some(payload))), heights)
+        tuples(Set(None).union(universe.map(payload => Some(payload))), WIRE_HEIGHTS)
           .map(((body, claimed)) => WFound({ body: body, height: claimed }))
           .union(Set(WNotFound, WError))
           .map(reply => { hub: h, reply: AWire(reply) })
