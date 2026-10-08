@@ -167,6 +167,11 @@ in both dialects and the indexer only ever sees gRPC. A browser also sends
 `Origin` (an extension's names the extension) and `Referer`; the shim strips
 both with the client-address headers.
 
+gRPC-web over browser `fetch` carries unary and server-streaming calls only, so
+a browser wallet cannot call `GetTaddressBalanceStream`, the one
+client-streaming method; it calls the unary `GetTaddressBalance` instead. The
+shim relays a client stream unchanged, so the limit sits in the browser.
+
 ## Residual leaks (state them, do not pretend)
 
 The Zeronym indexer closed the three that used to sit here (reused address,

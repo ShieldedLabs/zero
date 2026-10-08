@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use http::{HeaderMap, Request, Response};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Empty, Full, StreamBody};
+use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::server::conn::http2 as server_h2;
 use hyper::service::service_fn;
@@ -31,6 +32,39 @@ use common::{
 use zero_indexer_shim::proxy::SEND_TRANSACTION;
 
 const LATEST_BLOCK: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock";
+const BLOCK_RANGE: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRange";
+
+/// A stub indexer that answers any call as a server stream: `count` messages,
+/// each in its own DATA frame, then a `grpc-status: 0` trailer.
+async fn spawn_streaming_backend(count: u8) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<Incoming>| async move {
+                    let _ = req.into_body().collect().await;
+                    let mut trailers = HeaderMap::new();
+                    trailers.insert("grpc-status", "0".parse().unwrap());
+                    let mut frames: Vec<Result<Frame<Bytes>, Infallible>> = (0..count)
+                        .map(|i| Ok(Frame::data(grpc_frame(&[i; 3]))))
+                        .collect();
+                    frames.push(Ok(Frame::trailers(trailers)));
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header("content-type", "application/grpc")
+                            .body(StreamBody::new(tokio_stream::iter(frames)))
+                            .unwrap(),
+                    )
+                });
+                let _ = server_h2::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    addr
+}
 
 /// A stub indexer that records the headers of the last request it served and
 /// answers with a framed `SendResponse` and a `grpc-status: 0` trailer.
@@ -149,6 +183,22 @@ async fn a_text_grpc_web_call_round_trips_through_base64() {
         "application/grpc-web-text+proto"
     );
     assert_operator_answered(&reply);
+}
+
+#[tokio::test]
+async fn a_server_stream_arrives_whole_in_both_encodings() {
+    // GetBlockRange is how a wallet syncs, so the stream must survive the
+    // translation message for message, with the status after the last one.
+    let backend = spawn_streaming_backend(3).await;
+    let shim = spawn_forward_only_shim(backend).await;
+
+    for content_type in ["application/grpc-web+proto", "application/grpc-web-text"] {
+        let mut sender = connect_h2(shim).await;
+        let reply = grpc_web_call(&mut sender, shim, BLOCK_RANGE, content_type, &[]).await;
+        let expected: Vec<Bytes> = (0..3u8).map(|i| Bytes::from(vec![i; 3])).collect();
+        assert_eq!(reply.messages, expected, "{content_type}");
+        assert!(reply.trailers.contains("grpc-status:0"), "{content_type}");
+    }
 }
 
 #[tokio::test]
