@@ -13,6 +13,8 @@ module shimTest {
   pure val pOrchard = payload("orchard", OrchardTouching)
   pure val pPlain = payload("plain", PassThrough)
   pure val pJunk = { ...payload("junk", Unparseable), txid: None, expiry: None }
+  /// Trailing bytes: the shim's parser gives up, the hub's computes a txid.
+  pure val pTrailing = { ...payload("trailing", Unparseable), expiry: None }
   pure val pBig = { ...payload("big", OrchardTouching), oversize: true }
   pure val pBigPlain = { ...payload("big-plain", PassThrough), oversize: true }
 
@@ -75,6 +77,10 @@ module shimTest {
     // A body the shim cannot parse is diverted, never forwarded.
     assert(outputOf(initialShim, send(Clean(pJunk), true))
       == DivertedOutput({ payload: pJunk, frame: Submit({ nonce: 0, payload: pJunk }), told: SentOk })),
+    // So is one the hub's parser accepts: the shim's classification alone
+    // decides.
+    assert(outputOf(initialShim, send(Clean(pTrailing), true))
+      == DivertedOutput({ payload: pTrailing, frame: Submit({ nonce: 0, payload: pTrailing }), told: SentOk })),
   }
 
   run failClosedTest = all {

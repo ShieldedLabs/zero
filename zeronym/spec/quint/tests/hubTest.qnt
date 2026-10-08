@@ -158,6 +158,20 @@ module hubTest {
       after(state, LookupHInput({ nonce: 7, txid: "a", answer: INotFound })) == state)),
   }
 
+  /// Bytes the shim rejects for their trailing junk and the hub's parser
+  /// accepts: the shim diverts them, and the hub queues them under the txid it
+  /// computes, so a lookup by that txid is a queue hit.
+  pure val pTrailing = { ...pJunk, id: "trailing", txid: Some("tt") }
+
+  run trailingBytesAreQueuedAndHitTest =
+    val queued = running(5).after(submit(pTrailing))
+    all {
+      assert(admission(running(5), pTrailing) == Admitted),
+      assert(queued.isQueuedTxid("tt")),
+      assert(outputOf(queued, LookupHInput({ nonce: 7, txid: "tt", answer: INotFound }))
+        == LookupReplyOutput({ nonce: 7, outcome: QueueHit })),
+    }
+
   // ------------------------------------------------------------------------
   // Tip
   // ------------------------------------------------------------------------

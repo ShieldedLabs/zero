@@ -2,6 +2,7 @@
 # Check one invariant of one configuration exhaustively, with TLC.
 #
 #   tlc.sh FILE MAIN INIT STEP INVARIANT
+#   tlc.sh --fetch                      only fetch Apalache, if it is missing
 #
 # FILE is a Quint file, MAIN the module in it, INIT a named init action built
 # on `initWith`, STEP a step relation and INVARIANT a state predicate. On
@@ -45,6 +46,34 @@ die() {
   exit 1
 }
 
+# The Apalache distribution is fetched by Quint the first time it verifies
+# anything. The verdict of that run is irrelevant.
+fetch() {
+  [ -f "$JAR" ] && return 0
+  dir=$(mktemp -d)
+  cat >"$dir/fetch.qnt" <<'EOF'
+module fetch {
+  var x: int
+  action init = x' = 0
+  action step = x' = x
+}
+EOF
+  (cd "$dir" && $QUINT verify fetch.qnt --max-steps=1 >fetch.log 2>&1)
+  if [ ! -f "$JAR" ]; then
+    tail -5 "$dir/fetch.log" >&2
+    rm -rf "$dir"
+    die "toolchain: no Apalache $APALACHE_VERSION at $JAR"
+  fi
+  rm -rf "$dir"
+}
+
+# `tlc.sh --fetch` only fetches. A caller that runs several checks at once
+# fetches first: two first runs would unpack it into ~/.quint together.
+if [ "${1:-}" = --fetch ]; then
+  fetch
+  exit 0
+fi
+
 [ $# -eq 5 ] || die "usage: tlc.sh FILE MAIN INIT STEP INVARIANT"
 case $1 in
   /*) file=$1 ;;
@@ -62,19 +91,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work" || die "toolchain: cannot enter $work"
 
-# The Apalache distribution is fetched by Quint the first time it verifies
-# anything. The verdict of this run is irrelevant.
-if [ ! -f "$JAR" ]; then
-  cat >fetch.qnt <<'EOF'
-module fetch {
-  var x: int
-  action init = x' = 0
-  action step = x' = x
-}
-EOF
-  $QUINT verify fetch.qnt --max-steps=1 >fetch.log 2>&1
-  [ -f "$JAR" ] || { tail -5 fetch.log >&2; die "toolchain: no Apalache $APALACHE_VERSION at $JAR"; }
-fi
+fetch
 
 # 1. Compile. A misspelt name leaves stdout empty and exits non-zero.
 if ! $QUINT compile --target=json --main="$main" --init="$init" --step="$step" \

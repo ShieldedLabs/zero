@@ -48,9 +48,11 @@ esac
 SEED=7
 failures=0
 
-# Rows run JOBS at a time, each writing its result lines to a file of its own;
-# `finish` prints them in the order the rows were written and counts the
-# failures.
+# Rows run JOBS at a time, each writing its result lines to a file of its own
+# and, once it has run to the end, its exit status to a second file; `finish`
+# prints them in the order the rows were written and counts the failures. A
+# row with no status was killed before it finished, and is a failure whatever
+# it printed.
 results=$(mktemp -d)
 trap 'rm -rf "$results"' EXIT
 queued=0
@@ -58,7 +60,8 @@ running=0
 
 job() {
   queued=$((queued + 1))
-  ("$@") >"$results/$(printf '%04d' "$queued")" 2>&1 &
+  row_file="$results/$(printf '%04d' "$queued")"
+  ( "$@"; echo $? >"$row_file.status" ) >"$row_file" 2>&1 &
   running=$((running + 1))
   if [ "$running" -ge "$JOBS" ]; then
     wait
@@ -69,11 +72,15 @@ job() {
 finish() {
   wait
   running=0
-  for file in "$results"/*; do
+  for file in "$results"/[0-9][0-9][0-9][0-9]; do
     [ -f "$file" ] || continue
     cat "$file"
     failures=$((failures + $(grep -c '^FAIL' "$file")))
-    rm -f "$file"
+    if [ ! -s "$file.status" ]; then
+      echo "FAIL  row $(basename "$file"): killed before it finished"
+      failures=$((failures + 1))
+    fi
+    rm -f "$file" "$file.status"
   done
 }
 
@@ -81,7 +88,7 @@ finish() {
 # being found (renamed so it no longer ends in `Test`, say) fails the gate.
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:26 tests/shimTest.qnt:13
+FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:27 tests/shimTest.qnt:13
   tests/hubScenariosTest.qnt:28 tests/scenariosTest.qnt:21 tests/trustTest.qnt:12"
 
 fail() {
@@ -321,6 +328,12 @@ fi
 
 if [ "$TIERS" != simulation ]; then
 echo "---- 4 hub specification (TLC, exhaustive)"
+
+# Fetched once here, not by the first rows: rows run in parallel would unpack
+# it into ~/.quint at the same time.
+if ! QUINT=$QUINT sh ./tlc.sh --fetch; then
+  exit 1
+fi
 
 G6B=conformingFirstOfferBeforeExpiry
 G6C=conformingFirstOfferJudgedBeforeExpiry
