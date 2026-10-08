@@ -89,7 +89,6 @@ module hubScenariosTest {
     initTimely
       .then(initFlakyTip)
       .then(initFlakyTipNoSlack)
-      .then(initFlakyTipSlowFlight)
       .then(initStaleLag)
       .then(initStaleLagWithSlack)
       .then(initByzIndexer)
@@ -113,11 +112,11 @@ module hubScenariosTest {
       .expect(h.inFlight() == Set(early) and flightStart == 3)
       .expect(wConformingFirstOffer)
       .then(advance)
-      .expect(height == 4 and not(mayAdvance) and wConformingFirstOfferInFlightABlock and wBlockInFlight)
+      .expect(height == 4 and not(mayAdvance) and wBlockInFlight)
       .then(judge(early, Accepted))
       .then(flushEnd)
       .expect(onChain == Set(early) and offered == Set(early) and owed == Set() and flightStart == 0)
-      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry)
       .expect(conformingEveryOfferBeforeExpiry and ackedIsHeldOrSettled)
 
   // ------------------------------------------------------------------------
@@ -228,24 +227,12 @@ module hubScenariosTest {
 
   /// K3'. The expiry floor equals the three-term budget, with no slack for
   /// the reorg allowance. The flush is one block late and the transaction
-  /// misses the mining margin by that block. With the slack, G6b and G6c hold
+  /// misses the mining margin by that block. With the slack, G6b holds
   /// on `flakyTip` in every reachable state.
   run conformingMissesMarginWithoutSlackTest =
     regressedTipDelaysFlush(flakyTipNoSlack, orchard("early", 2, 8))
       .expect(not(reorgSlackFits(cfg)))
       .expect(not(conformingFirstOfferBeforeExpiry))
-
-  /// K7. With the slack, and the batch in flight for two blocks, as many as
-  /// the margin reserves. The offer left the whole margin, and G6b holds. By
-  /// the time the node looks, the transaction can no longer be mined: the
-  /// budget had already spent the slack, and the flight spent the margin.
-  run slowFlightSpendsTheMarginTest =
-    regressedTipDelaysFlush(flakyTipSlowFlight, early)
-      .then(unseenBlocks(2))
-      .expect(height == 9 and early.expiry == Some(9) and not(flightWithinMargin(cfg)))
-      .expect(not(nodeWouldTake(early)))
-      .expect(conformingFirstOfferBeforeExpiry and not(conformingFirstOfferJudgedBeforeExpiry))
-      .then(judge(early, Rejected))
 
   /// A supported wallet's transaction is admitted on time at height 2. At
   /// height 6 the hub, having adopted that epoch without flushing, is told
@@ -274,14 +261,14 @@ module hubScenariosTest {
   /// duplicate is a first arrival, four blocks late, and admission counts on
   /// the flush at 6, which will not happen. The wallet's transaction was on
   /// time, was acknowledged, and is first offered with one block of margin
-  /// where two are reserved. G6b and G6c hold: they are about arrivals this
+  /// where two are reserved. G6b holds: it is about arrivals this
   /// run of the hub knows to be timely.
   run crashThenLateDuplicateTest =
     duplicateBehindTheBoundary(true)
       .expect(reorgSlackFits(cfg) and onTime == Set() and offered == Set())
       .expect(conformingFirstOfferBeforeExpiry)
       .then(advance)
-      .expect(not(nodeWouldTake(early)) and conformingFirstOfferJudgedBeforeExpiry)
+      .expect(not(nodeWouldTake(early)))
 
   /// K8, control. No crash: the transaction is published by the flush at 3.
   /// The late offer at 8 is a second offer of an entry whose first was in
@@ -311,7 +298,6 @@ module hubScenariosTest {
       .expect(flightStart == 7 and wConformingFirstOffer and conformingFirstOfferBeforeExpiry)
       .then(advance)
       .expect(height == 8 and not(mayAdvance))
-      .expect(wConformingFirstOfferInFlightABlock and conformingFirstOfferJudgedBeforeExpiry)
       .then(judge(early, Accepted))
 
   // ------------------------------------------------------------------------
@@ -343,8 +329,8 @@ module hubScenariosTest {
     silenceAcrossBoundary(staleLag, early)
       .expect(not(conformingFirstOfferBeforeExpiry))
       .then(advance)
-      .expect(height == 9 and not(mayAdvance) and flightWithinMargin(cfg))
-      .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
+      .expect(height == 9 and not(mayAdvance))
+      .expect(not(nodeWouldTake(early)))
       .then(judge(early, Rejected))
 
   /// K4, contrast. The same steps with an expiry floor one block higher,
@@ -354,7 +340,7 @@ module hubScenariosTest {
     silenceAcrossBoundary(staleLagWithSlack, orchard("early", 2, 10))
       .expect(staleSlackFits(cfg) and wConformingFirstOffer and conformingFirstOfferBeforeExpiry)
       .then(advance)
-      .expect(height == 9 and conformingFirstOfferJudgedBeforeExpiry)
+      .expect(height == 9)
       .then(judge(orchard("early", 2, 10), Accepted))
       .expect(onChain == Set(orchard("early", 2, 10)))
 
@@ -453,7 +439,6 @@ module hubScenariosTest {
       .expect(flightStart == 11 and not(conformingFirstOfferBeforeExpiry))
       .then(advance)
       .expect(height == 12 and not(nodeWouldTake(lateAtFloor)))
-      .expect(not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(lateAtFloor, Rejected))
 
   // ------------------------------------------------------------------------
@@ -481,7 +466,7 @@ module hubScenariosTest {
     started(byzIndexer)
       .then(block)
       .then(deliver(payload))
-      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
+      .expect(conformingFirstOfferBeforeExpiry)
       .then((silence - 1).reps(_ => advance.then(observeWith(2))))
       .then(advance)
       .expect(height == 2 + silence and h.tip == Some(2) and not(mayAdvance))
@@ -489,7 +474,7 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(flightStart == 2 + silence and h.inFlight() == Set(payload))
 
-  /// G6b and G6c need the indexer. With the tip withheld up to height 8, a
+  /// G6b needs the indexer. With the tip withheld up to height 8, a
   /// supported wallet's transaction is offered at 8 with expiry 9, and after
   /// one block in flight the node cannot take it.
   run indexerWithholdsTipFromConformingTest =
@@ -497,6 +482,6 @@ module hubScenariosTest {
       .expect(conforming(early, cfg.params.minWalletExpiry) and onTime == Set(early))
       .expect(not(conformingFirstOfferBeforeExpiry))
       .then(advance)
-      .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
+      .expect(not(nodeWouldTake(early)))
       .then(judge(early, Rejected))
 }

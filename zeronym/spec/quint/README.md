@@ -213,10 +213,11 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true, as the implementation intends (`Hub::lookup`, `zeronym/hub/src/server.rs`). It does not say that successive answers agree | T4 | Simulation |
 | G6b | `conformingFirstOfferBeforeExpiry` | A supported wallet's transaction is offered with the mining margin to spare, the first time a hub offers it. About the margin left when the flush begins, not about acceptance; nothing about a later offer of a requeued entry | T5 | TLC, exhaustive |
-| G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and the flight-time assumption (the hub-schedule bullet under [Assumptions](#assumptions)) | T5 | TLC, exhaustive |
 | G7 | `wellFormedTest` | Structural sanity of the hub: a queued entry is within its attempts and a down hub holds nothing | T6 | Exhaustive test over every reachable hub state |
 | A2 | `neverEvictTest` | An entry leaves the hub's queue only into a flush, or because the hub went down or exited after its final flush | T6 | Exhaustive test over every reachable hub state and input |
 | A3 | `drainIsFinalTest` | A draining honest hub's queue gains only what a flush hands back | T6 | Exhaustive test over every reachable hub state and input |
+
+An unchecked corollary of G6b: if fewer blocks arrive while a flush is in flight than the mining margin reserves, a node that judges a supported wallet's first offer finds it unexpired. Nothing in the code bounds a flight in blocks (finding 4).
 
 A2 and A3 constrain a single hub step, not a state; the rest are state invariants. What each entry under "Checked by" is worth is under [How it is checked](#how-it-is-checked).
 
@@ -234,15 +235,14 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
-| G6b | holds (`timely`, `flakyTip`, `flakyTipSlowFlight`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| G6c | holds (`timely`, `flakyTip`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6b | holds (`timely`, `flakyTip`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | A3 | holds | argued, not checked: draining is an admission rule | holds |
 
 - A hub folds several indexer endpoints into one answer: the tip is the maximum, a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip, inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
 - G1 depends on the shim alone.
-- The hub specification has no Byzantine hub, so the hub column of G6b, G6c and A3 is an argument. The protocol specification's Byzantine hub backs the other rows.
+- The hub specification has no Byzantine hub, so the hub column of G6b and A3 is an argument. The protocol specification's Byzantine hub backs the other rows.
 
 ## Known gaps
 
@@ -254,13 +254,12 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 |---|---|---|---|---|---|---|
 | K1 | T7 | Told ok does not mean the hub ever admits it: it may refuse the frame, or never receive it | By design: the hub's verdict "is deliberately not waited for" (`zeronym/shim/src/hub.rs:289-295`) | `baseline` | scripted runs | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest` |
 | K2 | T8 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | By design for the flush window, which the code accepts in a comment on `Hub::lookup` (`zeronym/hub/src/server.rs`); resubmission of a published transaction is finding 10, not triaged | `baseline` | simulation, violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest` |
-| K3' | T5 | G6b and G6c when the expiry floor leaves no slack for the reorg allowance | Found here (finding 3); not triaged | `flakyTipNoSlack` | TLC, violated | `conformingMissesMarginWithoutSlackTest` |
-| K4 | T5 | G6b and G6c on the shipped relation between the constants, across a tip silence shorter than the staleness window | Found here (finding 1); not triaged | `staleLag` | TLC, violated | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
+| K3' | T5 | G6b when the expiry floor leaves no slack for the reorg allowance | Found here (finding 3); not triaged | `flakyTipNoSlack` | TLC, violated | `conformingMissesMarginWithoutSlackTest` |
+| K4 | T5 | G6b on the shipped relation between the constants, across a tip silence shorter than the staleness window | Found here (finding 1); not triaged | `staleLag` | TLC, violated | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
 | K5 | T9 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it | By design: the queue is in memory only, and the code logs what it loses (`zeronym/hub/src/batcher.rs:337-347`, `:467-478`). How much one unjudged flush drops is not triaged (finding 5) | `timely` | TLC, violated three ways | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueDropsAckedAsExpiredTest` |
 | K6 | T5 | `conformingEveryOfferBeforeExpiry`: G6b for every offer, not only the first | Found here (finding 7); not triaged | `staleLag` | TLC, violated | `requeuedPastExpiryTest` |
-| K7 | T5 | G6c when a flush may stay in flight for as many blocks as the mining margin | Found here (finding 4); not triaged | `flakyTipSlowFlight` | TLC, violated; G6b holds there | `slowFlightSpendsTheMarginTest` |
-| K8 | T5 | A supported wallet's transaction, acknowledged on time, lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. To the restarted hub the resend is a late first arrival, so G6b and G6c do not cover it | Found here (finding 6); not triaged | `flakyTip` | scripted run | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
-| K9 | T5 | G6b and G6c even when the expiry floor is wide enough to cover a tip silence: a stale hub's free-running clock flushes an empty queue early and spends the next epoch, so a transaction admitted after the tip returns waits a full interval | Found here (finding 2); not triaged | `staleLagWithSlack` | TLC, violated | `earlyFlushSpendsTheNextEpochTest` |
+| K8 | T5 | A supported wallet's transaction, acknowledged on time, lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. To the restarted hub the resend is a late first arrival, so G6b does not cover it | Found here (finding 6); not triaged | `flakyTip` | scripted run | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
+| K9 | T5 | G6b even when the expiry floor is wide enough to cover a tip silence: a stale hub's free-running clock flushes an empty queue early and spends the next epoch, so a transaction admitted after the tip returns waits a full interval | Found here (finding 2); not triaged | `staleLagWithSlack` | TLC, violated | `earlyFlushSpendsTheNextEpochTest` |
 
 K1 is not an invariant because it would be false on the ordinary success path too: the wallet is told ok before the hub has the frame.
 
@@ -285,7 +284,7 @@ Not checked as a result: two hubs disagreeing about one transaction; duplicate p
 
 Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
 
-- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b and G6c, and gap K5.
+- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, and gap K5.
 - **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
 - **Do not compose:** K1 and K2 each gain a cause with a second hub.
 
@@ -324,7 +323,7 @@ Nothing here has been fixed. "Code read" means the cited lines were read and mat
 | 1 | **A short tip silence costs a supported wallet its mining margin.** The cadence follows the last tip seen, so a silence across a flush boundary delays the flush until the hub goes stale. The staleness window is 12 blocks and the slack is 10, so on the shipped constants the first offer is at `created + 37` against an expiry of `created + 40`: three blocks of margin where four are reserved. It needs the hub not to hear the tip while a broadcast would still succeed, and the tip not to return before the hub goes stale; the tip and the broadcast use the same endpoints, so an unreachable indexer delays both | Latent: a real gap between the constants, in a narrow environment | K4, `silenceAcrossBoundaryMissesMarginTest`; TLC on `staleLag` | Code read: `batcher.rs:40-71`, `:227-247`. The one-block shortfall reads 15 minutes as exactly 12 blocks |
 | 2 | **An early free-running flush spends the next epoch.** A stale hub's clock runs ahead, flushes an empty queue and records that epoch. When the tip returns, admission counts on a flush that has already happened, and the transaction waits a full interval. A wider expiry floor does not fix it. The supported-wallet witness also needs a second, shorter silence | Code bug (MEDIUM), one root cause with finding 6: the loop records the epoch from the cadence height, and admission estimates the next flush from the observed height | K9, `earlyFlushSpendsTheNextEpochTest`; TLC on `staleLagWithSlack` | Code read: `batcher.rs:236-247`, `:316-326`. The comment there calls a clock that runs ahead "the safe direction" |
 | 3 | **The reorg slack holds by coincidence of constants.** The expiry floor minus the three-term budget (flush interval, mining margin, delivery lag) is 10 blocks, exactly the reorg allowance, and startup validation checks only the three-term sum. Without the slack a supported wallet's transaction misses its margin | Latent: no failure on the shipped constants | K3', `conformingMissesMarginWithoutSlackTest`; TLC on `flakyTipNoSlack` | Code read: `batcher.rs:40-59`, `:101-113` |
-| 4 | **A flush's flight is bounded in time, not in blocks.** The budget leaves exactly the mining margin at the offer, so blocks that arrive while the batch is in flight come out of it. Each call is bounded at 10 s with 64 in flight, about 160 s at the 1,024-entry cap, which is about two nominal blocks against a margin of four. Block arrival is not bounded by the clock, and requeue does not enforce the entry cap | Bounded in time, not in blocks; reachable only with a slow or selectively hanging indexer | K7, `slowFlightSpendsTheMarginTest`; TLC on `flakyTipSlowFlight` | Code read: `chain.rs:49`, `:59`. Estimate, not measured: with exponential block times at a 75 s mean, a flight of that length sees four or more blocks about one time in six |
+| 4 | **A flush's flight is bounded in time, not in blocks.** The budget leaves exactly the mining margin at the offer, so blocks that arrive while the batch is in flight come out of it. Each call is bounded at 10 s with 64 in flight, about 160 s at the 1,024-entry cap, which is about two nominal blocks against a margin of four. Block arrival is not bounded by the clock, and requeue does not enforce the entry cap | Bounded in time, not in blocks; reachable only with a slow or selectively hanging indexer | Not a checked property: the corollary of G6b under [Guarantees](#guarantees) assumes it away | Code read: `chain.rs:49`, `:59`. Estimate, not measured: with exponential block times at a 75 s mean, a flight of that length sees four or more blocks about one time in six |
 | 5 | **An acknowledged payload can be lost three ways with every component honest:** a crash; a draining hub's final flush that finds the indexer unreachable; a requeue that gives the entry up as expired. On the shipped constants a requeue keeps an entry only if it was created at most 16 blocks before the flush (`40 - 20 - 4`). For wallets at the 40-block floor, one unjudged flush therefore drops between 20% and 50% of a batch, depending on delivery lag, each entry with 14 to 23 blocks of life left | By design; the magnitude is not triaged | K5 and its three runs; TLC on `timely` | Code read: the loss is logged at error level (`batcher.rs:337-347`, `:467-478`) and unit-tested (`queue.rs`, `a_requeue_gives_up_on_an_entry_that_can_no_longer_be_mined`); the rule is `queue.rs:507-520`. The percentages are arithmetic on the constants, assuming arrivals uniform over the interval |
 | 6 | **An entry admitted while the tip is reported below a boundary already flushed waits a full interval.** Admission counts on the flush at that boundary, which will not happen again. Any late arrival meets it, and one that expires before that next flush is first offered after its expiry; the supported-wallet case is a resend after a crash, which a restarted hub offers with less than the mining margin | Code bug (MEDIUM), one root cause with finding 2 | K8, `crashThenLateDuplicateTest` | Code read: `batcher.rs:177-186`, `:316-327`; `queue.rs:294`, `:507-520` |
 | 7 | **On a stale hub a requeued entry is offered again past its expiry, and only the attempt bound stops it.** Each requeue judges the entry against the same stale tip, as admission does, so the expiry rule never gives it up. A supported wallet's transaction is offered a third time after its expiry, and is finally dropped as exhausted. The late offers normally reach no node: a stale hub whose flushes come back unjudged almost always has an unreachable indexer | Real behaviour that contradicts a comment; low harm | K6, `requeuedPastExpiryTest`; TLC on `staleLag`; `expiringEntryDroppedAsExhaustedTest` | Code read: `batcher.rs:417-422`; `queue.rs:197` says "Only reachable for a payload with no expiry". The shipped bound is 8 requeues |
@@ -381,16 +380,15 @@ The schedule flushes every 3 blocks with a mining margin of 2, a delivery lag of
 
 | Configuration | Differs from `timely` by | For |
 |---|---|---|
-| `timely` | | G6b, G6c, K5 |
-| `flakyTip` | the tip may be reported up to the reorg allowance behind | G6b, G6c under regression; K8 |
+| `timely` | | G6b, K5 |
+| `flakyTip` | the tip may be reported up to the reorg allowance behind | G6b under regression; K8 |
 | `flakyTipNoSlack` | and the expiry floor is 6, leaving no reorg slack | K3' |
-| `flakyTipSlowFlight` | and a flush may be in flight for 2 blocks | K7 |
 | `staleLag` | the hub may hear no tip, and goes stale | K4, K6 |
 | `staleLagWithSlack` | and the expiry floor is 8, enough to cover the silence | finding 2 |
 | `byzIndexer` | a Byzantine indexer, and a tight-expiry payload | the trust matrix |
 | `unknownUpgrade` | an unparseable payload; scripted runs only | the attempt bound |
 
-In every configuration a due flush begins before the next block, and at most one block arrives while a flush is in flight (two in `flakyTipSlowFlight`). Under `staleLag` a hub is stale once it has heard no tip for the staleness window; its free-running clock is then assumed never behind the chain and at most one flush interval ahead of it. The implementation relies on "never behind" and does not enforce it (`zeronym/hub/src/batcher.rs:64-67`).
+In every configuration a due flush begins before the next block, and at most one block arrives while a flush is in flight. Under `staleLag` a hub is stale once it has heard no tip for the staleness window; its free-running clock is then assumed never behind the chain and at most one flush interval ahead of it. The implementation relies on "never behind" and does not enforce it (`zeronym/hub/src/batcher.rs:64-67`).
 
 <details>
 <summary>What TLC visits</summary>
@@ -399,18 +397,16 @@ With 8 workers, on the machine this was written on:
 
 | Configuration | Invariant | Verdict |
 |---|---|---|
-| `timely` | G6b and G6c | holds, 20 030 states, depth 40 |
+| `timely` | G6b | holds, 20 030 states, depth 40 |
 | `timely` | K6's predicate | holds, 20 030 states, depth 40 |
-| `flakyTip` | G6b and G6c | holds, 113 496 states, depth 38 |
-| `flakyTipSlowFlight` | G6b | holds, 156 352 states, depth 39 |
+| `flakyTip` | G6b | holds, 113 496 states, depth 38 |
 | `flakyTipNoSlack` | G6b (K3') | violated, 12 states |
-| `flakyTipSlowFlight` | G6c (K7) | violated, 14 states |
-| `staleLag` | G6b; G6c; K6 | violated, 13; 14; 13 states |
-| `staleLagWithSlack` | G6b; G6c (finding 2) | violated, 19; 20 states |
+| `staleLag` | G6b; K6 | violated, 13; 13 states |
+| `staleLagWithSlack` | G6b (finding 2) | violated, 19 states |
 | `timely` | K5 | violated: 5 states; 8 without a crash; 12 without a shutdown either |
-| `byzIndexer` | G6b; G6c | violated, 16; 17 states |
+| `byzIndexer` | G6b | violated, 16 states |
 
-TLC runs with deadlock checking off, so a machine whose steps had died would hold everything. The gate therefore also requires one reachable state per family of steps, and the antecedents of G6b and G6c, each as a violated `not(..)` row.
+TLC runs with deadlock checking off, so a machine whose steps had died would hold everything. The gate therefore also requires one reachable state per family of steps, and the antecedent of G6b, each as a violated `not(..)` row.
 
 </details>
 

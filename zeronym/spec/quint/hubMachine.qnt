@@ -78,16 +78,6 @@ module hubMachine {
     c.params.flushInterval + c.params.miningMargin + c.params.deliveryLag + c.params.reorgAllowance
       <= c.params.minWalletExpiry
 
-  /// Fewer blocks arrive while a flush is in flight than the mining margin
-  /// reserves. The margin is measured from the height at which a flush begins;
-  /// every block that arrives before the node judges a transaction is taken
-  /// out of it. The implementation bounds each call to the indexer
-  /// (`RPC_TIMEOUT`, `zeronym/hub/src/chain.rs`) and not the batch as a whole,
-  /// and bounds neither in blocks, so this is an assumption about the
-  /// environment that the code does not enforce.
-  pure def flightWithinMargin(c: HubConfig): bool =
-    c.maxFlightBlocks < c.params.miningMargin
-
   /// The same budget with the longest silence that does not yet make a hub
   /// stale. The shipped constants do not meet it.
   pure def staleSlackFits(c: HubConfig): bool =
@@ -122,12 +112,11 @@ module hubMachine {
     CLOCK_HEIGHTS.contains(c.maxHeight + c.params.flushInterval),
   }
 
-  /// The shipped relations, with the slack and the flight bound they give.
+  /// The shipped relations, with the slack they give.
   pure def shippedAssumptions(c: HubConfig): bool = and {
     standingAssumptions(c),
     shippedRelationsKept(c),
     reorgSlackFits(c),
-    flightWithinMargin(c),
     not(staleSlackFits(c)),
   }
 
@@ -515,13 +504,11 @@ module hubMachine {
   //
   // G6b is about the moment a flush begins: how much of the mining margin is
   // left when the hub hands the batch over. It does not say a node accepts the
-  // transaction, because the chain may move while the batch is in flight. G6c
-  // is about the moment a node judges it.
+  // transaction, because the chain may move while the batch is in flight.
   //
   // Each is a predicate on the current state. That is enough: the whole batch
   // is in flight in the state `flushBegin` produces, with `flightStart` the
-  // height it began at; and an entry awaiting a verdict can be given one, a
-  // rejection at least, at whatever height the chain has reached.
+  // height it began at.
 
   /// Whether `payload`, published at height `at`, can still be mined
   /// `miningMargin` blocks later.
@@ -552,22 +539,6 @@ module hubMachine {
     h.inFlight().forall(payload =>
       isConformingAndOnTime(payload) and isFirstOffer(payload) implies marginLeft(payload, flightStart))
 
-  /// G6c. The end-to-end claim: when a node judges the first offer of a
-  /// supported wallet's transaction, the transaction has not expired. It can
-  /// still be mined in the next block, so the node does not turn it away for
-  /// its expiry.
-  ///
-  /// The margin is what pays for the blocks that arrive while the batch is in
-  /// flight. G6c therefore needs G6b and one thing more: that fewer blocks
-  /// than the mining margin arrive during a flush (`flightWithinMargin`).
-  val conformingFirstOfferJudgedBeforeExpiry =
-    awaiting.forall(payload =>
-      isConformingAndOnTime(payload) and isFirstOffer(payload) implies
-        match payload.expiry {
-          | Some(expiry) => expiry > height
-          | None => true
-        })
-
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
   // ------------------------------------------------------------------------
@@ -594,19 +565,14 @@ module hubMachine {
   // ------------------------------------------------------------------------
   //
   // States that must be reachable, each checked as `not(..)` expected to be
-  // violated. The first two are the antecedents of G6b and G6c: without
-  // them a "holds" could be vacuous. The rest are one per family of steps: TLC
+  // violated. The first is the antecedent of G6b: without
+  // it a "holds" could be vacuous. The rest are one per family of steps: TLC
   // is run with deadlock checking off, so a configuration whose steps died
   // after `init` would otherwise hold everything on a handful of states.
 
   /// A supported wallet's transaction, with an expiry, is on its first flight.
   val wConformingFirstOffer =
     h.inFlight().exists(payload =>
-      isSome(payload.expiry) and isConformingAndOnTime(payload) and isFirstOffer(payload))
-
-  /// The same entry is still unjudged after a block has arrived.
-  val wConformingFirstOfferInFlightABlock =
-    height > flightStart and awaiting.exists(payload =>
       isSome(payload.expiry) and isConformingAndOnTime(payload) and isFirstOffer(payload))
 
   /// A flight has been answered or has ended.
@@ -678,10 +644,6 @@ module hubMachine {
     payloads: Set(orchard("early", 2, 8), late),
   }
 
-  // The same tip, and a flush that may stay in flight for as many blocks as
-  // the mining margin reserves.
-  pure val flakyTipSlowFlight: HubConfig = { ...flakyTip, maxFlightBlocks: 2 }
-
   // A hub that may go without a tip for a while: on the shipped relation
   // between the staleness window and the expiry floor, and on the relation
   // that would cover the silence.
@@ -693,8 +655,7 @@ module hubMachine {
   }
 
   // A Byzantine indexer, on the schedule of `timely`, with one supported
-  // migration and `tight`: with three payloads TLC does not reach its G6c
-  // counterexample in five minutes.
+  // migration and `tight`.
   pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine, payloads: Set(early, tight) }
 
   /// Bytes neither the shim nor the hub can parse: no txid, no expiry. After
@@ -712,16 +673,8 @@ module hubMachine {
   action initFlakyTip = all { shippedAssumptions(flakyTip), initWith(flakyTip) }
   action initFlakyTipNoSlack = all {
     standingAssumptions(flakyTipNoSlack),
-    flightWithinMargin(flakyTipNoSlack),
     not(reorgSlackFits(flakyTipNoSlack)),
     initWith(flakyTipNoSlack),
-  }
-  action initFlakyTipSlowFlight = all {
-    standingAssumptions(flakyTipSlowFlight),
-    shippedRelationsKept(flakyTipSlowFlight),
-    reorgSlackFits(flakyTipSlowFlight),
-    not(flightWithinMargin(flakyTipSlowFlight)),
-    initWith(flakyTipSlowFlight),
   }
   action initStaleLag = all { shippedAssumptions(staleLag), initWith(staleLag) }
   action initByzIndexer = all { shippedAssumptions(byzIndexer), initWith(byzIndexer) }
@@ -729,7 +682,6 @@ module hubMachine {
   action initStaleLagWithSlack = all {
     standingAssumptions(staleLagWithSlack),
     reorgSlackFits(staleLagWithSlack),
-    flightWithinMargin(staleLagWithSlack),
     staleSlackFits(staleLagWithSlack),
     not(shippedRelationsKept(staleLagWithSlack)),
     initWith(staleLagWithSlack),

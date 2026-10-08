@@ -89,7 +89,7 @@ finish() {
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
 FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:24 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:26 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
+  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
 
 fail() {
   echo "FAIL  $1"
@@ -351,43 +351,35 @@ if ! QUINT=$QUINT sh ./tlc.sh --fetch; then
 fi
 
 G6B=conformingFirstOfferBeforeExpiry
-G6C=conformingFirstOfferJudgedBeforeExpiry
 K5=ackedIsHeldOrSettled
 K6=conformingEveryOfferBeforeExpiry
 
-# The schedule guarantees with every component honest: under a timely tip;
-# under a tip that may be reported behind the chain; and with a slow flight as
-# well, the one about the offer.
-job tlc_holds    initTimely             step "$G6B and $G6C"
+# The schedule guarantee with every component honest: under a timely tip, and
+# under a tip that may be reported behind the chain.
+job tlc_holds    initTimely             step $G6B
 job tlc_holds    initTimely             step $K6
-job tlc_holds    initFlakyTip           step "$G6B and $G6C"
-job tlc_holds    initFlakyTipSlowFlight step $G6B
+job tlc_holds    initFlakyTip           step $G6B
 
 # The known gaps, each on the configuration that isolates its cause. The last
 # argument is the length of TLC's counterexample.
 job tlc_violated initFlakyTipNoSlack    step $G6B 12                    # K3'
-job tlc_violated initFlakyTipSlowFlight step $G6C 14                    # K7
 job tlc_violated initStaleLag           step $G6B 13                    # K4
-job tlc_violated initStaleLag           step $G6C 14                    # K4
 job tlc_violated initStaleLag           step $K6 13                     # K6
 job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2
-job tlc_violated initStaleLagWithSlack  step $G6C 20                    # finding 2
 # K5, three causes: a crash; without one, a final flush nothing judged; with
 # no shutdown either, a requeue that gives the entry up as expired.
 job tlc_violated initTimely             step $K5 5
 job tlc_violated initTimely             noCrashStep $K5 8
 job tlc_violated initTimely             quietStep $K5 12
 
-# The trust matrix: each schedule guarantee is violated once the indexer is
+# The trust matrix: the schedule guarantee is violated once the indexer is
 # Byzantine.
 job tlc_violated initByzIndexer         step $G6B 16
-job tlc_violated initByzIndexer         step $G6C 17
 
-# Reachability. The antecedents of G6b and G6c, so that a "holds" is not
+# Reachability. The antecedent of G6b, so that a "holds" is not
 # vacuous; and one state per family of steps, because TLC runs with deadlock
 # checking off and a machine whose steps died would hold everything.
 job tlc_violated initTimely             step "not(wConformingFirstOffer)" 6
-job tlc_violated initTimely             step "not(wConformingFirstOfferInFlightABlock)" 7
 job tlc_violated initTimely             step "not(wOffered)" 7
 job tlc_violated initTimely             step "not(wRequeued)" 9
 job tlc_violated initTimely             step "not(wDown)" 2
@@ -395,7 +387,6 @@ job tlc_violated initTimely             step "not(wRestartedOwing)" 6
 job tlc_violated initTimely             step "not(wBlockInFlight)" 7
 job tlc_violated initTimely             step "not(wStopped)" 4
 job tlc_violated initFlakyTip           step "not(wConformingFirstOffer)" 6
-job tlc_violated initFlakyTip           step "not(wConformingFirstOfferInFlightABlock)" 7
 job tlc_violated initFlakyTip           step "not(wOffered)" 7
 job tlc_violated initFlakyTip           step "not(wRequeued)" 9
 job tlc_violated initFlakyTip           step "not(wDown)" 2
@@ -403,8 +394,6 @@ job tlc_violated initFlakyTip           step "not(wRestartedOwing)" 6
 job tlc_violated initFlakyTip           step "not(wBlockInFlight)" 7
 job tlc_violated initFlakyTip           step "not(wStopped)" 4
 job tlc_violated initFlakyTip           step "not(wTimelyQueuedBehindEpoch)" 6
-job tlc_violated initFlakyTipSlowFlight step "not(wConformingFirstOffer)" 6
-job tlc_violated initFlakyTipSlowFlight step "not(wBlockInFlight)" 7
 job tlc_violated initStaleLag           step "not(wStale)" 6
 job tlc_violated initStaleLagWithSlack  step "not(wStale)" 6
 finish
