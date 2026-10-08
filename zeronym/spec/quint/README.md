@@ -62,7 +62,7 @@ stateDiagram-v2
     Awaiting --> Awaiting: wrong-kind or unknown-nonce frame ignored
     Awaiting --> Pending: reply found, height 0, no body
     Awaiting --> Tx: reply found, body txid equals query
-    Awaiting --> NotFound: reply not_found, or found that fails L4
+    Awaiting --> NotFound: reply not_found, or found with a body of another txid
     Awaiting --> Unavailable: reply error, or timeout
     Pending --> [*]
     Tx --> [*]
@@ -140,7 +140,8 @@ stateDiagram-v2
 
 </details>
 
-### Wire encoding
+<details>
+<summary><b>Wire</b>: the three lookup replies and what the wallet sees</summary>
 
 A hub answers a lookup with one of three wire replies, and the shim turns that into what the wallet sees (`wire.qnt`).
 
@@ -152,7 +153,9 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 | Its indexer cannot be reached | error | Unavailable |
 | Its indexer says "found, height 0, no body" (a fault) | found, height 0, no body | Pending |
 
-"Pending" has no reply of its own: it is a found reply with nothing in it. So the first and last rows are the same bytes, and neither the shim nor the wallet can tell "queued at the hub" from "an indexer said found and returned nothing". One misbehaving indexer endpoint is enough to produce the last row (finding 8).
+</details>
+
+"Pending" has no reply of its own on the wire: it is a found reply with nothing in it. So the hub's queue hit and an indexer's empty "found" are the same bytes, and neither the shim nor the wallet can tell "queued at the hub" from "an indexer said found and returned nothing". One misbehaving indexer endpoint is enough to produce the second (finding 8).
 
 ## Assumptions
 
@@ -161,7 +164,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Roles.** The shim and the hub both run attested. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
 - **Byzantine hub.** It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
-- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered, one the chain published, or a twin of either. In the hub specification it also reports any tip.
+- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered, one the chain published, or a twin of either (other bytes with the same txid). In the hub specification it also reports any tip.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
 - **Third party.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
@@ -187,7 +190,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | T5 | A supported wallet's migration expires while the hub holds it | Chain timing; a flaky tip; Byzantine hub or indexer | Answered in part: under a timely or regressing tip, not under a stale one |
 | T6 | The hub silently drops or admits entries outside its rules | Hub implementation error | Answered |
 | T7 | The wallet is told "sent" but the hub never admits it | Network; the hub's own refusals | Not prevented |
-| T8 | The wallet sees its transaction's status go backwards | Network reordering; resubmission; the flush window | Not prevented |
+| T8 | The wallet sees its transaction's status go backwards | Network reordering; resubmission; the flush window (after a flush empties the queue, before the indexer has the batch) | Not prevented |
 | T9 | An acknowledged migration is lost to a crash, a failed final flush, or a requeue drop | None needed | Not prevented |
 | T10 | A third party who knows a txid learns it is queued | Unauthenticated third party | Accepted |
 | T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Not prevented; recorded |
@@ -205,17 +208,17 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 
 | Id | Name | What it says | Answers | Checked by |
 |---|---|---|---|---|
-| G1 | `operatorBlind` | Everything the shim hands the operator is a pass-through transaction | T1 | Simulation |
-| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
+| G1 | `operatorBlind` | Everything the shim hands the operator's indexer is a pass-through transaction | T1 | Simulation |
+| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator's indexer. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true, as the implementation intends (`Hub::lookup`, `zeronym/hub/src/server.rs`). It does not say that successive answers agree | T4 | Simulation |
 | G6b | `conformingFirstOfferBeforeExpiry` | A supported wallet's transaction is offered with the mining margin to spare, the first time a hub offers it. About the margin left when the flush begins, not about acceptance; nothing about a later offer of a requeued entry | T5 | TLC, exhaustive |
-| G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and the flight-time assumption | T5 | TLC, exhaustive |
+| G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and the flight-time assumption (the hub-schedule bullet under [Assumptions](#assumptions)) | T5 | TLC, exhaustive |
 | G7 | `wellFormedTest` | Structural sanity of the hub: a queued entry is within its attempts and a down hub holds nothing | T6 | Exhaustive test over every reachable hub state |
 | A2 | `neverEvictTest` | An entry leaves the hub's queue only into a flush, or because the hub went down or exited after its final flush | T6 | Exhaustive test over every reachable hub state and input |
 | A3 | `drainIsFinalTest` | A draining honest hub's queue gains only what a flush hands back | T6 | Exhaustive test over every reachable hub state and input |
 
-A2 and A3 constrain a single hub step, not a state; the rest are state invariants.
+A2 and A3 constrain a single hub step, not a state; the rest are state invariants. What each entry under "Checked by" is worth is under [How it is checked](#how-it-is-checked).
 
 Each pure function also has exhaustive tests over small inputs, in `tests/*Test.qnt`.
 
@@ -223,7 +226,7 @@ Each pure function also has exhaustive tests over small inputs, in `tests/*Test.
 
 > For each guarantee, whose honesty it depends on.
 
-Single-fault. "holds" is a checked row on the named configuration. "required" is a scripted run in which the component is Byzantine and the guarantee fails; the run asserts the guarantee in the state just before the Byzantine step, so the lie is what breaks it.
+Single-fault. "holds" is a checked row on the named [configuration](#configurations). "required" is a scripted run in which the component is Byzantine and the guarantee fails; the run asserts the guarantee in the state just before the Byzantine step, so the lie is what breaks it.
 
 | | All honest | Byzantine hub | Byzantine indexer |
 |---|---|---|---|
@@ -245,7 +248,7 @@ Single-fault. "holds" is a checked row on the named configuration. "required" is
 
 > Things you might expect to hold that don't, each with a concrete example run. Every component is honest in all of them.
 
-"By design" means the implementation says so itself. "Found here" means this specification showed it and nobody has yet decided whether it is acceptable.
+"By design" means the implementation says so itself. "Found here" means this specification showed it and nobody has yet decided whether it is acceptable. "Where" names a [configuration](#configurations).
 
 | Id | Threat | What is lost | Status | Where | Checked by | Scripted run |
 |---|---|---|---|---|---|---|
@@ -319,10 +322,10 @@ Nothing here has been fixed. "Code read" means the cited lines were read and mat
 |---|---|---|---|---|
 | 1 | **A short tip silence costs a supported wallet its mining margin.** The cadence follows the last tip seen, so a silence across a flush boundary delays the flush until the hub goes stale. The staleness window is 12 blocks and the slack is 10, so on the shipped constants the first offer is at `created + 37` against an expiry of `created + 40`: three blocks of margin where four are reserved. It needs the hub not to hear the tip while a broadcast would still succeed, and the tip not to return before the hub goes stale; the tip and the broadcast use the same endpoints, so an unreachable indexer delays both | Latent: a real gap between the constants, in a narrow environment | K4, `silenceAcrossBoundaryMissesMarginTest`; TLC on `staleLag` | Code read: `batcher.rs:40-71`, `:227-247`. The one-block shortfall reads 15 minutes as exactly 12 blocks |
 | 2 | **An early free-running flush spends the next epoch.** A stale hub's clock runs ahead, flushes an empty queue and records that epoch. When the tip returns, admission counts on a flush that has already happened, and the transaction waits a full interval. A wider expiry floor does not fix it. The supported-wallet witness also needs a second, shorter silence | Code bug (MEDIUM), one root cause with finding 6: the loop records the epoch from the cadence height, and admission estimates the next flush from the observed height | K9, `earlyFlushSpendsTheNextEpochTest`; TLC on `staleLagWithSlack` | Code read: `batcher.rs:236-247`, `:316-326`. The comment there calls a clock that runs ahead "the safe direction" |
-| 3 | **The reorg slack holds by coincidence of constants.** The expiry floor minus the three-term budget is 10 blocks, exactly the reorg allowance, and startup validation checks only the three-term sum. Without the slack a supported wallet's transaction misses its margin | Latent: no failure on the shipped constants | K3', `conformingMissesMarginWithoutSlackTest`; TLC on `flakyTipNoSlack` | Code read: `batcher.rs:40-59`, `:101-113` |
+| 3 | **The reorg slack holds by coincidence of constants.** The expiry floor minus the three-term budget (flush interval, mining margin, delivery lag) is 10 blocks, exactly the reorg allowance, and startup validation checks only the three-term sum. Without the slack a supported wallet's transaction misses its margin | Latent: no failure on the shipped constants | K3', `conformingMissesMarginWithoutSlackTest`; TLC on `flakyTipNoSlack` | Code read: `batcher.rs:40-59`, `:101-113` |
 | 4 | **A flush's flight is bounded in time, not in blocks.** The budget leaves exactly the mining margin at the offer, so blocks that arrive while the batch is in flight come out of it. Each call is bounded at 10 s with 64 in flight, about 160 s at the 1,024-entry cap, which is about two nominal blocks against a margin of four. Block arrival is not bounded by the clock, and requeue does not enforce the entry cap | Bounded in time, not in blocks; reachable only with a slow or selectively hanging indexer | K7, `slowFlightSpendsTheMarginTest`; TLC on `flakyTipSlowFlight` | Code read: `chain.rs:49`, `:59`. Estimate, not measured: with exponential block times at a 75 s mean, a flight of that length sees four or more blocks about one time in six |
 | 5 | **An acknowledged payload can be lost three ways with every component honest:** a crash; a draining hub's final flush that finds the indexer unreachable; a requeue that gives the entry up as expired. On the shipped constants a requeue keeps an entry only if it was created at most 16 blocks before the flush (`40 - 20 - 4`). For wallets at the 40-block floor, one unjudged flush therefore drops between 20% and 50% of a batch, depending on delivery lag, each entry with 14 to 23 blocks of life left | By design; the magnitude is not triaged | K5 and its three runs; TLC on `timely` | Code read: the loss is logged at error level (`batcher.rs:337-347`, `:467-478`) and unit-tested (`queue.rs`, `a_requeue_gives_up_on_an_entry_that_can_no_longer_be_mined`); the rule is `queue.rs:507-520`. The percentages are arithmetic on the constants, assuming arrivals uniform over the interval |
-| 6 | **An entry admitted while the tip is reported below a boundary already flushed waits a full interval.** Admission counts on the flush at that boundary, which will not happen again. Any late arrival meets it; the supported-wallet case is a resend after a crash, which a restarted hub offers with less than the mining margin | Code bug (MEDIUM), one root cause with finding 2 | K8, `crashThenLateDuplicateTest` | Code read: `batcher.rs:177-186`, `:316-327`; `queue.rs:294`, `:507-520` |
+| 6 | **An entry admitted while the tip is reported below a boundary already flushed waits a full interval.** Admission counts on the flush at that boundary, which will not happen again. Any late arrival meets it, and one that expires before that next flush is first offered after its expiry; the supported-wallet case is a resend after a crash, which a restarted hub offers with less than the mining margin | Code bug (MEDIUM), one root cause with finding 2 | K8, `crashThenLateDuplicateTest` | Code read: `batcher.rs:177-186`, `:316-327`; `queue.rs:294`, `:507-520` |
 | 7 | **On a stale hub a requeued entry is offered again past its expiry, and only the attempt bound stops it.** Each requeue judges the entry against the same stale tip, as admission does, so the expiry rule never gives it up. A supported wallet's transaction is offered a third time after its expiry, and is finally dropped as exhausted. The late offers normally reach no node: a stale hub whose flushes come back unjudged almost always has an unreachable indexer | Real behaviour that contradicts a comment; low harm | K6, `requeuedPastExpiryTest`; TLC on `staleLag`; `expiringEntryDroppedAsExhaustedTest` | Code read: `batcher.rs:417-422`; `queue.rs:197` says "Only reachable for a payload with no expiry". The shipped bound is 8 requeues |
 | 8 | **One indexer endpoint can make a wallet see "pending" for a transaction nobody holds.** "Found, height 0, no body" from an indexer is byte-identical to the hub's own queue-hit reply, and the hub forwards it unchanged | Code bug (MEDIUM): an ambiguous wire reply, and no check on an untrusted answer | `sentinelCollisionTest`, `indexerForgesPendingTest` | Code read: `server.rs:445-451`, `chain.rs:284-290`, `:305-319` |
 | 9 | **Lookups choose a hub by apparent liveness.** A lookup starts at a rotating cursor and moves to the next address only on a timeout, the pattern the submit path forbids. Whoever can make one hub time out decides which hub answers | Undecided: deliberate and tested, and in conflict with a rule written for submits. The `PRODUCTION.md` that rule cites is not in the repository | Not modelled: needs more than one hub | Code read: `shim/src/nym.rs:746-797`, against the rule at `:628-633`; `shim/tests/nym.rs` asserts the behaviour today |
