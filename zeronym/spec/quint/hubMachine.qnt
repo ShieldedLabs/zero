@@ -6,7 +6,7 @@
 /// is the protocol specification's business.
 ///
 /// This is where the schedule is checked: whether a transaction a hub admits
-/// is offered to the chain, and judged by a node, before it expires. The
+/// is offered to the chain with its mining margin to spare. The
 /// state is small enough for TLC to visit every reachable state of every
 /// configuration, so "holds" here means exactly that.
 ///

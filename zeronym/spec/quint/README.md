@@ -235,14 +235,14 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
-| G6b | holds (`timely`, `flakyTip`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6b | holds (`timely`, `flakyTip`) | argued, not checked: a hub that admits while it has no tip breaks it | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | A3 | holds | argued, not checked: draining is an admission rule | holds |
 
 - A hub folds several indexer endpoints into one answer: the tip is the maximum, a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip, inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
 - G1 depends on the shim alone.
-- The hub specification has no Byzantine hub, so the hub column of G6b and A3 is an argument. The protocol specification's Byzantine hub backs the other rows.
+- The hub specification has no Byzantine hub, so the hub column of G6b and A3 is an argument. A Byzantine hub breaks G6b by admitting while it has no tip, when an honest hub refuses everything. Admitting past the expiry rule cannot break it, because that rule never refuses a supported wallet's timely transaction (`conformingTimelyPayloadIsAdmissibleTest`). The protocol specification's Byzantine hub backs the other rows.
 
 ## Known gaps
 
