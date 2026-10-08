@@ -31,7 +31,8 @@
 # QUINT defaults to `npx @informalsystems/quint@0.33.0`. QUINT_BACKEND=typescript
 # skips the Rust evaluator, which is downloaded from GitHub on first use; the
 # sample counts and seeds below were settled on the Rust evaluator.
-# QUINT_JOBS is how many rows run at once.
+# QUINT_JOBS is how many rows run at once. CHECK_TIERS picks what runs after
+# tier 1: `simulation` (2 to 3b), `tlc` (4) or `all`, the default.
 set -u
 
 cd "$(dirname "$0")"
@@ -39,6 +40,11 @@ QUINT=${QUINT:-"npx --yes @informalsystems/quint@0.33.0"}
 BACKEND=${QUINT_BACKEND:-rust}
 SAMPLES=${QUINT_SAMPLES:-2000}
 JOBS=${QUINT_JOBS:-4}
+TIERS=${CHECK_TIERS:-all}
+case $TIERS in
+  all | simulation | tlc) ;;
+  *) echo "CHECK_TIERS is '$TIERS', not all, simulation or tlc" >&2; exit 2 ;;
+esac
 SEED=7
 failures=0
 
@@ -263,6 +269,7 @@ if [ "$failures" -ne 0 ]; then
   exit "$failures"
 fi
 
+if [ "$TIERS" != tlc ]; then
 echo "---- 2 tests"
 for file in $SPELLS $FUNCTIONAL; do
   job run_tests "$file"
@@ -304,7 +311,9 @@ job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
   -- operatorBlind txidAuthenticity ackImpliesQueued
 finish
+fi
 
+if [ "$TIERS" != simulation ]; then
 echo "---- 4 hub specification (TLC, exhaustive)"
 
 G6A=offeredBeforeExpiry
@@ -374,5 +383,6 @@ job tlc_violated initFlakyTipSlowFlight step "not(wBlockInFlight)" 7
 job tlc_violated initStaleLag           step "not(wStale)" 6
 job tlc_violated initStaleLagWithSlack  step "not(wStale)" 6
 finish
+fi
 
 exit "$failures"

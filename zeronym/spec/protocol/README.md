@@ -33,7 +33,9 @@ sh zeronym/spec/protocol/check.sh
 Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default;
 set `QUINT=quint` to use an installed one). Tier 4 needs Java (21 in CI) and Apalache 0.62.1, whose jar
 carries TLC and which Quint fetches into `~/.quint` on first use; without
-either the tier fails.
+either the tier fails. `CHECK_TIERS=simulation` runs tiers 1 to 3b and
+`CHECK_TIERS=tlc` tiers 1 and 4; CI runs them as two jobs, the TLC one with
+`QUINT_JOBS=2 TLC_HEAP=6g TLC_TIMEOUT=900`.
 
 | Tier | What | Command | Expectation |
 |---|---|---|---|
@@ -228,6 +230,16 @@ beyond loss in the soup.
 - **Hub.** In the protocol specification the hub is abstract: it may accept
   or refuse any submission, and take, settle, give back or lose its entries at
   any time. The three assumptions below are the hub specification's.
+- **Byzantine hub.** A Byzantine hub lies only in what it acks and replies:
+  on a submit it may queue the payload or not and send any ack, and on a
+  lookup it may send any reply (see [Roles](#roles)). Every other move is the
+  honest one: in the hub specification its flushes, verdicts, requeues, drain,
+  crash and restart; in the protocol specification its take, settle, give back
+  and lose. It cannot evict or withhold a queued entry, flush off schedule, or
+  send a frame nobody asked for. The rows that hold under a Byzantine hub hold
+  under this model: G1 does not read the hub, G3 holds because the shim
+  compares txids on every reply (so an unsolicited reply would change
+  nothing), and A2 follows from the model itself.
 - **Flight time.** At most `MAX_FLIGHT_BLOCKS` blocks arrive while one flush
   is in flight, and that is fewer than the mining margin
   (`flightWithinMargin`). The implementation bounds each call to the indexer
@@ -596,9 +608,9 @@ chain cannot pass a running, idle hub that has not asked.
 | G3 | holds (`baseline`) | holds (`byzHub`); a twin and a false height are both served (W16) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
 | G8 | holds (`baseline`) | **required**: `hubAcksWithoutAdmittingTest` | holds (`byzIndexer`) |
-| G6a | holds (`baseline`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
-| G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6a | holds (`timely`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
+| G6b | holds (`timely`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6c | holds (`timely`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | A3 | holds (`drainIsFinalTest`) | **required**: `hubAdmitsWhileDrainingTest` | holds (`drainIsFinalTest`) |
 
 There is no Byzantine-shim column: the shim sees every migration in plaintext
@@ -622,7 +634,7 @@ specification, under its configurations.
 | K3 | G6a for a tight-expiry transaction: admitted against a tip reported below a boundary already flushed | `flakyTip` | violated invariant | violated, as predicted | `tightExpiryAdmittedBehindFlushedBoundaryTest` |
 | K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
 | K4 | G6a, and G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
-| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `timely` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
+| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `timely` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueDropsAckedAsExpiredTest` |
 | K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
 
 | K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
@@ -672,8 +684,7 @@ Both are steps of the hub function, so they are checked on the hub alone, in
 `REACH` is the closure of `starting` under:
 
 - submits of `pA` (Orchard-touching, expiry 9) and `pJunk` (unparseable),
-  each through the honest hub and through every Byzantine result, with
-  Byzantine heights drawn from 0 and 4;
+  each through the honest hub and through every Byzantine result;
 - tips 0, 4, 5, 6 and 9, and stale reports at 4, 8 and 9;
 - `FlushDue`, `FlushDone`, `Drain`, `Crash` and `Restart`;
 - each of the four verdicts on each payload;
@@ -683,9 +694,18 @@ reorg allowance 1). `reachTest` checks that `REACH` is closed under all of
 these, so the checks below are exhaustive over those parameters, not
 depth-bounded.
 
+These are not the hub specification's parameters (`timely`: mining margin 2,
+expiry floor 7, which `realisedRunsTest` also uses), and `REACH` has one
+parseable payload, no twin and no tight payload. The abstraction lemma is
+carried to the hub specification's parameters by argument, not by a check:
+`hub()` takes its parameters as arguments, and the abstract hub has none and
+reads only queue membership and wire replies. `REACH` was not run at
+`timely`'s parameters; as an exhaustive closure it would very likely not
+finish.
+
 | Id | Test | What it says | Class |
 |---|---|---|---|
-| A2 | `neverEvictTest` | An entry leaves the hub's queue only into a flush, or because the hub went down or exited after its final flush | guarantee, any role |
+| A2 | `neverEvictTest` | An entry leaves the hub's queue only into a flush, or because the hub went down or exited after its final flush | guarantee, any role, under the Byzantine-hub model ([Assumptions](#assumptions)) |
 | A3 | `drainIsFinalTest` | A draining honest hub's queue gains only what a flush hands back | guarantee, honest hub |
 
 A2 is stated whatever the hub's role: the Byzantine submit relation only ever
@@ -735,7 +755,7 @@ stopped or stale, so a violation or a reached state shown over it may not
 happen. `tests/realisedRunsTest.qnt` closes that gap for the pinned runs: for
 K1a, K2 (a) to (e), W8, W9, W16, and each "required" run of the trust matrix,
 it replays the hub inputs of the run through the real hub function from a
-starting hub on the `baseline` schedule, each lie as a member of the
+starting hub on `timely`'s parameters, each lie as a member of the
 Byzantine relation, and checks the replies and the final queue. K1b has no
 hub step.
 
@@ -798,7 +818,7 @@ as `ackedIsHeldOrSettled`: held by the hub, or on the chain, or judged by a
 node. That is violated by a crash (`ackedThenCrashedTest`), by a draining hub's
 final flush that finds the indexer unreachable (`ackedThenLostAtDrainTest`),
 and by a requeue that drops an entry as expired after an outage
-(`requeueAndDropTest`). The third was not predicted; simulation found it.
+(`requeueDropsAckedAsExpiredTest`). The third was not predicted; simulation found it.
 
 **4. G3 does not depend on the shim's txid check when every component is
 honest.** Removing the comparison from `interpretReply` leaves G3 holding on
@@ -898,7 +918,9 @@ observer keeps four sets of payloads and one height and no history, which is
 what lets TLC visit every reachable state. `tlc.sh FILE MAIN INIT STEP
 INVARIANT` checks one invariant of one configuration and prints `holds
 <distinct states> <depth>` or `violated <trace length>`; anything else,
-including a run that TLC has not finished in five minutes, is a failure.
+including a run that TLC has not finished within `TLC_TIMEOUT` (five minutes
+by default, 15 in CI), is a failure. No recorded verdict or trace length
+depends on the limit.
 
 A configuration is a value held in the state and selected by a named init
 (`initTimely`, ...), whose guard is the assumptions that configuration is
@@ -1025,6 +1047,14 @@ on its configuration and was not repeated); the route with an empty `~/.quint`
 and Quint fetched by `npx`.
 
 ## The protocol specification under TLC (measured once, not a gate)
+
+The protocol state is still one record, `s: System`. A planned split into
+separate variables, with the audit recorded by each action, was not done, by
+decision during the work. `Audit` has the fields the split would have used,
+`everQueued` and `windows`, but `advance(audit, pre, post)` still computes
+them by comparing the whole state before and after each step. The
+measurement below is of that unsplit machine, so it does not say whether the
+split would make the protocol specification checkable.
 
 Measured once, on the all-honest configuration with `maxRequests` 2 and
 invariant `wellFormed` (since cut, C10), through `tlc.sh` with 4 workers, an

@@ -1037,7 +1037,7 @@ module protocol {
   // Guarantees
   // ------------------------------------------------------------------------
   //
-  // The predicates are defined, and documented, in `properties.qnt`, each as
+  // The predicates are defined, and documented, above, each as
   // `<name>In(..)`: a predicate over a system and an audit record. These are
   // their values in the current state, under the names the gate checks.
 

@@ -57,14 +57,31 @@ jobs:
       - name: Divert protocol model
         run: sh zeronym/spec/check.sh
 
-  # The standalone Quint specification of the whole protocol: typecheck, tests,
-  # bounded random simulation, and the hub specification checked exhaustively
-  # with TLC, which needs Java. The Apalache distribution that carries TLC is
-  # fetched by Quint on first use. About 9.5 minutes on a 16-core machine;
-  # the limit allows a runner three times slower.
+  # The standalone Quint specification of the whole protocol: typecheck, tests
+  # and bounded random simulation. About 2 minutes on a 16-core machine.
   spec-protocol:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    # Same reasoning as `spec`: it runs code fetched at run time.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Protocol specification, tiers 1 to 3b
+        run: sh zeronym/spec/protocol/check.sh
+        env:
+          CHECK_TIERS: simulation
+
+  # The hub specification checked exhaustively with TLC, which needs Java. The
+  # Apalache distribution that carries TLC is fetched by Quint on first use.
+  # About 7.5 minutes on a 16-core machine with four rows at a time. Rows that
+  # expect a violation run TLC on one worker, so the trace lengths are
+  # shortest; two rows at a time with 6 GB each fit a 4-core, 16 GB runner.
+  spec-protocol-tlc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Same reasoning as `spec`: it runs code fetched at run time.
     permissions:
       contents: read
@@ -76,8 +93,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Protocol specification
+      - name: Hub specification, tier 4
         run: sh zeronym/spec/protocol/check.sh
+        env:
+          CHECK_TIERS: tlc
+          QUINT_JOBS: '2'
+          TLC_HEAP: 6g
+          TLC_TIMEOUT: '900'
 
   tests:
     runs-on: blacksmith-8vcpu-ubuntu-2404
