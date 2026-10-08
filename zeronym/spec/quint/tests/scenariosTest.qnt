@@ -1,0 +1,235 @@
+// -*- mode: Bluespec; -*-
+
+/// Scripted runs against the honest configurations, and the two witnesses that
+/// need a Byzantine component: one run for each behaviour that must be
+/// reachable, and one for each cause of each known gap.
+///
+/// A run is a sequence of the machine's own steps. Where a run says a property
+/// fails, it also says what is in the wallet's log, the soup or the audit
+/// record that makes it fail.
+///
+/// Shim nonces count up from 0, one per frame.
+
+module scenariosTest {
+  import basicSpells.* from "../spells/basicSpells"
+  import types.* from "../types"
+  import wire.* from "../wire"
+  import indexer.* from "../indexer"
+  import abstractHub.* from "../abstractHub"
+  import shim.* from "../shim"
+  import protocol.* from "../protocol"
+
+  /// Every named init is live: its guard holds and it starts a run.
+  run liveInitsTest =
+    initBaseline
+      .then(initByzHub)
+      .then(initByzIndexer)
+
+  // ------------------------------------------------------------------------
+  // Every component honest (`baseline`)
+  // ------------------------------------------------------------------------
+
+  // ------------------------------------------------------------------------
+  // Witnesses
+  // ------------------------------------------------------------------------
+
+  /// A migration from send to mined, with the wallet polling.
+  run pendingThenMempoolThenMinedTest =
+    initBaseline
+      // The shim diverts and answers at once; the operator sees nothing.
+      .then(submitTo(0, early))
+      .expect(lastEvent == Sent({ input: Clean(early), obs: SentOk }))
+      .expect(s.hub.queue == Set(early) and s.operator == Set())
+      .then(lookUp(1, "early"))
+      .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
+      .then(flush([early], Accepted))
+      .expect(s.hub.queue == Set() and s.onChain("early") == InMempool)
+      .then(lookUp(2, "early"))
+      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(2) }))
+      .then(chainMineWith("early"))
+      .then(lookUp(3, "early"))
+      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(3) }))
+      .expect(wPending and wTxInMempool and wTxMined)
+      .expect(operatorBlind and queuedBytesConfidential and txidAuthenticity and lookupValidityPerHub)
+      .expect(statusNeverRegresses)
+
+  /// A pass-through transaction goes to the operator and nowhere else.
+  run passThroughIsForwardedTest =
+    initBaseline
+      .then(sendToHub(plain))
+      .expect(lastEvent == Sent({ input: Clean(plain), obs: SentToOperator }))
+      .expect(s.operator == Set(plain) and s.net == Set())
+      .expect(vOperatorBlind and operatorBlind and vQueuedBytesConfidential and queuedBytesConfidential)
+
+  /// The accepted disclosure: a third party that knows a txid is told it
+  /// is queued, and is not given the bytes.
+  run thirdPartyLearnsItIsQueuedTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(thirdPartyLearnsTxidWith("early"))
+      .then(thirdPartyLookupWith("early"))
+      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
+      .expect(wQueuedDisclosed)
+      .expect(s.tpLearned() == Set() and queuedBytesConfidential)
+
+  /// Once `early` is published its txid is public, and a third party
+  /// that asks is served its bytes from the indexer. G2 holds: they are
+  /// public.
+  run thirdPartyIsServedPublishedBodyTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(flush([early], Accepted))
+      .then(thirdPartyLookupWith("early"))
+      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", chainAnswer(s.indexer, "early")))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
+      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
+      .expect(wThirdPartyServedBody and vQueuedBytesConfidential and queuedBytesConfidential)
+
+  /// A lookup that gets no reply in time fails closed, and G4 holds of it.
+  run lookupTimesOutTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(ask("early"))
+      .then(timeOutLookup(1))
+      .expect(lastEvent == Got({ query: "early", obs: Unavailable, via: None }))
+      .expect(s.shim.waiters == Map() and lookupValidityPerHub)
+
+  /// A queued payload the hub cannot parse has no txid to be found by.
+  run unparseableIsQueuedAndMissedTest =
+    initBaseline
+      .then(submitTo(0, junk))
+      .expect(lastEvent == Sent({ input: Clean(junk), obs: SentOk }) and s.hub.queue == Set(junk))
+      .then(lookUp(1, "junk"))
+      .expect(lastEvent == Got({ query: "junk", obs: NotFound, via: Some(1) }))
+      .expect(wUnparseableMissed and lookupValidityPerHub)
+
+  // ------------------------------------------------------------------------
+  // K1. Told ok, and no hub ever has it
+  // ------------------------------------------------------------------------
+
+  /// K1a. The hub refuses the frame after the wallet was told ok.
+  run toldOkThenRefusedTest =
+    initBaseline
+      .then(sendToHub(tight))
+      .then(answerSubmitFrom(ShimAddr, 0, tight, WRefused(WExpiryTooTight)))
+      .expect(s.wallet.log == [Sent({ input: Clean(tight), obs: SentOk })])
+      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WRefused(WExpiryTooTight) }))
+      .expect(s.hub == emptyAHub)
+
+  /// K1b. The frame is never delivered. Nothing obliges the network to.
+  run toldOkAndNeverDeliveredTest =
+    initBaseline
+      .then(sendToHub(early))
+      .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
+      .expect(s.net == Set(submitMail(0, early)))
+      .expect(s.hub == emptyAHub)
+
+  // ------------------------------------------------------------------------
+  // K2. The status a wallet sees goes backwards
+  // ------------------------------------------------------------------------
+
+  /// K2a. Two polls, answered in order, delivered out of order.
+  run repliesReorderedTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(ask("early"))
+      .then(deliverLookup(1, "early"))
+      .then(flush([early], Accepted))
+      .then(ask("early"))
+      .then(deliverLookup(2, "early"))
+      .then(deliverToShim(replyMail(2, WFound({ body: Some(early), height: AtZero }))))
+      .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
+      .expect(s.wallet.log == [
+        Sent({ input: Clean(early), obs: SentOk }),
+        Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(2) }),
+        Got({ query: "early", obs: Pending, via: Some(1) }),
+      ])
+      // Each answer was true when it was given.
+      .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  /// K2b. The wallet sends published bytes again. The hub's memory of them
+  /// went with the flush, so they are admitted and pending once more.
+  run walletResendsPublishedTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(flush([early], Accepted))
+      .then(lookUp(1, "early"))
+      .then(submitTo(2, early))
+      .expect(s.hub.queue == Set(early) and s.onChain("early") == InMempool)
+      .then(lookUp(3, "early"))
+      .expect(s.wallet.log.slice(1, 4) == [
+        Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(1) }),
+        Sent({ input: Clean(early), obs: SentOk }),
+        Got({ query: "early", obs: Pending, via: Some(3) }),
+      ])
+      .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  /// K2c. The same, done by a third party: the bytes are public once
+  /// published, and submission is open to anyone.
+  run thirdPartyResubmitsPublishedTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(flush([early], Accepted))
+      .then(lookUp(1, "early"))
+      .expect(s.tpPayloads().contains(early))
+      .then(thirdPartySubmitWith(early))
+      .then(deliverSubmitFrom(ThirdPartyAddr, 0, early))
+      .then(lookUp(2, "early"))
+      .expect(s.wallet.log.slice(1, 3) == [
+        Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(1) }),
+        Got({ query: "early", obs: Pending, via: Some(2) }),
+      ])
+      .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  /// K2d. The flush window: the queue is empty and the chain does not have
+  /// the batch yet.
+  run flushWindowTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(lookUp(1, "early"))
+      .then(hubTake)
+      .expect(s.hub.held == Set(early) and s.onChain("early") == Absent)
+      .then(lookUp(2, "early"))
+      .expect(s.wallet.log.slice(1, 3) == [
+        Got({ query: "early", obs: Pending, via: Some(1) }),
+        Got({ query: "early", obs: NotFound, via: Some(2) }),
+      ])
+      .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  /// K2e. The node rejects the transaction at flush. It was pending; now it
+  /// is nowhere.
+  run rejectedAtFlushTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(lookUp(1, "early"))
+      .then(flush([early], Rejected))
+      .expect(s.hub.queue == Set() and s.hub.held == Set() and s.onChain("early") == Absent)
+      .then(lookUp(2, "early"))
+      .expect(s.wallet.log.slice(1, 3) == [
+        Got({ query: "early", obs: Pending, via: Some(1) }),
+        Got({ query: "early", obs: NotFound, via: Some(2) }),
+      ])
+      .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  // ------------------------------------------------------------------------
+  // A Byzantine hub (`byzHub`)
+  // ------------------------------------------------------------------------
+
+  /// A Byzantine hub serves a twin of the wallet's transaction at a
+  /// height the chain has not reached. The shim checks the txid, which a twin
+  /// shares, and nothing else: it serves both.
+  run twinAtFalseHeightIsServedTest =
+    initByzHub
+      .then(submitTo(0, early))
+      .then(ask("early"))
+      .then(hubReceiveWith(
+        lookupMail(1, "early"), INotFound,
+        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(earlyTwin), height: AtOther })))) },
+      ))
+      .then(deliverToShim(replyMail(1, WFound({ body: Some(earlyTwin), height: AtOther }))))
+      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: earlyTwin, height: AtOther }), via: Some(1) }))
+      .expect(s.onChain("early") == Absent)
+      .expect(wTwinServed and wFalseHeightServed)
+      .expect(txidAuthenticity and not(lookupValidityPerHub))
+}

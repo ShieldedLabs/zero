@@ -40,6 +40,51 @@ jobs:
       - name: Repository claim guards
         run: sh zeronym/guards.sh
 
+  # The Quint specification of the protocol: typecheck, tests
+  # and bounded random simulation. About 2 minutes on a 16-core machine.
+  spec-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # It runs code fetched at run time (npx, Quint's evaluator), so it gets a
+    # read-only token and a pinned checkout.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Protocol specification, tiers 1 to 3b
+        run: sh zeronym/spec/quint/check.sh
+        env:
+          CHECK_TIERS: simulation
+
+  # The hub specification checked exhaustively with TLC, which needs Java. The
+  # Apalache distribution that carries TLC is fetched by Quint on first use.
+  # About 8.5 minutes on a 16-core machine with four rows at a time. Rows that
+  # expect a violation run TLC on one worker, so the trace lengths are
+  # shortest; two rows at a time with 6 GB each fit a 4-core, 16 GB runner.
+  spec-protocol-tlc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Same reasoning as `spec-protocol`: it runs code fetched at run time.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Hub specification, tier 4
+        run: sh zeronym/spec/quint/check.sh
+        env:
+          CHECK_TIERS: tlc
+          QUINT_JOBS: '2'
+          TLC_HEAP: 6g
+          TLC_TIMEOUT: '900'
+
   tests:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
