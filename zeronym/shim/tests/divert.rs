@@ -23,6 +23,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1 as server_h1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use prost::Message;
 use tokio::net::TcpListener;
 use zaino_proto::proto::service::{BlockId, TxFilter};
 
@@ -193,6 +194,44 @@ async fn a_migration_is_diverted_and_the_operator_is_never_connected() {
         0,
         "classify-before-connect: a diverted migration must not dial the operator"
     );
+}
+
+#[tokio::test]
+async fn a_grpc_web_migration_is_diverted_and_the_operator_is_never_connected() {
+    let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    // A browser wallet's send: gRPC-web text, the dialect the classifier would
+    // never see if the translation sat anywhere but before routing.
+    let message = zaino_proto::proto::service::RawTransaction {
+        data: V6_MIGRATION.to_vec().into(),
+        height: 0,
+    }
+    .encode_to_vec();
+    let mut sender = connect_h2(shim).await;
+    let reply = common::grpc_web_call(
+        &mut sender,
+        shim,
+        zero_indexer_shim::proxy::SEND_TRANSACTION,
+        "application/grpc-web-text",
+        &message,
+    )
+    .await;
+
+    assert!(
+        reply.trailers.contains("grpc-status:0"),
+        "{:?}",
+        reply.trailers
+    );
+    let resp = zaino_proto::proto::service::SendResponse::decode(reply.messages[0].as_ref())
+        .expect("a SendResponse");
+    assert_eq!(resp.error_message, txid);
+    assert_eq!(hub_seen.lock().unwrap().as_deref(), Some(V6_MIGRATION));
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

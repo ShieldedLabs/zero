@@ -37,6 +37,15 @@ date) before dispatching the release.
   `UpdateError::DatabaseHole` and its "could not determine best chain" message,
   which `fae256572a` existed to un-mask, no longer appear anywhere upstream.
 
+### zero-indexer
+
+- The shim serves gRPC-web (`application/grpc-web+proto` and
+  `grpc-web-text`) beside plain gRPC on the same port, so browser and
+  extension wallets can use it. Translation happens before routing, so a
+  gRPC-web `SendTransaction` is classified and diverted like any other; the
+  CORS preflight is answered by the shim; `Origin` and `Referer` are stripped
+  before the indexer.
+
 ## v29 - 2026-09-07
 
 ### Added

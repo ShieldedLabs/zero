@@ -158,6 +158,15 @@ which is what closes the durability gap.
 
 ---
 
+## Wire dialects
+
+Every method above is reachable as plain gRPC or as gRPC-web (binary or
+`grpc-web-text`), on the same port, for browser and extension wallets. The shim
+translates gRPC-web to gRPC before routing, so each class applies identically
+in both dialects and the indexer only ever sees gRPC. A browser also sends
+`Origin` (an extension's names the extension) and `Referer`; the shim strips
+both with the client-address headers.
+
 ## Residual leaks (state them, do not pretend)
 
 The Zeronym indexer closed the three that used to sit here (reused address,
