@@ -299,7 +299,7 @@ module hubTest {
   }
 
   // ------------------------------------------------------------------------
-  // Totality and the Byzantine relation
+  // Totality
   // ------------------------------------------------------------------------
 
   /// The function answers every input in every state, and an input that
@@ -312,28 +312,12 @@ module hubTest {
         isError(result.out) implies result.state == state,
       }))
 
-  /// The Byzantine relation contains the honest transition.
-  run byzantineContainsHonestTest =
-    assert(tuples(STATES, INPUTS).forall(((state, input)) =>
-      byzHubResults(state, input, PAYLOADS).contains(hub(state, input))))
-
-  /// A Byzantine hub can hold a payload admission would refuse, and can
-  /// answer a lookup with a queued body.
-  run byzantineHubTest = all {
-    assert(byzHubResults(running(5), submit(pTight), PAYLOADS).exists(result =>
-      result.state.queued().contains(pTight))),
-    assert(byzHubResults(holding, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS)
-      .contains(holding.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(pA), height: AtZero }))))),
-    // It still cannot act while it is not running.
-    assert(byzHubResults(down, submit(pA), PAYLOADS) == Set(hub(down, submit(pA)))),
-  }
-
   // ------------------------------------------------------------------------
   // Every reachable state
   // ------------------------------------------------------------------------
   //
   // `REACH` is every hub state reachable from a starting hub under
-  // `REACH_INPUTS`, honest or through the Byzantine submit relation. The
+  // `REACH_INPUTS`. The
   // properties below are exhaustive over it, for these parameters: two
   // payloads, one with no txid and no expiry; tips 0, 4, 5, 6 and 9; free-run
   // estimates 4, 8 and 9; every verdict on either payload.
@@ -349,13 +333,8 @@ module hubTest {
       .union(tuples(REACH_PAYLOADS, Set(Accepted, AlreadyKnown, Rejected, Retryable))
         .map(((payload, given)) => verdict(payload, given)))
 
-  /// The states a Byzantine hub may move to on a submission.
-  pure def byzantineSteps(state: HubState): Set[HubState] =
-    REACH_PAYLOADS.map(payload => byzHubResults(state, submit(payload), REACH_PAYLOADS)
-      .map(result => result.state)).flatten()
-
   pure def successors(state: HubState): Set[HubState] =
-    REACH_INPUTS.map(input => hub(state, input).state).union(byzantineSteps(state))
+    REACH_INPUTS.map(input => hub(state, input).state)
 
   /// The closure, breadth first. The bound on rounds is a budget, not a
   /// depth bound: `reachTest` fails unless the result is closed.
@@ -364,23 +343,19 @@ module hubTest {
       val fresh = acc.frontier.map(state => successors(state)).flatten().exclude(acc.reached)
       { reached: acc.reached.union(fresh), frontier: fresh }).reached
 
-  /// `REACH` is a fixpoint: no input, honest or Byzantine, leaves it.
+  /// `REACH` is a fixpoint: no input leaves it.
   run reachTest = assert(REACH.forall(state => successors(state).subseteq(REACH)))
 
   /// A2. An entry leaves the queue only into a flush, or because the hub went
-  /// down or exited after its final flush. Nothing evicts it, whatever the
-  /// hub's role: the Byzantine submit relation only ever adds to the queue.
-  /// The exit matters only to a Byzantine hub, which can admit while
-  /// draining; an honest one has nothing queued by then.
+  /// down or exited after its final flush. Nothing evicts it.
   run neverEvictTest =
     assert(REACH.forall(state =>
       successors(state).forall(stepped =>
         stepped.phase == Down or stepped.phase == Stopped
           or state.queued().subseteq(stepped.queued().union(stepped.inFlight())))))
 
-  /// A3. A draining honest hub admits nothing: its queue gains only what a
-  /// flush hands back. A Byzantine hub is not bound by it
-  /// (`hubAdmitsWhileDrainingTest`).
+  /// A3. A draining hub admits nothing: its queue gains only what a flush
+  /// hands back.
   run drainIsFinalTest =
     assert(REACH.forall(state =>
       state.phase == Draining implies REACH_INPUTS.forall(input =>
@@ -436,17 +411,11 @@ module hubTest {
     }
 
   /// Every step of the real hub from a reachable state is a step of the
-  /// abstract one, honest against honest and Byzantine against Byzantine.
+  /// abstract one.
   run abstractionTest =
     assert(REACH.forall(state =>
       REACH_INPUTS.union(LOOKUPS).forall(input =>
         isAbstracted(state, input, hub(state, input), honestAnswers))))
-
-  run byzantineAbstractionTest =
-    assert(REACH.forall(state =>
-      REACH_PAYLOADS.map(payload => submit(payload)).union(LOOKUPS).forall(input =>
-        byzHubResults(state, input, PAYLOADS).forall(result =>
-          isAbstracted(state, input, result, (h, request) => byzantineAnswers(h, request, PAYLOADS))))))
 
   /// Each abstract move has a concrete step that projects onto it.
   pure def realises(state: HubState, input: HubInput, move: AHub, reply: Option[AReply]): bool =

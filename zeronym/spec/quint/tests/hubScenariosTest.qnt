@@ -76,11 +76,6 @@ module hubScenariosTest {
   def nodeWouldTake(payload: Payload): bool =
     verdictsOn(payload).contains((Accepted, true))
 
-  /// What a Byzantine hub answers when it takes `payload` into its queue
-  /// whatever the admission rules say.
-  def admitting(payload: Payload): HubResult =
-    { ...h, queue: h.queue.put(payload, 0) }.toAckOutput(0, Admitted)
-
   pure def requeued(held: int, droppedExpired: int, droppedExhausted: int): HubOutput =
     RequeuedOutput({ held: held, droppedExpired: droppedExpired, droppedExhausted: droppedExhausted })
 
@@ -97,7 +92,6 @@ module hubScenariosTest {
       .then(initFlakyTipSlowFlight)
       .then(initStaleLag)
       .then(initStaleLagWithSlack)
-      .then(initByzHub)
       .then(initByzIndexer)
       .then(initUnknownUpgrade)
       .expect(cfg == unknownUpgrade and h == startingHub(unknownUpgrade.params) and height == GENESIS_HEIGHT)
@@ -461,45 +455,6 @@ module hubScenariosTest {
       .expect(height == 12 and not(nodeWouldTake(lateAtFloor)))
       .expect(not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(lateAtFloor, Rejected))
-
-  // ------------------------------------------------------------------------
-  // A Byzantine hub
-  // ------------------------------------------------------------------------
-
-  /// G6b and G6c need the hub. A supported wallet's transaction is refused by
-  /// an honest hub only for reasons that are not about the transaction. This
-  /// hub takes one while it has not yet seen a tip, when an honest hub
-  /// refuses everything. It first sees the chain at height 7, adopts that
-  /// epoch without flushing, and offers the transaction at 9, its expiry,
-  /// when no node can take it.
-  run hubAdmitsBeforeFirstTipTest =
-    initWith(byzHub)
-      .then(unseenBlocks(2))
-      .expect(decision(early) == Refused(TipStale))
-      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
-      .then(submitWith(early, admitting(early)))
-      .expect(h.phase == Starting and height == 3 and onTime == Set(early))
-      .then(unseenBlocks(4))
-      .then(see)
-      .then(blocks(2))
-      .then(flushBegin)
-      .expect(conforming(early, cfg.params.minWalletExpiry) and flightStart == 9)
-      .expect(not(conformingFirstOfferBeforeExpiry))
-      .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
-      .then(judge(early, Rejected))
-
-  /// A3 needs the hub. Once its drain has begun, it takes a submission into
-  /// the queue: draining before and after, nothing in flight, and the queue
-  /// grown by a payload no flush handed back.
-  run hubAdmitsWhileDrainingTest =
-    started(byzHub)
-      .then(block)
-      .then(deliver(early))
-      .then(drain)
-      .expect(h.phase == Draining and h.queued() == Set(early) and h.inFlight() == Set())
-      .expect(decision(tight) == Refused(HubDraining))
-      .then(submitWith(tight, admitting(tight)))
-      .expect(h.phase == Draining and h.queued() == Set(early, tight))
 
   // ------------------------------------------------------------------------
   // A Byzantine indexer

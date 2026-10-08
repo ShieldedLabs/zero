@@ -163,7 +163,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 
 - **Roles.** The shim and the hub both run attested. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
-- **Byzantine hub.** It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
+- **Byzantine hub** (protocol specification only). It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
 - **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
 - **Third party.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
@@ -234,15 +234,15 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
-| G6b | holds (`timely`, `flakyTip`, `flakyTipSlowFlight`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| G6c | holds (`timely`, `flakyTip`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| A3 | holds | **required**: `hubAdmitsWhileDrainingTest` | holds |
+| G6b | holds (`timely`, `flakyTip`, `flakyTipSlowFlight`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| G6c | holds (`timely`, `flakyTip`) | argued, not checked: a hub that ignores its admission rules can break any schedule guarantee | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
+| A3 | holds | argued, not checked: draining is an admission rule | holds |
 
 - A hub folds several indexer endpoints into one answer: the tip is the maximum, a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip, inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
 - G1 depends on the shim alone.
-- A Byzantine hub breaks G6b by admitting while it has no tip, when an honest hub refuses everything. Admitting past the expiry rule cannot break it, because that rule never refuses a supported wallet's timely transaction (`conformingTimelyPayloadIsAdmissibleTest`).
+- The hub specification has no Byzantine hub, so the hub column of G6b, G6c and A3 is an argument. The protocol specification's Byzantine hub backs the other rows.
 
 ## Known gaps
 
@@ -309,6 +309,7 @@ Argued, not checked, on the assumption that hubs share nothing but the chain and
 | A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
 | Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them (but see finding 6). Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs:497-519`) is not checked, and is known not to hold under a tip reported behind the chain |
 | A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
+| A Byzantine hub in the hub specification | It produced no finding, and an adversary's moves are not an implementation to check against the abstract hub. The protocol specification keeps its Byzantine hub, which lies in lookup replies and admits or refuses as it likes |
 | More than one Byzantine component at once | The trust matrix is single-fault |
 | Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 
@@ -386,7 +387,7 @@ The schedule flushes every 3 blocks with a mining margin of 2, a delivery lag of
 | `flakyTipSlowFlight` | and a flush may be in flight for 2 blocks | K7 |
 | `staleLag` | the hub may hear no tip, and goes stale | K4, K6 |
 | `staleLagWithSlack` | and the expiry floor is 8, enough to cover the silence | finding 2 |
-| `byzHub`, `byzIndexer` | one Byzantine component, and a tight-expiry payload | the trust matrix |
+| `byzIndexer` | a Byzantine indexer, and a tight-expiry payload | the trust matrix |
 | `unknownUpgrade` | an unparseable payload; scripted runs only | the attempt bound |
 
 In every configuration a due flush begins before the next block, and at most one block arrives while a flush is in flight (two in `flakyTipSlowFlight`). Under `staleLag` a hub is stale once it has heard no tip for the staleness window; its free-running clock is then assumed never behind the chain and at most one flush interval ahead of it. The implementation relies on "never behind" and does not enforce it (`zeronym/hub/src/batcher.rs:64-67`).
@@ -407,7 +408,6 @@ With 8 workers, on the machine this was written on:
 | `staleLag` | G6b; G6c; K6 | violated, 13; 14; 13 states |
 | `staleLagWithSlack` | G6b; G6c (finding 2) | violated, 19; 20 states |
 | `timely` | K5 | violated: 5 states; 8 without a crash; 12 without a shutdown either |
-| `byzHub` | G6b; G6c | violated, 12; 13 states |
 | `byzIndexer` | G6b; G6c | violated, 16; 17 states |
 
 TLC runs with deadlock checking off, so a machine whose steps had died would hold everything. The gate therefore also requires one reachable state per family of steps, and the antecedents of G6b and G6c, each as a violated `not(..)` row.
@@ -417,7 +417,7 @@ TLC runs with deadlock checking off, so a machine whose steps had died would hol
 <details>
 <summary>The abstraction lemma</summary>
 
-The protocol specification's hub is the abstract one in `abstractHub.qnt`. `hubTest` checks, over every reachable state of the real hub function and every input, that each real step is a step of the abstract hub (`abstractionTest`, `byzantineAbstractionTest`), and that each abstract move has a real step behind it (`realisesTest`). So an invariant that holds over the abstract hub, and reads only queue membership and wire replies, holds over the real one: that covers G2, G3 and G4. It does not transfer reachability: the abstract hub answers where the real one is down or stale, so a violation shown over it is a state of the abstract hub. The reachable set is computed at a smaller schedule than the hub specification's and carried over by argument.
+The protocol specification's hub is the abstract one in `abstractHub.qnt`. `hubTest` checks, over every reachable state of the real hub function and every input, that each real step is a step of the abstract hub (`abstractionTest`), and that each abstract move has a real step behind it (`realisesTest`). So an invariant that holds over the abstract hub, and reads only queue membership and wire replies, holds over the real one: that covers G2, G3 and G4. It does not transfer reachability: the abstract hub answers where the real one is down or stale, so a violation shown over it is a state of the abstract hub. The reachable set is computed at a smaller schedule than the hub specification's and carried over by argument.
 
 </details>
 

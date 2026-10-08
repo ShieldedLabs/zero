@@ -88,8 +88,8 @@ finish() {
 # being found (renamed so it no longer ends in `Test`, say) fails the gate.
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:27 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:28 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
+FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:24 tests/shimTest.qnt:13
+  tests/hubScenariosTest.qnt:26 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
 
 fail() {
   echo "FAIL  $1"
@@ -378,10 +378,8 @@ job tlc_violated initTimely             step $K5 5
 job tlc_violated initTimely             noCrashStep $K5 8
 job tlc_violated initTimely             quietStep $K5 12
 
-# The trust matrix: each schedule guarantee is violated once the component it
-# depends on is Byzantine.
-job tlc_violated initByzHub             step $G6B 12
-job tlc_violated initByzHub             step $G6C 13
+# The trust matrix: each schedule guarantee is violated once the indexer is
+# Byzantine.
 job tlc_violated initByzIndexer         step $G6B 16
 job tlc_violated initByzIndexer         step $G6C 17
 

@@ -9,8 +9,6 @@
 /// verdict comes back) and corresponds to one seam in the implementation. An
 /// input that makes no sense in the current state returns `HubErrorOutput` and
 /// leaves the state alone.
-///
-/// `byzHubResults` is the wider relation a Byzantine hub draws from.
 module hub {
   import basicSpells.* from "./spells/basicSpells"
   import types.* from "./types"
@@ -404,44 +402,4 @@ module hub {
         if (state.phase == Down) startingHub(state.params).toNoHubOutput()
         else state.toHubErrorOutput("the hub is already up")
     }
-
-  // ------------------------------------------------------------------------
-  // Byzantine relation
-  // ------------------------------------------------------------------------
-
-  /// The transitions of a Byzantine hub. It keeps the honest schedule, and is
-  /// free in what it tells its clients and in what it admits:
-  ///
-  /// - a submission is admitted or refused whatever the admission rules say,
-  ///   and the ack says which;
-  /// - a lookup is answered with any outcome: a queue hit, or anything an
-  ///   indexer could say, with a body drawn from `universe` or none, at any
-  ///   height.
-  ///
-  /// The honest transition is always a member.
-  pure def byzHubResults(
-    state: HubState,
-    input: HubInput,
-    universe: Set[Payload],
-  ): Set[HubResult] =
-    val honest = Set(hub(state, input))
-    if (not(state.isServing())) honest
-    else
-      match input {
-        | SubmitHInput(submit) =>
-          val admitted =
-            if (state.queued().contains(submit.payload)) state.toAckOutput(submit.nonce, Duplicate)
-            else { ...state, queue: state.queue.put(submit.payload, 0) }.toAckOutput(submit.nonce, Admitted)
-          val refused = Set(TipStale, HubDraining, ExpiryTooTight).map(refusal =>
-            state.toAckOutput(submit.nonce, Refused(refusal)))
-          honest.union(Set(admitted)).union(refused)
-        | LookupHInput(lookup) =>
-          val bodies = Set(None).union(universe.map(payload => Some(payload)))
-          val answers = tuples(bodies, WIRE_HEIGHTS)
-            .map(((body, claimed)) => IFound({ body: body, height: claimed }))
-            .union(Set(INotFound, IUnavailable))
-          val outcomes = Set(QueueHit).union(answers.map(answer => FromIndexer(answer)))
-          honest.union(outcomes.map(outcome => state.toLookupReplyOutput(lookup.nonce, outcome)))
-        | _ => honest
-      }
 }

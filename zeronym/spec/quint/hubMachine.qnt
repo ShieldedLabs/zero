@@ -46,7 +46,6 @@ module hubMachine {
     maxFlightBlocks: int,
     maxHeight: Height,
     tip: TipModel,
-    hubRole: Role,
     indexerRole: Role,
   }
 
@@ -262,15 +261,9 @@ module hubMachine {
   def freeRunEstimates: Set[Height] =
     CLOCK_HEIGHTS.filter(estimate => height <= estimate and estimate <= height + cfg.params.flushInterval)
 
-  /// The transitions the hub may take on a submission of `payload`: the one
-  /// the protocol prescribes, or, for a Byzantine hub, any decision with the
-  /// payload queued or not. A Byzantine hub keeps the honest schedule.
+  /// The transition the hub takes on a submission of `payload`.
   def submitResults(payload: Payload): Set[HubResult] =
-    val input = SubmitHInput({ nonce: 0, payload: payload })
-    match cfg.hubRole {
-      | Honest => Set(hub(h, input))
-      | Byzantine => byzHubResults(h, input, cfg.payloads)
-    }
+    Set(hub(h, SubmitHInput({ nonce: 0, payload: payload })))
 
   // ------------------------------------------------------------------------
   // Frames
@@ -672,7 +665,6 @@ module hubMachine {
     maxFlightBlocks: 1,
     maxHeight: 12,
     tip: TipTimely,
-    hubRole: Honest,
     indexerRole: Honest,
   }
 
@@ -700,11 +692,9 @@ module hubMachine {
     payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12)),
   }
 
-  // One Byzantine component at a time, on the schedule of `timely`, each
-  // with `tight` as well: a Byzantine hub admits what the expiry rule refuses.
-  // The Byzantine indexer gets one supported migration and `tight`: with three
-  // payloads TLC does not reach its G6c counterexample in five minutes.
-  pure val byzHub: HubConfig = { ...timely, hubRole: Byzantine, payloads: Set(early, late, tight) }
+  // A Byzantine indexer, on the schedule of `timely`, with one supported
+  // migration and `tight`: with three payloads TLC does not reach its G6c
+  // counterexample in five minutes.
   pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine, payloads: Set(early, tight) }
 
   /// Bytes neither the shim nor the hub can parse: no txid, no expiry. After
@@ -734,7 +724,6 @@ module hubMachine {
     initWith(flakyTipSlowFlight),
   }
   action initStaleLag = all { shippedAssumptions(staleLag), initWith(staleLag) }
-  action initByzHub = all { shippedAssumptions(byzHub), initWith(byzHub) }
   action initByzIndexer = all { shippedAssumptions(byzIndexer), initWith(byzIndexer) }
   action initUnknownUpgrade = all { shippedAssumptions(unknownUpgrade), initWith(unknownUpgrade) }
   action initStaleLagWithSlack = all {
