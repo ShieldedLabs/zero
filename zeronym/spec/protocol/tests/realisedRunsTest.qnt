@@ -17,7 +17,7 @@ module realisedRunsTest {
   import wire.* from "../wire"
   import hub.* from "../hub"
   import abstractHub.* from "../abstractHub"
-  import configs.* from "../instances"
+  import protocol.* from "../protocol"
 
   /// The hub specification's `timely` schedule.
   pure val PARAMS: HubParams = {
@@ -28,7 +28,8 @@ module realisedRunsTest {
     reorgAllowance: 1,
     maxAttempts: 2,
   }
-  pure val UNIVERSE = baseline.payloads.union(baseline.twins).union(baseline.tpPayloads)
+  /// What a Byzantine hub builds its lies from.
+  pure val LIES = universeOf(baseline)
 
   type Step = Do(HubInput) | Lie({ input: HubInput, out: HubOutput })
 
@@ -61,7 +62,7 @@ module realisedRunsTest {
       }
       val taken = match step {
         | Do(_) => not(match result.out { | HubErrorOutput(_) => true | _ => false })
-        | Lie(lie) => byzHubResults(acc.state, lie.input, UNIVERSE).contains(result)
+        | Lie(lie) => byzHubResults(acc.state, lie.input, LIES).contains(result)
       }
       { state: result.state, ok: acc.ok and taken, replies: acc.replies.concat(result.out.replyOf()) })
     { ok: end.ok, replies: end.replies, last: { queue: end.state.queued(), held: end.state.inFlight() } }

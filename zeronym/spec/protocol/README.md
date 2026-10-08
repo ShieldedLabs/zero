@@ -16,9 +16,8 @@ modify.
 random traces per run (a few rows more), one seed. It is not a proof and it is not exhaustive to any
 depth. A property that "holds" is one no sampled trace violated.
 
-**`quint verify` has not been run**, on Apalache or on TLC, by anyone, on any
-part of this specification. The commands are given under
-["Bounded model checking (not run)"](#bounded-model-checking-not-run).
+**`quint verify` has not been run** on any part of this specification. Tier 4
+runs TLC on the hub specification through `tlc.sh`, not through `quint verify`.
 
 Statements that do not rest on sampling are the ones backed by `quint test`:
 the functional properties F1-F14 and the two-state properties A2-A3, which are
@@ -39,7 +38,7 @@ either the tier fails.
 | Tier | What | Command | Expectation |
 |---|---|---|---|
 | 1 | typecheck | `quint typecheck` on every file | ok |
-| 2 | tests | `quint test` on the spells, the four functional test files, each scenario and trust module, each configuration | all pass |
+| 2 | tests | `quint test` on the spells and every test file | all pass |
 | 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` ("fails" rows: 40 to 80 steps, a few with more traces) | "holds" rows hold; "fails" rows are violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
@@ -95,7 +94,7 @@ do. Tier 3b re-checks each configuration's guarantees on those deeper traces.
 | S32 | Two hub clocks. Admission and requeue use the observed height. The flush epoch uses the cadence height, which equals the observed height until no forward move has been seen for `TIP_STALE_AFTER` (15 min, 12 blocks at the nominal 75 s) and then free-runs at the nominal rate. The code comment claims the free-running clock runs ahead of the true height, "the safe direction"; nothing enforces it. Only the cadence loop (and startup) calls `observe`, and it does so before, never during, a flush | `zeronym/hub/src/batcher.rs:59-71`, `:227-247`, `:307-325`, `:414-422`, `zeronym/hub/src/main.rs:62` |
 | S25 | The operator can recover a diverted transaction's txid from transparent-pool queries, so a txid can be known to an outsider before publication | `zeronym/README.md:34` |
 
-Two comments in the implementation are quoted in `properties.qnt` next to the
+Two comments in the implementation are quoted in `protocol.qnt` next to the
 definitions they justify.
 
 - The accepted disclosure (W8), `zeronym/hub/src/server.rs`, in `Hub::lookup`:
@@ -405,8 +404,8 @@ nobody holds, and G4 fails.
 
 ## Layout
 
-Only `protocol.qnt` declares a constant or a variable. Every other module is
-pure.
+Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module
+declares a constant. Every other module is pure.
 
 | File | Module | Owns |
 |---|---|---|
@@ -418,14 +417,11 @@ pure.
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
 | `abstractHub.qnt` | `abstractHub` | The hub as the protocol sees it: `AHub`, its honest and Byzantine answers, its internal moves |
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
-| `state.qnt` | `state` | `System`, `Audit`; where each output goes; the derived views |
-| `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
-| `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, the run vocabulary |
-| `instances.qnt` | `configs`, then one module per configuration | The three configurations: `baseline`, `byzHub`, `byzIndexer` |
+| `protocol.qnt` | `protocol` | The transactions and the three configurations; `System`, `Audit`, where each output goes and the derived views; `truth`, the audit monitor `advance`, the guarantees, gaps and witnesses; the variables, `commit`, the named inits, the steps, the property aliases, the run vocabulary |
 | `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14; A2-A3 and the abstraction lemma in `hubTest.qnt` |
 | `tests/realisedRunsTest.qnt` | `realisedRunsTest` | The hub inputs of each pinned run, replayed through the real hub |
-| `tests/scenariosTest.qnt` | one module per configuration used | Witnesses and pinned gap causes |
-| `tests/trustTest.qnt` | one module per Byzantine configuration | One run and one control per "required" cell |
+| `tests/scenariosTest.qnt` | `scenariosTest` | Witnesses and pinned gap causes; `liveInitsTest` |
+| `tests/trustTest.qnt` | `trustTest` | One run and one control per "required" cell |
 
 ```mermaid
 flowchart BT
@@ -434,17 +430,16 @@ flowchart BT
     wire --> types
     indexer --> types
     hub --> types
+    abstractHub --> wire
     shim --> wire
-    state --> soup
-    state --> wire
-    state --> indexer
-    state --> hub
-    state --> shim
-    properties --> state
-    protocol --> properties
-    instances --> protocol
-    tests --> instances
-    tests --> properties
+    hubMachine --> hub
+    hubMachine --> indexer
+    protocol --> soup
+    protocol --> indexer
+    protocol --> abstractHub
+    protocol --> shim
+    tests --> protocol
+    tests --> hubMachine
 ```
 
 ### Components as functions
@@ -490,18 +485,19 @@ abstract indexer per hub was a decision of the design.
 
 ### Configurations
 
-One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
-(`PAYLOADS`, `ROLES`, ...).
+One variable, `cfg`, holds a configuration. It is written by `initWith` and
+kept by every step; `protocol.qnt` names its fields (`PAYLOADS`, `ROLES`, ...).
+Each configuration has a named init whose guard is `payloadsWellFormed`.
 
-| Module | Roles (hub / indexer) |
-|---|---|
-| `baseline` | H / H |
-| `byzHub` | **B** / H |
-| `byzIndexer` | H / **B** |
+| Configuration | Init | Roles (hub / indexer) |
+|---|---|---|
+| `baseline` | `initBaseline` | H / H |
+| `byzHub` | `initByzHub` | **B** / H |
+| `byzIndexer` | `initByzIndexer` | H / **B** |
 
 At most 3 sends and 3 lookups by the wallet and 3 requests by the third
-party. Each configuration's `assumptionsTest` asserts
-`payloadsWellFormed`; the simulator does not enforce `assume`. The hub
+party. `liveInitsTest` starts from each init in turn, so a guard that is false
+fails tier 2. The hub
 specification's configurations, its scaled-down schedule and the relations
 it keeps with the shipped one are in `hubMachine.qnt`.
 
@@ -1011,73 +1007,3 @@ only as a whole row (17 s, beside another run). Named inits are kept.
 Not measured: Apalache at bounded depths on this machine (one attempt failed
 on its configuration and was not repeated); the route with an empty `~/.quint`
 and Quint fetched by `npx`.
-
-## Bounded model checking (not run)
-
-**None of the commands in this section has been executed.** Both backends need
-Java 21 (Quint 0.33.0's default Apalache is 0.62.1), which the machine this was
-written on does not have. Whether Apalache or TLC accept the specification as
-written is unknown.
-
-Each "holds" cell, with Apalache:
-
-```sh
-quint verify --main=baseline --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=queuedBytesConfidential --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=lookupValidityPerHub --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=offeredBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=conformingFirstOfferBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant=wellFormed --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzHub --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzHub --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzIndexer --invariant=operatorBlind --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzIndexer --invariant=txidAuthenticity --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzIndexer --invariant=ackImpliesQueued --max-steps=12 zeronym/spec/protocol/instances.qnt
-```
-
-The same for G6c, and the configurations whose point is a violation (each
-should report one; `flakyTipNoSlack` and `flakyTipSlowFlight` satisfy every
-`assume`, so a checker that honours `assume` still has states to explore):
-
-```sh
-quint verify --main=baseline --invariant=conformingFirstOfferJudgedBeforeExpiry --max-steps=12 zeronym/spec/protocol/instances.qnt
-```
-
-Several of the scripted counterexamples are longer than 12 steps, so
-`--max-steps=12` may not reach these violations; raise it as needed.
-
-Each witness, as a reachability check that should report a violation:
-
-```sh
-quint verify --main=baseline --invariant='not(wPending)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wTxInMempool)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wTxMined)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRefusedTipStale)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRefusedDraining)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRefusedExpiryTooTight)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wRequeued)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wDroppedExpired)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wDroppedExhausted)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wQueuedDisclosed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wUnparseableMissed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wThirdPartyPayloadQueued)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wToldRefusedEverywhere)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=baseline --invariant='not(wToldNeverDelivered)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzHub --invariant='not(wTwinServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-quint verify --main=byzHub --invariant='not(wFalseHeightServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
-```
-The commands use one-hub configurations: nested maps of records are supported
-by Apalache but slow.
-
-What the specification does to give those runs a chance, from Apalache's
-documentation and not from running it:
-
-| Construct | Consequence |
-|---|---|
-| `run`, `.then`, `.expect`, `--witnesses`, `--mbt` are simulator-only | The commands above cover invariants only; reachability is `not(w)` expected to be violated |
-| `oneOf` on an empty set | Every pick is guarded |
-| Unbounded integers, `powerset`, `allLists` | Not used; every universe is a finite set bounded by constants, the Byzantine sets included |
-| A list in the state (the wallet's log) | Bounded by `--max-steps` |
-| `assume` | Behaviour under verify unknown; `assumptionsTest` is the check that counts |

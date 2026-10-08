@@ -10,16 +10,24 @@
 ///
 /// Shim nonces count up from 0, one per frame.
 
-module baselineScenarios {
+module scenariosTest {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
   import wire.* from "../wire"
   import indexer.* from "../indexer"
   import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
-  import state.* from "../state"
-  import configs.* from "../instances"
-  import protocol(CONFIG = baseline).* from "../protocol"
+  import protocol.* from "../protocol"
+
+  /// Every named init is live: its guard holds and it starts a run.
+  run liveInitsTest =
+    initBaseline
+      .then(initByzHub)
+      .then(initByzIndexer)
+
+  // ------------------------------------------------------------------------
+  // Every component honest (`baseline`)
+  // ------------------------------------------------------------------------
 
   def tpAcks = s.acks(ThirdPartyAddr)
 
@@ -29,7 +37,7 @@ module baselineScenarios {
 
   /// W1, W2, W3. A migration from send to mined, with the wallet polling.
   run pendingThenMempoolThenMinedTest =
-    init
+    initBaseline
       // The shim diverts and answers at once; the operator sees nothing.
       .then(submitTo(0, early))
       .expect(lastEvent == Sent({ input: Clean(early), obs: SentOk }))
@@ -49,7 +57,7 @@ module baselineScenarios {
 
   /// A pass-through transaction goes to the operator and nowhere else.
   run passThroughIsForwardedTest =
-    init
+    initBaseline
       .then(sendToHub(plain))
       .expect(lastEvent == Sent({ input: Clean(plain), obs: SentToOperator }))
       .expect(s.operator == Set(plain) and s.net == Set())
@@ -58,7 +66,7 @@ module baselineScenarios {
   /// W8. The accepted disclosure: a third party that knows a txid is told it
   /// is queued, and is not given the bytes.
   run thirdPartyLearnsItIsQueuedTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
@@ -69,7 +77,7 @@ module baselineScenarios {
 
   /// A lookup that gets no reply in time fails closed, and G4 holds of it.
   run lookupTimesOutTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(ask("early"))
       .then(timeOutLookup(1))
@@ -78,7 +86,7 @@ module baselineScenarios {
 
   /// W9. A queued payload the hub cannot parse has no txid to be found by.
   run unparseableIsQueuedAndMissedTest =
-    init
+    initBaseline
       .then(submitTo(0, junk))
       .expect(lastEvent == Sent({ input: Clean(junk), obs: SentOk }) and s.hub.queue == Set(junk))
       .then(lookUp(1, "junk"))
@@ -87,7 +95,7 @@ module baselineScenarios {
 
   /// W17. Anyone can put a payload in a hub's queue.
   run thirdPartyPayloadIsQueuedTest =
-    init
+    initBaseline
       .then(thirdPartySubmitWith(garbage))
       .then(deliverSubmitFrom(ThirdPartyAddr, 0, garbage))
       .expect(tpAcks == Set((0, WAccepted)) and s.hub.queue == Set(garbage))
@@ -101,7 +109,7 @@ module baselineScenarios {
   /// realisation, refused for its expiry after the flush at 3, is in
   /// `realisedRunsTest`.
   run toldOkThenRefusedTest =
-    init
+    initBaseline
       .then(sendToHub(tight))
       .then(answerSubmitFrom(ShimAddr, 0, tight, WRefused(WExpiryTooTight)))
       .expect(s.wallet.log == [Sent({ input: Clean(tight), obs: SentOk })])
@@ -111,7 +119,7 @@ module baselineScenarios {
 
   /// K1b. The frame is never delivered. Nothing obliges the network to.
   run toldOkAndNeverDeliveredTest =
-    init
+    initBaseline
       .then(sendToHub(early))
       .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
       .expect(s.net == Set(submitMail(0, early)))
@@ -124,7 +132,7 @@ module baselineScenarios {
 
   /// K2a. Two polls, answered in order, delivered out of order.
   run repliesReorderedTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(ask("early"))
       .then(deliverLookup(1, "early"))
@@ -144,7 +152,7 @@ module baselineScenarios {
   /// K2b. The wallet sends published bytes again. The hub's memory of them
   /// went with the flush, so they are admitted and pending once more.
   run walletResendsPublishedTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(flush([early], Accepted))
       .then(lookUp(1, "early"))
@@ -161,7 +169,7 @@ module baselineScenarios {
   /// K2c. The same, done by a third party: the bytes are public once
   /// published, and submission is open to anyone.
   run thirdPartyResubmitsPublishedTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(flush([early], Accepted))
       .then(lookUp(1, "early"))
@@ -178,7 +186,7 @@ module baselineScenarios {
   /// K2d. The flush window: the queue is empty and the chain does not have
   /// the batch yet.
   run flushWindowTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(lookUp(1, "early"))
       .then(hubTake)
@@ -193,7 +201,7 @@ module baselineScenarios {
   /// K2e. The node rejects the transaction at flush. It was pending; now it
   /// is nowhere.
   run rejectedAtFlushTest =
-    init
+    initBaseline
       .then(submitTo(0, early))
       .then(lookUp(1, "early"))
       .then(flush([early], Rejected))
@@ -204,24 +212,16 @@ module baselineScenarios {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-}
 
-module byzHubScenarios {
-  import basicSpells.* from "../spells/basicSpells"
-  import types.* from "../types"
-  import wire.* from "../wire"
-  import indexer.* from "../indexer"
-  import abstractHub.* from "../abstractHub"
-  import shim.* from "../shim"
-  import state.* from "../state"
-  import configs.* from "../instances"
-  import protocol(CONFIG = byzHub).* from "../protocol"
+  // ------------------------------------------------------------------------
+  // A Byzantine hub (`byzHub`)
+  // ------------------------------------------------------------------------
 
   /// W16. A Byzantine hub serves a twin of the wallet's transaction at a
   /// height the chain has not reached. The shim checks the txid, which a twin
   /// shares, and nothing else: it serves both.
   run twinAtFalseHeightIsServedTest =
-    init
+    initByzHub
       .then(submitTo(0, early))
       .then(ask("early"))
       .then(hubReceiveWith(

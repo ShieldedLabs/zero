@@ -8,8 +8,8 @@
 #
 # Tiers:
 #   1  typecheck every file.
-#   2  quint test: the functional layer, the scripted runs, and each
-#      configuration's assumptions.
+#   2  quint test: the functional layer and the scripted runs, among them
+#      `liveInitsTest`, which starts from every named init.
 #   3  quint run: invariants. "holds" rows are the guarantees, on the
 #      configurations where they are claimed. "fails" rows are the known gaps
 #      and the guarantees under the Byzantine component they depend on; such a
@@ -71,11 +71,8 @@ finish() {
 }
 
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
-MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
-FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt tests/realisedRunsTest.qnt"
-INSTANCES="baseline byzHub byzIndexer"
-SCENARIOS="baselineScenarios byzHubScenarios"
-TRUST="byzHubTrust byzIndexerTrust"
+MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
+FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt tests/realisedRunsTest.qnt tests/scenariosTest.qnt tests/trustTest.qnt"
 
 fail() {
   echo "FAIL  $1"
@@ -98,13 +95,19 @@ run_tests() {
   fi
 }
 
-# simulate MAIN STEP MAX_STEPS ARGS...: one simulation of $samples traces; the
-# output is left in $out.
+# simulate CONFIG STEP MAX_STEPS ARGS...: one simulation of $samples traces
+# from CONFIG's named init; the output is left in $out.
 samples=$SAMPLES
 simulate() {
   main=$1 step=$2 steps=$3
   shift 3
-  out=$($QUINT run instances.qnt --backend="$BACKEND" --main="$main" --step="$step" \
+  case $main in
+    baseline) init=initBaseline ;;
+    byzHub) init=initByzHub ;;
+    byzIndexer) init=initByzIndexer ;;
+    *) init=none ;;
+  esac
+  out=$($QUINT run protocol.qnt --backend="$BACKEND" --main=protocol --init="$init" --step="$step" \
       --max-samples="$samples" --max-steps="$steps" --seed="$SEED" "$@" 2>&1)
 }
 
@@ -118,7 +121,7 @@ verdict() {
   esac
 }
 
-# holds MAIN INVARIANT...: all of them, together, under `step`.
+# holds CONFIG INVARIANT...: all of them, together, under `step`.
 holds() {
   main=$1
   shift
@@ -137,7 +140,7 @@ holds() {
   esac
 }
 
-# fails MAIN STEP MAX_STEPS INVARIANT [TRACES]: violated in some trace of STEP.
+# fails CONFIG STEP MAX_STEPS INVARIANT [TRACES]: violated in some trace of STEP.
 fails() {
   samples=${5:-$SAMPLES}
   simulate "$1" "$2" "$3" --invariant="$4"
@@ -168,7 +171,7 @@ before_dashes() {
   done
 }
 
-# reaches MAIN STEP MAX_STEPS WITNESS... -- INVARIANT...: every witness is
+# reaches CONFIG STEP MAX_STEPS WITNESS... -- INVARIANT...: every witness is
 # reached in at least one trace of STEP, and no invariant is violated on the
 # way.
 reaches() {
@@ -251,7 +254,7 @@ typecheck() {
 }
 
 echo "---- 1 typecheck"
-for file in $SPELLS $MODULES $FUNCTIONAL tests/scenariosTest.qnt tests/trustTest.qnt; do
+for file in $SPELLS $MODULES $FUNCTIONAL; do
   job typecheck "$file"
 done
 finish
@@ -262,15 +265,6 @@ fi
 echo "---- 2 tests"
 for file in $SPELLS $FUNCTIONAL; do
   job run_tests "$file"
-done
-for module in $SCENARIOS; do
-  job run_tests tests/scenariosTest.qnt "$module"
-done
-for module in $TRUST; do
-  job run_tests tests/trustTest.qnt "$module"
-done
-for module in $INSTANCES; do
-  job run_tests instances.qnt "$module"
 done
 finish
 

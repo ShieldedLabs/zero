@@ -12,7 +12,7 @@
 ///
 /// - Roles. The shim and the hub run in enclaves and are honest in the
 ///   baseline. The shim is honest in every configuration; the hub and its
-///   indexer can each be made Byzantine through `ROLES`. A Byzantine
+///   indexer can each be made Byzantine through `cfg.roles`. A Byzantine
 ///   component draws its transitions from a wider relation and is not marked
 ///   in any other way.
 /// - Network. Frames may be lost, duplicated, delayed and reordered. They
@@ -44,56 +44,674 @@ module protocol {
   import indexer.* from "./indexer"
   import abstractHub.* from "./abstractHub"
   import shim.* from "./shim"
-  import state.* from "./state"
-  import properties.* from "./properties"
+
+  // ========================================================================
+  // Transactions and configurations
+  // ========================================================================
 
   // ------------------------------------------------------------------------
-  // Constants
+  // Transactions
+  // ------------------------------------------------------------------------
+  //
+  // The expiries are set against the hub specification's schedule; the
+  // protocol does not read them.
+
+  pure def orchard(id: str, created: Height, expiry: Height): Payload =
+    { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, oversize: false }
+
+  /// Two migrations from supported wallets, built at heights 2 and 4.
+  pure val early = orchard("early", 2, 9)
+  pure val late = orchard("late", 4, 11)
+  /// A migration whose wallet set its expiry tighter than the supported floor.
+  pure val tight = orchard("tight", 2, 5)
+  /// Bytes the shim cannot parse and neither can a hub: no txid, no expiry.
+  pure val junk: Payload =
+    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+  /// A transaction that is not a migration.
+  pure val plain: Payload =
+    { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: PassThrough, oversize: false }
+  /// Other bytes with the txid of `early`.
+  pure val earlyTwin = { ...early, id: "early-twin" }
+  /// The third party's own payload.
+  pure val garbage: Payload =
+    { id: "garbage", txid: Some("garbage"), created: 1, expiry: None, class: OrchardTouching, oversize: false }
+
+  // ------------------------------------------------------------------------
+  // Configurations
   // ------------------------------------------------------------------------
 
-  /// The configuration. It is one record so that a configuration is a value
-  /// that can be named, derived from another and shared between the module
-  /// that simulates it and the modules that script runs against it. The names
+  pure val allHonest: Roles = { hub: Honest, indexer: Honest }
+
+  /// One hub, the mixnet transport, every component honest.
+  pure val baseline: Config = {
+    payloads: Set(early, late, tight, junk, plain),
+    twins: Set(earlyTwin),
+    tpPayloads: Set(garbage),
+    maxRequests: 3,
+    roles: allHonest,
+  }
+
+  // One Byzantine component at a time.
+  pure val byzHub = { ...baseline, roles: { ...allHonest, hub: Byzantine } }
+  pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
+
+  // ========================================================================
+  // The system
+  //
+  // The whole system as one value: the components' states, the network
+  // between them, and what each outside party has seen. Nothing here decides
+  // anything: these functions put a component's output where it goes and
+  // derive the views the properties are stated over.
+  // ========================================================================
+
+  // ------------------------------------------------------------------------
+  // The system
+  // ------------------------------------------------------------------------
+
+  type Mail = Envelope[Addr, Msg]
+  type Net = Soup[Addr, Msg]
+
+  /// The wallet: the answers it has been given, in the order it got them, and
+  /// how many requests of each kind it has made.
+  type Wallet = { log: List[WalletEvent], sends: int, gets: int }
+
+  /// The third party: a client of the hub's public address that is not the
+  /// shim. `txids` are the transaction ids it has learned out of band; `own`
+  /// are payloads of its own making.
+  type ThirdParty = { txids: Set[TxId], own: Set[Payload], nextNonce: Nonce, requests: int }
+
+  /// - `hub`: the hub as the protocol sees it (`abstractHub.qnt`).
+  /// - `operator`: every transaction the shim has handed the operator's
+  ///   indexer. The operator is assumed to publish nothing itself.
+  /// - `disclosed`: payloads a Byzantine component has revealed. It is written
+  ///   by the disclosure step and by nothing else.
+  type System = {
+    indexer: IndexerState,
+    hub: AHub,
+    shim: ShimState,
+    net: Net,
+    wallet: Wallet,
+    operator: Set[Payload],
+    thirdParty: ThirdParty,
+    disclosed: Set[Payload],
+  }
+
+  /// The system at rest: the chain and the hub empty, nothing sent. The
+  /// protocol has no chain height, and the indexer's stays at 0.
+  pure def initialSystem(config: Config): System = {
+    indexer: initialIndexer(0),
+    hub: emptyAHub,
+    shim: initialShim,
+    net: Set(),
+    wallet: { log: [], sends: 0, gets: 0 },
+    operator: Set(),
+    thirdParty: { txids: Set(), own: config.tpPayloads, nextNonce: 0, requests: 0 },
+    disclosed: Set(),
+  }
+
+  /// What an observer of the run has recorded. It is not protocol state: no
+  /// component reads it, and it is derived at every step from the states
+  /// before and after, never from what a component reports about itself.
+  ///
+  /// - `everQueued`: every payload that has been in the hub's queue.
+  /// - `windows`: for each lookup the shim has sent, the answers that were
+  ///   true at the hub at some point while it waited.
+  type Audit = {
+    everQueued: Set[Payload],
+    windows: Nonce -> Set[LookupObs],
+  }
+
+  // ------------------------------------------------------------------------
+  // Views
+  // ------------------------------------------------------------------------
+
+  /// Where `txid` stands on the chain.
+  pure def onChain(s: System, txid: TxId): Inclusion =
+    s.indexer.inclusion(txid)
+
+  /// The answers the wallet has been given, without their order.
+  pure def events(s: System): Set[WalletEvent] =
+    s.wallet.log.indices().map(i => s.wallet.log[i])
+
+  /// The payloads the wallet has been told were diverted.
+  pure def toldOk(s: System): Set[Payload] =
+    s.events().fold(Set(), (acc, event) =>
+      match event {
+        | Sent(sent) =>
+          match sent.input {
+            | Clean(payload) => if (sent.obs == SentOk) acc.union(Set(payload)) else acc
+            | _ => acc
+          }
+        | _ => acc
+      })
+
+  /// The submissions `client` has addressed to the hub, as (nonce, payload).
+  pure def submissions(s: System, client: Addr): Set[(Nonce, Payload)] =
+    s.net.fold(Set(), (acc, mail) =>
+      match mail.msg {
+        | Submit(submit) =>
+          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((submit.nonce, submit.payload)))
+          else acc
+        | _ => acc
+      })
+
+  /// The acks the hub has sent `client`, as (nonce, ack).
+  pure def acks(s: System, client: Addr): Set[(Nonce, WireAck)] =
+    s.net.fold(Set(), (acc, mail) =>
+      match mail.msg {
+        | Ack(ack) =>
+          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((ack.nonce, ack.ack)))
+          else acc
+        | _ => acc
+      })
+
+  /// The payloads the hub has acknowledged as accepted, to any client.
+  pure def acked(s: System): Set[Payload] =
+    Set(ShimAddr, ThirdPartyAddr).map(client =>
+      tuples(s.submissions(client), s.acks(client))
+        .filter(((submit, ack)) => submit._1 == ack._1 and ack._2 == WAccepted)
+        .map(((submit, _)) => submit._2)
+    ).flatten()
+
+  /// The lookups `client` has addressed to the hub, as (nonce, txid).
+  pure def lookups(s: System, client: Addr): Set[(Nonce, TxId)] =
+    s.net.fold(Set(), (acc, mail) =>
+      match mail.msg {
+        | Lookup(lookup) =>
+          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((lookup.nonce, lookup.txid)))
+          else acc
+        | _ => acc
+      })
+
+  /// The lookup replies the hub has addressed to `client`, as (nonce, reply).
+  pure def replies(s: System, client: Addr): Set[(Nonce, WireReply)] =
+    s.net.fold(Set(), (acc, mail) =>
+      match mail.msg {
+        | LookupReply(reply) =>
+          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((reply.nonce, reply.reply)))
+          else acc
+        | _ => acc
+      })
+
+  /// The transaction bodies in lookup replies addressed to `client`.
+  pure def repliedBodies(s: System, client: Addr): Set[Payload] =
+    s.replies(client).fold(Set(), (acc, reply) =>
+      match reply._2 {
+        | WFound(found) =>
+          match found.body {
+            | Some(payload) => acc.union(Set(payload))
+            | None => acc
+          }
+        | _ => acc
+      })
+
+  // ------------------------------------------------------------------------
+  // What each party knows
+  // ------------------------------------------------------------------------
+
+  /// The transaction ids the third party knows: those it learned out of band
+  /// and everything the chain has made public.
+  pure def tpTxids(s: System): Set[TxId] =
+    s.thirdParty.txids.union(s.indexer.txs.keys())
+
+  /// The payloads the third party did not make and yet has: the bodies of
+  /// replies sent to it, whatever reached the operator, and whatever a
+  /// Byzantine component disclosed. The chain is left out on purpose: what is
+  /// published is public.
+  ///
+  /// This is derived from what the third party can observe. Nothing updates it
+  /// when a transaction is published, so a property over it constrains what
+  /// the hub puts in its replies.
+  pure def tpLearned(s: System): Set[Payload] =
+    s.repliedBodies(ThirdPartyAddr).union(s.operator).union(s.disclosed).exclude(s.thirdParty.own)
+
+  /// Every payload the third party has: what it learned, what the chain
+  /// published, and its own.
+  pure def tpPayloads(s: System): Set[Payload] =
+    s.tpLearned().union(s.indexer.published()).union(s.thirdParty.own)
+
+  /// The payloads the wallet has handed the shim: every send is answered at
+  /// once.
+  pure def sentByWallet(s: System): Set[Payload] =
+    s.events().fold(Set(), (acc, event) =>
+      match event {
+        | Sent(done) =>
+          match done.input {
+            | Clean(payload) => acc.union(Set(payload))
+            | _ => acc
+          }
+        | _ => acc
+      })
+
+  /// The payloads addressed to the hub by anyone: what it has received or may
+  /// yet receive.
+  pure def seenByHub(s: System): Set[Payload] =
+    Set(ShimAddr, ThirdPartyAddr).map(client => s.submissions(client).map(submit => submit._2)).flatten()
+
+  /// What the Byzantine components, taken together, are able to reveal.
+  pure def disclosable(s: System, roles: Roles): Set[Payload] =
+    (if (roles.indexer == Byzantine) s.indexer.offered else Set())
+      .union(if (roles.hub == Byzantine) s.seenByHub() else Set())
+
+  // ------------------------------------------------------------------------
+  // Putting outputs where they go
+  // ------------------------------------------------------------------------
+
+  pure def logged(s: System, event: WalletEvent): System =
+    { ...s, wallet: { ...s.wallet, log: s.wallet.log.append(event) } }
+
+  pure def posted(s: System, mails: Set[Mail]): System =
+    { ...s, net: s.net.sendAll(mails) }
+
+  /// The system after the shim took `result`. `via` is the nonce of the frame
+  /// that was delivered to it, if the step was a delivery: it is recorded with
+  /// a lookup answer so the answer can be traced to the reply that gave it.
+  pure def shimStepped(s: System, result: ShimResult, via: Option[Nonce]): System =
+    val stepped = { ...s, shim: result.state }
+    match result.out {
+      | ForwardOutput(payload) =>
+        { ...stepped, operator: stepped.operator.union(Set(payload)) }
+          .logged(Sent({ input: Clean(payload), obs: SentToOperator }))
+      | DivertedOutput(diverted) =>
+        stepped.posted(Set({ src: ShimAddr, dst: HubAddr, msg: diverted.frame }))
+          .logged(Sent({ input: Clean(diverted.payload), obs: diverted.told }))
+      | SendDoneOutput(done) => stepped.logged(Sent(done))
+      | LookupSentOutput(frame) => stepped.posted(Set({ src: ShimAddr, dst: HubAddr, msg: frame }))
+      | LookupDoneOutput(done) =>
+        stepped.logged(Got({ query: done.query, obs: done.result, via: via }))
+      | NoShimOutput => stepped
+      | ShimErrorOutput(_) => stepped
+    }
+
+  /// The system after the hub answered `answer` to the request `mail`. The
+  /// reply goes back to its sender under its nonce.
+  pure def hubReplied(s: System, mail: Mail, answer: AAnswer): System =
+    val nonce = match mail.msg {
+      | Submit(submit) => submit.nonce
+      | Lookup(lookup) => lookup.nonce
+      | _ => 0
+    }
+    val msg = match answer.reply {
+      | AAck(ack) => Ack({ nonce: nonce, ack: ack })
+      | AWire(reply) => LookupReply({ nonce: nonce, reply: reply })
+    }
+    { ...s, hub: answer.hub }.posted(Set({ src: HubAddr, dst: mail.src, msg: msg }))
+
+  /// The request a frame carries. `answer` is what the hub's indexer would say
+  /// to a lookup. Reply frames are not requests and give nothing.
+  pure def requestOf(msg: Msg, answer: IndexerAnswer): Set[ARequest] =
+    match msg {
+      | Submit(submit) => Set(ASubmit(submit.payload))
+      | Lookup(lookup) => Set(ALookup({ txid: lookup.txid, answer: answer }))
+      | _ => Set()
+    }
+
+  /// The wallet makes one more request of a kind.
+  pure def countSend(s: System): System =
+    { ...s, wallet: { ...s.wallet, sends: s.wallet.sends + 1 } }
+
+  pure def countGet(s: System): System =
+    { ...s, wallet: { ...s.wallet, gets: s.wallet.gets + 1 } }
+
+  /// The third party sends `msg` to the hub, under a nonce of its own.
+  pure def thirdPartySent(s: System, msg: Msg): System =
+    { ...s,
+      thirdParty: { ...s.thirdParty,
+        nextNonce: s.thirdParty.nextNonce + 1,
+        requests: s.thirdParty.requests + 1,
+      },
+    }.posted(Set({ src: ThirdPartyAddr, dst: HubAddr, msg: msg }))
+
+  // ========================================================================
+  // Properties
+  //
+  // What a wallet can rely on, what it cannot, and what must be reachable.
+  // Every definition is a pure predicate over the system and the audit
+  // record. Three classes, kept apart: guarantees, invariants claimed under
+  // stated trust assumptions; known gaps, invariants a wallet might hope for
+  // that fail even when every component is honest; witnesses, states that
+  // must be reachable. A predicate reads the system and the audit record, and
+  // the audit record is derived from consecutive states by `advance`, never
+  // from what a component says about itself.
+  // ========================================================================
+
+  // ------------------------------------------------------------------------
+  // The audit record
+  // ------------------------------------------------------------------------
+
+  /// The true answer to a lookup for `query` at the hub, read off its
+  /// queue and the chain. The queue comes first, as it does in the hub.
+  ///
+  /// `NotFound` is the true answer for a transaction that is with a flush and
+  /// not yet on the chain. That window is part of the lookup contract. The
+  /// implementation says so (`zeronym/hub/src/server.rs`, on `Hub::lookup`):
+  ///
+  /// > Note the flush-in-flight gap: `flush()` drains the queue before
+  /// > `broadcast_batch` has reached the indexer, so a lookup in that window
+  /// > gets a queue miss then an indexer NOT_FOUND for a transaction it was
+  /// > told height-0 about seconds earlier. Wallets poll on multi-second
+  /// > intervals and tolerate a transient NOT_FOUND; a resubmit is harmless
+  /// > (deduped pre-flush, already-known post-flush). Holding entries until
+  /// > broadcast returns would extend how long the hub remembers a txid, which
+  /// > is the wrong trade.
+  ///
+  /// It is also the true answer for a queued payload that does not parse.
+  pure def truth(s: System, query: TxId): LookupObs =
+    if (s.hub.queue.exists(payload => payload.txid == Some(query)))
+      Pending
+    else if (s.indexer.txs.keys().contains(query))
+      val tx = s.indexer.txs.get(query)
+      Tx({ payload: tx.payload, height: answerHeight(tx.at) })
+    else
+      NotFound
+
+  pure val initialAudit: Audit = { everQueued: Set(), windows: Map() }
+
+  /// The audit record after one step, from the states before and after it.
+  pure def advance(audit: Audit, pre: System, post: System): Audit =
+    // The lookups the shim is waiting on, or was until this step, each widen
+    // their window by what is true at the hub.
+    val waiting = pre.shim.waiters.keys().union(post.shim.waiters.keys())
+    val windows = post.lookups(ShimAddr)
+      .filter(lookup => waiting.contains(lookup._1))
+      .fold(audit.windows, (acc, lookup) =>
+        val seen = if (acc.keys().contains(lookup._1)) acc.get(lookup._1) else Set()
+        acc.put(lookup._1, seen.union(Set(truth(post, lookup._2)))))
+    { everQueued: audit.everQueued.union(post.hub.queue), windows: windows }
+
+  // ------------------------------------------------------------------------
+  // Guarantees
+  // ------------------------------------------------------------------------
+
+  /// G1. The operator sees no migration: everything the shim hands it is a
+  /// pass-through transaction.
+  pure def operatorBlindIn(s: System): bool =
+    s.operator.forall(payload => payload.class == PassThrough)
+
+  /// G2. A transaction's bytes do not reach a third party before the chain has
+  /// published them. Everything the third party has learned is on the chain,
+  /// or was a pass-through transaction the operator was given.
+  pure def queuedBytesConfidentialIn(s: System): bool =
+    s.tpLearned().forall(payload =>
+      or {
+        s.indexer.published().contains(payload),
+        s.operator.contains(payload) and payload.class == PassThrough,
+      })
+
+  /// G3. A transaction served to the wallet has the txid the wallet asked for.
+  /// That is all: it need not be the bytes the wallet sent (a twin passes),
+  /// and its height is whatever the hub said.
+  pure def txidAuthenticityIn(s: System): bool =
+    s.events().forall(event =>
+      match event {
+        | Got(got) =>
+          match got.obs {
+            | Tx(tx) => tx.payload.txid == Some(got.query)
+            | _ => true
+          }
+        | _ => true
+      })
+
+  /// G4. Every lookup answer other than `Unavailable` was true, at the hub
+  /// that gave it, at some point between the request and the answer.
+  ///
+  /// It is a statement about one request. It does not say that successive
+  /// answers agree; see `statusNeverRegresses`.
+  pure def lookupValidityPerHubIn(s: System, audit: Audit): bool =
+    s.events().forall(event =>
+      match event {
+        | Got(got) =>
+          or {
+            got.obs == Unavailable,
+            match got.via {
+              | Some(nonce) =>
+                audit.windows.keys().contains(nonce) and audit.windows.get(nonce).contains(got.obs)
+              | None => false
+            },
+          }
+        | _ => true
+      })
+
+  /// G7. Structural sanity: every nonce in use was minted.
+  pure def wellFormedIn(s: System): bool =
+    and {
+      s.shim.waiters.keys().forall(nonce => nonce < s.shim.nextNonce),
+      s.net.forall(mail =>
+        match mail.msg {
+          | Submit(submit) =>
+            submit.nonce < (if (mail.src == ShimAddr) s.shim.nextNonce else s.thirdParty.nextNonce)
+          | Lookup(lookup) =>
+            lookup.nonce < (if (mail.src == ShimAddr) s.shim.nextNonce else s.thirdParty.nextNonce)
+          | _ => true
+        }),
+    }
+
+  /// G8. An accepted ack from the hub is for a payload it had queued by the
+  /// time it acked. It holds whether or not anyone waits for the ack.
+  pure def ackImpliesQueuedIn(s: System, audit: Audit): bool =
+    s.acked().subseteq(audit.everQueued)
+
+  // ------------------------------------------------------------------------
+  // Known gaps
+  // ------------------------------------------------------------------------
+
+  /// K2. What a wallet sees of one transaction never goes backwards: once
+  /// served, it is not later pending or missing; once pending, it is not later
+  /// missing. This does not hold. Replies are reordered; a published
+  /// transaction can be queued again; a flush empties the queue before the
+  /// chain has the batch; and the node can reject at flush.
+  pure def statusNeverRegressesIn(s: System): bool =
+    val log = s.wallet.log
+    tuples(log.indices(), log.indices()).forall(((i, j)) =>
+      i < j implies
+        match log[i] {
+          | Got(earlier) =>
+            match log[j] {
+              | Got(later) =>
+                earlier.query != later.query or
+                  match earlier.obs {
+                    | Tx(_) =>
+                      match later.obs {
+                        | Tx(_) => true
+                        | Unavailable => true
+                        | _ => false
+                      }
+                    | Pending => later.obs != NotFound
+                    | _ => true
+                  }
+              | _ => true
+            }
+          | _ => true
+        })
+
+  // K1. "Told ok" promises nothing about the hub. It is stated as two
+  // reachable states, not as a violated invariant, because the invariant is
+  // false on the ordinary success path too: the wallet is told before the hub
+  // has the frame.
+
+  /// The nonces of the shim's submissions of `payload`.
+  pure def shimSubmissionsOf(s: System, payload: Payload): Set[Nonce] =
+    s.submissions(ShimAddr).filter(submit => submit._2 == payload).map(submit => submit._1)
+
+  /// K1a. The wallet was told ok; every submission that reached the hub was
+  /// refused; the hub never queued the payload.
+  pure def wToldRefusedEverywhereIn(s: System, audit: Audit): bool =
+    s.toldOk().exists(payload =>
+      val submitted = s.shimSubmissionsOf(payload)
+      and {
+        not(audit.everQueued.contains(payload)),
+        submitted != Set(),
+        submitted.forall(nonce => s.acks(ShimAddr).exists(ack => ack._1 == nonce and ack._2 != WAccepted)),
+      })
+
+  /// K1b. The wallet was told ok; the hub has answered none of the frames and
+  /// never queued the payload. The network may leave it so forever.
+  pure def wToldNeverDeliveredIn(s: System, audit: Audit): bool =
+    s.toldOk().exists(payload =>
+      and {
+        not(audit.everQueued.contains(payload)),
+        s.shimSubmissionsOf(payload).forall(nonce => not(s.acks(ShimAddr).exists(ack => ack._1 == nonce))),
+      })
+
+  // ------------------------------------------------------------------------
+  // Witnesses
+  // ------------------------------------------------------------------------
+
+  pure def wasGiven(s: System, isIt: LookupObs => bool): bool =
+    s.events().exists(event =>
+      match event {
+        | Got(got) => isIt(got.obs)
+        | _ => false
+      })
+
+  /// W1. The wallet is told its transaction is pending.
+  pure def wPendingIn(s: System): bool =
+    s.wasGiven(obs => obs == Pending)
+
+  /// W2. The wallet is served its transaction from the mempool.
+  pure def wTxInMempoolIn(s: System): bool =
+    s.wasGiven(obs =>
+      match obs {
+        | Tx(tx) => tx.height == AtZero
+        | _ => false
+      })
+
+  /// W3. The wallet is served its transaction from a block.
+  pure def wTxMinedIn(s: System): bool =
+    s.wasGiven(obs =>
+      match obs {
+        | Tx(tx) => tx.height == AtMined
+        | _ => false
+      })
+
+  /// W8. The accepted disclosure: a third party that knows a txid learns that
+  /// it is queued at the hub. The hub withholds the bytes; it does not withhold
+  /// the fact. The implementation leaves this open on purpose
+  /// (`zeronym/hub/src/server.rs`, in `Hub::lookup`):
+  ///
+  /// > What this does NOT close: the 200-versus-NotFound distinction still
+  /// > discloses that a given txid is queued here. Closing that too means
+  /// > answering NotFound, which costs a wallet the ability to tell "pending"
+  /// > from "never seen". That is a product decision, not a code one, and it
+  /// > is left open deliberately.
+  pure def wQueuedDisclosedIn(s: System): bool =
+    tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
+      lookup._1 == reply._1 and reply._2 == WFound({ body: None, height: AtZero }))
+
+  /// W9. The hub holds a payload it cannot parse; the wallet that sent it asks
+  /// for it and is told not found. An entry without a txid can never
+  /// be hit.
+  pure def wUnparseableMissedIn(s: System): bool =
+    tuples(s.events(), s.lookups(ShimAddr)).exists(((event, lookup)) =>
+      match event {
+        | Got(got) =>
+          and {
+            got.obs == NotFound,
+            got.via == Some(lookup._1),
+            s.hub.queue.exists(payload => payload.txid == None and walletTxid(payload) == got.query),
+          }
+        | _ => false
+      })
+
+  /// W16a. The wallet is served a twin of what it sent: other bytes, same txid.
+  pure def wTwinServedIn(s: System): bool =
+    s.wasGiven(obs =>
+      match obs {
+        | Tx(tx) => s.toldOk().exists(sent => areTwins(sent, tx.payload))
+        | _ => false
+      })
+
+  /// W16b. The wallet is served a transaction at a height that cannot be
+  /// true: the chain does not have it, or has it in the mempool and the
+  /// height says mined, or the height is not where it was mined.
+  pure def wFalseHeightServedIn(s: System): bool =
+    s.wasGiven(obs =>
+      match obs {
+        | Tx(tx) =>
+          val at = match tx.payload.txid {
+            | Some(txid) => s.onChain(txid)
+            | None => Absent
+          }
+          or { at == Absent, tx.height == AtOther, tx.height == AtMined and at != Mined }
+        | _ => false
+      })
+
+  /// W17. The hub has queued a payload of the third party's own making.
+  pure def wThirdPartyPayloadQueuedIn(s: System): bool =
+    s.hub.queue.intersect(s.thirdParty.own) != Set()
+
+  // ------------------------------------------------------------------------
+  // Non-vacuity: the antecedent of each guarantee is reachable
+  // ------------------------------------------------------------------------
+
+  pure def vOperatorBlindIn(s: System): bool =
+    s.operator != Set()
+
+  pure def vQueuedBytesConfidentialIn(s: System): bool =
+    s.tpLearned() != Set()
+
+  pure def vTxidAuthenticityIn(s: System): bool =
+    s.wasGiven(obs =>
+      match obs {
+        | Tx(_) => true
+        | _ => false
+      })
+
+  pure def vLookupValidityPerHubIn(s: System): bool =
+    and {
+      s.wPendingIn(),
+      s.vTxidAuthenticityIn(),
+      s.wasGiven(obs => obs == NotFound),
+    }
+
+  pure def vAckImpliesQueuedIn(s: System): bool =
+    s.acked() != Set()
+
+  // ========================================================================
+  // The machine
+  // ========================================================================
+
+
+  // ------------------------------------------------------------------------
+  // Configuration
+  // ------------------------------------------------------------------------
+
+  /// The configuration. Written by `initWith` and by nothing else. The names
   /// below are its fields, and are what the rest of the module uses.
-  const CONFIG: Config
+  var cfg: Config
 
   /// The transactions a wallet may send.
-  pure val PAYLOADS = CONFIG.payloads
+  def PAYLOADS = cfg.payloads
   /// Twins of wallet transactions: other bytes with the same txid. No honest
   /// party sends one.
-  pure val TWINS = CONFIG.twins
+  def TWINS = cfg.twins
   /// Payloads of the third party's own making.
-  pure val TP_PAYLOADS = CONFIG.tpPayloads
+  def TP_PAYLOADS = cfg.tpPayloads
 
   /// The bound of the model: the wallet makes at most `MAX_REQUESTS` sends
   /// and as many lookups, as does the third party.
-  pure val MAX_REQUESTS = CONFIG.maxRequests
+  def MAX_REQUESTS = cfg.maxRequests
 
-  pure val ROLES = CONFIG.roles
+  def ROLES = cfg.roles
 
   /// Every payload that exists. A Byzantine component builds its lies from it.
-  pure val UNIVERSE = PAYLOADS.union(TWINS).union(TP_PAYLOADS)
+  pure def universeOf(c: Config): Set[Payload] = c.payloads.union(c.twins).union(c.tpPayloads)
+  def UNIVERSE = universeOf(cfg)
   /// What a wallet may send.
-  pure val SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
+  def SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
   /// Every transaction id there is.
-  pure val TXIDS = txidsOf(UNIVERSE)
+  def TXIDS = txidsOf(UNIVERSE)
 
-  // ------------------------------------------------------------------------
-  // Assumptions
-  // ------------------------------------------------------------------------
-  //
-  // A named value, so that an instance's `assumptionsTest` can assert it: the
-  // simulator does not enforce `assume`.
-
-  /// Payloads are told apart by their bytes; a twin is a twin of something a
-  /// wallet sends; the third party's payloads are its own.
-  pure val payloadsWellFormed = and {
-    UNIVERSE.size() == UNIVERSE.map(payload => payload.id).size(),
-    PAYLOADS.intersect(TP_PAYLOADS) == Set(),
-    TWINS.forall(twin => PAYLOADS.exists(payload => areTwins(twin, payload))),
-  }
-
-  assume _ = payloadsWellFormed
+  /// The standing assumption, checked by every named init: payloads are told
+  /// apart by their bytes; a twin is a twin of something a wallet sends; the
+  /// third party's payloads are its own.
+  pure def payloadsWellFormed(c: Config): bool =
+    val universe = universeOf(c)
+    and {
+      universe.size() == universe.map(payload => payload.id).size(),
+      c.payloads.intersect(c.tpPayloads) == Set(),
+      c.twins.forall(twin => c.payloads.exists(payload => areTwins(twin, payload))),
+    }
 
   // ------------------------------------------------------------------------
   // State
@@ -104,30 +722,34 @@ module protocol {
   /// The observer's record of the run. No step reads it.
   var audit: Audit
 
-  /// The only writer of the variables.
+  /// The only writer of the variables after `initWith`.
   action commit(post: System): bool = all {
+    cfg' = cfg,
     s' = post,
     audit' = advance(audit, s, post),
   }
 
-  pure val INITIAL = initialSystem(CONFIG)
-
-  action init = all {
-    s' = INITIAL,
+  action initWith(c: Config): bool = all {
+    cfg' = c,
+    s' = initialSystem(c),
     audit' = initialAudit,
   }
+
+  action initBaseline = all { payloadsWellFormed(baseline), initWith(baseline) }
+  action initByzHub = all { payloadsWellFormed(byzHub), initWith(byzHub) }
+  action initByzIndexer = all { payloadsWellFormed(byzIndexer), initWith(byzIndexer) }
 
   // ------------------------------------------------------------------------
   // Roles
   // ------------------------------------------------------------------------
 
-  pure def hubAnswers(h: AHub, request: ARequest): Set[AAnswer] =
+  def hubAnswers(h: AHub, request: ARequest): Set[AAnswer] =
     match ROLES.hub {
       | Honest => honestAnswers(h, request)
       | Byzantine => byzantineAnswers(h, request, UNIVERSE)
     }
 
-  pure def indexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
+  def indexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
     match ROLES.indexer {
       | Honest => heightlessIndexerResults(state, input)
       | Byzantine => byzIndexerResults(state, input, UNIVERSE)
@@ -135,7 +757,7 @@ module protocol {
 
   /// What the indexer may answer a hub's lookup for the transaction `msg`
   /// asks about. A frame that is not a lookup needs no answer.
-  pure def lookupAnswers(state: IndexerState, msg: Msg): Set[IndexerAnswer] =
+  def lookupAnswers(state: IndexerState, msg: Msg): Set[IndexerAnswer] =
     match msg {
       | Lookup(lookup) =>
         indexerResults(state, LookupIInput(lookup.txid)).fold(Set(), (acc, result) =>
