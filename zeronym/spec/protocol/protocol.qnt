@@ -123,8 +123,6 @@ module protocol {
   /// - `hub`: the hub as the protocol sees it (`abstractHub.qnt`).
   /// - `operator`: every transaction the shim has handed the operator's
   ///   indexer. The operator is assumed to publish nothing itself.
-  /// - `disclosed`: payloads a Byzantine component has revealed. It is written
-  ///   by the disclosure step and by nothing else.
   type System = {
     indexer: IndexerState,
     hub: AHub,
@@ -133,7 +131,6 @@ module protocol {
     wallet: Wallet,
     operator: Set[Payload],
     thirdParty: ThirdParty,
-    disclosed: Set[Payload],
   }
 
   /// The system at rest: the chain and the hub empty, nothing sent. The
@@ -146,7 +143,6 @@ module protocol {
     wallet: { log: [], sends: 0, gets: 0 },
     operator: Set(),
     thirdParty: { txids: Set(), own: config.tpPayloads, nextNonce: 0, requests: 0 },
-    disclosed: Set(),
   }
 
   /// What an observer of the run has recorded. It is not protocol state: no
@@ -255,15 +251,15 @@ module protocol {
     s.thirdParty.txids.union(s.indexer.txs.keys())
 
   /// The payloads the third party did not make and yet has: the bodies of
-  /// replies sent to it, whatever reached the operator, and whatever a
-  /// Byzantine component disclosed. The chain is left out on purpose: what is
-  /// published is public.
+  /// replies sent to it, and whatever reached the operator. The chain is left
+  /// out on purpose: what is published is public. A Byzantine hub or indexer
+  /// leaks through a lookup reply; there is no other disclosure.
   ///
   /// This is derived from what the third party can observe. Nothing updates it
   /// when a transaction is published, so a property over it constrains what
   /// the hub puts in its replies.
   pure def tpLearned(s: System): Set[Payload] =
-    s.repliedBodies(ThirdPartyAddr).union(s.operator).union(s.disclosed).exclude(s.thirdParty.own)
+    s.repliedBodies(ThirdPartyAddr).union(s.operator).exclude(s.thirdParty.own)
 
   /// Every payload the third party has: what it learned, what the chain
   /// published, and its own.
@@ -282,16 +278,6 @@ module protocol {
           }
         | _ => acc
       })
-
-  /// The payloads addressed to the hub by anyone: what it has received or may
-  /// yet receive.
-  pure def seenByHub(s: System): Set[Payload] =
-    Set(ShimAddr, ThirdPartyAddr).map(client => s.submissions(client).map(submit => submit._2)).flatten()
-
-  /// What the Byzantine components, taken together, are able to reveal.
-  pure def disclosable(s: System, roles: Roles): Set[Payload] =
-    (if (roles.indexer == Byzantine) s.indexer.offered else Set())
-      .union(if (roles.hub == Byzantine) s.seenByHub() else Set())
 
   // ------------------------------------------------------------------------
   // Putting outputs where they go
@@ -1044,24 +1030,6 @@ module protocol {
     },
   }
 
-  /// What a Byzantine component could still reveal.
-  def undisclosed: Set[Payload] =
-    s.disclosable(ROLES).exclude(s.disclosed)
-
-  /// A Byzantine component reveals a payload it has seen.
-  action byzDiscloseWith(payload: Payload): bool = all {
-    undisclosed.contains(payload),
-    commit({ ...s, disclosed: s.disclosed.union(Set(payload)) }),
-  }
-
-  action byzDisclose = all {
-    undisclosed != Set(),
-    {
-      nondet payload = oneOf(undisclosed)
-      byzDiscloseWith(payload)
-    },
-  }
-
   // ------------------------------------------------------------------------
   // Step
   // ------------------------------------------------------------------------
@@ -1071,10 +1039,9 @@ module protocol {
     shimLookupTimeout, hubLose,
   }
 
-  /// A step by someone outside the protocol: the third party, or a Byzantine
-  /// component revealing what it has seen.
+  /// A step by someone outside the protocol: the third party.
   action outsiderStep = any {
-    thirdPartyLearnsTxid, thirdPartyLookup, thirdPartySubmit, byzDisclose,
+    thirdPartyLearnsTxid, thirdPartyLookup, thirdPartySubmit,
   }
 
   /// One step of the system.

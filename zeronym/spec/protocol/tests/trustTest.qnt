@@ -37,6 +37,8 @@ module trustTest {
       ))
       .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: Some(early), height: AtZero }))))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
+      // What it learned came in the body of a reply addressed to it.
+      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
   run hubServesQueuedBodyControlTest =
@@ -150,6 +152,8 @@ module trustTest {
       ))
       .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: Some(early), height: AtZero }))))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
+      // What it learned came in the body of a reply addressed to it.
+      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
   run indexerServesUnpublishedBodyControlTest =

@@ -140,6 +140,7 @@ definitions they justify.
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
+| Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed (C7): a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it, with its control |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
 | The hub's schedule in the protocol specification: its phases, tip, cadence, drain, crash and restart, flight time, and what read them there: G6a-G6c, the refusal witnesses W4, the requeue witnesses W5-W7, the offer, verdict, admission, refusal and drop records, the tip models | Moved: the protocol uses the abstract hub, which `hubTest` checks the real hub refines; the schedule is checked exhaustively in the hub specification. The protocol's pinned runs that need a real hub step are replayed through it in `realisedRunsTest` |
@@ -469,7 +470,9 @@ member of a finite set that contains it (F12):
 - **Byzantine indexer.** Any verdict, with the transaction relayed to the
   network or not. Any lookup answer built from a payload it was offered, one
   the chain published, or a twin of either. Any tip up to `MAX_HEIGHT`.
-- Any of them may disclose a payload it has seen (`byzDisclose`).
+- Neither discloses a payload except in a lookup reply. There is no separate
+  disclosure step: a Byzantine hub or indexer already leaks through a reply
+  (`hubServesQueuedBodyTest`, `indexerServesUnpublishedBodyTest`).
 
 A hub folds several indexer endpoints into one answer, and the folds are not
 symmetric: the tip is the maximum over endpoints, a lookup takes the first
@@ -528,7 +531,7 @@ it keeps with the shipped one are in `hubMachine.qnt`.
 | Id | Name | What it says |
 |---|---|---|
 | G1 | `operatorBlind` | Everything the shim hands the operator is a pass-through transaction |
-| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it, the operator's view and explicit disclosures; nothing updates it at publication |
+| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it and the operator's view; nothing updates it at publication |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true. It does not say that successive answers agree, or that hubs agree |
 | G6a | `offeredBeforeExpiry` | Every transaction a hub offers is offered with the mining margin to spare: whatever was admitted, on every attempt. About the margin left when the flush begins, not about acceptance. Claimed under a timely tip |
