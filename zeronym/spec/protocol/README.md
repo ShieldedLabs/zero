@@ -413,12 +413,14 @@ pure.
 | `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply`, `sizeOf` |
 | `indexer.qnt` | `indexer` | The chain and indexer as a relation: honest and Byzantine outputs, and their effect |
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
+| `abstractHub.qnt` | `abstractHub` | The hub as the protocol sees it: `AHub`, its honest and Byzantine answers, its internal moves |
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
 | `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, the run vocabulary |
 | `instances.qnt` | `configs`, then one module per configuration | The three configurations: `baseline`, `byzHub`, `byzIndexer` |
-| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14; A2-A3 in `hubTest.qnt` |
+| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14; A2-A3 and the abstraction lemma in `hubTest.qnt` |
+| `tests/realisedRunsTest.qnt` | `realisedRunsTest` | The hub inputs of each pinned run, replayed through the real hub |
 | `tests/scenariosTest.qnt` | one module per configuration used | Witnesses and pinned gap causes |
 | `tests/trustTest.qnt` | one module per Byzantine configuration | One run and one control per "required" cell |
 
@@ -711,6 +713,39 @@ refuses the same frame.
 The old A1, "a transaction's chain status never moves backwards", was an
 assumption about the environment and is true by construction of the chain
 model, so it is not stated.
+
+### The abstraction lemma
+
+`abstractHub.qnt` is the hub as the protocol sees it: the payloads it has
+queued, the payloads out with a flush, and its wire replies. It has no phase,
+tip or schedule. A submit is accepted (the payload joins the queue) or
+refused under one of the three codes; a lookup is a queue hit for a queued
+txid and the indexer's answer otherwise; and the internal moves are take,
+settle, give back what is kept, and lose everything. The Byzantine answers
+are anything, with any body from the universe, and queue the payload or not.
+
+Over the same `REACH` as A2 and A3, with lookups added, `hubTest` checks:
+
+| Test | What it says |
+|---|---|
+| `abstractionTest` | Every honest step of the real hub is an honest abstract step, or an error that changes nothing |
+| `byzantineAbstractionTest` | Every member of `byzHubResults` for a submit or a lookup is a Byzantine abstract step |
+| `realisesTest` | Each abstract move (accept, refuse, take, settle, a retryable verdict, give back, lose) has a concrete step that projects onto it |
+
+A temporary edit that makes `hub` ack a submission without queueing it fails
+`abstractionTest`.
+
+What the lemma transfers: an invariant that holds over the abstract hub, and
+reads only queue membership and wire replies, holds over the real hub with
+these parameters. That covers G2, G3, G4 and G8. What it does not transfer is
+reachability. The abstract hub answers where the real one is down, starting,
+stopped or stale, so a violation or a reached state shown over it may not
+happen. `tests/realisedRunsTest.qnt` closes that gap for the pinned runs: for
+K1a, K2 (a) to (e), W8, W9, W16, and each "required" run of the trust matrix,
+it replays the hub inputs of the run through the real hub function from a
+starting hub on the `baseline` schedule, each lie as a member of the
+Byzantine relation, and checks the replies and the final queue. K1b has no
+hub step.
 
 No liveness property is claimed: the network may lose everything, and nobody
 waits for an ack.

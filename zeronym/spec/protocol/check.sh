@@ -71,8 +71,8 @@ finish() {
 }
 
 SPELLS="spells/basicSpells.qnt spells/soup.qnt"
-MODULES="types.qnt wire.qnt indexer.qnt hub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
-FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt"
+MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt state.qnt properties.qnt protocol.qnt instances.qnt"
+FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt tests/realisedRunsTest.qnt"
 INSTANCES="baseline byzHub byzIndexer"
 SCENARIOS="baselineScenarios byzHubScenarios"
 TRUST="byzHubTrust byzIndexerTrust"

@@ -6,6 +6,8 @@ module hubTest {
   import basicSpells.* from "../spells/basicSpells"
   import types.* from "../types"
   import hub.* from "../hub"
+  import wire.* from "../wire"
+  import abstractHub.* from "../abstractHub"
 
   pure val PARAMS: HubParams = {
     flushInterval: 3,
@@ -383,4 +385,78 @@ module hubTest {
     assert(REACH.forall(state =>
       state.phase == Draining implies REACH_INPUTS.forall(input =>
         hub(state, input).state.queued().subseteq(state.queued().union(state.inFlight())))))
+
+  // ------------------------------------------------------------------------
+  // The abstraction lemma
+  // ------------------------------------------------------------------------
+
+  pure def project(state: HubState): AHub =
+    { queue: state.queued(), held: state.inFlight() }
+
+  pure def requestOf(input: HubInput): Option[ARequest] =
+    match input {
+      | SubmitHInput(submitted) => Some(ASubmit(submitted.payload))
+      | LookupHInput(lookup) => Some(ALookup({ txid: lookup.txid, answer: lookup.answer }))
+      | _ => None
+    }
+
+  pure def replyOf(output: HubOutput): Option[AReply] =
+    match output {
+      | AckOutput(ack) => Some(AAck(renderAck(ack.kind)))
+      | LookupReplyOutput(reply) => Some(AWire(render(reply.outcome)))
+      | _ => None
+    }
+
+  pure val LOOKUPS: Set[HubInput] =
+    Set(INotFound, IUnavailable, IFound({ body: Some(pA), height: 4 }))
+      .map(answer => LookupHInput({ nonce: 1, txid: "a", answer: answer }))
+      .union(Set(LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: 4 }) })))
+
+  /// An error changes nothing. A request is one of `answers`; anything else
+  /// is an internal move with no reply.
+  pure def isAbstracted(state: HubState, input: HubInput, result: HubResult, answers: (AHub, ARequest) => Set[AAnswer]): bool =
+    val before = state.project()
+    val after = result.state.project()
+    if (result.out.isError()) result.state == state
+    else match input.requestOf() {
+      | Some(request) =>
+        match result.out.replyOf() {
+          | Some(reply) => answers(before, request).contains({ hub: after, reply: reply })
+          | None => false
+        }
+      | None => result.out.replyOf() == None and isInternal(before, after)
+    }
+
+  /// Every step of the real hub from a reachable state is a step of the
+  /// abstract one, honest against honest and Byzantine against Byzantine.
+  run abstractionTest =
+    assert(REACH.forall(state =>
+      REACH_INPUTS.union(LOOKUPS).forall(input =>
+        isAbstracted(state, input, hub(state, input), honestAnswers))))
+
+  run byzantineAbstractionTest =
+    assert(REACH.forall(state =>
+      REACH_PAYLOADS.map(payload => submit(payload)).union(LOOKUPS).forall(input =>
+        byzHubResults(state, input, PAYLOADS, HEIGHTS).forall(result =>
+          isAbstracted(state, input, result, (h, request) => byzantineAnswers(h, request, PAYLOADS, HEIGHTS))))))
+
+  /// Each abstract move has a concrete step that projects onto it.
+  pure def realises(state: HubState, input: HubInput, move: AHub, reply: Option[AReply]): bool =
+    val result = hub(state, input)
+    and { not(result.out.isError()), result.state.project() == move, result.out.replyOf() == reply }
+
+  run realisesTest = all {
+    // accept, refuse
+    assert(realises(running(5), submit(pA), { queue: Set(pA), held: Set() }, Some(AAck(WAccepted)))),
+    assert(realises(draining, submit(pB), draining.project(), Some(AAck(WRefused(WQueueFull))))),
+    // take, settle, a retryable verdict that moves nothing
+    assert(realises(holding.after(TipHInput(6)), FlushDueHInput, holding.project().take(), None)),
+    assert(realises(flushing, verdict(pA, Accepted), flushing.project().settle(pA), None)),
+    assert(realises(flushing, verdict(pA, Retryable), flushing.project(), None)),
+    // give back what is kept: `pJunk` is held, `pA` was settled
+    val ending = flushing.after(verdict(pA, Accepted)).after(verdict(pJunk, Retryable))
+    assert(realises(ending, FlushDoneHInput, ending.project().giveBack(Set(pJunk)), None)),
+    // lose
+    assert(realises(holding, CrashHInput, emptyAHub, None)),
+  }
 }
