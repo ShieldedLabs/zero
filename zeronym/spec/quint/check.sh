@@ -294,8 +294,9 @@ echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
 BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub"
 
-# W8, W19, and the antecedents of G1 and G2. W19 is G2's reply-body branch,
-# which `vQueuedBytesConfidential` does not reach on its own.
+# The accepted disclosure, a third party served a published body, and the
+# antecedents of G1 and G2. The served body is G2's reply-body branch, which
+# `vQueuedBytesConfidential` does not reach on its own.
 job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyServedBody \
   vOperatorBlind vQueuedBytesConfidential \
@@ -308,7 +309,7 @@ job reaches baseline earlyLookupStep 40 \
   vLookupValidityPerHub \
   -- $BASELINE_HOLDS
 
-# W16, both halves.
+# A twin served, and a transaction served at a false height.
 job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \
   -- operatorBlind txidAuthenticity

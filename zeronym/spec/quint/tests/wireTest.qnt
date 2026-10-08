@@ -43,13 +43,13 @@ module wireTest {
 
   pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)
 
-  /// F1. Rendering an honest outcome and reading it back gives what the
+  /// Rendering an honest outcome and reading it back gives what the
   /// outcome means.
   run renderThenInterpretIsMeaningTest =
     assert(tuples(HONEST_OUTCOMES, QUERIES).forall(((outcome, query)) =>
       interpretReply(render(outcome), query) == meaning(outcome, query)))
 
-  /// F2. The documented collision: a queue hit and an indexer answer of
+  /// The documented collision: a queue hit and an indexer answer of
   /// "found, height 0, no body" are the same reply, though they mean different
   /// things. The wallet cannot tell them apart: it is told pending for both,
   /// so an indexer that answers that way for a transaction nobody holds makes
@@ -69,7 +69,7 @@ module wireTest {
       left != right implies render(left) != render(right))),
   }
 
-  /// F3. The shim serves a transaction only when its txid is the one asked
+  /// The shim serves a transaction only when its txid is the one asked
   /// for, and compares nothing else.
   run servedOnlyOnMatchingTxidTest = all {
     assert(tuples(REPLIES, QUERIES).forall(((reply, query)) =>
@@ -92,11 +92,11 @@ module wireTest {
       interpretReply(WFound({ body: Some(pJunk), height: height }), query) == NotFound)),
   }
 
-  /// F4. A hub error fails closed. It is never reported as not found.
+  /// A hub error fails closed. It is never reported as not found.
   run errorIsNeverNotFoundTest =
     assert(QUERIES.forall(query => interpretReply(WError, query) == Unavailable))
 
-  /// F10. A draining hub refuses under the queue-full code; a fresh admission
+  /// A draining hub refuses under the queue-full code; a fresh admission
   /// and a duplicate are one acceptance. Every refusal has its own code.
   run ackRenderingTest = all {
     assert(renderAck(Refused(HubDraining)) == WRefused(WQueueFull)),

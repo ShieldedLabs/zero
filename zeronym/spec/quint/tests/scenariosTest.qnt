@@ -33,7 +33,7 @@ module scenariosTest {
   // Witnesses
   // ------------------------------------------------------------------------
 
-  /// W1, W2, W3. A migration from send to mined, with the wallet polling.
+  /// A migration from send to mined, with the wallet polling.
   run pendingThenMempoolThenMinedTest =
     initBaseline
       // The shim diverts and answers at once; the operator sees nothing.
@@ -61,7 +61,7 @@ module scenariosTest {
       .expect(s.operator == Set(plain) and s.net == Set())
       .expect(vOperatorBlind and operatorBlind and vQueuedBytesConfidential and queuedBytesConfidential)
 
-  /// W8. The accepted disclosure: a third party that knows a txid is told it
+  /// The accepted disclosure: a third party that knows a txid is told it
   /// is queued, and is not given the bytes.
   run thirdPartyLearnsItIsQueuedTest =
     initBaseline
@@ -73,7 +73,7 @@ module scenariosTest {
       .expect(wQueuedDisclosed)
       .expect(s.tpLearned() == Set() and queuedBytesConfidential)
 
-  /// W19. Once `early` is published its txid is public, and a third party
+  /// Once `early` is published its txid is public, and a third party
   /// that asks is served its bytes from the indexer. G2 holds: they are
   /// public.
   run thirdPartyIsServedPublishedBodyTest =
@@ -95,7 +95,7 @@ module scenariosTest {
       .expect(lastEvent == Got({ query: "early", obs: Unavailable, via: None }))
       .expect(s.shim.waiters == Map() and lookupValidityPerHub)
 
-  /// W9. A queued payload the hub cannot parse has no txid to be found by.
+  /// A queued payload the hub cannot parse has no txid to be found by.
   run unparseableIsQueuedAndMissedTest =
     initBaseline
       .then(submitTo(0, junk))
@@ -216,7 +216,7 @@ module scenariosTest {
   // A Byzantine hub (`byzHub`)
   // ------------------------------------------------------------------------
 
-  /// W16. A Byzantine hub serves a twin of the wallet's transaction at a
+  /// A Byzantine hub serves a twin of the wallet's transaction at a
   /// height the chain has not reached. The shim checks the txid, which a twin
   /// shares, and nothing else: it serves both.
   run twinAtFalseHeightIsServedTest =

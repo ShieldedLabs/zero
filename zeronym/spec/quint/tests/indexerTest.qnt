@@ -102,7 +102,7 @@ module indexerTest {
     assert(honestTips(initialIndexer(1), 3, 0.to(7)) == Set(0, 1)),
   }
 
-  /// F12. The Byzantine relation contains every honest transition, and every
+  /// The Byzantine relation contains every honest transition, and every
   /// honest tip report is one a Byzantine indexer could make.
   run byzantineContainsHonestTest = all {
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>

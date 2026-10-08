@@ -82,7 +82,7 @@ module hubTest {
   // Admission
   // ------------------------------------------------------------------------
 
-  /// F7. Under the startup budget, a conforming payload that arrives within
+  /// Under the startup budget, a conforming payload that arrives within
   /// the delivery lag passes the expiry check. The lemma is about admission at
   /// one tip. It does not say at what height the flush later happens.
   run conformingTimelyPayloadIsAdmissibleTest = all {
@@ -107,7 +107,7 @@ module hubTest {
     assert(not(survivesNextFlush(Some(6), 5, 3, 1))),
   }
 
-  /// F8. Each refusal, and the order the checks are made in.
+  /// Each refusal, and the order the checks are made in.
   run admissionDecisionTableTest = all {
     // No tip yet, or a stale one: nothing else is looked at.
     assert(PAYLOADS.forall(payload => admission(starting, payload) == Refused(TipStale))),
@@ -162,7 +162,7 @@ module hubTest {
   // Tip
   // ------------------------------------------------------------------------
 
-  /// F14. The tip rule.
+  /// The tip rule.
   run tipRuleTest = all {
     // The first observation is adopted with its epoch, and nothing is due.
     assert(running(5).tip == Some(5) and running(5).phase == Running),
@@ -236,7 +236,7 @@ module hubTest {
     }),
   }
 
-  /// F9. Requeue, entry by entry, and the counts it reports.
+  /// Requeue, entry by entry, and the counts it reports.
   run requeueTest = all {
     assert(outputOf(returning, FlushDoneHInput)
       == RequeuedOutput({ held: 2, droppedExpired: 2, droppedExhausted: 1 })),
@@ -288,7 +288,7 @@ module hubTest {
   // Totality and the Byzantine relation
   // ------------------------------------------------------------------------
 
-  /// F11. The function answers every input in every state, and an input that
+  /// The function answers every input in every state, and an input that
   /// is invalid in a state leaves that state unchanged.
   run totalityTest =
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
@@ -298,7 +298,7 @@ module hubTest {
         isError(result.out) implies result.state == state,
       }))
 
-  /// F12. The Byzantine relation contains the honest transition.
+  /// The Byzantine relation contains the honest transition.
   run byzantineContainsHonestTest =
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
       byzHubResults(state, input, PAYLOADS).contains(hub(state, input))))

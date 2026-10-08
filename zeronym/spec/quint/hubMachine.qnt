@@ -520,10 +520,10 @@ module hubMachine {
   // Guarantees
   // ------------------------------------------------------------------------
   //
-  // G6 comes in three parts. G6a and G6b are about the moment a flush begins:
-  // how much of the mining margin is left when the hub hands the batch over.
-  // They do not say a node accepts the transaction, because the chain may move
-  // while the batch is in flight. G6c is about the moment a node judges it.
+  // G6b is about the moment a flush begins: how much of the mining margin is
+  // left when the hub hands the batch over. It does not say a node accepts the
+  // transaction, because the chain may move while the batch is in flight. G6c
+  // is about the moment a node judges it.
   //
   // Each is a predicate on the current state. That is enough: the whole batch
   // is in flight in the state `flushBegin` produces, with `flightStart` the
@@ -601,7 +601,7 @@ module hubMachine {
   // ------------------------------------------------------------------------
   //
   // States that must be reachable, each checked as `not(..)` expected to be
-  // violated. The first three are the antecedents of G6a, G6b and G6c: without
+  // violated. The first two are the antecedents of G6b and G6c: without
   // them a "holds" could be vacuous. The rest are one per family of steps: TLC
   // is run with deadlock checking off, so a configuration whose steps died
   // after `init` would otherwise hold everything on a handful of states.

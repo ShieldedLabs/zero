@@ -463,11 +463,11 @@ module protocol {
         | _ => false
       })
 
-  /// W1. The wallet is told its transaction is pending.
+  /// The wallet is told its transaction is pending.
   pure def wPendingIn(s: System): bool =
     s.wasGiven(obs => obs == Pending)
 
-  /// W2. The wallet is served its transaction from the mempool.
+  /// The wallet is served its transaction from the mempool.
   pure def wTxInMempoolIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
@@ -475,7 +475,7 @@ module protocol {
         | _ => false
       })
 
-  /// W3. The wallet is served its transaction from a block.
+  /// The wallet is served its transaction from a block.
   pure def wTxMinedIn(s: System): bool =
     s.wasGiven(obs =>
       match obs {
@@ -483,7 +483,7 @@ module protocol {
         | _ => false
       })
 
-  /// W8. The accepted disclosure: a third party that knows a txid learns that
+  /// The accepted disclosure: a third party that knows a txid learns that
   /// it is queued at the hub. The hub withholds the bytes; it does not withhold
   /// the fact. The implementation leaves this open on purpose
   /// (`zeronym/hub/src/server.rs`, in `Hub::lookup`):
@@ -497,7 +497,7 @@ module protocol {
     tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
       lookup.nonce == reply.nonce and reply.reply == WFound({ body: None, height: AtZero }))
 
-  /// W9. The hub holds a payload it cannot parse; the wallet that sent it asks
+  /// The hub holds a payload it cannot parse; the wallet that sent it asks
   /// for it and is told not found. An entry without a txid can never
   /// be hit.
   pure def wUnparseableMissedIn(s: System): bool =
@@ -512,7 +512,7 @@ module protocol {
         | _ => false
       })
 
-  /// W19. A third party is given a transaction's bytes in a lookup reply.
+  /// A third party is given a transaction's bytes in a lookup reply.
   /// With every component honest these are published bytes, served from the
   /// indexer: the branch of G2 that `vQueuedBytesConfidential` alone does not
   /// reach, since `plain` at the operator satisfies it.

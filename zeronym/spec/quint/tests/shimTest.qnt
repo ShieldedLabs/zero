@@ -59,7 +59,7 @@ module shimTest {
   // SendTransaction
   // ------------------------------------------------------------------------
 
-  /// F5. Only a cleanly read pass-through transaction is forwarded. Every
+  /// Only a cleanly read pass-through transaction is forwarded. Every
   /// other input is diverted or fails closed, in every state.
   run onlyPassThroughIsForwardedTest = all {
     assert(tuples(STATES, SEND_INPUTS, Set(true, false)).forall(((state, input, handedOver)) =>
@@ -148,7 +148,7 @@ module shimTest {
   // Totality
   // ------------------------------------------------------------------------
 
-  /// F11. The function answers every input in every state, and an invalid
+  /// The function answers every input in every state, and an invalid
   /// input leaves the state unchanged.
   run totalityTest =
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
