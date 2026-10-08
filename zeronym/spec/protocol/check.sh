@@ -22,7 +22,6 @@
 #      schedule guarantees; "violated" rows are the known gaps, the guarantees
 #      under a Byzantine hub or indexer, and the states that must be reachable
 #      (each as `not(..)`). Needs Java; fails, never skips, without it.
-#   5  opt-in, QUINT_TLC=1: the two-state properties, with TLC. Needs Java 21.
 #
 # A row that starts holding where it is expected to fail, or the reverse,
 # means the specification or the prediction changed: read README.md before
@@ -394,22 +393,5 @@ job tlc_violated initFlakyTipSlowFlight step "not(wBlockInFlight)" 7
 job tlc_violated initStaleLag           step "not(wStale)" 6
 job tlc_violated initStaleLagWithSlack  step "not(wStale)" 6
 finish
-
-# Tier 5. Not part of the default gate, not run in CI, and never executed while
-# this script was written: the verdict strings matched below are what Quint
-# prints for the simulator, and are untested against the TLC backend.
-if [ "${QUINT_TLC:-0}" = "1" ]; then
-  echo "---- 5 two-state properties (TLC)"
-  out=$($QUINT verify instances.qnt --backend=tlc --main=baseline \
-      --temporal=chainMonotone,neverEvict,drainIsFinal 2>&1)
-  verdict
-  case $got in
-    holds) echo "ok    baseline: holds: chainMonotone neverEvict drainIsFinal (TLC)" ;;
-    *)
-      echo "$out" | tail -40
-      fail "baseline: two-state properties under TLC"
-      ;;
-  esac
-fi
 
 exit "$failures"

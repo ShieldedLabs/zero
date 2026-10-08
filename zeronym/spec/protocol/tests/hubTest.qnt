@@ -325,4 +325,62 @@ module hubTest {
     // It still cannot act while it is not running.
     assert(byzHubResults(down, submit(pA), PAYLOADS, HEIGHTS) == Set(hub(down, submit(pA)))),
   }
+
+  // ------------------------------------------------------------------------
+  // Every reachable state
+  // ------------------------------------------------------------------------
+  //
+  // `REACH` is every hub state reachable from a starting hub under
+  // `REACH_INPUTS`, honest or through the Byzantine submit relation. The
+  // properties below are exhaustive over it, for these parameters: two
+  // payloads, one with no txid and no expiry; tips 0, 4, 5, 6 and 9; free-run
+  // estimates 4, 8 and 9; every verdict on either payload.
+
+  pure val REACH_PAYLOADS = Set(pA, pJunk)
+  pure val REACH_INPUTS: Set[HubInput] =
+    REACH_PAYLOADS.map(payload => submit(payload))
+      .union(Set(
+        TipHInput(0), TipHInput(4), TipHInput(5), TipHInput(6), TipHInput(9),
+        StaleHInput(4), StaleHInput(8), StaleHInput(9),
+        FlushDueHInput, FlushDoneHInput, DrainHInput, CrashHInput, RestartHInput,
+      ))
+      .union(tuples(REACH_PAYLOADS, Set(Accepted, AlreadyKnown, Rejected, Retryable))
+        .map(((payload, given)) => verdict(payload, given)))
+
+  /// The states a Byzantine hub may move to on a submission.
+  pure def byzantineSteps(state: HubState): Set[HubState] =
+    REACH_PAYLOADS.map(payload => byzHubResults(state, submit(payload), REACH_PAYLOADS, HEIGHTS)
+      .map(result => result.state)).flatten()
+
+  pure def successors(state: HubState): Set[HubState] =
+    REACH_INPUTS.map(input => hub(state, input).state).union(byzantineSteps(state))
+
+  /// The closure, breadth first. The bound on rounds is a budget, not a
+  /// depth bound: `reachTest` fails unless the result is closed.
+  pure val REACH: Set[HubState] =
+    1.to(60).fold({ reached: Set(starting), frontier: Set(starting) }, (acc, _) =>
+      val fresh = acc.frontier.map(state => successors(state)).flatten().exclude(acc.reached)
+      { reached: acc.reached.union(fresh), frontier: fresh }).reached
+
+  /// `REACH` is a fixpoint: no input, honest or Byzantine, leaves it.
+  run reachTest = assert(REACH.forall(state => successors(state).subseteq(REACH)))
+
+  /// A2. An entry leaves the queue only into a flush, or because the hub went
+  /// down or exited after its final flush. Nothing evicts it, whatever the
+  /// hub's role: the Byzantine submit relation only ever adds to the queue.
+  /// The exit matters only to a Byzantine hub, which can admit while
+  /// draining; an honest one has nothing queued by then.
+  run neverEvictTest =
+    assert(REACH.forall(state =>
+      successors(state).forall(stepped =>
+        stepped.phase == Down or stepped.phase == Stopped
+          or state.queued().subseteq(stepped.queued().union(stepped.inFlight())))))
+
+  /// A3. A draining honest hub admits nothing: its queue gains only what a
+  /// flush hands back. A Byzantine hub is not bound by it
+  /// (`hubAdmitsWhileDrainingTest`).
+  run drainIsFinalTest =
+    assert(REACH.forall(state =>
+      state.phase == Draining implies REACH_INPUTS.forall(input =>
+        hub(state, input).state.queued().subseteq(state.queued().union(state.inFlight())))))
 }

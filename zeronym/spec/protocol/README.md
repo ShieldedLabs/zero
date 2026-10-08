@@ -20,12 +20,10 @@ depth. A property that "holds" is one no sampled trace violated.
 part of this specification. The commands are given under
 ["Bounded model checking (not run)"](#bounded-model-checking-not-run).
 
-**The two-state properties A1-A3 are typechecked only.** Their verdicts are
-unknown.
-
 Statements that do not rest on sampling are the ones backed by `quint test`:
-the functional properties F1-F14, which are exhaustive over small finite
-universes, and the scripted runs, each of which is one concrete execution.
+the functional properties F1-F14 and the two-state properties A2-A3, which are
+exhaustive over small finite universes, and the scripted runs, each of which
+is one concrete execution.
 
 ## Running it
 
@@ -34,9 +32,7 @@ sh zeronym/spec/protocol/check.sh
 ```
 
 Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default;
-set `QUINT=quint` to use an installed one). The two-state properties use the
-action-property syntax introduced in 0.33, so 0.32 does not typecheck the
-specification. Tier 4 needs Java (21 in CI) and Apalache 0.62.1, whose jar
+set `QUINT=quint` to use an installed one). Tier 4 needs Java (21 in CI) and Apalache 0.62.1, whose jar
 carries TLC and which Quint fetches into `~/.quint` on first use; without
 either the tier fails.
 
@@ -47,8 +43,6 @@ either the tier fails.
 | 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` ("fails" rows: 40 to 80 steps, a few with more traces) | "holds" rows hold; "fails" rows are violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
-| 5 | two-state properties | `QUINT_TLC=1`, opt-in, **never run** | unknown |
-
 Measured on the machine it was written on (Apple silicon, Quint's Rust
 evaluator): 4 min 40 s wall with four rows at a time (`QUINT_JOBS=4`, the
 default), about 14 minutes of CPU. It has not been timed on a CI runner.
@@ -422,9 +416,9 @@ pure.
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
 | `state.qnt` | `state` | `System`, `Label`, `Audit`; where each output goes; the derived views |
 | `properties.qnt` | `properties` | `truth` and the audit monitor `advance`; guarantees, gaps, witnesses |
-| `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, A1-A3, the run vocabulary |
+| `protocol.qnt` | `protocol` | The constant, the assumptions, the variables, `commit`, the steps, the property aliases, the run vocabulary |
 | `instances.qnt` | `configs`, then one module per configuration | The three configurations: `baseline`, `byzHub`, `byzIndexer` |
-| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14 |
+| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14; A2-A3 in `hubTest.qnt` |
 | `tests/scenariosTest.qnt` | one module per configuration used | Witnesses and pinned gap causes |
 | `tests/trustTest.qnt` | one module per Byzantine configuration | One run and one control per "required" cell |
 
@@ -619,15 +613,16 @@ chain cannot pass a running, idle hub that has not asked.
 | G6a | holds (`baseline`) | **required**: `hubAdmitsPastExpiryRuleTest` | **required**: `indexerWithholdsTipTest`. Needs every endpoint |
 | G6b | holds (`baseline`, `flakyTip`). **Fails on `staleLag` (K4, predicted) and on `staleLagWithSlack` (predicted to hold)** | **required**: `hubAdmitsBeforeFirstTipTest`. The cause differs from the one predicted | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G6c | holds (`baseline`, `flakyTip`). Fails on `staleLag` (K4), `flakyTipNoSlack` (K3'), `flakyTipSlowFlight` (K7), and by scripted run on `staleLagWithSlack` | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
-| A3 | not run (TLC, `baseline`) | **required**: `hubAdmitsWhileDrainingTest` | not run |
+| A3 | holds (`drainIsFinalTest`) | **required**: `hubAdmitsWhileDrainingTest` | holds (`drainIsFinalTest`) |
 
 There is no Byzantine-shim column: the shim sees every migration in plaintext
 and controls everything the wallet observes, so every wallet-facing guarantee
 assumes an honest (attested) shim. G3 is the only wallet-facing guarantee that
 survives a Byzantine hub or indexer, and it authenticates the txid only. G1
 depends on the shim alone. With more than one hub, G2 is required of every
-hub (argued, see [One hub](#one-hub)). A3 needs the hub: its "required"
-cell is a scripted step, and its "holds" cells are the unrun TLC property.
+hub (argued, see [One hub](#one-hub)). A3 is a property of the hub function
+alone, so the indexer's role does not reach it: its "holds" cells are one
+exhaustive test, and its "required" cell is a scripted step.
 
 ### Known gaps, with every component honest
 
@@ -678,23 +673,44 @@ log has a pending, a served transaction and a not-found), `vAckImpliesQueued`.
 The antecedents of G6a, G6b and G6c are reachability rows of the hub
 specification.
 
-### Two-state properties: not checked
+### Two-state properties
 
-Written in `protocol.qnt` as `temporal` definitions in the 0.33 action-property
-form, and typechecked. **None has been run.**
+Both are steps of the hub function, so they are checked on the hub alone, in
+`tests/hubTest.qnt`, over every pair of a reachable hub state and an input.
+`REACH` is the closure of `starting` under:
 
-| Id | Name | What it says | Class |
+- submits of `pA` (Orchard-touching, expiry 9) and `pJunk` (unparseable),
+  each through the honest hub and through every Byzantine result, with
+  Byzantine heights drawn from 0 and 4;
+- tips 0, 4, 5, 6 and 9, and stale reports at 4, 8 and 9;
+- `FlushDue`, `FlushDone`, `Drain`, `Crash` and `Restart`;
+- each of the four verdicts on each payload;
+
+with the `hubTest` schedule (flush interval 3, mining margin 1, two attempts,
+reorg allowance 1). `reachTest` checks that `REACH` is closed under all of
+these, so the checks below are exhaustive over those parameters, not
+depth-bounded.
+
+| Id | Test | What it says | Class |
 |---|---|---|---|
-| A1 | `chainMonotone` | A transaction's chain status never moves backwards | assumption about the environment |
-| A2 | `neverEvict` | An entry leaves the hub's queue only into a flush, or because the hub went down | guarantee |
-| A3 | `drainIsFinal` | A draining honest hub's queue gains only what a flush hands back | guarantee |
+| A2 | `neverEvictTest` | An entry leaves the hub's queue only into a flush, or because the hub went down or exited after its final flush | guarantee, any role |
+| A3 | `drainIsFinalTest` | A draining honest hub's queue gains only what a flush hands back | guarantee, honest hub |
+
+A2 is stated whatever the hub's role: the Byzantine submit relation only ever
+adds to a queue. The exit clause matters only for a Byzantine hub, which can
+admit while draining (`hubAdmitsWhileDrainingTest`); the final flush then
+stops it with those entries still queued, and they are lost with the process.
+Before `REACH`, A2 was written without that clause, as an unrun `temporal`
+definition; the closure found the counterexample.
 
 A3 is stated of an honest hub only. Draining is an admission rule, and a
 Byzantine hub is not bound by admission rules: `hubAdmitsWhileDrainingTest`
 takes a submission into the queue after the drain began, and its control
-refuses the same frame. That run asserts the step, because the simulator
-does not check `temporal` definitions. A2 is stated whatever the hub's role:
-the Byzantine hub relation only ever adds to a queue.
+refuses the same frame.
+
+The old A1, "a transaction's chain status never moves backwards", was an
+assumption about the environment and is true by construction of the chain
+model, so it is not stated.
 
 No liveness property is claimed: the network may lose everything, and nobody
 waits for an ack.
@@ -1039,13 +1055,6 @@ quint verify --main=baseline --invariant='not(wToldNeverDelivered)' --max-steps=
 quint verify --main=byzHub --invariant='not(wTwinServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 quint verify --main=byzHub --invariant='not(wFalseHeightServed)' --max-steps=12 zeronym/spec/protocol/instances.qnt
 ```
-
-The two-state properties, with TLC (also `QUINT_TLC=1 sh check.sh`):
-
-```sh
-quint verify --backend tlc --main=baseline --temporal=chainMonotone,neverEvict,drainIsFinal zeronym/spec/protocol/instances.qnt
-```
-
 The commands use one-hub configurations: nested maps of records are supported
 by Apalache but slow.
 
@@ -1059,4 +1068,3 @@ documentation and not from running it:
 | Unbounded integers, `powerset`, `allLists` | Not used; every universe is a finite set bounded by constants, the Byzantine sets included |
 | A list in the state (the wallet's log) | Bounded by `--max-steps` |
 | `assume` | Behaviour under verify unknown; `assumptionsTest` is the check that counts |
-| Temporal definitions | For TLC only |

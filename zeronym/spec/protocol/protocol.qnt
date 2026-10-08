@@ -781,55 +781,6 @@ module protocol {
   val vAckImpliesQueued = vAckImpliesQueuedIn(s)
 
   // ------------------------------------------------------------------------
-  // Two-state properties
-  // ------------------------------------------------------------------------
-  //
-  // These relate a state to its successor, which an invariant cannot. The
-  // simulator does not check them. `next` has to wrap a complete expression
-  // that reads the state, which is why they are written out here and not as
-  // predicates over a pair of systems.
-
-  /// How far along the chain a transaction is.
-  def chainRank(txid: TxId): int =
-    match s.onChain(txid) {
-      | Absent => 0
-      | InMempool => 1
-      | MinedAt(_) => 2
-    }
-
-  def chainStatus(txid: TxId): Inclusion = s.onChain(txid)
-
-  /// A1. A transaction's status on the chain never moves backwards, and a
-  /// mined transaction stays where it was mined. An assumption about the
-  /// environment, true by construction of the chain steps.
-  temporal chainMonotone = always(
-    TXIDS.forall(txid =>
-      and {
-        chainRank(txid) <= next(chainRank(txid)),
-        chainRank(txid) == 2 implies next(chainStatus(txid)) == chainStatus(txid),
-      }
-    ).orKeep(s)
-  )
-
-  /// A2. An entry leaves the hub's queue only into a flush, or because the
-  /// hub went down. Nothing evicts it.
-  temporal neverEvict = always(
-    or {
-      s.hub.queued().subseteq(next(s.hub.queued()).union(next(s.hub.inFlight()))),
-      next(s.hub.phase) == Down,
-    }.orKeep(s)
-  )
-
-  /// A3. A draining honest hub admits nothing: its queue gains only what a
-  /// flush hands back. Draining is an admission rule like the others, so a
-  /// Byzantine hub is not bound by it (`hubAdmitsWhileDrainingTest`).
-  temporal drainIsFinal = always(
-    (ROLES.hub == Honest and s.hub.phase == Draining implies
-      next(s.hub.queued()).subseteq(s.hub.queued().union(s.hub.inFlight()))
-    ).orKeep(s)
-  )
-
-  // ------------------------------------------------------------------------
   // Run vocabulary
   // ------------------------------------------------------------------------
   //
