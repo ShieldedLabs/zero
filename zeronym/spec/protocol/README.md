@@ -122,7 +122,7 @@ definitions they justify.
 | Chain / indexer | per-txid status (absent, mempool, mined); what the indexer has been offered; verdict and lookup-answer relations. A lookup answer's height is 0, the height the transaction was mined at, or another (`WireHeight`). The protocol specification has no chain height and no block clock, and its verdict relation has no expiry clause (`heightlessIndexerResults`); the hub specification keeps the chain height, which its tip and expiry rules read | S15, S22 |
 | Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
 | Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
-| Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned and payloads of its own making; its payload knowledge is derived from what it can observe | S13, S25 |
+| Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned or the chain has published; its payload knowledge is derived from what it can observe | S13, S25 |
 | Network | drop, duplicate, delay, reorder; cannot forge |  |
 | Hubs | one; see [One hub](#one-hub) | S24 |
 | Tip | Hub specification only: `TipTimely \| TipMayRegress \| TipMayLag`, the observed tip and the cadence height as two hub clocks, the reorg allowance, the staleness window and the wallet expiry floor as parameters | S17, S26, S32 |
@@ -141,6 +141,7 @@ definitions they justify.
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed (C7): a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it, with its control |
+| Payloads of the third party's own making, and W17 (one of them queued) | Removed (C8): the hub's address is public and unauthenticated, so this is possible, but only W17 read them. The third party still submits what it has learned or the chain has published (K2c) |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
 | The hub's schedule in the protocol specification: its phases, tip, cadence, drain, crash and restart, flight time, and what read them there: G6a-G6c, the refusal witnesses W4, the requeue witnesses W5-W7, the offer, verdict, admission, refusal and drop records, the tip models | Moved: the protocol uses the abstract hub, which `hubTest` checks the real hub refines; the schedule is checked exhaustively in the hub specification. The protocol's pinned runs that need a real hub step are replayed through it in `realisedRunsTest` |
@@ -374,7 +375,6 @@ stateDiagram-v2
     KnowsQueued --> KnowsPayload: payload published on chain
     Nothing --> KnowsPayload: payload published on chain
     KnowsPayload --> KnowsPayload: may resubmit the payload to any hub
-    Nothing --> Nothing: may submit payloads of its own making to any hub
 ```
 
 ### Encoding: hub outcome to wallet observation
@@ -629,7 +629,7 @@ frame undelivered, and nothing obliges the network ever to deliver it.
 
 ### Witnesses
 
-Each has a scripted run. W8, W16 and W17 are also counted in tier 3b; W1-W3,
+Each has a scripted run. W8 and W16 are also counted in tier 3b; W1-W3,
 W9, W15 and W18 are scripted only.
 W4 (each refusal) and W5-W7 (requeued, dropped as expired, dropped as
 exhausted) were witnesses here; they read the hub's internals and are gone
@@ -644,7 +644,6 @@ hub specification reaches `wRequeued` under TLC and both drops in
 | W9 | a queued payload the hub cannot parse is asked for and missed | `wUnparseableMissed` | `baseline` |
 | W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | scripted run `tipAheadOfChainFlushesEarlyTest` (hub specification) | `byzIndexer` |
 | W16 | **Twin served**: the wallet is served a twin of what it sent, and a transaction at a false height; G3 holds throughout | `wTwinServed`, `wFalseHeightServed` | `byzHub` |
-| W17 | the third party's own payload is queued | `wThirdPartyPayloadQueued` | `baseline` |
 | W18 | **Early flush by the free-running clock**: a stale hub's clock is ahead of the chain and it flushes before the true boundary, every component honest | scripted run `freeRunningClockFlushesEarlyTest` (hub specification) | `staleLag` |
 
 Non-vacuity: for each guarantee, a state where its antecedent holds, reached on

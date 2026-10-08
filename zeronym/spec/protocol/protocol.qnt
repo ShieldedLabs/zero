@@ -18,7 +18,7 @@
 /// - Network. Frames may be lost, duplicated, delayed and reordered. They
 ///   cannot be forged or read in transit.
 /// - Third party. A client of the hub's public address. It looks up txids it
-///   knows and submits payloads it has learned or made. It cannot read or
+///   knows and submits payloads it has learned or the chain has published. It cannot read or
 ///   forge frames, so it does not know a nonce and cannot answer the shim.
 /// - Nonces are unique. A counter stands for an unguessable random value.
 /// - Chain. A transaction's status only moves forward: no reorg of an
@@ -72,9 +72,6 @@ module protocol {
     { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: PassThrough, oversize: false }
   /// Other bytes with the txid of `early`.
   pure val earlyTwin = { ...early, id: "early-twin" }
-  /// The third party's own payload.
-  pure val garbage: Payload =
-    { id: "garbage", txid: Some("garbage"), created: 1, expiry: None, class: OrchardTouching, oversize: false }
 
   // ------------------------------------------------------------------------
   // Configurations
@@ -86,7 +83,6 @@ module protocol {
   pure val baseline: Config = {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
-    tpPayloads: Set(garbage),
     maxRequests: 3,
     roles: allHonest,
   }
@@ -116,9 +112,8 @@ module protocol {
   type Wallet = { log: List[WalletEvent], sends: int, gets: int }
 
   /// The third party: a client of the hub's public address that is not the
-  /// shim. `txids` are the transaction ids it has learned out of band; `own`
-  /// are payloads of its own making.
-  type ThirdParty = { txids: Set[TxId], own: Set[Payload], nextNonce: Nonce, requests: int }
+  /// shim. `txids` are the transaction ids it has learned out of band.
+  type ThirdParty = { txids: Set[TxId], nextNonce: Nonce, requests: int }
 
   /// - `hub`: the hub as the protocol sees it (`abstractHub.qnt`).
   /// - `operator`: every transaction the shim has handed the operator's
@@ -142,7 +137,7 @@ module protocol {
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
     operator: Set(),
-    thirdParty: { txids: Set(), own: config.tpPayloads, nextNonce: 0, requests: 0 },
+    thirdParty: { txids: Set(), nextNonce: 0, requests: 0 },
   }
 
   /// What an observer of the run has recorded. It is not protocol state: no
@@ -259,12 +254,12 @@ module protocol {
   /// when a transaction is published, so a property over it constrains what
   /// the hub puts in its replies.
   pure def tpLearned(s: System): Set[Payload] =
-    s.repliedBodies(ThirdPartyAddr).union(s.operator).exclude(s.thirdParty.own)
+    s.repliedBodies(ThirdPartyAddr).union(s.operator)
 
-  /// Every payload the third party has: what it learned, what the chain
-  /// published, and its own.
+  /// Every payload the third party has: what it learned and what the chain
+  /// published.
   pure def tpPayloads(s: System): Set[Payload] =
-    s.tpLearned().union(s.indexer.published()).union(s.thirdParty.own)
+    s.tpLearned().union(s.indexer.published())
 
   /// The payloads the wallet has handed the shim: every send is answered at
   /// once.
@@ -622,10 +617,6 @@ module protocol {
         | _ => false
       })
 
-  /// W17. The hub has queued a payload of the third party's own making.
-  pure def wThirdPartyPayloadQueuedIn(s: System): bool =
-    s.hub.queue.intersect(s.thirdParty.own) != Set()
-
   // ------------------------------------------------------------------------
   // Non-vacuity: the antecedent of each guarantee is reachable
   // ------------------------------------------------------------------------
@@ -671,8 +662,6 @@ module protocol {
   /// Twins of wallet transactions: other bytes with the same txid. No honest
   /// party sends one.
   def TWINS = cfg.twins
-  /// Payloads of the third party's own making.
-  def TP_PAYLOADS = cfg.tpPayloads
 
   /// The bound of the model: the wallet makes at most `MAX_REQUESTS` sends
   /// and as many lookups, as does the third party.
@@ -681,7 +670,7 @@ module protocol {
   def ROLES = cfg.roles
 
   /// Every payload that exists. A Byzantine component builds its lies from it.
-  pure def universeOf(c: Config): Set[Payload] = c.payloads.union(c.twins).union(c.tpPayloads)
+  pure def universeOf(c: Config): Set[Payload] = c.payloads.union(c.twins)
   def UNIVERSE = universeOf(cfg)
   /// What a wallet may send.
   def SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
@@ -689,13 +678,11 @@ module protocol {
   def TXIDS = txidsOf(UNIVERSE)
 
   /// The standing assumption, checked by every named init: payloads are told
-  /// apart by their bytes; a twin is a twin of something a wallet sends; the
-  /// third party's payloads are its own.
+  /// apart by their bytes, and a twin is a twin of something a wallet sends.
   pure def payloadsWellFormed(c: Config): bool =
     val universe = universeOf(c)
     and {
       universe.size() == universe.map(payload => payload.id).size(),
-      c.payloads.intersect(c.tpPayloads) == Set(),
       c.twins.forall(twin => c.payloads.exists(payload => areTwins(twin, payload))),
     }
 
@@ -1013,8 +1000,8 @@ module protocol {
     },
   }
 
-  /// The third party submits a payload it has: one it made, or one it has
-  /// learned. Submission is not authenticated either.
+  /// The third party submits a payload it has learned or the chain has
+  /// published. Submission is not authenticated either.
   action thirdPartySubmitWith(payload: Payload): bool = all {
     s.thirdParty.requests < MAX_REQUESTS,
     s.tpPayloads().contains(payload),
@@ -1106,7 +1093,6 @@ module protocol {
   val wUnparseableMissed = wUnparseableMissedIn(s)
   val wTwinServed = wTwinServedIn(s)
   val wFalseHeightServed = wFalseHeightServedIn(s)
-  val wThirdPartyPayloadQueued = wThirdPartyPayloadQueuedIn(s)
 
   // Non-vacuity: the antecedent of each guarantee is reachable.
   val vOperatorBlind = vOperatorBlindIn(s)

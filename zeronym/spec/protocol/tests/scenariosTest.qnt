@@ -29,8 +29,6 @@ module scenariosTest {
   // Every component honest (`baseline`)
   // ------------------------------------------------------------------------
 
-  def tpAcks = s.acks(ThirdPartyAddr)
-
   // ------------------------------------------------------------------------
   // Witnesses
   // ------------------------------------------------------------------------
@@ -92,14 +90,6 @@ module scenariosTest {
       .then(lookUp(1, "junk"))
       .expect(lastEvent == Got({ query: "junk", obs: NotFound, via: Some(1) }))
       .expect(wUnparseableMissed and lookupValidityPerHub)
-
-  /// W17. Anyone can put a payload in a hub's queue.
-  run thirdPartyPayloadIsQueuedTest =
-    initBaseline
-      .then(thirdPartySubmitWith(garbage))
-      .then(deliverSubmitFrom(ThirdPartyAddr, 0, garbage))
-      .expect(tpAcks == Set((0, WAccepted)) and s.hub.queue == Set(garbage))
-      .expect(wThirdPartyPayloadQueued and queuedBytesConfidential)
 
   // ------------------------------------------------------------------------
   // K1. Told ok, and no hub ever has it

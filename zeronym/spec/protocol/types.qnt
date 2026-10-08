@@ -196,7 +196,6 @@ module types {
   type Config = {
     payloads: Set[Payload],
     twins: Set[Payload],
-    tpPayloads: Set[Payload],
     maxRequests: int,
     roles: Roles,
   }
