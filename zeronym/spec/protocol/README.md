@@ -276,9 +276,11 @@ beyond loss in the soup.
 - **Hub.** In the protocol specification the hub is abstract: it may accept
   or refuse any submission, and take, settle, give back or lose its entries at
   any time. The three assumptions below are the hub specification's.
-- **Byzantine hub.** A Byzantine hub lies only in what it acks and replies:
-  on a submit it may queue the payload or not and send any ack, and on a
-  lookup it may send any reply (see [Roles](#roles)). Every other move is the
+- **Byzantine hub.** A Byzantine hub admits or refuses a submission whatever
+  the admission rules say, and on a lookup it may send any reply (see
+  [Roles](#roles)). Its ack is modelled as truthful: a real one could ack
+  anything, but nothing reads an ack, so no property here depends on it.
+  Every other move is the
   honest one: in the hub specification its flushes, verdicts, requeues, drain,
   crash and restart; in the protocol specification its take, settle, give back
   and lose. It cannot evict or withhold a queued entry, flush off schedule, or
@@ -770,8 +772,9 @@ queued, the payloads out with a flush, and its wire replies. It has no phase,
 tip or schedule. A submit is accepted (the payload joins the queue) or
 refused under one of the three codes; a lookup is a queue hit for a queued
 txid and the indexer's answer otherwise; and the internal moves are take,
-settle, give back what is kept, and lose everything. The Byzantine answers
-are anything, with any body from the universe, and queue the payload or not.
+settle, give back what is kept, and lose everything. A Byzantine hub answers a
+lookup with anything, with any body from the universe; a submission it accepts
+or refuses as the honest relation already allows.
 
 Over the same `REACH` as A2 and A3, with lookups added, `hubTest` checks:
 
