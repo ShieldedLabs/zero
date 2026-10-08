@@ -24,7 +24,7 @@ is one concrete execution.
 ## Running it
 
 ```sh
-sh zeronym/spec/protocol/check.sh
+sh zeronym/spec/quint/check.sh
 ```
 
 Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default;

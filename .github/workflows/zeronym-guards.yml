@@ -54,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Protocol specification, tiers 1 to 3b
-        run: sh zeronym/spec/protocol/check.sh
+        run: sh zeronym/spec/quint/check.sh
         env:
           CHECK_TIERS: simulation
 
@@ -78,7 +78,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Hub specification, tier 4
-        run: sh zeronym/spec/protocol/check.sh
+        run: sh zeronym/spec/quint/check.sh
         env:
           CHECK_TIERS: tlc
           QUINT_JOBS: '2'
