@@ -180,7 +180,7 @@ definitions they justify.
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
 | The HTTP (ack-awaiting) transport, and with it G5 "told ok implies some hub queued it". In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the K5 run under that transport, `toldOkAdmittedThenLostTest` (told ok on the hub's word, admitted, lost to a crash) |
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
-| Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed (C7): a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it, with its control |
+| Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed (C7): a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it |
 | Payloads of the third party's own making, and W17 (one of them queued) | Removed (C8): the hub's address is public and unauthenticated, so this is possible, but only W17 read them. The third party still submits what it has learned or the chain has published (K2c) |
 | The frame-size lemma, `sizeOf` and F6 | Removed (C9): true by construction; the code pads four fixed-size frames (`zeronym/hub/src/wire.rs:29-59`), and length side channels were already out of the model |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
@@ -481,7 +481,7 @@ declares a constant. Every other module is pure.
 | `protocol.qnt` | `protocol` | The transactions and the three configurations; `System`, `Audit`, where each output goes and the derived views; `truth`, the audit monitor `advance`, the guarantees, gaps and witnesses; the variables, `commit`, the named inits, the steps, the property aliases, the run vocabulary |
 | `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F15; A2-A3 and the abstraction lemma in `hubTest.qnt` |
 | `tests/scenariosTest.qnt` | `scenariosTest` | Witnesses and pinned gap causes; `liveInitsTest` |
-| `tests/trustTest.qnt` | `trustTest` | One run and one control per "required" cell |
+| `tests/trustTest.qnt` | `trustTest` | One run per "required" cell, with the guarantee asserted just before the Byzantine step |
 
 ```mermaid
 flowchart BT
@@ -623,17 +623,16 @@ The G3 row is not what was predicted; see [Findings](#findings).
 Which components must be honest for each guarantee. Single-fault. "holds" is a
 tier 3 simulation row on the named configuration, with its antecedent witnessed
 there in tier 3b. "required" is a scripted run in `tests/trustTest.qnt` in which
-the component is Byzantine and the guarantee fails, followed by its control
-(same wallet inputs, honest transition, guarantee holds). Such a cell has no
-simulation row.
+the component is Byzantine and the guarantee fails. The run asserts the
+guarantee in the state just before the Byzantine step, so the lie is what
+breaks it. Such a cell has no simulation row.
 
 Every cell was a prediction, except the G6c row, which was added after review
 and derived by running. **Observed verdicts agree with the predictions in every
 cell of this table except the G6b entries marked below.**
 
 The two tip-withholding runs in the indexer column have the hub ask for the tip
-at every block and the indexer answer with a stale one; their controls are the
-same polls answered truthfully. The simulation rows for those cells classify a
+at every block and the indexer answer with a stale one. The simulation rows for those cells classify a
 verdict line and cannot say which lie a trace used. The counterexamples the
 simulator finds at seed 7 were read by hand and both use reports below the true
 height. With truthful answers `byzIndexer` behaves as `baseline`, where the
@@ -667,12 +666,12 @@ specification, under its configurations.
 |---|---|---|---|---|---|
 | K1 | Told ok does not mean the hub ever admits it | `baseline` | scripted runs only | shown | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest` |
 | K2 | `statusNeverRegresses`: what a wallet sees of one transaction never goes backwards | `baseline` | violated invariant | violated | `repliesReorderedTest`, `walletResendsPublishedTest`, `thirdPartyResubmitsPublishedTest`, `flushWindowTest`, `rejectedAtFlushTest` |
-| K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
+| K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; with the slack, G6b and G6c hold on `flakyTip` under TLC |
 | K4 | G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
 | K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `timely` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueDropsAckedAsExpiredTest` |
-| K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
+| K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; under a timely tip the predicate holds on `timely` under TLC |
 
-| K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
+| K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest` |
 | K8 | A supported wallet's transaction, acknowledged on time, then lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. G6b and G6c do not cover it: to the restarted hub the resend is a late first arrival | `flakyTip` | scripted run | shown; not a TLC row | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
 
 K7 was added after review. The four-term budget (`reorgSlackFits`) holds with
@@ -755,8 +754,8 @@ definition; the closure found the counterexample.
 
 A3 is stated of an honest hub only. Draining is an admission rule, and a
 Byzantine hub is not bound by admission rules: `hubAdmitsWhileDrainingTest`
-takes a submission into the queue after the drain began, and its control
-refuses the same frame.
+takes a submission into the queue after the drain began, having first shown
+that an honest hub would refuse the same frame.
 
 The old A1, "a transaction's chain status never moves backwards", was an
 assumption about the environment and is true by construction of the chain

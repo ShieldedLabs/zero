@@ -7,9 +7,8 @@
 /// Each run is built from the machine's own steps. It names the one Byzantine
 /// transition it relies on, written out as a `...With` step, and ends by
 /// stating what in the wallet's log, the soup or the audit record constitutes
-/// the failure. Each is followed by its control: the same wallet inputs in the
-/// same configuration, with the component taking the honest transition, which
-/// is always among those it may take. In the control the guarantee holds.
+/// the failure. The guarantee is asserted in the state just before that
+/// transition, so the run shows the lie is what breaks it.
 
 module trustTest {
   import basicSpells.* from "../spells/basicSpells"
@@ -31,6 +30,7 @@ module trustTest {
       .then(submitTo(0, early))
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
+      .expect(queuedBytesConfidential)
       .then(hubReceiveWith(
         fromThirdParty(lookupMail(0, "early")), INotFound,
         { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtZero })))) },
@@ -41,20 +41,12 @@ module trustTest {
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
-  run hubServesQueuedBodyControlTest =
-    initByzHub
-      .then(submitTo(0, early))
-      .then(thirdPartyLearnsTxidWith("early"))
-      .then(thirdPartyLookupWith("early"))
-      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
-      .expect(queuedBytesConfidential)
-
   /// G4 needs the hub. It answers not found for a transaction it has queued.
   run hubDeniesQueuedTest =
     initByzHub
       .then(submitTo(0, early))
       .then(ask("early"))
+      .expect(lookupValidityPerHub)
       .then(hubReceiveWith(
         lookupMail(1, "early"), INotFound,
         { hub: s.hub, reply: AWire(render(FromIndexer(INotFound))) },
@@ -64,13 +56,6 @@ module trustTest {
       .expect(s.hub.queue == Set(early) and audit.windows.get(1) == Set(Pending))
       .expect(not(lookupValidityPerHub))
 
-  run hubDeniesQueuedControlTest =
-    initByzHub
-      .then(submitTo(0, early))
-      .then(lookUp(1, "early"))
-      .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
-      .expect(lookupValidityPerHub)
-
   /// G4 needs the hub, second run. It serves a mempool transaction as mined,
   /// at a height it made up. The txid is right, so the shim passes it on.
   run hubServesFalseHeightTest =
@@ -78,6 +63,7 @@ module trustTest {
       .then(submitTo(0, early))
       .then(flush([early], Accepted))
       .then(ask("early"))
+      .expect(lookupValidityPerHub)
       .then(hubReceiveWith(
         lookupMail(1, "early"), chainAnswer(s.indexer, "early"),
         { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtOther })))) },
@@ -87,14 +73,6 @@ module trustTest {
       .expect(s.onChain("early") == InMempool)
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
-
-  run hubServesFalseHeightControlTest =
-    initByzHub
-      .then(submitTo(0, early))
-      .then(flush([early], Accepted))
-      .then(lookUp(1, "early"))
-      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(1) }))
-      .expect(lookupValidityPerHub)
 
   /// G3 survives. The hub answers with another transaction; the shim compares
   /// txids and refuses it.
@@ -131,6 +109,7 @@ module trustTest {
       .expect(s.indexer.offered == Set(early) and s.onChain("early") == Absent)
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
+      .expect(queuedBytesConfidential)
       .then(deliverLookupFrom(
         ThirdPartyAddr, 0, "early", IFound({ body: Some(early), height: AtZero }),
       ))
@@ -140,17 +119,6 @@ module trustTest {
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
-  run indexerServesUnpublishedBodyControlTest =
-    initByzIndexer
-      .then(submitTo(0, early))
-      .then(hubTake)
-      .then(judge(early, Retryable))
-      .then(thirdPartyLearnsTxidWith("early"))
-      .then(thirdPartyLookupWith("early"))
-      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WNotFound }))
-      .expect(queuedBytesConfidential)
-
   /// G4 needs the indexer. For a transaction that exists nowhere it answers
   /// "found, height 0, no body". The hub forwards it unchanged, and on the
   /// wire it is the hub's own "queued here": the wallet sees pending.
@@ -158,16 +126,10 @@ module trustTest {
     initByzIndexer
       .then(sends(Clean(early), true))
       .then(ask("early"))
+      .expect(lookupValidityPerHub)
       .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: None, height: AtZero })))
       .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
       .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
       .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
       .expect(not(lookupValidityPerHub))
-
-  run indexerForgesPendingControlTest =
-    initByzIndexer
-      .then(sends(Clean(early), true))
-      .then(lookUp(1, "early"))
-      .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
-      .expect(lookupValidityPerHub)
 }

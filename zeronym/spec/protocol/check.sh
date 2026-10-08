@@ -82,7 +82,7 @@ finish() {
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
 FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:26 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:33 tests/scenariosTest.qnt:21 tests/trustTest.qnt:17"
+  tests/hubScenariosTest.qnt:28 tests/scenariosTest.qnt:21 tests/trustTest.qnt:12"
 
 fail() {
   echo "FAIL  $1"

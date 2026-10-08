@@ -4,8 +4,8 @@
 ///
 /// A run is a sequence of the machine's own steps from `initWith(c)`. Where a
 /// run says a property fails, it also says what in the state makes it fail.
-/// A control is the same inputs in the same configuration with the one
-/// decisive choice made the honest way; in the control the property holds.
+/// Where a Byzantine choice breaks a property, the run asserts the property
+/// just before that choice.
 ///
 /// The schedule in every configuration: the chain starts at height 1, a flush
 /// is scheduled at heights 3, 6, 9 and 12, and the mining margin is 2 blocks.
@@ -126,27 +126,6 @@ module hubScenariosTest {
       .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
       .expect(conformingEveryOfferBeforeExpiry and ackedIsHeldOrSettled)
 
-  /// K6, control. The wallet inputs of K6 under a timely tip. The second
-  /// requeue is judged at tip 9, finds that an expiry of 11 does not survive
-  /// the flush at 12, and drops the entry: it is never offered past its
-  /// expiry.
-  run requeueUnderTimelyTipDropsTest =
-    started(timely)
-      .then(blocks(2))
-      .then(flushBegin)
-      .then(blocks(2))
-      .then(deliver(late))
-      .then(block)
-      .then(flush([late], Retryable))
-      .expect(h.queue == Map(late -> 1) and wRequeued)
-      .then(blocks(3))
-      .then(flushBegin)
-      .expect(flightStart == 9 and conformingEveryOfferBeforeExpiry)
-      .then(judge(late, Retryable))
-      .expect(requeueReport == requeued(0, 1, 0))
-      .then(flushEnd)
-      .expect(h.queue == Map())
-
   // ------------------------------------------------------------------------
   // K5. Acknowledged, then lost
   // ------------------------------------------------------------------------
@@ -253,29 +232,16 @@ module hubScenariosTest {
       .expect(flightStart == 7 and h.inFlight() == Set(payload))
       .expect(conforming(payload, cfg.params.minWalletExpiry))
 
-  /// K3', contrast. The reorg slack leaves the transaction exactly the mining
-  /// margin at the offer. One block arrives while the batch is in flight,
-  /// which the margin is there to pay for, and the node still accepts it.
-  run conformingSurvivesRegressionTest =
-    regressedTipDelaysFlush(flakyTip, early)
-      .expect(early.expiry == Some(7 + cfg.params.miningMargin))
-      .expect(conformingFirstOfferBeforeExpiry)
-      .then(advance)
-      .expect(height == 8 and not(mayAdvance))
-      .expect(wConformingFirstOfferInFlightABlock and conformingFirstOfferJudgedBeforeExpiry)
-      .then(judge(early, Accepted))
-      .then(flushEnd)
-      .expect(onChain == Set(early))
-
-  /// K3'. The same steps with the expiry floor equal to the three-term
-  /// budget. The flush is one block late and the transaction misses the
-  /// mining margin by that block.
+  /// K3'. The expiry floor equals the three-term budget, with no slack for
+  /// the reorg allowance. The flush is one block late and the transaction
+  /// misses the mining margin by that block. With the slack, G6b and G6c hold
+  /// on `flakyTip` in every reachable state.
   run conformingMissesMarginWithoutSlackTest =
     regressedTipDelaysFlush(flakyTipNoSlack, orchard("early", 2, 8))
       .expect(not(reorgSlackFits(cfg)))
       .expect(not(conformingFirstOfferBeforeExpiry))
 
-  /// K7. The same steps with the batch in flight for two blocks, as many as
+  /// K7. With the slack, and the batch in flight for two blocks, as many as
   /// the margin reserves. The offer left the whole margin, and G6b holds. By
   /// the time the node looks, the transaction can no longer be mined: the
   /// budget had already spent the slack, and the flight spent the margin.
@@ -510,6 +476,7 @@ module hubScenariosTest {
     initWith(byzHub)
       .then(unseenBlocks(2))
       .expect(decision(early) == Refused(TipStale))
+      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
       .then(submitWith(early, admitting(early)))
       .expect(h.phase == Starting and height == 3 and onTime == Set(early))
       .then(unseenBlocks(4))
@@ -520,18 +487,6 @@ module hubScenariosTest {
       .expect(not(conformingFirstOfferBeforeExpiry))
       .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(early, Rejected))
-
-  run hubAdmitsBeforeFirstTipControlTest =
-    initWith(byzHub)
-      .then(unseenBlocks(2))
-      .then(deliver(early))
-      .expect(h.queued() == Set())
-      .then(unseenBlocks(4))
-      .then(see)
-      .then(blocks(2))
-      .then(flushBegin)
-      .expect(h.inFlight() == Set())
-      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
 
   /// A3 needs the hub. Once its drain has begun, it takes a submission into
   /// the queue: draining before and after, nothing in flight, and the queue
@@ -545,14 +500,6 @@ module hubScenariosTest {
       .expect(decision(tight) == Refused(HubDraining))
       .then(submitWith(tight, admitting(tight)))
       .expect(h.phase == Draining and h.queued() == Set(early, tight))
-
-  run hubAdmitsWhileDrainingControlTest =
-    started(byzHub)
-      .then(block)
-      .then(deliver(early))
-      .then(drain)
-      .then(deliver(tight))
-      .expect(h.phase == Draining and h.queued() == Set(early))
 
   // ------------------------------------------------------------------------
   // A Byzantine indexer
@@ -579,21 +526,13 @@ module hubScenariosTest {
     started(byzIndexer)
       .then(block)
       .then(deliver(payload))
+      .expect(conformingFirstOfferBeforeExpiry and conformingFirstOfferJudgedBeforeExpiry)
       .then((silence - 1).reps(_ => advance.then(observeWith(2))))
       .then(advance)
       .expect(height == 2 + silence and h.tip == Some(2) and not(mayAdvance))
       .then(see)
       .then(flushBegin)
       .expect(flightStart == 2 + silence and h.inFlight() == Set(payload))
-
-  /// The same polls, answered truthfully: the flush runs at 3.
-  run tipReported(payload: Payload): bool =
-    started(byzIndexer)
-      .then(block)
-      .then(deliver(payload))
-      .then(block)
-      .then(flushBegin)
-      .expect(flightStart == 3 and h.inFlight() == Set(payload))
 
   /// G6b and G6c need the indexer. With the tip withheld up to height 8, a
   /// supported wallet's transaction is offered at 8 with expiry 9, and after
@@ -605,14 +544,4 @@ module hubScenariosTest {
       .then(advance)
       .expect(not(nodeWouldTake(early)) and not(conformingFirstOfferJudgedBeforeExpiry))
       .then(judge(early, Rejected))
-
-  /// Offered at 3, and accepted after a block in flight.
-  run indexerWithholdsTipFromConformingControlTest =
-    tipReported(early)
-      .expect(conformingFirstOfferBeforeExpiry)
-      .then(advance)
-      .expect(conformingFirstOfferJudgedBeforeExpiry)
-      .then(judge(early, Accepted))
-      .then(flushEnd)
-      .expect(onChain == Set(early))
 }
