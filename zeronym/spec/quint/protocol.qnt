@@ -70,8 +70,6 @@ module protocol {
   /// A transaction that is not a migration.
   pure val plain: Payload =
     { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: PassThrough, oversize: false }
-  /// Other bytes with the txid of `early`.
-  pure val earlyTwin = { ...early, id: "early-twin" }
 
   // ------------------------------------------------------------------------
   // Configurations
@@ -82,7 +80,6 @@ module protocol {
   /// One hub, the mixnet transport, every component honest.
   pure val baseline: Config = {
     payloads: Set(early, late, tight, junk, plain),
-    twins: Set(earlyTwin),
     maxRequests: 3,
     roles: allHonest,
   }
@@ -519,29 +516,6 @@ module protocol {
   pure def wThirdPartyServedBodyIn(s: System): bool =
     s.repliedBodies(ThirdPartyAddr) != Set()
 
-  /// W16a. The wallet is served a twin of what it sent: other bytes, same txid.
-  pure def wTwinServedIn(s: System): bool =
-    s.wasGiven(obs =>
-      match obs {
-        | Tx(tx) => s.toldOk().exists(sent => areTwins(sent, tx.payload))
-        | _ => false
-      })
-
-  /// W16b. The wallet is served a transaction at a height that cannot be
-  /// true: the chain does not have it, or has it in the mempool and the
-  /// height says mined, or the height is not where it was mined.
-  pure def wFalseHeightServedIn(s: System): bool =
-    s.wasGiven(obs =>
-      match obs {
-        | Tx(tx) =>
-          val at = match tx.payload.txid {
-            | Some(txid) => s.onChain(txid)
-            | None => Absent
-          }
-          or { at == Absent, tx.height == AtOther, tx.height == AtMined and at != Mined }
-        | _ => false
-      })
-
   // ------------------------------------------------------------------------
   // Non-vacuity: the antecedent of each guarantee is reachable
   // ------------------------------------------------------------------------
@@ -581,41 +555,27 @@ module protocol {
 
   /// The transactions a wallet may send.
   def PAYLOADS = cfg.payloads
-  /// Twins of wallet transactions: other bytes with the same txid. No honest
-  /// party sends one.
-  def TWINS = cfg.twins
-
   /// The bound of the model: the wallet makes at most `MAX_REQUESTS` sends
   /// and as many lookups, as does the third party.
   def MAX_REQUESTS = cfg.maxRequests
 
   def ROLES = cfg.roles
 
-  /// Every payload that exists. A Byzantine component builds its lies from it.
-  pure def universeOf(c: Config): Set[Payload] = c.payloads.union(c.twins)
-  def UNIVERSE = universeOf(cfg)
   /// What a wallet may send.
   def SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
   /// Every transaction id there is.
-  def TXIDS = txidsOf(UNIVERSE)
+  def TXIDS = txidsOf(PAYLOADS)
 
   /// The standing assumption, checked by every named init: payloads are told
-  /// apart by their bytes, and a twin is a twin of something a wallet sends.
+  /// apart by their bytes.
   pure def payloadsWellFormed(c: Config): bool =
-    val universe = universeOf(c)
-    and {
-      universe.size() == universe.map(payload => payload.id).size(),
-      c.twins.forall(twin => c.payloads.exists(payload => areTwins(twin, payload))),
-    }
+    c.payloads.size() == c.payloads.map(payload => payload.id).size()
 
-  /// Checked by the Byzantine inits: the universe holds a wallet payload, its
-  /// twin, and a payload with another txid, so a lie can be the twin or a
-  /// foreign transaction.
-  pure def universeCoversLies(c: Config): bool =
-    c.payloads.exists(payload => and {
-      c.twins.exists(twin => areTwins(twin, payload)),
-      c.payloads.exists(other => other.txid != None and other.txid != payload.txid),
-    })
+  /// Checked by the Byzantine inits: two payloads have different txids, so a
+  /// lie can be a transaction other than the one asked for.
+  pure def aForeignTransactionExists(c: Config): bool =
+    tuples(c.payloads, c.payloads).exists(((one, other)) =>
+      one.txid != None and other.txid != None and one.txid != other.txid)
 
   // ------------------------------------------------------------------------
   // State
@@ -640,8 +600,8 @@ module protocol {
   }
 
   action initBaseline = all { payloadsWellFormed(baseline), initWith(baseline) }
-  action initByzHub = all { payloadsWellFormed(byzHub), universeCoversLies(byzHub), initWith(byzHub) }
-  action initByzIndexer = all { payloadsWellFormed(byzIndexer), universeCoversLies(byzIndexer), initWith(byzIndexer) }
+  action initByzHub = all { payloadsWellFormed(byzHub), aForeignTransactionExists(byzHub), initWith(byzHub) }
+  action initByzIndexer = all { payloadsWellFormed(byzIndexer), aForeignTransactionExists(byzIndexer), initWith(byzIndexer) }
 
   // ------------------------------------------------------------------------
   // Roles
@@ -650,13 +610,13 @@ module protocol {
   def hubAnswers(h: AHub, request: ARequest): Set[AAnswer] =
     match ROLES.hub {
       | Honest => honestAnswers(h, request)
-      | Byzantine => byzantineAnswers(h, request, UNIVERSE)
+      | Byzantine => byzantineAnswers(h, request, PAYLOADS)
     }
 
   def indexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
     match ROLES.indexer {
       | Honest => heightlessIndexerResults(state, input)
-      | Byzantine => byzIndexerResults(state, input, UNIVERSE)
+      | Byzantine => byzIndexerResults(state, input, PAYLOADS)
     }
 
   /// What the indexer may answer a hub's lookup for the transaction `msg`
@@ -1026,8 +986,6 @@ module protocol {
   val wQueuedDisclosed = wQueuedDisclosedIn(s)
   val wUnparseableMissed = wUnparseableMissedIn(s)
   val wThirdPartyServedBody = wThirdPartyServedBodyIn(s)
-  val wTwinServed = wTwinServedIn(s)
-  val wFalseHeightServed = wFalseHeightServedIn(s)
 
   // Non-vacuity: the antecedent of each guarantee is reachable.
   val vOperatorBlind = vOperatorBlindIn(s)

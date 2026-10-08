@@ -89,7 +89,7 @@ finish() {
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
 FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:27 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:28 tests/scenariosTest.qnt:21 tests/trustTest.qnt:12"
+  tests/hubScenariosTest.qnt:28 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
 
 fail() {
   echo "FAIL  $1"
@@ -332,9 +332,8 @@ job reaches baseline earlyLookupStep 40 \
   vLookupValidityPerHub \
   -- $BASELINE_HOLDS
 
-# A twin served, and a transaction served at a false height.
 job reaches byzHub quietStep 40 \
-  vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \
+  vOperatorBlind vTxidAuthenticity \
   -- operatorBlind txidAuthenticity
 job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity \

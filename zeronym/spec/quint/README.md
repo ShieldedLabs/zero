@@ -164,7 +164,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Roles.** The shim and the hub both run attested. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
 - **Byzantine hub.** It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
-- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered, one the chain published, or a twin of either (other bytes with the same txid). In the hub specification it also reports any tip.
+- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
 - **Third party.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
@@ -232,7 +232,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 |---|---|---|---|
 | G1 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
-| G3 | holds (`baseline`) | holds (`byzHub`); a twin and a false height are both served | holds (`byzIndexer`) |
+| G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerForgesPendingTest`. One endpoint suffices |
 | G6b | holds (`timely`, `flakyTip`, `flakyTipSlowFlight`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G6c | holds (`timely`, `flakyTip`) | **required**: `hubAdmitsBeforeFirstTipTest` | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
@@ -269,7 +269,6 @@ Behaviours that are accepted or only recorded:
 | Behaviour | Threat | Shown by |
 |---|---|---|
 | **Accepted disclosure.** A third party that knows a txid learns that it is queued. The hub withholds the bytes, not the fact. The implementation leaves this open deliberately (`Hub::lookup`, `zeronym/hub/src/server.rs`): "the 200-versus-NotFound distinction still discloses that a given txid is queued here. Closing that too means answering NotFound, which costs a wallet the ability to tell "pending" from "never seen"" | T10 | `thirdPartyLearnsItIsQueuedTest`; witness `wQueuedDisclosed` on `baseline` |
-| **Twin and false height served.** The wallet can be served a twin of what it sent, and a transaction at a height the hub made up. G3 holds throughout | T3 | `wTwinServed`, `wFalseHeightServed` on `byzHub` |
 | **Premature flush.** A Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary: a batching harm, not an expiry one. What a report far ahead of the chain does is finding 11 | T11 | `tipAheadOfChainFlushesEarlyTest` |
 | **Early flush by the free-running clock.** A stale hub's clock is ahead of the chain and it flushes before the true boundary, with every component honest | T11, with no liar | `freeRunningClockFlushesEarlyTest` |
 | **Unparseable and queued.** A payload the hub cannot parse has no txid, so a lookup misses it while it is queued | none | `unparseableIsQueuedAndMissedTest` |
@@ -309,6 +308,7 @@ Argued, not checked, on the assumption that hubs share nothing but the chain and
 | The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled |
 | A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
 | Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them (but see finding 6). Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs:497-519`) is not checked, and is known not to hold under a tip reported behind the chain |
+| A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
 | More than one Byzantine component at once | The trust matrix is single-fault |
 | Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 

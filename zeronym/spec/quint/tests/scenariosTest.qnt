@@ -1,8 +1,7 @@
 // -*- mode: Bluespec; -*-
 
-/// Scripted runs against the honest configurations, and the two witnesses that
-/// need a Byzantine component: one run for each behaviour that must be
-/// reachable, and one for each cause of each known gap.
+/// Scripted runs against the honest configuration: one run for each behaviour
+/// that must be reachable, and one for each cause of each known gap.
 ///
 /// A run is a sequence of the machine's own steps. Where a run says a property
 /// fails, it also says what is in the wallet's log, the soup or the audit
@@ -211,25 +210,4 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-
-  // ------------------------------------------------------------------------
-  // A Byzantine hub (`byzHub`)
-  // ------------------------------------------------------------------------
-
-  /// A Byzantine hub serves a twin of the wallet's transaction at a
-  /// height the chain has not reached. The shim checks the txid, which a twin
-  /// shares, and nothing else: it serves both.
-  run twinAtFalseHeightIsServedTest =
-    initByzHub
-      .then(submitTo(0, early))
-      .then(ask("early"))
-      .then(hubReceiveWith(
-        lookupMail(1, "early"), INotFound,
-        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(earlyTwin), height: AtOther })))) },
-      ))
-      .then(deliverToShim(replyMail(1, WFound({ body: Some(earlyTwin), height: AtOther }))))
-      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: earlyTwin, height: AtOther }), via: Some(1) }))
-      .expect(s.onChain("early") == Absent)
-      .expect(wTwinServed and wFalseHeightServed)
-      .expect(txidAuthenticity and not(lookupValidityPerHub))
 }

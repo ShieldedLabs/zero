@@ -56,8 +56,8 @@ module trustTest {
       .expect(s.hub.queue == Set(early) and audit.windows.get(1) == Set(Pending))
       .expect(not(lookupValidityPerHub))
 
-  /// G4 needs the hub, second run. It serves a mempool transaction as mined,
-  /// at a height it made up. The txid is right, so the shim passes it on.
+  /// G4 needs the hub, second run. It serves a mempool transaction as mined.
+  /// The txid is right, so the shim passes it on.
   run hubServesFalseHeightTest =
     initByzHub
       .then(submitTo(0, early))
@@ -66,10 +66,10 @@ module trustTest {
       .expect(lookupValidityPerHub)
       .then(hubReceiveWith(
         lookupMail(1, "early"), chainAnswer(s.indexer, "early"),
-        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtOther })))) },
+        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtMined })))) },
       ))
-      .then(deliverToShim(replyMail(1, WFound({ body: Some(early), height: AtOther }))))
-      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtOther }), via: Some(1) }))
+      .then(deliverToShim(replyMail(1, WFound({ body: Some(early), height: AtMined }))))
+      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(1) }))
       .expect(s.onChain("early") == InMempool)
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)

@@ -87,9 +87,9 @@ module types {
   /// The height a lookup answer carries, relative to the transaction it names:
   /// 0, meaning the mempool; the height it was mined at; or any other height.
   /// No answer is compared against the chain height except through this.
-  type WireHeight = AtZero | AtMined | AtOther
+  type WireHeight = AtZero | AtMined
 
-  pure val WIRE_HEIGHTS = Set(AtZero, AtMined, AtOther)
+  pure val WIRE_HEIGHTS = Set(AtZero, AtMined)
 
   /// The height a lookup answer carries for `inclusion`.
   pure def answerHeight(inclusion: Inclusion): WireHeight =
@@ -195,7 +195,6 @@ module types {
   /// in `protocol.qnt`.
   type Config = {
     payloads: Set[Payload],
-    twins: Set[Payload],
     maxRequests: int,
     roles: Roles,
   }

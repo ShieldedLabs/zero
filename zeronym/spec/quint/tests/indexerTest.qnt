@@ -129,7 +129,7 @@ module indexerTest {
     // It may serve what it was offered and the chain has not published.
     assert(offeredB.servable(UNIVERSE) == Set(pB)),
     assert(byzIndexerOutputs(offeredB, LookupIInput("tb"), UNIVERSE)
-      .contains(AnswerOutput(IFound({ body: Some(pB), height: AtOther })))),
+      .contains(AnswerOutput(IFound({ body: Some(pB), height: AtMined })))),
     // A twin of what it knows, too. Nothing else.
     assert(withA.servable(UNIVERSE) == Set(pA, pATwin)),
     assert(empty.servable(UNIVERSE) == Set()),
