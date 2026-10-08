@@ -153,9 +153,6 @@ module types {
   ///   once the silence reaches the staleness window.
   type TipModel = TipTimely | TipMayRegress | TipMayLag
 
-  /// How a stale hub's free-running cadence clock relates to the true height.
-  type FreeRun = NotSlower | MayBeSlower
-
   // ------------------------------------------------------------------------
   // What the wallet observes
   // ------------------------------------------------------------------------
@@ -201,7 +198,6 @@ module types {
     deliveryLag: int,
     reorgAllowance: int,
     staleWindow: int,
-    freeRun: FreeRun,
     minWalletExpiry: int,
     maxAttempts: int,
     maxFlightBlocks: int,

@@ -69,7 +69,6 @@ module configs {
     deliveryLag: 1,
     reorgAllowance: 1,
     staleWindow: 3,
-    freeRun: NotSlower,
     minWalletExpiry: 7,
     maxAttempts: 2,
     maxFlightBlocks: 1,

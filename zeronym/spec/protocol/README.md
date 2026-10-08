@@ -142,7 +142,7 @@ definitions they justify.
 | Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist (S23). Represented by the roles |
 | Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; shim client rotation supervisor (`zeronym/shim/src/nym.rs:942-1024`); both `nym_driver.rs` | Protocol-visible effect is loss and delay |
 | Hub lookup concurrency bound, reply deadline, dropped acks (S21) | Refinements of "the network lost the message" |
-| Wall-clock time | The staleness window is counted in blocks (`STALE_WINDOW`), and a free-running cadence height is chosen by the environment under the named assumption `freeRunNotSlowerThanChain`; there is no clock |
+| Wall-clock time | The staleness window is counted in blocks (`STALE_WINDOW`), and a free-running cadence height is chosen by the environment, never behind the chain (see the tip assumption); there is no clock |
 | Multiple indexer endpoints and their folds | One abstract indexer per model stands for all of a hub's endpoints. Because the folds are asymmetric (S28), this document states for each Byzantine-indexer behaviour whether one lying endpoint suffices or all must lie |
 | Wire codecs `ZNS1` / `ZNA1` / `ZNL1` / `ZNR1` and the golden vectors (`zeronym/hub/src/wire.rs:576-579`) | Byte layouts are scoped out and are pinned by the Rust tests in both crates; the abstract `render` / `interpretReply` layer is the level this spec works at. The spec does not claim to bind the codec |
 | HTTP `"already_known"` and the lookup content-type tripwire (S31) | Checked in code: `"already_known"` has no hub source, so the wallet can never observe it; the tripwire turns a malformed 200 into the same `Unavailable` the wallet sees for `error`. Neither is a distinct wallet observation that changes a property |
@@ -150,6 +150,7 @@ definitions they justify.
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
+| A free-running clock slower than the chain (`MayBeSlower`) | Removed: no configuration used it, and nothing else told the two variants apart. The assumption that the clock is not slower is prose under [Assumptions](#assumptions) |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
 | Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
@@ -241,8 +242,10 @@ beyond loss in the soup.
   report may trail the chain by up to `REORG_ALLOWANCE`. `TipMayLag`: a hub may
   hear nothing for a while, and is stale once the silence reaches
   `STALE_WINDOW` blocks; a stale hub's free-running clock is assumed never
-  behind the chain (`freeRunNotSlowerThanChain`) and at most one flush interval
-  ahead of it.
+  behind the chain and at most one flush interval ahead of it. The
+  implementation relies on the first and does not enforce it: "during a real
+  stall blocks arrive slower than this, so the free-running clock runs ahead
+  of the true height" (`zeronym/hub/src/batcher.rs:64-67`).
 - **Wallets.** A supported ("conforming") wallet sets an expiry at least
   `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the
   hub within `DELIVERY_LAG` blocks. A wallet asks only about transactions it

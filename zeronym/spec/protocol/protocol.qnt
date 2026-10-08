@@ -76,8 +76,6 @@ module protocol {
   pure val REORG_ALLOWANCE = CONFIG.reorgAllowance
   /// Blocks without a forward tip observation after which a hub is stale.
   pure val STALE_WINDOW = CONFIG.staleWindow
-  /// How a stale hub's free-running clock relates to the true height.
-  pure val FREE_RUN = CONFIG.freeRun
   /// The smallest expiry delta a supported wallet sets.
   pure val MIN_WALLET_EXPIRY = CONFIG.minWalletExpiry
   /// Requeues an entry is allowed.
@@ -163,12 +161,6 @@ module protocol {
   pure val staleSlackFits =
     FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + (STALE_WINDOW - 1) <= MIN_WALLET_EXPIRY
 
-  /// A stale hub's free-running cadence clock is never behind the true height.
-  /// The implementation relies on this ("during a real stall blocks arrive
-  /// slower than this, so the free-running clock runs ahead of the true
-  /// height") and does not enforce it.
-  pure val freeRunNotSlowerThanChain = FREE_RUN == NotSlower
-
   pure val flushIntervalPositive = FLUSH_INTERVAL > 0
 
   /// Payloads are told apart by their bytes; a twin is a twin of something a
@@ -185,7 +177,6 @@ module protocol {
   /// relies on each, and some exist to show what happens without one.
   pure val standingAssumptions = and {
     budgetFits,
-    freeRunNotSlowerThanChain,
     flushIntervalPositive,
     payloadsWellFormed,
   }
@@ -193,7 +184,6 @@ module protocol {
   assume _ = budgetFits
   assume _ = CONFIG.reliesOnReorgSlack implies reorgSlackFits
   assume _ = CONFIG.reliesOnFlightWithinMargin implies flightWithinMargin
-  assume _ = freeRunNotSlowerThanChain
   assume _ = flushIntervalPositive
   assume _ = payloadsWellFormed
 
@@ -284,14 +274,13 @@ module protocol {
   def lag: int =
     s.height() - s.hub.observedTip()
 
-  /// The heights a stale hub's free-running clock may read now: up to an
-  /// interval ahead of the chain, and not behind it unless `FREE_RUN` allows.
+  /// The heights a stale hub's free-running clock may read now: not behind
+  /// the chain, and up to an interval ahead of it. The implementation relies
+  /// on the first ("during a real stall blocks arrive slower than this, so the
+  /// free-running clock runs ahead of the true height",
+  /// `zeronym/hub/src/batcher.rs:64-67`) and does not enforce it.
   def freeRunEstimates: Set[Height] =
-    val earliest = match FREE_RUN {
-      | NotSlower => s.height()
-      | MayBeSlower => s.hub.observedTip()
-    }
-    CLOCK_HEIGHTS.filter(estimate => earliest <= estimate and estimate <= s.height() + FLUSH_INTERVAL)
+    CLOCK_HEIGHTS.filter(estimate => s.height() <= estimate and estimate <= s.height() + FLUSH_INTERVAL)
 
   /// Whether the next block may arrive. This is where the timing assumptions
   /// live: a block is held back until the hub has done what the tip model
@@ -321,7 +310,7 @@ module protocol {
         | TipMayLag =>
           and {
             s.hub.phase == Running implies lag < STALE_WINDOW,
-            (s.hub.phase == Stale and FREE_RUN == NotSlower) implies s.hub.cadenceHeight() >= s.height(),
+            s.hub.phase == Stale implies s.hub.cadenceHeight() >= s.height(),
           }
       },
   }
