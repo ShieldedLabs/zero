@@ -13,7 +13,7 @@ module state {
   import types.* from "./types"
   import wire.* from "./wire"
   import indexer.* from "./indexer"
-  import hub.* from "./hub"
+  import abstractHub.* from "./abstractHub"
   import shim.* from "./shim"
 
   // ------------------------------------------------------------------------
@@ -32,20 +32,14 @@ module state {
   /// are payloads of its own making.
   type ThirdParty = { txids: Set[TxId], own: Set[Payload], nextNonce: Nonce, requests: int }
 
-  /// - `polled`: whether the hub's cadence loop has asked for the tip since the
-  ///   last block arrived.
-  /// - `flightBlocks`: the blocks that have arrived since the hub's flush in
-  ///   flight began; zero while no flush is in flight. Both are the
-  ///   environment's bookkeeping of time; no component reads them.
+  /// - `hub`: the hub as the protocol sees it (`abstractHub.qnt`).
   /// - `operator`: every transaction the shim has handed the operator's
   ///   indexer. The operator is assumed to publish nothing itself.
   /// - `disclosed`: payloads a Byzantine component has revealed. It is written
   ///   by the disclosure step and by nothing else.
   type System = {
     indexer: IndexerState,
-    hub: HubState,
-    polled: bool,
-    flightBlocks: int,
+    hub: AHub,
     shim: ShimState,
     net: Net,
     wallet: Wallet,
@@ -54,13 +48,10 @@ module state {
     disclosed: Set[Payload],
   }
 
-  /// The system at rest: the chain at `height`, the hub started and waiting
-  /// for its first tip, nothing sent.
-  pure def initialSystem(config: Config, params: HubParams, height: Height): System = {
+  /// The system at rest: the chain at `height`, the hub empty, nothing sent.
+  pure def initialSystem(config: Config, height: Height): System = {
     indexer: initialIndexer(height),
-    hub: startingHub(params),
-    polled: false,
-    flightBlocks: 0,
+    hub: emptyAHub,
     shim: initialShim,
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
@@ -79,14 +70,10 @@ module state {
     | ShimReceive(Mail)
     | ShimLookupTimeout(Nonce)
     | HubReceive(Mail)
-    | HubObserveTip(Height)
-    | HubTipStale(Height)
-    | HubFlushBegin
+    | HubTake
     | IndexerVerdict(Payload)
-    | HubFlushEnd
-    | HubBeginDrain
-    | HubCrash
-    | HubRestart
+    | HubReturn(Set[Payload])
+    | HubLose
     | ChainAdvance
     | ChainMine(TxId)
     | ThirdPartyLearnsTxid(TxId)
@@ -99,29 +86,11 @@ module state {
   /// before and after, never from what a component reports about itself.
   ///
   /// - `everQueued`: every payload that has been in the hub's queue.
-  /// - `admitted`: for a payload's first entry into the queue, the true chain
-  ///   height at that moment and the tip the hub believed in.
-  /// - `offers`: every time a flush put a payload in flight: the true chain
-  ///   height, the requeues the entry had had (`attempt`), and how many times
-  ///   the hub had offered the payload before (`nth`).
-  /// - `verdicts`: every time an entry in flight got its answer from the
-  ///   indexer: the true chain height at that moment, which offer of the
-  ///   payload it answers (`nth`), and whether a node judged the transaction
-  ///   (`final`) or nothing did and it was set aside for requeue.
   /// - `windows`: for each lookup the shim has sent, the answers that were
   ///   true at the hub at some point while it waited.
-  /// - `refusals`: the admission refusals that have been sent.
-  /// - `dropped`: entries a requeue gave up on, with the requeues they had had.
-  type Offer = { payload: Payload, height: Height, attempt: int, nth: int }
-  type Judgement = { payload: Payload, height: Height, nth: int, final: bool }
   type Audit = {
     everQueued: Set[Payload],
-    admitted: Payload -> { height: Height, tip: Height },
-    offers: Set[Offer],
-    verdicts: Set[Judgement],
     windows: Nonce -> Set[LookupObs],
-    refusals: Set[Refusal],
-    dropped: Set[{ payload: Payload, attempts: int }],
   }
 
   // ------------------------------------------------------------------------
@@ -289,45 +258,30 @@ module state {
       | ShimErrorOutput(_) => stepped
     }
 
-  /// The system after the hub moved to `state` on its own schedule. A hub with
-  /// no flush in flight has no flight time.
-  pure def hubMoved(s: System, state: HubState): System =
-    { ...s, hub: state, flightBlocks: if (state.flush == Idle) 0 else s.flightBlocks }
-
-  /// The system after one more block: the chain is a block higher, the hub has
-  /// not asked for the new tip yet, and a flush in flight has been out one
-  /// block longer.
+  /// The system after one more block.
   pure def blockArrived(s: System): System =
-    { ...s,
-      indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput),
-      polled: false,
-      flightBlocks: if (s.hub.flush == Idle) 0 else s.flightBlocks + 1,
-    }
+    { ...s, indexer: indexerApply(s.indexer, AdvanceIInput, NoIndexerOutput) }
 
-  /// The system after the hub took `result` on a frame from `client`. Its ack
-  /// or lookup reply is put on the wire and sent back; nothing else a hub
-  /// outputs leaves it.
-  pure def hubReplied(s: System, client: Addr, result: HubResult): System =
-    val stepped = { ...s, hub: result.state }
-    match result.out {
-      | AckOutput(ack) =>
-        stepped.posted(Set({
-          src: HubAddr, dst: client, msg: Ack({ nonce: ack.nonce, ack: renderAck(ack.kind) }),
-        }))
-      | LookupReplyOutput(reply) =>
-        stepped.posted(Set({
-          src: HubAddr, dst: client,
-          msg: LookupReply({ nonce: reply.nonce, reply: render(reply.outcome) }),
-        }))
-      | _ => stepped
+  /// The system after the hub answered `answer` to the request `mail`. The
+  /// reply goes back to its sender under its nonce.
+  pure def hubReplied(s: System, mail: Mail, answer: AAnswer): System =
+    val nonce = match mail.msg {
+      | Submit(submit) => submit.nonce
+      | Lookup(lookup) => lookup.nonce
+      | _ => 0
     }
+    val msg = match answer.reply {
+      | AAck(ack) => Ack({ nonce: nonce, ack: ack })
+      | AWire(reply) => LookupReply({ nonce: nonce, reply: reply })
+    }
+    { ...s, hub: answer.hub }.posted(Set({ src: HubAddr, dst: mail.src, msg: msg }))
 
-  /// The hub input a request frame becomes. `answer` is what the hub's indexer
-  /// would say to a lookup. Reply frames are not requests and give nothing.
-  pure def requestInput(msg: Msg, answer: IndexerAnswer): Set[HubInput] =
+  /// The request a frame carries. `answer` is what the hub's indexer would say
+  /// to a lookup. Reply frames are not requests and give nothing.
+  pure def requestOf(msg: Msg, answer: IndexerAnswer): Set[ARequest] =
     match msg {
-      | Submit(submit) => Set(SubmitHInput(submit))
-      | Lookup(lookup) => Set(LookupHInput({ nonce: lookup.nonce, txid: lookup.txid, answer: answer }))
+      | Submit(submit) => Set(ASubmit(submit.payload))
+      | Lookup(lookup) => Set(ALookup({ txid: lookup.txid, answer: answer }))
       | _ => Set()
     }
 

@@ -16,7 +16,7 @@ module byzHubTrust {
   import types.* from "../types"
   import wire.* from "../wire"
   import indexer.* from "../indexer"
-  import hub.* from "../hub"
+  import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import state.* from "../state"
   import configs.* from "../instances"
@@ -25,21 +25,21 @@ module byzHubTrust {
   /// G2 needs the hub. Asked by a third party about a queued txid, it answers
   /// with the queued bytes.
   run hubServesQueuedBodyTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
       .then(hubReceiveWith(
         fromThirdParty(lookupMail(0, "early")), INotFound,
-        s.hub.toLookupReplyOutput(0, FromIndexer(IFound({ body: Some(early), height: MEMPOOL_HEIGHT }))),
+        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: MEMPOOL_HEIGHT })))) },
       ))
       .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: Some(early), height: MEMPOOL_HEIGHT }))))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
       .expect(not(queuedBytesConfidential))
 
   run hubServesQueuedBodyControlTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(thirdPartyLearnsTxidWith("early"))
@@ -50,21 +50,21 @@ module byzHubTrust {
 
   /// G4 needs the hub. It answers not found for a transaction it has queued.
   run hubDeniesQueuedTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(ask("early"))
       .then(hubReceiveWith(
         lookupMail(1, "early"), INotFound,
-        s.hub.toLookupReplyOutput(1, FromIndexer(INotFound)),
+        { hub: s.hub, reply: AWire(render(FromIndexer(INotFound))) },
       ))
       .then(deliverToShim(replyMail(1, WNotFound)))
       .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
-      .expect(s.hub.queued() == Set(early) and audit.windows.get(1) == Set(Pending))
+      .expect(s.hub.queue == Set(early) and audit.windows.get(1) == Set(Pending))
       .expect(not(lookupValidityPerHub))
 
   run hubDeniesQueuedControlTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(lookUp(1, "early"))
@@ -74,7 +74,7 @@ module byzHubTrust {
   /// G4 needs the hub, second run. It serves a mempool transaction as mined,
   /// at a height it made up. The txid is right, so the shim passes it on.
   run hubServesFalseHeightTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(block)
@@ -82,7 +82,7 @@ module byzHubTrust {
       .then(ask("early"))
       .then(hubReceiveWith(
         lookupMail(1, "early"), chainAnswer(s.indexer, "early"),
-        s.hub.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(early), height: 9 }))),
+        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: 9 })))) },
       ))
       .then(deliverToShim(replyMail(1, WFound({ body: Some(early), height: 9 }))))
       .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: 9 }), via: Some(1) }))
@@ -91,7 +91,7 @@ module byzHubTrust {
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
 
   run hubServesFalseHeightControlTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(block)
@@ -102,32 +102,32 @@ module byzHubTrust {
 
   /// G8 needs the hub. It acks a submission as accepted and does not queue it.
   run hubAcksWithoutAdmittingTest =
-    started
+    init
       .then(block)
       .then(sendToHub(early))
-      .then(hubReceiveWith(submitMail(0, early), INotFound, s.hub.toAckOutput(0, Admitted)))
+      .then(hubReceiveWith(submitMail(0, early), INotFound, { hub: s.hub, reply: AAck(WAccepted) }))
       .expect(s.acks(ShimAddr) == Set((0, WAccepted)))
-      .expect(s.hub.queued() == Set() and audit.everQueued == Set())
+      .expect(s.hub.queue == Set() and audit.everQueued == Set())
       .expect(not(ackImpliesQueued))
 
   run hubAcksWithoutAdmittingControlTest =
-    started
+    init
       .then(block)
       .then(sendToHub(early))
       .then(deliverSubmit(0, early))
-      .expect(s.acks(ShimAddr) == Set((0, WAccepted)) and s.hub.queued() == Set(early))
+      .expect(s.acks(ShimAddr) == Set((0, WAccepted)) and s.hub.queue == Set(early))
       .expect(ackImpliesQueued)
 
   /// G3 survives. The hub answers with another transaction; the shim compares
   /// txids and refuses it.
   run wrongTransactionIsRefusedTest =
-    started
+    init
       .then(block)
       .then(sendToHub(early))
       .then(ask("early"))
       .then(hubReceiveWith(
         lookupMail(1, "early"), INotFound,
-        s.hub.toLookupReplyOutput(1, FromIndexer(IFound({ body: Some(tight), height: 3 }))),
+        { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(tight), height: 3 })))) },
       ))
       .then(deliverToShim(replyMail(1, WFound({ body: Some(tight), height: 3 }))))
       .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
@@ -139,7 +139,7 @@ module byzIndexerTrust {
   import types.* from "../types"
   import wire.* from "../wire"
   import indexer.* from "../indexer"
-  import hub.* from "../hub"
+  import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import state.* from "../state"
   import configs.* from "../instances"
@@ -155,11 +155,11 @@ module byzIndexerTrust {
   /// then serves the unpublished bytes in a lookup answer, which the honest
   /// hub forwards to whoever asked.
   run indexerServesUnpublishedBodyTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(block)
-      .then(hubFlushBegin)
+      .then(hubTake)
       .then(judge(early, Retryable))
       .expect(s.indexer.offered == Set(early) and s.onChain("early") == Absent)
       .then(thirdPartyLearnsTxidWith("early"))
@@ -172,11 +172,11 @@ module byzIndexerTrust {
       .expect(not(queuedBytesConfidential))
 
   run indexerServesUnpublishedBodyControlTest =
-    started
+    init
       .then(block)
       .then(submitTo(0, early))
       .then(block)
-      .then(hubFlushBegin)
+      .then(hubTake)
       .then(judge(early, Retryable))
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
@@ -188,7 +188,7 @@ module byzIndexerTrust {
   /// "found, height 0, no body". The hub forwards it unchanged, and on the
   /// wire it is the hub's own "queued here": the wallet sees pending.
   run indexerForgesPendingTest =
-    started
+    init
       .then(block)
       .then(sends(Clean(early), true))
       .then(ask("early"))
@@ -199,7 +199,7 @@ module byzIndexerTrust {
       .expect(not(lookupValidityPerHub))
 
   run indexerForgesPendingControlTest =
-    started
+    init
       .then(block)
       .then(sends(Clean(early), true))
       .then(lookUp(1, "early"))

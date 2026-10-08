@@ -6,7 +6,8 @@
 /// The protocol spec's hub answers wherever the real one would refuse or
 /// error, so a protocol run proves nothing about reachability on its own.
 /// Each realisation here is the sequence of inputs the hub sees in that run,
-/// on the `baseline` schedule, with the replies the run relies on. A lie is a
+/// on the hub specification's `timely` schedule, with the replies the run
+/// relies on. A lie is a
 /// member of the Byzantine relation, with the state unchanged.
 ///
 /// K1b has no hub step: the frame is never delivered.
@@ -18,13 +19,14 @@ module realisedRunsTest {
   import abstractHub.* from "../abstractHub"
   import configs.* from "../instances"
 
+  /// The hub specification's `timely` schedule.
   pure val PARAMS: HubParams = {
-    flushInterval: baseline.flushInterval,
-    miningMargin: baseline.miningMargin,
-    deliveryLag: baseline.deliveryLag,
-    minWalletExpiry: baseline.minWalletExpiry,
-    reorgAllowance: baseline.reorgAllowance,
-    maxAttempts: baseline.maxAttempts,
+    flushInterval: 3,
+    miningMargin: 2,
+    deliveryLag: 1,
+    minWalletExpiry: 7,
+    reorgAllowance: 1,
+    maxAttempts: 2,
   }
   pure val UNIVERSE = baseline.payloads.union(baseline.twins).union(baseline.tpPayloads)
   pure val HEIGHTS = 0.to(baseline.maxHeight)

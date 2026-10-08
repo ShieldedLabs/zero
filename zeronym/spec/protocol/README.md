@@ -50,10 +50,9 @@ default), about 14 minutes of CPU. It has not been timed on a CI runner.
 only 2 to 6 of the 2000 traces, so a lower count risks losing them. Five
 "fails" rows have a larger count of their own, written on the row.
 
-Tier 3 "fails" rows and tier 3b run under `step` or under one of two narrower
-relations, `quietStep` (no faults, no outsiders) and `outageStep` (the indexer
-is unreachable throughout). Each is a part of `step`, so a state or a violation
-found under one is reachable under `step`. Uniform random choice over `step`
+Tier 3 "fails" rows and tier 3b run under `step` or under a narrower
+relation, `quietStep` (no faults, no outsiders). It is a part of `step`, so a
+state or a violation found under it is reachable under `step`. Uniform random choice over `step`
 rarely gets a transaction as far as a block in 40 steps; the narrower relations
 do. Tier 3b re-checks each configuration's guarantees on those deeper traces.
 
@@ -120,14 +119,14 @@ definitions they justify.
 |---|---|---|
 | Wallet / shim front door | `SendTransaction` input as `Clean(payload) \| Unreadable \| EmptyBody`; routing to divert / forward / fail-closed; `GetTransaction` always to the hub | S1, S3, S4. `divert.qnt` omits it |
 | Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
-| Hub | lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash | S10-S19 |
+| Hub | In the hub specification: lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash. In the protocol specification: the abstract hub, a queue and the entries out with a flush, which accepts, refuses, takes, settles, gives back and loses (see [The abstraction lemma](#the-abstraction-lemma)) | S10-S19 |
 | Chain / indexer | height; per-txid status; what the indexer has been offered; verdict and lookup-answer relations | S15, S22 |
 | Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
 | Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
 | Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned and payloads of its own making; its payload knowledge is derived from what it can observe | S13, S25 |
 | Network | drop, duplicate, delay, reorder; cannot forge |  |
 | Hubs | one; see [One hub](#one-hub) | S24 |
-| Tip | `TipTimely \| TipMayRegress \| TipMayLag`, the observed tip and the cadence height as two hub clocks, `REORG_ALLOWANCE`, `STALE_WINDOW` and the wallet expiry floor as constants | S17, S26, S32 |
+| Tip | Hub specification only: `TipTimely \| TipMayRegress \| TipMayLag`, the observed tip and the cadence height as two hub clocks, the reorg allowance, the staleness window and the wallet expiry floor as parameters | S17, S26, S32 |
 
 ### Out of the model
 
@@ -144,6 +143,7 @@ definitions they justify.
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
+| The hub's schedule in the protocol specification: its phases, tip, cadence, drain, crash and restart, flight time, and what read them there: G6a-G6c, the refusal witnesses W4, the requeue witnesses W5-W7, the offer, verdict, admission, refusal and drop records, the tip models | Moved: the protocol uses the abstract hub, which `hubTest` checks the real hub refines; the schedule is checked exhaustively in the hub specification. The protocol's pinned runs that need a real hub step are replayed through it in `realisedRunsTest` |
 | A free-running clock slower than the chain (`MayBeSlower`) | Removed: no configuration used it, and nothing else told the two variants apart. The assumption that the clock is not slower is prose under [Assumptions](#assumptions) |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
@@ -223,6 +223,9 @@ beyond loss in the soup.
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** A transaction's status only moves forward: no reorg of an included
   transaction, no mempool eviction. The operator's indexer publishes nothing.
+- **Hub.** In the protocol specification the hub is abstract: it may accept
+  or refuse any submission, and take, settle, give back or lose its entries at
+  any time. The three assumptions below are the hub specification's.
 - **Flight time.** At most `MAX_FLIGHT_BLOCKS` blocks arrive while one flush
   is in flight, and that is fewer than the mining margin
   (`flightWithinMargin`). The implementation bounds each call to the indexer
@@ -488,47 +491,19 @@ abstract indexer per hub was a decision of the design.
 ### Configurations
 
 One constant, `CONFIG`, holds a configuration; `protocol.qnt` names its fields
-(`PAYLOADS`, `FLUSH_INTERVAL`, `ROLES`, `TIP`, ...).
+(`PAYLOADS`, `ROLES`, ...).
 
-| Module | Roles (hub / indexer) | Tip |
-|---|---|---|
-| `baseline` | H / H | timely |
-| `byzHub` | **B** / H | timely |
-| `byzIndexer` | H / **B** | timely for honest reports |
+| Module | Roles (hub / indexer) |
+|---|---|
+| `baseline` | H / H |
+| `byzHub` | **B** / H |
+| `byzIndexer` | H / **B** |
 
-The schedule is the shipped one scaled down, keeping the relations between the
-numbers:
-
-| | Interval | Margin | Delivery lag | Reorg allowance | Staleness window | Expiry floor |
-|---|---|---|---|---|---|---|
-| Shipped | 20 | 4 | 6 | 10 | 12 blocks (15 min at 75 s) | 40 |
-| Model | 3 | 2 | 1 | 1 | 3 | 7 |
-
-The relations kept, each asserted by `assumptionsTest` through
-`shippedRelationsKept`:
-
-- the slack `floor - (interval + margin + lag)` equals the reorg allowance
-  (10 and 1);
-- the staleness window exceeds the margin (12 > 4, 3 > 2) and the slack
-  (12 > 10, 3 > 1);
-- `interval + margin + lag + (window - 1)` exceeds the floor by exactly one
-  (41 = 40 + 1, 8 = 7 + 1);
-- `interval + lag + (window - 1)` does not exceed it (37 <= 40, 6 <= 7).
-
-The margin is 2, not 1, so that one block can arrive while a flush is in flight
-and still be inside it: `MAX_FLIGHT_BLOCKS` is 1 everywhere except
-`flakyTipSlowFlight`, where it is 2. `flakyTipNoSlack` uses a floor of 6 and
-`staleLagWithSlack` a floor of 8; those two do not keep the relations, and
-their tests assert that. Also: at most 2 requeues, heights up to 12,
-at most 3 sends and 3 lookups by the wallet and 3 requests by the third party.
-
-Each configuration has an `assumptionsTest`. The simulator does not enforce
-`assume`, so that test is the check that counts. Every `assume` in
-`protocol.qnt` is true of every configuration. `reorgSlackFits` and
-`flightWithinMargin` are assumed only where the configuration says it relies on
-them (`reliesOnReorgSlack`, `reliesOnFlightWithinMargin`); `flakyTipNoSlack`
-and `flakyTipSlowFlight` each drop one, and their tests assert it is false.
-`staleSlackFits` is never assumed.
+Heights up to 12, at most 3 sends and 3 lookups by the wallet and 3 requests
+by the third party. Each configuration's `assumptionsTest` asserts
+`payloadsWellFormed`; the simulator does not enforce `assume`. The hub
+specification's configurations, its scaled-down schedule and the relations
+it keeps with the shipped one are in `hubMachine.qnt`.
 
 ## Properties
 
@@ -562,7 +537,7 @@ and `flakyTipSlowFlight` each drop one, and their tests assert it is false.
 | G6a | `offeredBeforeExpiry` | Every transaction a hub offers is offered with the mining margin to spare: whatever was admitted, on every attempt. About the margin left when the flush begins, not about acceptance. Claimed under a timely tip |
 | G6b | `conformingFirstOfferBeforeExpiry` | The same for supported wallets and for the first time a hub offers the transaction. Nothing about a later offer of a requeued entry. Also about the margin at the offer |
 | G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and `flightWithinMargin` |
-| G7 | `wellFormed` | Structural sanity; checked in every configuration; not a trust-matrix row |
+| G7 | `wellFormed` | Structural sanity: every nonce in use was minted. Checked in every configuration; not a trust-matrix row. Its hub half, a queued entry within its attempts and a down hub holding nothing, is `hubTest::wellFormedTest` over `REACH` |
 | G8 | `ackImpliesQueued` | An accepted ack from a hub is for a payload that hub had queued by then, whether or not anyone waits for the ack |
 
 No guarantee reads a field written by the function it constrains. The history
@@ -655,12 +630,15 @@ frame undelivered, and nothing obliges the network ever to deliver it.
 ### Witnesses
 
 Each has a scripted run and, except W15 and W18, is counted in tier 3b.
+W4 (each refusal) and W5-W7 (requeued, dropped as expired, dropped as
+exhausted) were witnesses here; they read the hub's internals and are gone
+with the real hub. F8 produces each refusal and F9 each requeue outcome; the
+hub specification reaches `wRequeued` under TLC and both drops in
+`requeueAndDropTest`.
 
 | Id | Witness | Name | Configuration |
 |---|---|---|---|
 | W1-W3 | the wallet sees pending; its transaction in the mempool; mined | `wPending`, `wTxInMempool`, `wTxMined` | `baseline` |
-| W4 | each of the three refusals | `wRefusedTipStale`, `wRefusedDraining`, `wRefusedExpiryTooTight` | `baseline` |
-| W5-W7 | an entry is requeued; dropped as expired; dropped as exhausted | `wRequeued`, `wDroppedExpired`, `wDroppedExhausted` | `baseline` |
 | W8 | **Accepted disclosure**: a third party that knows a txid learns it is queued. The hub withholds the bytes, not the fact. See the quoted comment under [Scope](#scope) | `wQueuedDisclosed` | `baseline` |
 | W9 | a queued payload the hub cannot parse is asked for and missed | `wUnparseableMissed` | `baseline` |
 | W15 | **Premature flush**: a Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary. A batching harm, not a G6 one. One endpoint suffices | scripted run `tipAheadOfChainFlushesEarlyTest` (hub specification) | `byzIndexer` |
@@ -735,7 +713,8 @@ Over the same `REACH` as A2 and A3, with lookups added, `hubTest` checks:
 A temporary edit that makes `hub` ack a submission without queueing it fails
 `abstractionTest`.
 
-What the lemma transfers: an invariant that holds over the abstract hub, and
+The protocol specification's hub is this abstract one. What the lemma
+transfers: an invariant that holds over the abstract hub, and
 reads only queue membership and wire replies, holds over the real hub with
 these parameters. That covers G2, G3, G4 and G8. What it does not transfer is
 reachability. The abstract hub answers where the real one is down, starting,

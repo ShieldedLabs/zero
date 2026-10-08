@@ -15,8 +15,8 @@ module configs {
   // Transactions
   // ------------------------------------------------------------------------
   //
-  // The schedule below flushes every 3 blocks with a mining margin of 2 and a
-  // delivery lag of 1, and supports wallets that set an expiry 7 blocks out.
+  // The expiries are set against the hub specification's schedule; the
+  // protocol does not read them.
 
   pure def orchard(id: str, created: Height, expiry: Height): Payload =
     { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, oversize: false }
@@ -44,40 +44,14 @@ module configs {
 
   pure val allHonest: Roles = { hub: Honest, indexer: Honest }
 
-  /// One hub, the mixnet transport, every component honest, a timely tip.
-  ///
-  /// The schedule is the shipped one scaled down (shipped: interval 20,
-  /// margin 4, lag 6, reorg allowance 10, staleness window 12 blocks, expiry
-  /// floor 40), keeping the relations between the numbers that matter
-  /// (`shippedRelationsKept` in `protocol.qnt`):
-  ///
-  /// - the slack `floor - (interval + margin + lag)` equals the reorg
-  ///   allowance (10 there, 1 here);
-  /// - the staleness window is larger than the margin and than the slack;
-  /// - `interval + margin + lag + (window - 1)` exceeds the floor by one
-  ///   (41 > 40 there, 8 > 7 here), while `interval + lag + (window - 1)` does
-  ///   not (37 <= 40, 6 <= 7).
-  ///
-  /// The margin is 2, the smallest that leaves room for a block to arrive
-  /// while a flush is in flight (`maxFlightBlocks`).
+  /// One hub, the mixnet transport, every component honest.
   pure val baseline: Config = {
     payloads: Set(early, late, tight, junk, plain),
     twins: Set(earlyTwin),
     tpPayloads: Set(garbage),
-    flushInterval: 3,
-    miningMargin: 2,
-    deliveryLag: 1,
-    reorgAllowance: 1,
-    staleWindow: 3,
-    minWalletExpiry: 7,
-    maxAttempts: 2,
-    maxFlightBlocks: 1,
     maxHeight: 12,
     maxRequests: 3,
     roles: allHonest,
-    tip: TipTimely,
-    reliesOnReorgSlack: true,
-    reliesOnFlightWithinMargin: true,
   }
 
   // One Byzantine component at a time.
@@ -91,13 +65,7 @@ module baseline {
   import configs.*
   import protocol(CONFIG = baseline).* from "./protocol"
 
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
+  run assumptionsTest = assert(payloadsWellFormed)
 }
 
 module byzHub {
@@ -105,13 +73,7 @@ module byzHub {
   import configs.*
   import protocol(CONFIG = byzHub).* from "./protocol"
 
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
+  run assumptionsTest = assert(payloadsWellFormed)
 }
 
 module byzIndexer {
@@ -119,11 +81,5 @@ module byzIndexer {
   import configs.*
   import protocol(CONFIG = byzIndexer).* from "./protocol"
 
-  run assumptionsTest = all {
-    assert(standingAssumptions),
-    assert(reorgSlackFits),
-    assert(flightWithinMargin),
-    assert(shippedRelationsKept),
-    assert(not(staleSlackFits)),
-  }
+  run assumptionsTest = assert(payloadsWellFormed)
 }

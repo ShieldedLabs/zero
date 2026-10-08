@@ -193,21 +193,8 @@ module types {
     payloads: Set[Payload],
     twins: Set[Payload],
     tpPayloads: Set[Payload],
-    flushInterval: int,
-    miningMargin: int,
-    deliveryLag: int,
-    reorgAllowance: int,
-    staleWindow: int,
-    minWalletExpiry: int,
-    maxAttempts: int,
-    maxFlightBlocks: int,
     maxHeight: Height,
     maxRequests: int,
     roles: Roles,
-    tip: TipModel,
-    // Which of the two optional timing relations this configuration relies
-    // on. A configuration that exists to show what one of them buys drops it.
-    reliesOnReorgSlack: bool,
-    reliesOnFlightWithinMargin: bool,
   }
 }

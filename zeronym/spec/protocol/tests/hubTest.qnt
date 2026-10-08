@@ -386,6 +386,14 @@ module hubTest {
       state.phase == Draining implies REACH_INPUTS.forall(input =>
         hub(state, input).state.queued().subseteq(state.queued().union(state.inFlight())))))
 
+  /// G7's hub half: a queued entry is within its attempts, and a hub that is
+  /// down holds nothing and knows nothing.
+  run wellFormedTest =
+    assert(REACH.forall(state => and {
+      state.queued().forall(payload => state.queue.get(payload) >= 0 and state.queue.get(payload) <= PARAMS.maxAttempts),
+      state.phase == Down implies state == down,
+    }))
+
   // ------------------------------------------------------------------------
   // The abstraction lemma
   // ------------------------------------------------------------------------

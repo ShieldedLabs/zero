@@ -22,16 +22,15 @@
 ///   forge frames, so it does not know a nonce and cannot answer the shim.
 /// - Nonces are unique. A counter stands for an unguessable random value.
 /// - Chain. A transaction's status only moves forward: no reorg of an
-///   included transaction, no mempool eviction. How a hub's view of the tip
-///   relates to the true height is the constant `TIP`.
-/// - Wallets. A supported wallet sets an expiry at least `MIN_WALLET_EXPIRY`
-///   blocks after the height it builds at, and its frame reaches the hub within
-///   `DELIVERY_LAG` blocks.
+///   included transaction, no mempool eviction.
+/// - Hub. The hub is abstract (`abstractHub.qnt`): a queue, the entries out
+///   with a flush, and its replies, with no schedule. `hubTest` checks that
+///   the real hub function refines it. Its timing is the hub specification's.
 /// - Time. There is no clock. A timeout is an event that may happen at any
-///   moment, and the staleness window is counted in blocks.
+///   moment.
 ///
 /// How it is built. This module holds no protocol logic. Every step picks an
-/// input, hands it to one component function (`shim`, `hub`, or the indexer
+/// input, hands it to one component (`shim`, the abstract hub, or the indexer
 /// relation) and puts the output where it goes. Each step exists in two
 /// forms: `xWith(..)`, which takes every choice as a parameter and is what a
 /// scripted run is made of, and `x`, which picks the choices and is what
@@ -43,7 +42,7 @@ module protocol {
   import types.* from "./types"
   import wire.* from "./wire"
   import indexer.* from "./indexer"
-  import hub.* from "./hub"
+  import abstractHub.* from "./abstractHub"
   import shim.* from "./shim"
   import state.* from "./state"
   import properties.* from "./properties"
@@ -66,24 +65,6 @@ module protocol {
   /// Payloads of the third party's own making.
   pure val TP_PAYLOADS = CONFIG.tpPayloads
 
-  /// Blocks between scheduled flushes.
-  pure val FLUSH_INTERVAL = CONFIG.flushInterval
-  /// Blocks a published transaction needs to be mined.
-  pure val MINING_MARGIN = CONFIG.miningMargin
-  /// Blocks a submission may take to reach a hub.
-  pure val DELIVERY_LAG = CONFIG.deliveryLag
-  /// How far behind the chain a tip report may be and still be followed.
-  pure val REORG_ALLOWANCE = CONFIG.reorgAllowance
-  /// Blocks without a forward tip observation after which a hub is stale.
-  pure val STALE_WINDOW = CONFIG.staleWindow
-  /// The smallest expiry delta a supported wallet sets.
-  pure val MIN_WALLET_EXPIRY = CONFIG.minWalletExpiry
-  /// Requeues an entry is allowed.
-  pure val MAX_ATTEMPTS = CONFIG.maxAttempts
-
-  /// Blocks that may arrive while one flush is in flight.
-  pure val MAX_FLIGHT_BLOCKS = CONFIG.maxFlightBlocks
-
   /// Bounds of the model: the chain stops growing at `MAX_HEIGHT`, and the
   /// wallet makes at most `MAX_REQUESTS` sends and as many lookups, as does
   /// the third party.
@@ -91,15 +72,11 @@ module protocol {
   pure val MAX_REQUESTS = CONFIG.maxRequests
 
   pure val ROLES = CONFIG.roles
-  pure val TIP = CONFIG.tip
 
   /// Every payload that exists. A Byzantine component builds its lies from it.
   pure val UNIVERSE = PAYLOADS.union(TWINS).union(TP_PAYLOADS)
   /// Every height a Byzantine component may claim.
   pure val HEIGHTS = 0.to(MAX_HEIGHT)
-  /// Every height a free-running cadence clock may read: up to one flush
-  /// interval past the last block.
-  pure val CLOCK_HEIGHTS = 0.to(MAX_HEIGHT + FLUSH_INTERVAL)
   /// What a wallet may send.
   pure val SEND_INPUTS = PAYLOADS.map(payload => Clean(payload)).union(Set(Unreadable, EmptyBody))
   /// Every transaction id there is.
@@ -107,61 +84,12 @@ module protocol {
   /// The height the chain starts at. Height 0 is kept for "in the mempool".
   pure val GENESIS_HEIGHT = 1
 
-  pure val HUB_PARAMS: HubParams = {
-    flushInterval: FLUSH_INTERVAL,
-    miningMargin: MINING_MARGIN,
-    deliveryLag: DELIVERY_LAG,
-    minWalletExpiry: MIN_WALLET_EXPIRY,
-    reorgAllowance: REORG_ALLOWANCE,
-    maxAttempts: MAX_ATTEMPTS,
-  }
-
   // ------------------------------------------------------------------------
   // Assumptions
   // ------------------------------------------------------------------------
   //
-  // Each is a named value, so that an instance's `assumptionsTest` can assert
-  // it: the simulator does not enforce `assume`.
-
-  /// The hub's startup check: delivery, one full interval and the mining
-  /// margin fit inside the smallest supported expiry.
-  pure val budgetFits = scheduleFitsBudget(HUB_PARAMS)
-
-  /// The same budget with the reorg allowance added. A hub that follows a tip
-  /// report up to the allowance behind the chain can flush that much late.
-  /// Nothing in the implementation checks this; its shipped constants meet it
-  /// with equality.
-  pure val reorgSlackFits =
-    FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + REORG_ALLOWANCE <= MIN_WALLET_EXPIRY
-
-  /// Fewer blocks arrive while a flush is in flight than the mining margin
-  /// reserves. The margin is measured from the height at which a flush begins;
-  /// every block that arrives before the node judges a transaction is taken
-  /// out of it. The implementation bounds each call to the indexer
-  /// (`RPC_TIMEOUT`, `zeronym/hub/src/chain.rs`) and not the batch as a whole,
-  /// and bounds neither in blocks, so this is an assumption about the
-  /// environment that the code does not enforce.
-  pure val flightWithinMargin = MAX_FLIGHT_BLOCKS < MINING_MARGIN
-
-  /// The relations between the shipped constants that the scaled-down schedule
-  /// is meant to keep: the slack left by the startup budget equals the reorg
-  /// allowance; the staleness window exceeds both the margin and that slack;
-  /// the budget with the longest non-stale silence added exceeds the expiry
-  /// floor by exactly one block, and without the margin it fits.
-  pure val shippedRelationsKept = and {
-    MIN_WALLET_EXPIRY - (FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG) == REORG_ALLOWANCE,
-    STALE_WINDOW > MINING_MARGIN,
-    STALE_WINDOW > REORG_ALLOWANCE,
-    FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + (STALE_WINDOW - 1) == MIN_WALLET_EXPIRY + 1,
-    FLUSH_INTERVAL + DELIVERY_LAG + (STALE_WINDOW - 1) <= MIN_WALLET_EXPIRY,
-  }
-
-  /// The same budget with the longest silence that does not yet make a hub
-  /// stale. It is named, not assumed: the shipped constants do not meet it.
-  pure val staleSlackFits =
-    FLUSH_INTERVAL + MINING_MARGIN + DELIVERY_LAG + (STALE_WINDOW - 1) <= MIN_WALLET_EXPIRY
-
-  pure val flushIntervalPositive = FLUSH_INTERVAL > 0
+  // A named value, so that an instance's `assumptionsTest` can assert it: the
+  // simulator does not enforce `assume`.
 
   /// Payloads are told apart by their bytes; a twin is a twin of something a
   /// wallet sends; the third party's payloads are its own.
@@ -172,19 +100,6 @@ module protocol {
     UNIVERSE.forall(payload => payload.created >= GENESIS_HEIGHT),
   }
 
-  /// The assumptions every configuration meets. `reorgSlackFits` and
-  /// `flightWithinMargin` are kept apart: a configuration says whether it
-  /// relies on each, and some exist to show what happens without one.
-  pure val standingAssumptions = and {
-    budgetFits,
-    flushIntervalPositive,
-    payloadsWellFormed,
-  }
-
-  assume _ = budgetFits
-  assume _ = CONFIG.reliesOnReorgSlack implies reorgSlackFits
-  assume _ = CONFIG.reliesOnFlightWithinMargin implies flightWithinMargin
-  assume _ = flushIntervalPositive
   assume _ = payloadsWellFormed
 
   // ------------------------------------------------------------------------
@@ -205,7 +120,7 @@ module protocol {
     lastAction' = label,
   }
 
-  pure val INITIAL = initialSystem(CONFIG, HUB_PARAMS, GENESIS_HEIGHT)
+  pure val INITIAL = initialSystem(CONFIG, GENESIS_HEIGHT)
 
   action init = all {
     s' = INITIAL,
@@ -217,10 +132,10 @@ module protocol {
   // Roles
   // ------------------------------------------------------------------------
 
-  pure def hubResults(state: HubState, input: HubInput): Set[HubResult] =
+  pure def hubAnswers(h: AHub, request: ARequest): Set[AAnswer] =
     match ROLES.hub {
-      | Honest => Set(hub(state, input))
-      | Byzantine => byzHubResults(state, input, UNIVERSE, HEIGHTS)
+      | Honest => honestAnswers(h, request)
+      | Byzantine => byzantineAnswers(h, request, UNIVERSE, HEIGHTS)
     }
 
   pure def indexerResults(state: IndexerState, input: IndexerInput): Set[IndexerResult] =
@@ -247,73 +162,6 @@ module protocol {
       | ShimErrorOutput(_) => true
       | _ => false
     }
-
-  pure def isHubError(output: HubOutput): bool =
-    match output {
-      | HubErrorOutput(_) => true
-      | _ => false
-    }
-
-  // ------------------------------------------------------------------------
-  // Tip models
-  // ------------------------------------------------------------------------
-
-  /// The tips the indexer may report to a hub now.
-  def reportableTips: Set[Height] =
-    match ROLES.indexer {
-      | Byzantine => byzTips(HEIGHTS)
-      | Honest =>
-        match TIP {
-          | TipTimely => honestTips(s.indexer, 0, HEIGHTS)
-          | TipMayRegress => honestTips(s.indexer, REORG_ALLOWANCE, HEIGHTS)
-          | TipMayLag => honestTips(s.indexer, 0, HEIGHTS)
-        }
-    }
-
-  /// How far behind the chain the hub's observed tip is.
-  def lag: int =
-    s.height() - s.hub.observedTip()
-
-  /// The heights a stale hub's free-running clock may read now: not behind
-  /// the chain, and up to an interval ahead of it. The implementation relies
-  /// on the first ("during a real stall blocks arrive slower than this, so the
-  /// free-running clock runs ahead of the true height",
-  /// `zeronym/hub/src/batcher.rs:64-67`) and does not enforce it.
-  def freeRunEstimates: Set[Height] =
-    CLOCK_HEIGHTS.filter(estimate => s.height() <= estimate and estimate <= s.height() + FLUSH_INTERVAL)
-
-  /// Whether the next block may arrive. This is where the timing assumptions
-  /// live: a block is held back until the hub has done what the tip model
-  /// says it does within a block.
-  ///
-  /// In every model, a flush that is due has begun, and no flush has been in
-  /// flight for `MAX_FLIGHT_BLOCKS` blocks already. A hub whose flush is in
-  /// flight is not looking at the tip, so the clauses below bind the hub only
-  /// while it is idle.
-  ///
-  /// - `TipTimely`: a running hub has asked for the tip since the last block.
-  ///   An honest indexer answers with the true height, so the hub's lag is
-  ///   zero at every block. A Byzantine one is asked just as often; what it
-  ///   controls is the answer.
-  /// - `TipMayRegress`: a running hub is no further behind than the allowance.
-  /// - `TipMayLag`: a hub whose silence has reached the staleness window has
-  ///   become stale, and a stale hub's free-running clock has caught up with
-  ///   the current block.
-  def chainMayAdvance: bool = and {
-    s.height() < MAX_HEIGHT,
-    not(s.hub.isFlushDue()),
-    s.flightBlocks < MAX_FLIGHT_BLOCKS or s.hub.flush == Idle,
-    s.hub.flush == Idle implies
-      match TIP {
-        | TipTimely => s.hub.phase == Running implies s.polled
-        | TipMayRegress => s.hub.phase == Running implies lag <= REORG_ALLOWANCE
-        | TipMayLag =>
-          and {
-            s.hub.phase == Running implies lag < STALE_WINDOW,
-            s.hub.phase == Stale implies s.hub.cadenceHeight() >= s.height(),
-          }
-      },
-  }
 
   // ------------------------------------------------------------------------
   // Wallet
@@ -424,25 +272,22 @@ module protocol {
   // ------------------------------------------------------------------------
 
   /// The request frames that may be delivered to the hub: all of them, as
-  /// often as the network likes, while the hub is serving.
+  /// often as the network likes.
   def hubDeliverable: Set[Mail] =
-    if (s.hub.isServing())
-      s.net.inbox(HubAddr).filter(mail => requestInput(mail.msg, INotFound) != Set())
-    else Set()
+    s.net.inbox(HubAddr).filter(mail => requestOf(mail.msg, INotFound) != Set())
 
-  /// The transitions the hub may take when `mail` is delivered and its
-  /// indexer would answer a lookup with `answer`.
-  def hubReceipts(mail: Mail, answer: IndexerAnswer): Set[HubResult] =
-    requestInput(mail.msg, answer).map(input => hubResults(s.hub, input)).flatten()
+  /// What the hub may answer when `mail` is delivered and its indexer would
+  /// answer a lookup with `answer`.
+  def hubReceipts(mail: Mail, answer: IndexerAnswer): Set[AAnswer] =
+    requestOf(mail.msg, answer).map(request => hubAnswers(s.hub, request)).flatten()
 
   /// The network delivers a request to the hub, which answers its sender. For
   /// a lookup, `answer` is what the hub's indexer says if the queue misses.
-  action hubReceiveWith(mail: Mail, answer: IndexerAnswer, result: HubResult): bool = all {
+  action hubReceiveWith(mail: Mail, answer: IndexerAnswer, result: AAnswer): bool = all {
     hubDeliverable.contains(mail),
     lookupAnswers(s.indexer, mail.msg).contains(answer),
     hubReceipts(mail, answer).contains(result),
-    not(isHubError(result.out)),
-    commit(s.hubReplied(mail.src, result), HubReceive(mail)),
+    commit(s.hubReplied(mail, result), HubReceive(mail)),
   }
 
   action hubReceive = all {
@@ -455,56 +300,12 @@ module protocol {
     },
   }
 
-  /// A step of the hub's own schedule, taken in the system `around` (the
-  /// current one, or the current one after its indexer moved). A Byzantine hub
-  /// keeps the honest schedule, so these take the hub function's transition
-  /// whatever the role. A step that would change nothing is not taken.
-  action hubTakesIn(around: System, input: HubInput, label: Label): bool =
-    val result = hub(s.hub, input)
-    all {
-      not(isHubError(result.out)),
-      result.state != s.hub,
-      commit(around.hubMoved(result.state), label),
-    }
-
-  action hubTakes(input: HubInput, label: Label): bool =
-    hubTakesIn(s, input, label)
-
-  /// The hub's cadence loop observes the tip its indexer reports.
-  ///
-  /// The poll is recorded whether or not the answer moves the hub's tip: a hub
-  /// that asked and was told nothing new has still asked. A second poll in the
-  /// same block that changes nothing is not taken.
-  action hubObserveTipWith(tip: Height): bool =
-    val result = hub(s.hub, TipHInput(tip))
-    all {
-      reportableTips.contains(tip),
-      not(isHubError(result.out)),
-      result.state != s.hub or not(s.polled),
-      commit({ ...s.hubMoved(result.state), polled: true }, HubObserveTip(tip)),
-    }
-
-  action hubObserveTip = {
-    nondet tip = oneOf(reportableTips)
-    hubObserveTipWith(tip)
+  /// A flush begins: the whole queue goes out at once. A Byzantine hub keeps
+  /// the schedule, so these steps are the same whatever its role.
+  action hubTake = all {
+    s.hub.queue != Set(),
+    commit({ ...s, hub: s.hub.take() }, HubTake),
   }
-
-  /// A hub that has seen no tip progress for the staleness window goes stale,
-  /// or, already stale, reads its free-running clock again.
-  action hubTipStaleWith(estimate: Height): bool = all {
-    TIP == TipMayLag,
-    s.hub.phase == Stale or lag >= STALE_WINDOW,
-    freeRunEstimates.contains(estimate),
-    hubTakes(StaleHInput(estimate), HubTipStale(estimate)),
-  }
-
-  action hubTipStale = {
-    nondet estimate = oneOf(freeRunEstimates)
-    hubTipStaleWith(estimate)
-  }
-
-  /// A flush begins: the hub's whole queue goes out at once.
-  action hubFlushBegin = hubTakes(FlushDueHInput, HubFlushBegin)
 
   /// The verdict an indexer output carries. Read only where it carries one.
   pure def verdictIn(output: IndexerOutput): Verdict =
@@ -513,44 +314,49 @@ module protocol {
       | _ => Retryable
     }
 
-  /// The indexer returns its verdict on one entry of a batch. `result` is the
-  /// indexer's transition: the verdict, and what became of the transaction.
+  /// The indexer returns its verdict on one entry out with a flush. `result`
+  /// is the indexer's transition: the verdict, and what became of the
+  /// transaction. A node's verdict settles the entry; a retryable one leaves it
+  /// out with the flush.
   action indexerVerdictWith(payload: Payload, result: IndexerResult): bool = all {
+    s.hub.held.contains(payload),
     indexerResults(s.indexer, BroadcastIInput(payload)).contains(result),
     result.out == VerdictOutput(verdictIn(result.out)),
-    hubTakesIn(
-      { ...s, indexer: result.state },
-      VerdictHInput({ payload: payload, verdict: verdictIn(result.out) }),
-      IndexerVerdict(payload),
-    ),
+    val hub = if (verdictIn(result.out) == Retryable) s.hub else s.hub.settle(payload)
+    commit({ ...s, indexer: result.state, hub: hub }, IndexerVerdict(payload)),
   }
 
-  /// The entries of the hub's batch still waiting for a verdict.
-  def awaitingVerdict: Set[Payload] =
-    match s.hub.flush {
-      | Broadcasting(flush) => flush.batch.keys()
-      | Idle => Set()
-    }
-
   action indexerVerdict = all {
-    awaitingVerdict != Set(),
+    s.hub.held != Set(),
     {
-      nondet payload = oneOf(awaitingVerdict)
+      nondet payload = oneOf(s.hub.held)
       nondet result = oneOf(indexerResults(s.indexer, BroadcastIInput(payload)))
       indexerVerdictWith(payload, result)
     },
   }
 
-  /// A flush ends: what nothing judged is requeued or dropped.
-  action hubFlushEnd = hubTakes(FlushDoneHInput, HubFlushEnd)
+  /// A flush ends: of what nothing judged, `kept` goes back into the queue and
+  /// the rest is dropped.
+  action hubReturnWith(kept: Set[Payload]): bool = all {
+    s.hub.held != Set(),
+    kept.subseteq(s.hub.held),
+    commit({ ...s, hub: s.hub.giveBack(kept) }, HubReturn(kept)),
+  }
 
-  /// The hub gets its shutdown signal.
-  action hubBeginDrain = hubTakes(DrainHInput, HubBeginDrain)
+  action hubReturn = all {
+    s.hub.held != Set(),
+    {
+      nondet kept = oneOf(s.hub.held.powerset())
+      hubReturnWith(kept)
+    },
+  }
 
-  /// The hub's process dies, or exits after its final flush.
-  action hubCrash = hubTakes(CrashHInput, HubCrash)
-
-  action hubRestart = hubTakes(RestartHInput, HubRestart)
+  /// The hub loses everything: its process dies, or exits after its final
+  /// flush.
+  action hubLose = all {
+    s.hub != emptyAHub,
+    commit({ ...s, hub: emptyAHub }, HubLose),
+  }
 
   // ------------------------------------------------------------------------
   // Chain
@@ -558,7 +364,7 @@ module protocol {
 
   /// The chain grows by one block.
   action chainAdvance = all {
-    chainMayAdvance,
+    s.height() < MAX_HEIGHT,
     commit(s.blockArrived(), ChainAdvance),
   }
 
@@ -666,9 +472,9 @@ module protocol {
   // Step
   // ------------------------------------------------------------------------
 
-  /// A fault: a timeout, a shutdown, a crash, a restart.
+  /// A fault: a timeout, or the hub losing what it holds.
   action faultStep = any {
-    shimLookupTimeout, hubBeginDrain, hubCrash, hubRestart,
+    shimLookupTimeout, hubLose,
   }
 
   /// A step by someone outside the protocol: the third party, or a Byzantine
@@ -685,22 +491,10 @@ module protocol {
   action step = any {
     walletSend, walletGet,
     shimReceive,
-    hubReceive, hubObserveTip, hubTipStale, hubFlushBegin, indexerVerdict, hubFlushEnd,
+    hubReceive, hubTake, indexerVerdict, hubReturn,
     chainAdvance, chainMine,
     faultStep,
     outsiderStep,
-  }
-
-  /// The indexer cannot be reached: an entry of a batch gets no verdict.
-  action indexerUnreachable = all {
-    awaitingVerdict != Set(),
-    {
-      nondet payload = oneOf(awaitingVerdict)
-      indexerVerdictWith(payload, {
-        state: indexerApply(s.indexer, BroadcastIInput(payload), VerdictOutput(Retryable)),
-        out: VerdictOutput(Retryable),
-      })
-    },
   }
 
   // The relations below are parts of `step`. Everything one of them reaches,
@@ -712,18 +506,8 @@ module protocol {
   action quietStep = any {
     walletSend, walletGet,
     shimReceive,
-    hubReceive, hubObserveTip, hubTipStale, hubFlushBegin, indexerVerdict, hubFlushEnd,
+    hubReceive, hubTake, indexerVerdict, hubReturn,
     chainAdvance, chainMine,
-  }
-
-  /// The protocol during an indexer outage: every flush comes back unjudged,
-  /// while outsiders go on submitting.
-  action outageStep = any {
-    walletSend, walletGet,
-    shimReceive,
-    hubReceive, hubObserveTip, hubTipStale, hubFlushBegin, indexerUnreachable, hubFlushEnd,
-    chainAdvance,
-    outsiderStep,
   }
 
   // ------------------------------------------------------------------------
@@ -738,9 +522,6 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
-  val offeredBeforeExpiry = offeredBeforeExpiryIn(s, audit)
-  val conformingFirstOfferBeforeExpiry = conformingFirstOfferBeforeExpiryIn(s, audit)
-  val conformingFirstOfferJudgedBeforeExpiry = conformingFirstOfferJudgedBeforeExpiryIn(s, audit)
   val wellFormed = wellFormedIn(s)
   val ackImpliesQueued = ackImpliesQueuedIn(s, audit)
 
@@ -760,12 +541,6 @@ module protocol {
   val wPending = wPendingIn(s)
   val wTxInMempool = wTxInMempoolIn(s)
   val wTxMined = wTxMinedIn(s)
-  val wRefusedTipStale = wRefused(audit, TipStale)
-  val wRefusedDraining = wRefused(audit, HubDraining)
-  val wRefusedExpiryTooTight = wRefused(audit, ExpiryTooTight)
-  val wRequeued = wRequeuedIn(s)
-  val wDroppedExpired = wDroppedExpiredIn(s, audit)
-  val wDroppedExhausted = wDroppedExhaustedIn(audit)
   val wQueuedDisclosed = wQueuedDisclosedIn(s)
   val wUnparseableMissed = wUnparseableMissedIn(s)
   val wTwinServed = wTwinServedIn(s)
@@ -777,7 +552,6 @@ module protocol {
   val vQueuedBytesConfidential = vQueuedBytesConfidentialIn(s)
   val vTxidAuthenticity = vTxidAuthenticityIn(s)
   val vLookupValidityPerHub = vLookupValidityPerHubIn(s)
-  val vConformingFirstOfferJudged = vConformingFirstOfferJudgedIn(s, audit)
   val vAckImpliesQueued = vAckImpliesQueuedIn(s)
 
   // ------------------------------------------------------------------------
@@ -822,10 +596,17 @@ module protocol {
     walletGetWith(query)
 
   /// `client`'s submission of `payload` under `nonce` reaches the hub, which
-  /// acts as it should.
+  /// answers `ack`, and queues the payload if it accepts it.
+  action answerSubmitFrom(client: Addr, nonce: Nonce, payload: Payload, ack: WireAck): bool =
+    hubReceiveWith(
+      { src: client, dst: HubAddr, msg: Submit({ nonce: nonce, payload: payload }) },
+      INotFound,
+      { hub: if (ack == WAccepted) { ...s.hub, queue: s.hub.queue.union(Set(payload)) } else s.hub, reply: AAck(ack) },
+    )
+
+  /// The same, accepted.
   action deliverSubmitFrom(client: Addr, nonce: Nonce, payload: Payload): bool =
-    val submit = { nonce: nonce, payload: payload }
-    hubReceiveWith({ src: client, dst: HubAddr, msg: Submit(submit) }, INotFound, hub(s.hub, SubmitHInput(submit)))
+    answerSubmitFrom(client, nonce, payload, WAccepted)
 
   /// The shim's submission of `payload` under `nonce` reaches the hub.
   action deliverSubmit(nonce: Nonce, payload: Payload): bool =
@@ -837,7 +618,7 @@ module protocol {
     hubReceiveWith(
       { src: client, dst: HubAddr, msg: Lookup({ nonce: nonce, txid: txid }) },
       answer,
-      hub(s.hub, LookupHInput({ nonce: nonce, txid: txid, answer: answer })),
+      { hub: s.hub, reply: AWire(honestReplyOn(txid, answer)) },
     )
 
   /// The shim's lookup of `txid` under `nonce` reaches the hub, whose indexer
@@ -849,10 +630,14 @@ module protocol {
   action deliverToShim(mail: Mail): bool =
     shimReceiveWith(mail)
 
-  /// The reply an honest hub with a truthful indexer gives, in the current
-  /// state, to a lookup of `txid`.
+  /// The reply an honest hub gives, in the current state, to a lookup of
+  /// `txid` on which its indexer would answer `answer`.
+  def honestReplyOn(txid: TxId, answer: IndexerAnswer): WireReply =
+    render(if (s.hub.queue.exists(payload => payload.txid == Some(txid))) QueueHit else FromIndexer(answer))
+
+  /// The same, with a truthful indexer.
   def honestReply(txid: TxId): WireReply =
-    render(if (s.hub.isQueuedTxid(txid)) QueueHit else FromIndexer(chainAnswer(s.indexer, txid)))
+    honestReplyOn(txid, chainAnswer(s.indexer, txid))
 
   /// The shim's wait under `nonce` times out.
   action timeOutLookup(nonce: Nonce): bool =
@@ -866,17 +651,10 @@ module protocol {
       out: VerdictOutput(verdict),
     })
 
-  /// The hub observes the true height.
-  action observe: bool =
-    hubObserveTipWith(s.height())
+  /// One block arrives.
+  run block = chainAdvance
 
-  /// The system with the hub running at the genesis height.
-  run started = init.then(observe)
-
-  /// One block arrives and the hub sees it.
-  run block = chainAdvance.then(observe)
-
-  /// `count` blocks arrive, each seen by the hub. No flush may fall due.
+  /// `count` blocks arrive.
   run blocks(count: int): bool = count.reps(_ => block)
 
   /// The wallet sends `payload`, and the frame under `nonce` reaches the hub.
@@ -892,9 +670,7 @@ module protocol {
 
   /// The hub flushes `batch`, and the indexer gives every entry `verdict`.
   run flush(batch: List[Payload], verdict: Verdict): bool =
-    hubFlushBegin
-      .then(batch.length().reps(i => judge(batch[i], verdict)))
-      .then(hubFlushEnd)
+    hubTake.then(batch.length().reps(i => judge(batch[i], verdict)))
 
   /// The wallet's most recent answer.
   def lastEvent: WalletEvent =
