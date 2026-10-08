@@ -8,8 +8,8 @@ A [Quint](https://quint-lang.org) specification of zeronym: the protocol between
 - [Guarantees](#guarantees)
 - [Trust matrix](#trust-matrix)
 - [Known gaps](#known-gaps)
+- [Out of scope](#out-of-scope)
 - [Findings](#findings)
-- [Scope](#scope)
 - [How it is checked](#how-it-is-checked)
 - [Future work](#future-work)
 
@@ -19,7 +19,7 @@ A [Quint](https://quint-lang.org) specification of zeronym: the protocol between
 
 The architecture diagram and the prose description of the deployment are in [`zeronym/README.md`](../../README.md).
 
-Only the mixnet transport is modelled; the HTTP transport is out of scope (see [Out of the model](#out-of-the-model)).
+Only the mixnet transport is modelled; the HTTP transport is out of scope (see [Out of scope](#out-of-scope)).
 
 There are two specifications, sharing one hub function:
 
@@ -208,7 +208,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | G1 | `operatorBlind` | Everything the shim hands the operator is a pass-through transaction | T1 | Simulation |
 | G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
-| G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true. It does not say that successive answers agree | T4 | Simulation |
+| G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true, as the implementation intends (`Hub::lookup`, `zeronym/hub/src/server.rs`). It does not say that successive answers agree | T4 | Simulation |
 | G6b | `conformingFirstOfferBeforeExpiry` | A supported wallet's transaction is offered with the mining margin to spare, the first time a hub offers it. About the margin left when the flush begins, not about acceptance; nothing about a later offer of a requeued entry | T5 | TLC, exhaustive |
 | G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and the flight-time assumption | T5 | TLC, exhaustive |
 | G7 | `wellFormedTest` | Structural sanity of the hub: a queued entry is within its attempts and a down hub holds nothing | T6 | Exhaustive test over every reachable hub state |
@@ -268,6 +268,44 @@ Behaviours that are accepted or only recorded:
 | **Early flush by the free-running clock.** A stale hub's clock is ahead of the chain and it flushes before the true boundary, with every component honest | T11, with no liar | `freeRunningClockFlushesEarlyTest` |
 | **Unparseable and queued.** A payload the hub cannot parse has no txid, so a lookup misses it while it is queued | none | `unparseableIsQueuedAndMissedTest` |
 
+## Out of scope
+
+> What the specification deliberately does not cover, and why.
+
+### One hub
+
+The specification checks one hub; production runs one or more, replicated: every shim sends every submission to every hub, and each hub that receives a migration queues and broadcasts it (`zeronym/shim/src/nym.rs:602-647`). The single hub is a scope choice, not a claim about production.
+
+Not checked as a result: two hubs disagreeing about one transaction; duplicate publication, and a second enclave holding the plaintext, both accepted deliberately in production; told ok after a partial send, and its anonymity cost; a lookup moving to the next address on a timeout (finding 9); that one Byzantine replica is enough to break G2 and G4.
+
+Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
+
+- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b and G6c, and gap K5.
+- **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
+- **Do not compose:** K1 and K2 each gain a cause with a second hub.
+
+### Not modelled
+
+| Item | Reason |
+|---|---|
+| Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist. Represented by the roles |
+| Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
+| The hub's lookup concurrency bound, reply deadline and dropped acks | Refinements of "the network lost the message" |
+| Wall-clock time | There is no clock: the staleness window is counted in blocks, and a timeout may happen at any moment |
+| Multiple indexer endpoints | One abstract indexer stands for all of a hub's endpoints. The trust matrix says, for each Byzantine-indexer cell, whether one lying endpoint suffices |
+| Wire codecs, byte layout, malformed frames | Pinned by the Rust tests and golden vectors in both crates. The specification works at the level of what a reply means, and does not bind the codec |
+| Reorgs of included transactions, mempool eviction | Assumed away: a transaction's chain status only moves forward |
+| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not properties of a single run |
+| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol |
+| The HTTP transport, where the shim waits for the hub's verdict before answering the wallet (`HubTransport::Http`, `--hub`) | The production deployment is the mixnet (`HTTP_SUBMIT=0`). So there is no configuration here in which the shim's ok means the hub has the transaction |
+| A Byzantine shim | The shim runs attested, sees every migration in plaintext and controls what the wallet observes. Every wallet-facing guarantee assumes it honest |
+| What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
+| The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled |
+| A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
+| Wallets whose expiry is below the supported floor | No schedule guarantee is made for them. Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs:497-519`) is not checked, and is known not to hold under a tip reported behind the chain |
+| More than one Byzantine component at once | The trust matrix is single-fault |
+| Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
+
 ## Findings
 
 > Where the model disagrees with what the code or its comments assume.
@@ -287,120 +325,6 @@ Nothing here has been fixed. "Code read" means the cited lines were read and mat
 | 9 | **Lookups choose a hub by apparent liveness.** A lookup starts at a rotating cursor and moves to the next address only on a timeout, the pattern the submit path forbids. Whoever can make one hub time out decides which hub answers | Not modelled: needs more than one hub | Code read: `shim/src/nym.rs:746-797`, against the rule at `:630-633`. Unexamined; not claimed as a bug |
 
 On finding 2, the model lets the free-running clock be at most one flush interval ahead, so it can spend one epoch. `cadence_height` has no such cap. Reading that code, a clock further ahead would skip more than one boundary; the model does not exhibit that.
-
-## Scope
-
-> What is in the model, what is out and why, and the facts read from the Rust that it rests on.
-
-### In the model
-
-| Area | What is modelled | Why |
-|---|---|---|
-| Wallet / shim front door | `SendTransaction` input as `Clean(payload) \| Unreadable \| EmptyBody`; routing to divert / forward / fail-closed; `GetTransaction` always to the hub | S1, S3, S4 |
-| Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
-| Hub | In the hub specification: lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash. In the protocol specification: the abstract hub, a queue and the entries out with a flush, which accepts, refuses, takes, settles, gives back and loses (see [The abstraction lemma](#the-abstraction-lemma)) | S10-S19 |
-| Chain / indexer | per-txid status (absent, mempool, mined); what the indexer has been offered; verdict and lookup-answer relations. A lookup answer's height is 0, the height the transaction was mined at, or another (`WireHeight`). The protocol specification has no chain height and no block clock, and its verdict relation has no expiry clause (`heightlessIndexerResults`); the hub specification keeps the chain height, which its tip and expiry rules read | S15, S22 |
-| Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation | S20, S22 |
-| Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
-| Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned or the chain has published; its payload knowledge is derived from what it can observe | S13, S25 |
-| Network | drop, duplicate, delay, reorder; cannot forge |  |
-| Hubs | one; see [One hub](#one-hub) | S24 |
-| Tip | Hub specification only: `TipTimely \| TipMayRegress \| TipMayLag`, the observed tip and the cadence height as two hub clocks, the reorg allowance, the staleness window and the wallet expiry floor as parameters | S17, S26, S32 |
-
-### One hub
-
-The specification checks one hub; production runs one or more, replicated: every shim sends every submission to every hub, and each hub that receives a migration queues and broadcasts it (`zeronym/shim/src/nym.rs:602-647`). The single hub is a scope choice, not a claim about production.
-
-Not checked as a result: two hubs disagreeing about one transaction; duplicate publication, and a second enclave holding the plaintext, both accepted deliberately in production; told ok after a partial send, and its anonymity cost; a lookup moving to the next address on a timeout (finding 9); that one Byzantine replica is enough to break G2 and G4.
-
-Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
-
-- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b and G6c, and gap K5.
-- **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
-- **Do not compose:** K1 and K2 each gain a cause with a second hub.
-
-### Out of the model
-
-Never modelled:
-
-| Item | Reason |
-|---|---|
-| Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist (S23). Represented by the roles |
-| Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; shim client rotation supervisor (`zeronym/shim/src/nym.rs:942-1024`); both `nym_driver.rs` | Protocol-visible effect is loss and delay |
-| Hub lookup concurrency bound, reply deadline, dropped acks (S21) | Refinements of "the network lost the message" |
-| Wall-clock time | The staleness window is counted in blocks (`STALE_WINDOW`), and a free-running cadence height is chosen by the environment, never behind the chain (see the tip assumption); there is no clock |
-| Multiple indexer endpoints and their folds | One abstract indexer per model stands for all of a hub's endpoints. Because the folds are asymmetric (S28), this document states for each Byzantine-indexer behaviour whether one lying endpoint suffices or all must lie |
-| Wire codecs `ZNS1` / `ZNA1` / `ZNL1` / `ZNR1` and the golden vectors (`zeronym/hub/src/wire.rs:576-579`) | Byte layouts are scoped out and are pinned by the Rust tests in both crates; the abstract `render` / `interpretReply` layer is the level this spec works at. The spec does not claim to bind the codec |
-| Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
-| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties |
-| Byte layout, malformed frames, `bad_frame` | Sum types make them unrepresentable; pinned by the Rust golden vectors |
-| Forward-only shim, transparent-pool RPCs, health / address / attestation endpoints, DoS bounds, logging | Not divert-protocol state |
-| More than one Byzantine component at once | The trust matrix is single-fault |
-| Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
-
-Removed, each because it produced no finding and removing it made the specification smaller:
-
-| Item | Reason |
-|---|---|
-| More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
-| The HTTP transport, where the shim waits for the hub's verdict before answering the wallet. In code (`HubTransport::Http`, `--hub`); `deploy.env.example` sets `HTTP_SUBMIT=0` | Removed: it increases complexity without much gain, and the production deployment is the mixnet. With it went the only configuration in which the shim's ok meant the hub had the transaction. Its two HTTP-only details were read in the code and are not distinct wallet observations: the client's `"already_known"` arm has no hub source, and a malformed 200 on a lookup becomes the same `Unavailable` as an error |
-| A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. |
-| Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed: a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it |
-| Payloads of the third party's own making | Removed: the hub's address is public and unauthenticated, so this is possible, but nothing read them. The third party still submits what it has learned or the chain has published (a cause of K2) |
-| The frame-size lemma and `sizeOf` | Removed: true by construction; the code pads four fixed-size frames (`zeronym/hub/src/wire.rs:29-59`), and length side channels were already out of the model |
-| The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. The shim's own too-large arm (S3) stays |
-| A free-running clock slower than the chain (`MayBeSlower`) | Removed: no configuration used it, and nothing else told the two variants apart. The assumption that the clock is not slower is prose under [Assumptions](#assumptions) |
-| The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
-| G8 `ackImpliesQueued` and its function-level test: an accepted ack is only for a payload the hub queued. In code: `queue.rs` admits before it acks | Removed: nothing reads an ack since the HTTP transport went. The abstraction lemma still fails if `hub` acks without queueing |
-| A Byzantine hub's false ack (accepted but not queued, or queued but refused) | Removed with G8: no remaining guarantee reads it. A Byzantine hub still admits or refuses against the rules, and lies in lookup replies |
-| G6a `offeredBeforeExpiry` and K3: the margin at the offer for every admitted transaction, including one whose wallet set an expiry below the supported floor. In code: admission's "provably survives its scheduled flush" (`zeronym/hub/src/queue.rs:497-519`) | Removed: it adds only unsupported wallets to G6b. Known not to hold under a tip reported behind the chain (K3); no longer checked |
-| K1 as reachable-state rows, and the `everQueued` history they read | K1 is pinned by its two scripted runs. The simulation rows were the last readers of that history |
-| Replaying each pinned protocol run through the real hub (`realisations`, `realisedRunsTest`) | Removed: it produced no finding. Violations and reached states of the protocol specification are shown over the abstract hub; `realisesTest` shows each abstract move has a real step |
-
-<details>
-<summary>Protocol facts read from the Rust</summary>
-
-| # | Fact | Source |
-|---|---|---|
-| S1 | Shim classifies `SendTransaction` by presence of Orchard actions; unparseable folds into "treat as migration" | `zeronym/shim/src/classify.rs:70-101`, `:246-248` |
-| S2 | Shim-unparseable includes trailing bytes, which the hub's parser accepts, so "shim cannot parse" does not imply "hub computes no txid" | `zeronym/shim/src/classify.rs:269-283`, `zeronym/hub/src/queue.rs:281-289` |
-| S3 | Divert arms: unreadable body fails closed; empty body INVALID_ARGUMENT; too large RESOURCE_EXHAUSTED; hub unreachable UNAVAILABLE; never the operator | `zeronym/shim/src/intercept.rs:180-283` |
-| S4 | With a hub configured every `GetTransaction` goes to the hub; shim keeps no per-migration state | `zeronym/shim/src/intercept.rs:305-314`, `:58-64` |
-| S5 | Lookup reply arms, in order: found/height 0/empty relayed as pending; found served only if the bytes' txid equals the query (L4), else NOT_FOUND; not-found; error fails closed | `zeronym/shim/src/intercept.rs:370-422`, `:453-466` |
-| S6 | Two transports behind one enum: HTTP (verdict returned synchronously) and Nym | `zeronym/shim/src/hub.rs:277-328` |
-| S7 | Nym submit is dispatch-only: success once one frame is handed over, fresh nonce per hub address, sent to every address; the ack is never awaited | `zeronym/shim/src/nym.rs:595-703` |
-| S8 | Nym lookup tries addresses in turn; only a timeout moves on; fresh nonce per attempt | `zeronym/shim/src/nym.rs:708-797` |
-| S9 | Correlation by nonce only; unknown nonce dropped; wrong reply kind for a known nonce ignored, waiter stays | `zeronym/shim/src/nym.rs:1040-1077`, `zeronym/hub/src/wire.rs:22-27` |
-| S10 | Hub admit: tip-stale gate, then draining, too large, expiry survives next scheduled flush, payload-hash dedup, byte and entry budget. Admission never asks a node | `zeronym/hub/src/server.rs:343-392`, `:299-303`, `zeronym/hub/src/queue.rs:256-340` |
-| S11 | Queue identity is `sha256(bytes)`; dedup is against resident entries only (`inner.entries.contains_key`), and a flush removes every entry (`inner.entries.drain()`); accepted entries are not put back. So bytes that were published are admitted again if resubmitted | `zeronym/hub/src/queue.rs:17-22`, `:308-310`, `:358-359`, `zeronym/hub/src/batcher.rs:389` |
-| S12 | Hub lookup: queue first (found, height 0, no bytes), then indexer; unparseable entries never hit; flush window answers not-found, deliberately | `zeronym/hub/src/server.rs:403-462`, `zeronym/hub/src/queue.rs:455-475` |
-| S13 | Lookup and submit to the hub are unauthenticated; the hub's Nym address is public with no ACL; the queue-hit reply discloses that a txid is queued | `zeronym/hub/src/server.rs:413-437`, `zeronym/hub/src/nym.rs:220-227` |
-| S14 | Flush fires only when `cadence_height / flush_interval` exceeds the last flushed epoch; first observation adopts the epoch without flushing; shutdown flushes once more | `zeronym/hub/src/batcher.rs:316-335` |
-| S15 | Flush drains everything, broadcasts, then: accepted / already-known leave; rejected dropped; retryable requeued | `zeronym/hub/src/batcher.rs:358-422`, `zeronym/hub/src/chain.rs:129-134` |
-| S16 | Requeue: resident copy wins; attempts + 1; dropped if it no longer survives the next flush or attempts exceed 8; may overrun the byte budget; reports `held` / `dropped_expired` / `dropped_exhausted` | `zeronym/hub/src/queue.rs:186-199`, `:366-422`, `:96` |
-| S17 | Tip is the max over answering endpoints; a regression within 10 blocks is followed; staleness stops admission only | `zeronym/hub/src/chain.rs:183-201`, `zeronym/hub/src/batcher.rs:161-205`, `:222-225` |
-| S18 | Budget inequality `flush_interval + mining_margin + delivery_lag <= min_wallet_expiry` asserted at startup | `zeronym/hub/src/batcher.rs:93-118` |
-| S19 | Drain closes admission before the final flush; the queue is RAM-only | `zeronym/hub/src/main.rs:142-177`, `zeronym/hub/src/queue.rs:226-243`, `zeronym/hub/src/batcher.rs:337-347` |
-| S20 | Wire: four fixed-size frames; reply dispositions found / not_found / error; not_found or error with a payload is a decode error; `Draining` shares `QueueFull`'s code | `zeronym/hub/src/wire.rs:29-59`, `:278-290`, `:531-569` |
-| S21 | Hub drops lookups past 64 in flight, replies older than 60 s, acks when the driver queue is full | `zeronym/hub/src/nym.rs:54`, `:75`, `:171-213`, `:285-292` |
-| S22 | Indexer lookup answer is forwarded verbatim, so a zero `RawTransaction` is byte-identical to the queue-hit sentinel | `zeronym/hub/src/server.rs:445-451`, `zeronym/hub/src/chain.rs:284-290` |
-| S23 | No attestation or STEVE handshake exists in code | `zeronym/README.md:88` |
-| S24 | Replicate, never fail over: every hub that receives a migration queues and broadcasts it | `zeronym/README.md:86`, `zeronym/shim/src/nym.rs:602-647` |
-| S26 | Shipped constants: `FLUSH_INTERVAL_BLOCKS = 20`, `MINING_MARGIN = 4`, `MAX_DELIVERY_LAG = 6`, `MIN_WALLET_EXPIRY = 40`, `REORG_ALLOWANCE = 10`. The slack `40 - (20 + 4 + 6) = 10` equals the reorg allowance exactly. `BatchParams::validate` asserts only the three-term sum; nothing asserts the four-term one | `zeronym/hub/src/batcher.rs:40-59`, `:101-113` |
-| S27 | Lookup starts at a rotating cursor, so consecutive polls start at different hubs; a `NotFound` from the first hub asked is final | `zeronym/shim/src/nym.rs:756-793` |
-| S28 | Indexer folds are asymmetric: tip is the max over answering endpoints (one endpoint can only win high; a low tip needs every endpoint); lookup returns the first `Found` in endpoint order (one endpoint suffices to inject an answer); publish takes the best verdict | `zeronym/hub/src/chain.rs:183-201`, `:305-319`, `:517-532` |
-| S29 | Submit sweep tells the wallet ok when at least one frame was handed over, even if the loop broke before later addresses | `zeronym/shim/src/nym.rs:673-702` |
-| S30 | L4 deserialises the returned bytes, computes their txid and compares it with the queried hash in both byte orders. It compares nothing else: not the bytes, not the height | `zeronym/shim/src/intercept.rs:453-466` |
-| S31 | HTTP transport: one `SocketAddr`; hub answers `"accepted"` for both a fresh admission and a duplicate, so the client's `"already_known"` arm has no source; a 200 lookup without the octet-stream content type and `x-tx-height` is an error | `zeronym/shim/src/hub.rs:69-72`, `:201-208`, `:259-263`, `zeronym/hub/src/server.rs:741-747` |
-| S32 | Two hub clocks. Admission and requeue use the observed height. The flush epoch uses the cadence height, which equals the observed height until no forward move has been seen for `TIP_STALE_AFTER` (15 min, 12 blocks at the nominal 75 s) and then free-runs at the nominal rate. The code comment claims the free-running clock runs ahead of the true height, "the safe direction"; nothing enforces it. Only the cadence loop (and startup) calls `observe`, and it does so before, never during, a flush | `zeronym/hub/src/batcher.rs:59-71`, `:227-247`, `:307-325`, `:414-422`, `zeronym/hub/src/main.rs:62` |
-| S25 | The operator can recover a diverted transaction's txid from transparent-pool queries, so a txid can be known to an outsider before publication | `zeronym/README.md:34` |
-
-Two comments in the implementation that the model follows:
-
-- The accepted disclosure, `zeronym/hub/src/server.rs`, in `Hub::lookup`: "What this does NOT close: the 200-versus-NotFound distinction still discloses that a given txid is queued here. Closing that too means answering NotFound, which costs a wallet the ability to tell "pending" from "never seen". That is a product decision, not a code one, and it is left open deliberately."
-- The flush window (`truth`, used by G4), same file, on `Hub::lookup`: "Note the flush-in-flight gap: `flush()` drains the queue before `broadcast_batch` has reached the indexer, so a lookup in that window gets a queue miss then an indexer NOT_FOUND for a transaction it was told height-0 about seconds earlier. Wallets poll on multi-second intervals and tolerate a transient NOT_FOUND; a resubmit is harmless (deduped pre-flush, already-known post-flush). Holding entries until broadcast returns would extend how long the hub remembers a txid, which is the wrong trade."
-
-</details>
 
 ## How it is checked
 
