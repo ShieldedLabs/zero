@@ -159,7 +159,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 > What must be true of the world for the claims to apply.
 
 - **Roles.** The shim and the hub both run attested. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
-- **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (F12). No message or state field records which it took.
+- **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
 - **Byzantine hub.** It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
 - **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered, one the chain published, or a twin of either. In the hub specification it also reports any tip.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
@@ -207,7 +207,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 |---|---|---|---|---|
 | G1 | `operatorBlind` | Everything the shim hands the operator is a pass-through transaction | T1 | Simulation |
 | G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
-| G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; F3 exhaustively |
+| G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true. It does not say that successive answers agree | T4 | Simulation |
 | G6b | `conformingFirstOfferBeforeExpiry` | A supported wallet's transaction is offered with the mining margin to spare, the first time a hub offers it. About the margin left when the flush begins, not about acceptance; nothing about a later offer of a requeued entry | T5 | TLC, exhaustive |
 | G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and the flight-time assumption | T5 | TLC, exhaustive |
@@ -217,30 +217,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 
 A2 and A3 constrain a single hub step, not a state; the rest are state invariants.
 
-"Simulation" is bounded random sampling, not a proof; see [How it is checked](#how-it-is-checked). Every simulated guarantee has a non-vacuity row: a state where its antecedent holds must be reached on each configuration where it is claimed. No liveness property is claimed: the network may lose everything, and nobody waits for an ack.
-
-No guarantee reads a field written by the function it constrains. The one piece of history the protocol guarantees need, the answers that were true while each lookup waited, is derived from the states before and after each step.
-
-<details>
-<summary>Functional properties: facts about one function, checked on every small input</summary>
-
-| Id | Statement | Test |
-|---|---|---|
-| F1 | `interpretReply(render(o), q) == meaning(o, q)` for every outcome a queue or an honest indexer produces | `wireTest::renderThenInterpretIsMeaningTest` |
-| F2 | The documented collision: a queue hit and an indexer's "found, height 0, no body" render to the same reply, and the shim reads both as pending for every query. `render` is injective on honest outcomes | `wireTest::sentinelCollisionTest` |
-| F3 | The shim serves a transaction only if its txid is the one asked for. A twin is served; the height is passed through unchecked | `wireTest::servedOnlyOnMatchingTxidTest` |
-| F4 | An error never becomes "not found" | `wireTest::errorIsNeverNotFoundTest` |
-| F5 | The shim forwards only cleanly read pass-through transactions | `shimTest::onlyPassThroughIsForwardedTest` |
-| F7 | Under the startup budget, a conforming payload arriving within the delivery lag passes the expiry check. This is about admission at one tip, not about when the flush happens | `hubTest::conformingTimelyPayloadIsAdmissibleTest` |
-| F8 | The admission decision table, in the implementation's order | `hubTest::admissionDecisionTableTest` |
-| F9 | Requeue, entry by entry, and the counts it reports | `hubTest::requeueTest` |
-| F10 | A draining hub refuses under the queue-full code | `wireTest::ackRenderingTest` |
-| F11 | `hub` and `shim` are total; an invalid input returns an error and changes nothing | `hubTest::totalityTest`, `shimTest::totalityTest` |
-| F12 | Each Byzantine relation contains the honest transition | `byzantineContainsHonestTest` in `hubTest`, `shimTest`, `indexerTest` |
-| F15 | The protocol's heightless verdict relation contains the honest one and is wider only by the expiry clause | `indexerTest::heightlessCoversTest` |
-| F14 | The tip rule: first observation adopted; forward followed; a drop within the allowance followed; a larger drop ignored | `hubTest::tipRuleTest` |
-
-</details>
+Each pure function also has exhaustive tests over small inputs, in `tests/*Test.qnt`.
 
 ## Trust matrix
 
@@ -262,7 +239,7 @@ Single-fault. "holds" is a checked row on the named configuration. "required" is
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
 - G1 depends on the shim alone.
-- A Byzantine hub breaks G6b by admitting while it has no tip, when an honest hub refuses everything. Admitting past the expiry rule cannot break it, because that rule never refuses a supported wallet's timely transaction (F7).
+- A Byzantine hub breaks G6b by admitting while it has no tip, when an honest hub refuses everything. Admitting past the expiry rule cannot break it, because that rule never refuses a supported wallet's timely transaction (`conformingTimelyPayloadIsAdmissibleTest`).
 
 ## Known gaps
 
@@ -306,7 +283,7 @@ Nothing here has been fixed. "Code read" means the cited lines were read and mat
 | 5 | **An acknowledged payload can be lost three ways with every component honest:** a crash; a draining hub's final flush that finds the indexer unreachable; a requeue that gives the entry up as expired after two unjudged flushes | K5 and its three runs; TLC on `timely` | Code read: the queue is in memory only (`queue.rs:226-243`, `batcher.rs:337-347`) |
 | 6 | **A crash plus a late duplicate is offered past the margin.** A restarted hub adopts the current epoch without flushing; told a tip one block back, it admits the resend counting on a flush that will not happen | K8, `crashThenLateDuplicateTest` | Code read: `batcher.rs:177-186`, `:316-327`; `queue.rs:294`, `:507-519` |
 | 7 | **An entry with an expiry can be dropped as exhausted.** On a hub that sees no tip, each requeue judges the entry against the same stale tip, so the expiry rule never gives it up and the attempt bound does | `expiringEntryDroppedAsExhaustedTest` | Code read, and it contradicts a comment: `queue.rs:197` says "Only reachable for a payload with no expiry". The shipped bound is 8 requeues |
-| 8 | **One indexer endpoint can make a wallet see "pending" for a transaction nobody holds.** "Found, height 0, no body" from an indexer is byte-identical to the hub's own queue-hit reply, and the hub forwards it unchanged | F2, `indexerForgesPendingTest` | Code read: `server.rs:445-451`, `chain.rs:284-290`, `:305-319` |
+| 8 | **One indexer endpoint can make a wallet see "pending" for a transaction nobody holds.** "Found, height 0, no body" from an indexer is byte-identical to the hub's own queue-hit reply, and the hub forwards it unchanged | `sentinelCollisionTest`, `indexerForgesPendingTest` | Code read: `server.rs:445-451`, `chain.rs:284-290`, `:305-319` |
 | 9 | **Lookups choose a hub by apparent liveness.** A lookup starts at a rotating cursor and moves to the next address only on a timeout, the pattern the submit path forbids. Whoever can make one hub time out decides which hub answers | Not modelled: needs more than one hub | Code read: `shim/src/nym.rs:746-797`, against the rule at `:630-633`. Unexamined; not claimed as a bug |
 
 On finding 2, the model lets the free-running clock be at most one flush interval ahead, so it can spend one epoch. `cadence_height` has no such cap. Reading that code, a clock further ahead would skip more than one boundary; the model does not exhibit that.
@@ -359,6 +336,7 @@ Never modelled:
 | Byte layout, malformed frames, `bad_frame` | Sum types make them unrepresentable; pinned by the Rust golden vectors |
 | Forward-only shim, transparent-pool RPCs, health / address / attestation endpoints, DoS bounds, logging | Not divert-protocol state |
 | More than one Byzantine component at once | The trust matrix is single-fault |
+| Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 
 Removed, each because it produced no finding and removing it made the specification smaller:
 
@@ -369,11 +347,11 @@ Removed, each because it produced no finding and removing it made the specificat
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. |
 | Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed: a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it |
 | Payloads of the third party's own making | Removed: the hub's address is public and unauthenticated, so this is possible, but nothing read them. The third party still submits what it has learned or the chain has published (a cause of K2) |
-| The frame-size lemma, `sizeOf` and F6 | Removed: true by construction; the code pads four fixed-size frames (`zeronym/hub/src/wire.rs:29-59`), and length side channels were already out of the model |
+| The frame-size lemma and `sizeOf` | Removed: true by construction; the code pads four fixed-size frames (`zeronym/hub/src/wire.rs:29-59`), and length side channels were already out of the model |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. The shim's own too-large arm (S3) stays |
 | A free-running clock slower than the chain (`MayBeSlower`) | Removed: no configuration used it, and nothing else told the two variants apart. The assumption that the clock is not slower is prose under [Assumptions](#assumptions) |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
-| G8 `ackImpliesQueued` and F13: an accepted ack is only for a payload the hub queued. In code: `queue.rs` admits before it acks | Removed: nothing reads an ack since the HTTP transport went. The abstraction lemma still fails if `hub` acks without queueing |
+| G8 `ackImpliesQueued` and its function-level test: an accepted ack is only for a payload the hub queued. In code: `queue.rs` admits before it acks | Removed: nothing reads an ack since the HTTP transport went. The abstraction lemma still fails if `hub` acks without queueing |
 | A Byzantine hub's false ack (accepted but not queued, or queued but refused) | Removed with G8: no remaining guarantee reads it. A Byzantine hub still admits or refuses against the rules, and lies in lookup replies |
 | G6a `offeredBeforeExpiry` and K3: the margin at the offer for every admitted transaction, including one whose wallet set an expiry below the supported floor. In code: admission's "provably survives its scheduled flush" (`zeronym/hub/src/queue.rs:497-519`) | Removed: it adds only unsupported wallets to G6b. Known not to hold under a tip reported behind the chain (K3); no longer checked |
 | K1 as reachable-state rows, and the `everQueued` history they read | K1 is pinned by its two scripted runs. The simulation rows were the last readers of that history |
