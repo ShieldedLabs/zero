@@ -12,8 +12,8 @@ modify.
 ## What "holds" means here
 
 **Bounded random simulation.** Every "holds" below was produced by
-`quint run`: fixed constants, at most 40, 60 or 80 steps per trace, 2000
-random traces per run (a few rows more), one seed. It is not a proof and it is not exhaustive to any
+`quint run`: fixed constants, at most 40 or 80 steps per trace, 2000
+random traces per run, one seed. It is not a proof and it is not exhaustive to any
 depth. A property that "holds" is one no sampled trace violated.
 
 **`quint verify` has not been run** on any part of this specification. Tier 4
@@ -39,17 +39,17 @@ either the tier fails.
 |---|---|---|---|
 | 1 | typecheck | `quint typecheck` on every file | ok |
 | 2 | tests | `quint test` on the spells and every test file | all pass |
-| 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` ("fails" rows: 40 to 80 steps, a few with more traces) | "holds" rows hold; "fails" rows are violated |
+| 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` | "holds" rows hold; the "fails" row is violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
-Measured on the machine it was written on (Apple silicon, Quint's Rust
-evaluator): 4 min 40 s wall with four rows at a time (`QUINT_JOBS=4`, the
-default), about 14 minutes of CPU. It has not been timed on a CI runner.
-`QUINT_SAMPLES` changes the trace count. The rarest witnesses are reached in
-only 2 to 6 of the 2000 traces, so a lower count risks losing them. Five
-"fails" rows have a larger count of their own, written on the row.
+Measured on the machine it was written on (Apple silicon, 16 cores, Quint's
+Rust evaluator): 9 min 27 s wall for all four tiers with four rows at a time
+(`QUINT_JOBS=4`, the default), of which tiers 1 to 3 are about 2 minutes. It
+has not been timed on a CI runner. `QUINT_SAMPLES` changes the trace count.
+The rarest witness, `vLookupValidityPerHub`, is reached in 2 of the 2000
+traces, so a lower count risks losing it.
 
-Tier 3 "fails" rows and tier 3b run under `step` or under a narrower
+The tier 3 "fails" row and tier 3b run under `step` or under a narrower
 relation, `quietStep` (no faults, no outsiders). It is a part of `step`, so a
 state or a violation found under it is reachable under `step`. Uniform random choice over `step`
 rarely gets a transaction as far as a block in 40 steps; the narrower relations
@@ -149,7 +149,7 @@ definitions they justify.
 | A free-running clock slower than the chain (`MayBeSlower`) | Removed: no configuration used it, and nothing else told the two variants apart. The assumption that the clock is not slower is prose under [Assumptions](#assumptions) |
 | The shim's ack waiter | In code a waiter is registered and its receiver dropped at once (`zeronym/shim/src/nym.rs:578-591`, `:665`). Nothing reads it once nobody awaits an ack, so the model's shim keeps no state for a submission and drops every ack |
 | Reorgs of included transactions, mempool eviction | Environment assumption: per-txid chain status is monotone |
-| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties. Only the pure lemma "frame size is independent of content" is stated |
+| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not trace properties |
 | Byte layout, malformed frames, `bad_frame` | Sum types make them unrepresentable; pinned by the Rust golden vectors |
 | Forward-only shim, transparent-pool RPCs, health / address / attestation endpoints, DoS bounds, logging | Not divert-protocol state |
 | More than one Byzantine component at once | The trust matrix is single-fault |
@@ -220,7 +220,7 @@ beyond loss in the soup.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or
   read them.
 - **Third party.** A client of the hub's public address. It looks up txids it
-  knows and submits payloads it has learned or made. It cannot read or forge
+  knows and submits payloads it has learned or the chain has published. It cannot read or forge
   frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** A transaction's status only moves forward: no reorg of an included
@@ -252,6 +252,8 @@ beyond loss in the soup.
 - **Honest indexer.** Answers lookups from chain state or "unavailable". A
   broadcast may always be rejected or left unjudged; it is accepted only if a
   node would take it, and reported already-known only if the chain has it.
+  The protocol specification has no heights, so there a node takes any
+  parseable transaction the chain does not have, whatever its expiry.
 - **Time.** There is no clock. A timeout may happen at any moment; the
   staleness window is counted in blocks.
 
@@ -465,12 +467,13 @@ takes exactly the transition its function gives. A Byzantine one takes any
 member of a finite set that contains it (F12):
 
 - **Byzantine hub.** Any ack for a submission it receives, with the payload
-  queued or not, whatever admission says. Any reply to a lookup: a queue hit,
-  not found, error, or found with no body or any payload that exists, at any
-  height. It keeps the honest flush schedule.
+  queued or not. Any reply to a lookup: not found, error, or found with no
+  body or any payload of the universe, at any of the three wire heights. Its
+  internal moves (take, settle, give back, lose) are the honest ones.
 - **Byzantine indexer.** Any verdict, with the transaction relayed to the
   network or not. Any lookup answer built from a payload it was offered, one
-  the chain published, or a twin of either. Any tip up to `MAX_HEIGHT`.
+  the chain published, or a twin of either, at any of the three wire heights.
+  In the hub specification it also reports any tip.
 - Neither discloses a payload except in a lookup reply. There is no separate
   disclosure step: a Byzantine hub or indexer already leaks through a reply
   (`hubServesQueuedBodyTest`, `indexerServesUnpublishedBodyTest`).
@@ -609,6 +612,9 @@ exhaustive test, and its "required" cell is a scripted step.
 
 ### Known gaps, with every component honest
 
+K1 and K2 are on the protocol specification; K3 to K8 on the hub
+specification, under its configurations.
+
 | Id | What is lost | Where | Form | Observed | Scripted runs |
 |---|---|---|---|---|---|
 | K1 | Told ok does not mean the hub ever admits it | `baseline` | reachable states `wToldRefusedEverywhere`, `wToldNeverDelivered` | reached | `toldOkThenRefusedTest`, `toldOkAndNeverDeliveredTest` |
@@ -616,11 +622,11 @@ exhaustive test, and its "required" cell is a scripted step.
 | K3 | G6a for a tight-expiry transaction: admitted against a tip reported below a boundary already flushed | `flakyTip` | violated invariant | violated, as predicted | `tightExpiryAdmittedBehindFlushedBoundaryTest` |
 | K3' | G6b, and with it G6c, when the expiry floor equals the three-term budget | `flakyTipNoSlack` | violated invariant | violated, as predicted | `conformingMissesMarginWithoutSlackTest`; contrast `conformingSurvivesRegressionTest` |
 | K4 | G6a, and G6b and G6c on the shipped relation, across a silence shorter than the staleness window | `staleLag` | violated invariant | violated, as predicted; the node then cannot accept | `silenceAcrossBoundaryMissesMarginTest`; contrast `sameSilenceWithSlackKeepsMarginTest` |
-| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `baseline` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `toldOkAdmittedThenLostTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
+| K5 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it (accepted, already known, rejected) | `timely` | violated invariant | violated, by a crash, by a final flush nothing judged, and by a requeue that drops the entry as expired | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueAndDropTest` |
 | K6 | `conformingEveryOfferBeforeExpiry`: G6b without "first offer" | `staleLag` | violated invariant | violated, as predicted | `requeuedPastExpiryTest`; control `requeueUnderTimelyTipDropsTest` |
 
 | K7 | G6c when a flush may stay in flight for as many blocks as the mining margin | `flakyTipSlowFlight` | violated invariant | violated; G6b holds there | `slowFlightSpendsTheMarginTest`; contrast `conformingSurvivesRegressionTest` |
-| K8 | A supported wallet's transaction, acknowledged on time, then lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. G6b and G6c do not cover it: to the restarted hub the resend is a late first arrival | `flakyTip` (hub specification) | scripted run | shown; not a TLC row | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
+| K8 | A supported wallet's transaction, acknowledged on time, then lost to a crash and resent, is first offered by the restarted hub with less than the mining margin. G6b and G6c do not cover it: to the restarted hub the resend is a late first arrival | `flakyTip` | scripted run | shown; not a TLC row | `crashThenLateDuplicateTest`; control `lateDuplicateWithoutCrashTest` |
 
 K7 was added after review. The four-term budget (`reorgSlackFits`) holds with
 equality in the shipped constants, so a transaction that uses all of it is
@@ -880,7 +886,7 @@ Not built. The specification is shaped so it can be:
 - Each step gives one input to one component function and applies one output;
   the pairs map onto the seams in the table above.
 - All protocol state is in `s`. `audit` is a monitor a harness ignores.
-- ITF variable names are qualified by configuration. Model nonces are counters,
+- ITF traces carry `cfg`, `s` and `audit`. Model nonces are counters,
   to be bound to real nonces as frames appear. A payload's `id` maps to a
   fixture. The frames a step emits are `s.net` after it minus before.
 
@@ -960,7 +966,7 @@ K5 under `quietStep` (10, now 9), `wStale` on `staleLag` (9, now 6).
 With the capacity refusals removed, a hub may hold all three payloads at
 once, and the tier was re-run. Every verdict and every trace length is
 unchanged. `timely` still exhausts at 229 339 states, depth 51; `flakyTip`
-grows from 1 468 808 to 1 753 204 states, depth 44. Two rows then missed the
+grows from 1 468 808 to 1 753 204 states, depth 43. Two rows then missed the
 five-minute limit: G6b on `flakyTipSlowFlight` (1 824 007 states at depth 30,
 152 337 on the queue) and G6c on `byzIndexer` with one worker (1 229 802
 states at depth 17). Those two configurations are now checked with two
@@ -1005,8 +1011,8 @@ of TLC's counterexample in states.
 
 The three rows in bold are finding 8 under the first definition. Simulation,
 of either machine, does not find the counterexample in the traces it samples;
-TLC does. The protocol gate's rows are still simulated on the whole-protocol
-machine, with timeliness as first defined, until they are removed from it.
+TLC does. The protocol gate's column is from before the move; those rows
+have since been removed from it.
 
 Configuration in the state against configuration as a constant, on `timely`
 with G6a, G6b and G6c: the compiled JSON is 13.7 MB with named inits and
@@ -1020,12 +1026,11 @@ and Quint fetched by `npx`.
 
 ## The protocol specification under TLC (measured once, not a gate)
 
-Measured once at step 19, on the all-honest configuration with
-`maxRequests` 2 and invariant `wellFormed` (since cut, C10), through `tlc.sh` with 4 workers,
-an 8 GB heap and a 300 s limit (the plan said 10 minutes; the cap used for
-every TLC run here is 5). A tier 1-3 gate shared the machine for most of the
-run. The compiled JSON is 39.2 MB (133.0 MB before step 18, with a constant
-and an instance module). TLC did not exhaust it: after 300 s it had
+Measured once, on the all-honest configuration with `maxRequests` 2 and
+invariant `wellFormed` (since cut, C10), through `tlc.sh` with 4 workers, an
+8 GB heap and a 300 s limit. A tier 1-3 gate shared the machine for most of
+the run. The compiled JSON is 39.2 MB (133.0 MB with the configuration as a
+constant and an instance module). TLC did not exhaust it: after 300 s it had
 6 942 646 distinct states at depth 11, with 5 392 316 still on the queue,
 and a resident set of 6.3 GB. The queue grew by about 1.2 million states a
 minute throughout (0.10 M at 4 s, 1.66 M at 64 s, 2.99 M, 4.20 M, 5.39 M at
