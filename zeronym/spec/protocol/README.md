@@ -548,17 +548,20 @@ the guarantees need (`audit`) is derived by `commit` from the state before and
 the state after each step.
 
 Each guarantee can be broken by a change to an honest component. These were
-tried by hand, with the result shown, and reverted:
+tried on the current specification, one at a time, and reverted. A simulation
+is 2000 traces of 40 steps at seed 7 under `step`, unless a step is named.
 
-| Guarantee | Change | Result |
-|---|---|---|
-| F1 | `interpretReply` loses the pending arm | F1 fails |
-| G1 | `shim` forwards an unparseable body | violated on `baseline` |
-| G2 | `hub` answers a queue hit with the queued body | violated on `baseline` |
-| G3 | `interpretReply` skips the txid comparison | **holds on `baseline`**; violated on `byzHub` and `byzIndexer` |
-| G4 | `hub` answers not-found on a queue hit | violated on `baseline` |
-| G8 | `hub` acks accepted without inserting | violated on `baseline` |
-| G6a | `hub` admits without the expiry check | violated on `baseline` |
+| Guarantee | Change | Checked by | Result |
+|---|---|---|---|
+| F1 | `interpretReply` loses the pending arm | `renderThenInterpretIsMeaningTest` | fails |
+| G1 | `shim` forwards an unparseable body | `operatorBlind` on `baseline` | violated |
+| G1 | `shim` forwards a migration | `operatorBlind` on `baseline` | violated |
+| G2 | the abstract hub answers a queue hit with the queued body | `queuedBytesConfidential` on `baseline` | violated |
+| G3 | `interpretReply` skips the txid comparison | `txidAuthenticity` | **holds on `baseline`** (also under `quietStep`, 80 steps); violated on `byzHub` and `byzIndexer` (`quietStep`) |
+| G4 | the abstract hub answers not-found on a queue hit | `lookupValidityPerHub` on `baseline` | violated |
+| G8 | the abstract hub acks accepted without queueing | `ackImpliesQueued` on `baseline` | violated |
+| G8 | `hub` acks accepted without inserting | `abstractionTest` (the lemma) | fails |
+| G6a | `hub` admits without the expiry check | `offeredBeforeExpiry` on the hub specification's `initTimely`, TLC | violated, 8 states |
 
 The G3 row is not what was predicted; see [Findings](#findings).
 
@@ -714,7 +717,8 @@ Over the same `REACH` as A2 and A3, with lookups added, `hubTest` checks:
 | `realisesTest` | Each abstract move (accept, refuse, take, settle, a retryable verdict, give back, lose) has a concrete step that projects onto it |
 
 A temporary edit that makes `hub` ack a submission without queueing it fails
-`abstractionTest`.
+`abstractionTest` (the G8 rows of the mutation table under
+[Guarantees](#guarantees)).
 
 The protocol specification's hub is this abstract one. What the lemma
 transfers: an invariant that holds over the abstract hub, and
@@ -794,7 +798,7 @@ and by a requeue that drops an entry as expired after an outage
 honest.** Removing the comparison from `interpretReply` leaves G3 holding on
 `baseline`, because an honest hub and indexer never return another
 transaction. It fails on `byzHub` and `byzIndexer`, which is where the check is
-claimed to matter. G3 is kept as a guarantee: it is falsifiable where it is
+claimed to matter. Rerun on the current specification, with the same result. G3 is kept as a guarantee: it is falsifiable where it is
 claimed "by the check", and other changes to honest code would break it on
 `baseline`.
 
