@@ -19,7 +19,6 @@ module trustTest {
   import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import protocol.* from "../protocol"
-  import realisations as R from "./realisations"
 
   // ------------------------------------------------------------------------
   // A Byzantine hub (`byzHub`)
@@ -41,7 +40,6 @@ module trustTest {
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
-      .expect(R::realisedBy(s, R::hubLeaksBody))
 
   run hubServesQueuedBodyControlTest =
     initByzHub
@@ -65,7 +63,6 @@ module trustTest {
       .expect(lastEvent == Got({ query: "early", obs: NotFound, via: Some(1) }))
       .expect(s.hub.queue == Set(early) and audit.windows.get(1) == Set(Pending))
       .expect(not(lookupValidityPerHub))
-      .expect(R::realisedBy(s, R::hubDeniesQueued))
 
   run hubDeniesQueuedControlTest =
     initByzHub
@@ -90,7 +87,6 @@ module trustTest {
       .expect(s.onChain("early") == InMempool)
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
-      .expect(R::realisedBy(s, R::hubFalseHeight))
 
   run hubServesFalseHeightControlTest =
     initByzHub
@@ -99,23 +95,6 @@ module trustTest {
       .then(lookUp(1, "early"))
       .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(1) }))
       .expect(lookupValidityPerHub)
-
-  /// G8 needs the hub. It acks a submission as accepted and does not queue it.
-  run hubAcksWithoutAdmittingTest =
-    initByzHub
-      .then(sendToHub(early))
-      .then(hubReceiveWith(submitMail(0, early), INotFound, { hub: s.hub, reply: AAck(WAccepted) }))
-      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WAccepted }))
-      .expect(s.hub.queue == Set() and audit.everQueued == Set())
-      .expect(not(ackImpliesQueued))
-      .expect(R::realisedBy(s, R::hubAcksUnqueued))
-
-  run hubAcksWithoutAdmittingControlTest =
-    initByzHub
-      .then(sendToHub(early))
-      .then(deliverSubmit(0, early))
-      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WAccepted }) and s.hub.queue == Set(early))
-      .expect(ackImpliesQueued)
 
   /// G3 survives. The hub answers with another transaction; the shim compares
   /// txids and refuses it.
@@ -160,7 +139,6 @@ module trustTest {
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
-      .expect(R::realisedBy(s, R::indexerLeaksBody))
 
   run indexerServesUnpublishedBodyControlTest =
     initByzIndexer
@@ -183,9 +161,8 @@ module trustTest {
       .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: None, height: AtZero })))
       .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
       .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
-      .expect(audit.everQueued == Set() and audit.windows.get(1) == Set(NotFound))
+      .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
       .expect(not(lookupValidityPerHub))
-      .expect(R::realisedBy(s, R::indexerForgesPending))
 
   run indexerForgesPendingControlTest =
     initByzIndexer

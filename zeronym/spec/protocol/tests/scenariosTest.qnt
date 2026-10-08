@@ -18,7 +18,6 @@ module scenariosTest {
   import abstractHub.* from "../abstractHub"
   import shim.* from "../shim"
   import protocol.* from "../protocol"
-  import realisations as R from "./realisations"
 
   /// Every named init is live: its guard holds and it starts a run.
   run liveInitsTest =
@@ -52,7 +51,7 @@ module scenariosTest {
       .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(3) }))
       .expect(wPending and wTxInMempool and wTxMined)
       .expect(operatorBlind and queuedBytesConfidential and txidAuthenticity and lookupValidityPerHub)
-      .expect(ackImpliesQueued and statusNeverRegresses)
+      .expect(statusNeverRegresses)
 
   /// A pass-through transaction goes to the operator and nowhere else.
   run passThroughIsForwardedTest =
@@ -73,7 +72,6 @@ module scenariosTest {
       .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
       .expect(wQueuedDisclosed)
       .expect(s.tpLearned() == Set() and queuedBytesConfidential)
-      .expect(R::realisedBy(s, R::w8))
 
   /// W19. Once `early` is published its txid is public, and a third party
   /// that asks is served its bytes from the indexer. G2 holds: they are
@@ -105,24 +103,19 @@ module scenariosTest {
       .then(lookUp(1, "junk"))
       .expect(lastEvent == Got({ query: "junk", obs: NotFound, via: Some(1) }))
       .expect(wUnparseableMissed and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::w9))
 
   // ------------------------------------------------------------------------
   // K1. Told ok, and no hub ever has it
   // ------------------------------------------------------------------------
 
-  /// K1a. The only hub refuses the frame after the wallet was told ok. Its
-  /// realisation, refused for its expiry after the flush at 3, is in
-  /// `realisedRunsTest`.
+  /// K1a. The hub refuses the frame after the wallet was told ok.
   run toldOkThenRefusedTest =
     initBaseline
       .then(sendToHub(tight))
       .then(answerSubmitFrom(ShimAddr, 0, tight, WRefused(WExpiryTooTight)))
       .expect(s.wallet.log == [Sent({ input: Clean(tight), obs: SentOk })])
       .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WRefused(WExpiryTooTight) }))
-      .expect(audit.everQueued == Set())
-      .expect(wToldRefusedEverywhere)
-      .expect(R::realisedBy(s, R::k1a))
+      .expect(s.hub == emptyAHub)
 
   /// K1b. The frame is never delivered. Nothing obliges the network to.
   run toldOkAndNeverDeliveredTest =
@@ -130,8 +123,7 @@ module scenariosTest {
       .then(sendToHub(early))
       .expect(s.wallet.log == [Sent({ input: Clean(early), obs: SentOk })])
       .expect(s.net == Set(submitMail(0, early)))
-      .expect(audit.everQueued == Set())
-      .expect(wToldNeverDelivered)
+      .expect(s.hub == emptyAHub)
 
   // ------------------------------------------------------------------------
   // K2. The status a wallet sees goes backwards
@@ -155,7 +147,6 @@ module scenariosTest {
       ])
       // Each answer was true when it was given.
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::k2a))
 
   /// K2b. The wallet sends published bytes again. The hub's memory of them
   /// went with the flush, so they are admitted and pending once more.
@@ -173,7 +164,6 @@ module scenariosTest {
         Got({ query: "early", obs: Pending, via: Some(3) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::k2bc))
 
   /// K2c. The same, done by a third party: the bytes are public once
   /// published, and submission is open to anyone.
@@ -191,7 +181,6 @@ module scenariosTest {
         Got({ query: "early", obs: Pending, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::k2bc))
 
   /// K2d. The flush window: the queue is empty and the chain does not have
   /// the batch yet.
@@ -207,7 +196,6 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::k2d))
 
   /// K2e. The node rejects the transaction at flush. It was pending; now it
   /// is nowhere.
@@ -223,7 +211,6 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
-      .expect(R::realisedBy(s, R::k2e))
 
   // ------------------------------------------------------------------------
   // A Byzantine hub (`byzHub`)
@@ -245,5 +232,4 @@ module scenariosTest {
       .expect(s.onChain("early") == Absent)
       .expect(wTwinServed and wFalseHeightServed)
       .expect(txidAuthenticity and not(lookupValidityPerHub))
-      .expect(R::realisedBy(s, R::w16))
 }

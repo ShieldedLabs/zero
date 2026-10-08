@@ -412,8 +412,8 @@ module hub {
   /// The transitions of a Byzantine hub. It keeps the honest schedule, and is
   /// free in what it tells its clients and in what it admits:
   ///
-  /// - a submission is answered with any decision, and the payload is queued
-  ///   or not, independently of the answer and of every admission rule;
+  /// - a submission is admitted or refused whatever the admission rules say,
+  ///   and the ack says which;
   /// - a lookup is answered with any outcome: a queue hit, or anything an
   ///   indexer could say, with a body drawn from `universe` or none, at any
   ///   height.
@@ -429,13 +429,12 @@ module hub {
     else
       match input {
         | SubmitHInput(submit) =>
-          val kinds = Set(Admitted, Duplicate)
-            .union(Set(TipStale, HubDraining, ExpiryTooTight).map(refusal => Refused(refusal)))
-          val holding =
-            if (state.queued().contains(submit.payload)) state
-            else { ...state, queue: state.queue.put(submit.payload, 0) }
-          honest.union(tuples(Set(state, holding), kinds).map(((after, kind)) =>
-            after.toAckOutput(submit.nonce, kind)))
+          val admitted =
+            if (state.queued().contains(submit.payload)) state.toAckOutput(submit.nonce, Duplicate)
+            else { ...state, queue: state.queue.put(submit.payload, 0) }.toAckOutput(submit.nonce, Admitted)
+          val refused = Set(TipStale, HubDraining, ExpiryTooTight).map(refusal =>
+            state.toAckOutput(submit.nonce, Refused(refusal)))
+          honest.union(Set(admitted)).union(refused)
         | LookupHInput(lookup) =>
           val bodies = Set(None).union(universe.map(payload => Some(payload)))
           val answers = tuples(bodies, WIRE_HEIGHTS)

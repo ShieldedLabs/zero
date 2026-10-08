@@ -45,14 +45,13 @@ module abstractHub {
         Set({ hub: h, reply: AWire(render(outcome)) })
     }
 
-  /// A Byzantine hub queues a submission or not, whatever it answers, and
-  /// answers a lookup with anything: a body from `universe` or none, at any
-  /// height, or not found, or an error.
+  /// A Byzantine hub answers a lookup with anything: a body from `universe` or
+  /// none, at any height, or not found, or an error. A submission it accepts
+  /// or refuses as it likes, which the honest relation already allows; its ack
+  /// says which.
   pure def byzantineAnswers(h: AHub, request: ARequest, universe: Set[Payload]): Set[AAnswer] =
     match request {
-      | ASubmit(payload) =>
-        tuples(Set(h, { ...h, queue: h.queue.union(Set(payload)) }), WIRE_ACKS)
-          .map(((after, ack)) => { hub: after, reply: AAck(ack) })
+      | ASubmit(_) => honestAnswers(h, request)
       | ALookup(_) =>
         tuples(Set(None).union(universe.map(payload => Some(payload))), WIRE_HEIGHTS)
           .map(((body, claimed)) => WFound({ body: body, height: claimed }))

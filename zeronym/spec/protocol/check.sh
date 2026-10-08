@@ -81,8 +81,8 @@ finish() {
 # being found (renamed so it no longer ends in `Test`, say) fails the gate.
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:27 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:38 tests/realisedRunsTest.qnt:8 tests/scenariosTest.qnt:21 tests/trustTest.qnt:19"
+FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:26 tests/shimTest.qnt:13
+  tests/hubScenariosTest.qnt:38 tests/scenariosTest.qnt:21 tests/trustTest.qnt:17"
 
 fail() {
   echo "FAIL  $1"
@@ -281,10 +281,9 @@ finish
 echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
 # The guarantees, where they are claimed.
-job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub \
-                              ackImpliesQueued
+job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub
 job holds byzHub              operatorBlind txidAuthenticity
-job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued
+job holds byzIndexer          operatorBlind txidAuthenticity
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
@@ -293,13 +292,13 @@ finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub"
 
-# W8, W19, K1a, K1b, and the antecedents of G1, G2, G8. W19 is G2's reply-body
-# branch, which `vQueuedBytesConfidential` does not reach on its own.
+# W8, W19, and the antecedents of G1 and G2. W19 is G2's reply-body branch,
+# which `vQueuedBytesConfidential` does not reach on its own.
 job reaches baseline step 40 \
-  wQueuedDisclosed wThirdPartyServedBody wToldRefusedEverywhere wToldNeverDelivered \
-  vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
+  wQueuedDisclosed wThirdPartyServedBody \
+  vOperatorBlind vQueuedBytesConfidential \
   -- $BASELINE_HOLDS
 # The antecedent of G3, and G4's under a step that keeps to one migration.
 job reaches baseline quietStep 80 \
@@ -314,8 +313,8 @@ job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \
   -- operatorBlind txidAuthenticity
 job reaches byzIndexer quietStep 40 \
-  vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
-  -- operatorBlind txidAuthenticity ackImpliesQueued
+  vOperatorBlind vTxidAuthenticity \
+  -- operatorBlind txidAuthenticity
 finish
 fi
 

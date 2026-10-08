@@ -144,11 +144,9 @@ module protocol {
   /// component reads it, and it is derived at every step from the states
   /// before and after, never from what a component reports about itself.
   ///
-  /// - `everQueued`: every payload that has been in the hub's queue.
   /// - `windows`: for each lookup the shim has sent, the answers that were
   ///   true at the hub at some point while it waited.
   type Audit = {
-    everQueued: Set[Payload],
     windows: Nonce -> Set[LookupObs],
   }
 
@@ -184,21 +182,9 @@ module protocol {
   pure def fromHub(s: System, client: Addr): Set[Msg] =
     s.net.filter(mail => mail.src == HubAddr and mail.dst == client).map(mail => mail.msg)
 
-  /// The submissions `client` has addressed to the hub.
-  pure def submissions(s: System, client: Addr): Set[{ nonce: Nonce, payload: Payload }] =
-    s.toHub(client).filterMap(msg => match msg { | Submit(submit) => Some(submit) | _ => None })
-
   /// The acks the hub has sent `client`.
   pure def acks(s: System, client: Addr): Set[{ nonce: Nonce, ack: WireAck }] =
     s.fromHub(client).filterMap(msg => match msg { | Ack(ack) => Some(ack) | _ => None })
-
-  /// The payloads the hub has acknowledged as accepted, to any client.
-  pure def acked(s: System): Set[Payload] =
-    Set(ShimAddr, ThirdPartyAddr).map(client =>
-      tuples(s.submissions(client), s.acks(client))
-        .filter(((submit, ack)) => submit.nonce == ack.nonce and ack.ack == WAccepted)
-        .map(((submit, _)) => submit.payload)
-    ).flatten()
 
   /// The lookups `client` has addressed to the hub.
   pure def lookups(s: System, client: Addr): Set[{ nonce: Nonce, txid: TxId }] =
@@ -366,7 +352,7 @@ module protocol {
     else
       NotFound
 
-  pure val initialAudit: Audit = { everQueued: Set(), windows: Map() }
+  pure val initialAudit: Audit = { windows: Map() }
 
   /// The audit record after one step, from the states before and after it.
   pure def advance(audit: Audit, pre: System, post: System): Audit =
@@ -378,7 +364,7 @@ module protocol {
       .fold(audit.windows, (acc, lookup) =>
         val seen = if (acc.keys().contains(lookup.nonce)) acc.get(lookup.nonce) else Set()
         acc.put(lookup.nonce, seen.union(Set(truth(post, lookup.txid)))))
-    { everQueued: audit.everQueued.union(post.hub.queue), windows: windows }
+    { windows: windows }
 
   // ------------------------------------------------------------------------
   // Guarantees
@@ -433,11 +419,6 @@ module protocol {
         | _ => true
       })
 
-  /// G8. An accepted ack from the hub is for a payload it had queued by the
-  /// time it acked. It holds whether or not anyone waits for the ack.
-  pure def ackImpliesQueuedIn(s: System, audit: Audit): bool =
-    s.acked().subseteq(audit.everQueued)
-
   // ------------------------------------------------------------------------
   // Known gaps
   // ------------------------------------------------------------------------
@@ -470,35 +451,6 @@ module protocol {
             }
           | _ => true
         })
-
-  // K1. "Told ok" promises nothing about the hub. It is stated as two
-  // reachable states, not as a violated invariant, because the invariant is
-  // false on the ordinary success path too: the wallet is told before the hub
-  // has the frame.
-
-  /// The nonces of the shim's submissions of `payload`.
-  pure def shimSubmissionsOf(s: System, payload: Payload): Set[Nonce] =
-    s.submissions(ShimAddr).filter(submit => submit.payload == payload).map(submit => submit.nonce)
-
-  /// K1a. The wallet was told ok; every submission that reached the hub was
-  /// refused; the hub never queued the payload.
-  pure def wToldRefusedEverywhereIn(s: System, audit: Audit): bool =
-    s.toldOk().exists(payload =>
-      val submitted = s.shimSubmissionsOf(payload)
-      and {
-        not(audit.everQueued.contains(payload)),
-        submitted != Set(),
-        submitted.forall(nonce => s.acks(ShimAddr).exists(ack => ack.nonce == nonce and ack.ack != WAccepted)),
-      })
-
-  /// K1b. The wallet was told ok; the hub has answered none of the frames and
-  /// never queued the payload. The network may leave it so forever.
-  pure def wToldNeverDeliveredIn(s: System, audit: Audit): bool =
-    s.toldOk().exists(payload =>
-      and {
-        not(audit.everQueued.contains(payload)),
-        s.shimSubmissionsOf(payload).forall(nonce => not(s.acks(ShimAddr).exists(ack => ack.nonce == nonce))),
-      })
 
   // ------------------------------------------------------------------------
   // Witnesses
@@ -613,9 +565,6 @@ module protocol {
       s.vTxidAuthenticityIn(),
       s.wasGiven(obs => obs == NotFound),
     }
-
-  pure def vAckImpliesQueuedIn(s: System): bool =
-    s.acked() != Set()
 
   // ========================================================================
   // The machine
@@ -1060,7 +1009,6 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
-  val ackImpliesQueued = ackImpliesQueuedIn(s, audit)
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
@@ -1071,9 +1019,6 @@ module protocol {
   // ------------------------------------------------------------------------
   // Witnesses
   // ------------------------------------------------------------------------
-
-  val wToldRefusedEverywhere = wToldRefusedEverywhereIn(s, audit)
-  val wToldNeverDelivered = wToldNeverDeliveredIn(s, audit)
 
   val wPending = wPendingIn(s)
   val wTxInMempool = wTxInMempoolIn(s)
@@ -1089,7 +1034,6 @@ module protocol {
   val vQueuedBytesConfidential = vQueuedBytesConfidentialIn(s)
   val vTxidAuthenticity = vTxidAuthenticityIn(s)
   val vLookupValidityPerHub = vLookupValidityPerHubIn(s)
-  val vAckImpliesQueued = vAckImpliesQueuedIn(s)
 
   // ------------------------------------------------------------------------
   // Run vocabulary

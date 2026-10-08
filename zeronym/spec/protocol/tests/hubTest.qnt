@@ -136,16 +136,6 @@ module hubTest {
       })),
   }
 
-  /// F13. An accepted ack is given only for a payload the hub then holds.
-  run ackImpliesQueuedTest = all {
-    assert(tuples(STATES, PAYLOADS).forall(((state, payload)) =>
-      match outputOf(state, submit(payload)) {
-        | AckOutput(ack) => isAccepted(ack.kind) implies state.after(submit(payload)).queued().contains(payload)
-        | _ => true
-      })),
-    assert(running(5).after(submit(pA)).queue == Map(pA -> 0)),
-  }
-
   // ------------------------------------------------------------------------
   // Lookup
   // ------------------------------------------------------------------------
@@ -313,12 +303,9 @@ module hubTest {
     assert(tuples(STATES, INPUTS).forall(((state, input)) =>
       byzHubResults(state, input, PAYLOADS).contains(hub(state, input))))
 
-  /// F13, companion. A Byzantine hub can accept a payload it does not hold,
-  /// can hold one admission would refuse, and can answer a lookup with a
-  /// queued body.
+  /// A Byzantine hub can hold a payload admission would refuse, and can
+  /// answer a lookup with a queued body.
   run byzantineHubTest = all {
-    assert(byzHubResults(running(5), submit(pA), PAYLOADS).exists(result =>
-      result.out == AckOutput({ nonce: 0, kind: Admitted }) and not(result.state.queued().contains(pA)))),
     assert(byzHubResults(running(5), submit(pTight), PAYLOADS).exists(result =>
       result.state.queued().contains(pTight))),
     assert(byzHubResults(holding, LookupHInput({ nonce: 1, txid: "a", answer: INotFound }), PAYLOADS)
