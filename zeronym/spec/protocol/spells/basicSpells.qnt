@@ -30,6 +30,19 @@ module basicSpells {
     assert(unwrapOr(None, 7) == 7),
   }
 
+  /// What `f` keeps of `items`.
+  pure def filterMap(items: Set[a], f: a => Option[b]): Set[b] =
+    items.fold(Set(), (acc, elem) =>
+      match f(elem) {
+        | Some(kept) => acc.union(Set(kept))
+        | None => acc
+      })
+
+  run filterMapTest = all {
+    assert(Set(1, 2, 3).filterMap(n => if (n > 1) Some(n * 10) else None) == Set(20, 30)),
+    assert(Set(1).filterMap(n => if (n > 1) Some(n) else None) == Set()),
+  }
+
   /// `items` without `elem`.
   pure def setRemove(items: Set[a], elem: a): Set[a] =
     items.exclude(Set(elem))

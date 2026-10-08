@@ -166,74 +166,54 @@ module protocol {
 
   /// The payloads the wallet has been told were diverted.
   pure def toldOk(s: System): Set[Payload] =
-    s.events().fold(Set(), (acc, event) =>
+    s.events().filterMap(event =>
       match event {
         | Sent(sent) =>
           match sent.input {
-            | Clean(payload) => if (sent.obs == SentOk) acc.union(Set(payload)) else acc
-            | _ => acc
+            | Clean(payload) => if (sent.obs == SentOk) Some(payload) else None
+            | _ => None
           }
-        | _ => acc
+        | _ => None
       })
 
-  /// The submissions `client` has addressed to the hub, as (nonce, payload).
-  pure def submissions(s: System, client: Addr): Set[(Nonce, Payload)] =
-    s.net.fold(Set(), (acc, mail) =>
-      match mail.msg {
-        | Submit(submit) =>
-          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((submit.nonce, submit.payload)))
-          else acc
-        | _ => acc
-      })
+  /// The frames `client` has addressed to the hub.
+  pure def toHub(s: System, client: Addr): Set[Msg] =
+    s.net.filter(mail => mail.src == client and mail.dst == HubAddr).map(mail => mail.msg)
 
-  /// The acks the hub has sent `client`, as (nonce, ack).
-  pure def acks(s: System, client: Addr): Set[(Nonce, WireAck)] =
-    s.net.fold(Set(), (acc, mail) =>
-      match mail.msg {
-        | Ack(ack) =>
-          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((ack.nonce, ack.ack)))
-          else acc
-        | _ => acc
-      })
+  /// The frames the hub has addressed to `client`.
+  pure def fromHub(s: System, client: Addr): Set[Msg] =
+    s.net.filter(mail => mail.src == HubAddr and mail.dst == client).map(mail => mail.msg)
+
+  /// The submissions `client` has addressed to the hub.
+  pure def submissions(s: System, client: Addr): Set[{ nonce: Nonce, payload: Payload }] =
+    s.toHub(client).filterMap(msg => match msg { | Submit(submit) => Some(submit) | _ => None })
+
+  /// The acks the hub has sent `client`.
+  pure def acks(s: System, client: Addr): Set[{ nonce: Nonce, ack: WireAck }] =
+    s.fromHub(client).filterMap(msg => match msg { | Ack(ack) => Some(ack) | _ => None })
 
   /// The payloads the hub has acknowledged as accepted, to any client.
   pure def acked(s: System): Set[Payload] =
     Set(ShimAddr, ThirdPartyAddr).map(client =>
       tuples(s.submissions(client), s.acks(client))
-        .filter(((submit, ack)) => submit._1 == ack._1 and ack._2 == WAccepted)
-        .map(((submit, _)) => submit._2)
+        .filter(((submit, ack)) => submit.nonce == ack.nonce and ack.ack == WAccepted)
+        .map(((submit, _)) => submit.payload)
     ).flatten()
 
-  /// The lookups `client` has addressed to the hub, as (nonce, txid).
-  pure def lookups(s: System, client: Addr): Set[(Nonce, TxId)] =
-    s.net.fold(Set(), (acc, mail) =>
-      match mail.msg {
-        | Lookup(lookup) =>
-          if (mail.src == client and mail.dst == HubAddr) acc.union(Set((lookup.nonce, lookup.txid)))
-          else acc
-        | _ => acc
-      })
+  /// The lookups `client` has addressed to the hub.
+  pure def lookups(s: System, client: Addr): Set[{ nonce: Nonce, txid: TxId }] =
+    s.toHub(client).filterMap(msg => match msg { | Lookup(lookup) => Some(lookup) | _ => None })
 
-  /// The lookup replies the hub has addressed to `client`, as (nonce, reply).
-  pure def replies(s: System, client: Addr): Set[(Nonce, WireReply)] =
-    s.net.fold(Set(), (acc, mail) =>
-      match mail.msg {
-        | LookupReply(reply) =>
-          if (mail.src == HubAddr and mail.dst == client) acc.union(Set((reply.nonce, reply.reply)))
-          else acc
-        | _ => acc
-      })
+  /// The lookup replies the hub has addressed to `client`.
+  pure def replies(s: System, client: Addr): Set[{ nonce: Nonce, reply: WireReply }] =
+    s.fromHub(client).filterMap(msg => match msg { | LookupReply(reply) => Some(reply) | _ => None })
 
   /// The transaction bodies in lookup replies addressed to `client`.
   pure def repliedBodies(s: System, client: Addr): Set[Payload] =
-    s.replies(client).fold(Set(), (acc, reply) =>
-      match reply._2 {
-        | WFound(found) =>
-          match found.body {
-            | Some(payload) => acc.union(Set(payload))
-            | None => acc
-          }
-        | _ => acc
+    s.replies(client).filterMap(reply =>
+      match reply.reply {
+        | WFound(found) => found.body
+        | _ => None
       })
 
   // ------------------------------------------------------------------------
@@ -264,14 +244,14 @@ module protocol {
   /// The payloads the wallet has handed the shim: every send is answered at
   /// once.
   pure def sentByWallet(s: System): Set[Payload] =
-    s.events().fold(Set(), (acc, event) =>
+    s.events().filterMap(event =>
       match event {
         | Sent(done) =>
           match done.input {
-            | Clean(payload) => acc.union(Set(payload))
-            | _ => acc
+            | Clean(payload) => Some(payload)
+            | _ => None
           }
-        | _ => acc
+        | _ => None
       })
 
   // ------------------------------------------------------------------------
@@ -394,10 +374,10 @@ module protocol {
     // their window by what is true at the hub.
     val waiting = pre.shim.waiters.keys().union(post.shim.waiters.keys())
     val windows = post.lookups(ShimAddr)
-      .filter(lookup => waiting.contains(lookup._1))
+      .filter(lookup => waiting.contains(lookup.nonce))
       .fold(audit.windows, (acc, lookup) =>
-        val seen = if (acc.keys().contains(lookup._1)) acc.get(lookup._1) else Set()
-        acc.put(lookup._1, seen.union(Set(truth(post, lookup._2)))))
+        val seen = if (acc.keys().contains(lookup.nonce)) acc.get(lookup.nonce) else Set()
+        acc.put(lookup.nonce, seen.union(Set(truth(post, lookup.txid)))))
     { everQueued: audit.everQueued.union(post.hub.queue), windows: windows }
 
   // ------------------------------------------------------------------------
@@ -498,7 +478,7 @@ module protocol {
 
   /// The nonces of the shim's submissions of `payload`.
   pure def shimSubmissionsOf(s: System, payload: Payload): Set[Nonce] =
-    s.submissions(ShimAddr).filter(submit => submit._2 == payload).map(submit => submit._1)
+    s.submissions(ShimAddr).filter(submit => submit.payload == payload).map(submit => submit.nonce)
 
   /// K1a. The wallet was told ok; every submission that reached the hub was
   /// refused; the hub never queued the payload.
@@ -508,7 +488,7 @@ module protocol {
       and {
         not(audit.everQueued.contains(payload)),
         submitted != Set(),
-        submitted.forall(nonce => s.acks(ShimAddr).exists(ack => ack._1 == nonce and ack._2 != WAccepted)),
+        submitted.forall(nonce => s.acks(ShimAddr).exists(ack => ack.nonce == nonce and ack.ack != WAccepted)),
       })
 
   /// K1b. The wallet was told ok; the hub has answered none of the frames and
@@ -517,7 +497,7 @@ module protocol {
     s.toldOk().exists(payload =>
       and {
         not(audit.everQueued.contains(payload)),
-        s.shimSubmissionsOf(payload).forall(nonce => not(s.acks(ShimAddr).exists(ack => ack._1 == nonce))),
+        s.shimSubmissionsOf(payload).forall(nonce => not(s.acks(ShimAddr).exists(ack => ack.nonce == nonce))),
       })
 
   // ------------------------------------------------------------------------
@@ -563,7 +543,7 @@ module protocol {
   /// > is left open deliberately.
   pure def wQueuedDisclosedIn(s: System): bool =
     tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
-      lookup._1 == reply._1 and reply._2 == WFound({ body: None, height: AtZero }))
+      lookup.nonce == reply.nonce and reply.reply == WFound({ body: None, height: AtZero }))
 
   /// W9. The hub holds a payload it cannot parse; the wallet that sent it asks
   /// for it and is told not found. An entry without a txid can never
@@ -574,7 +554,7 @@ module protocol {
         | Got(got) =>
           and {
             got.obs == NotFound,
-            got.via == Some(lookup._1),
+            got.via == Some(lookup.nonce),
             s.hub.queue.exists(payload => payload.txid == None and walletTxid(payload) == got.query),
           }
         | _ => false
@@ -672,6 +652,15 @@ module protocol {
       c.twins.forall(twin => c.payloads.exists(payload => areTwins(twin, payload))),
     }
 
+  /// Checked by the Byzantine inits: the universe holds a wallet payload, its
+  /// twin, and a payload with another txid, so a lie can be the twin or a
+  /// foreign transaction.
+  pure def universeCoversLies(c: Config): bool =
+    c.payloads.exists(payload => and {
+      c.twins.exists(twin => areTwins(twin, payload)),
+      c.payloads.exists(other => other.txid != None and other.txid != payload.txid),
+    })
+
   // ------------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------------
@@ -695,8 +684,8 @@ module protocol {
   }
 
   action initBaseline = all { payloadsWellFormed(baseline), initWith(baseline) }
-  action initByzHub = all { payloadsWellFormed(byzHub), initWith(byzHub) }
-  action initByzIndexer = all { payloadsWellFormed(byzIndexer), initWith(byzIndexer) }
+  action initByzHub = all { payloadsWellFormed(byzHub), universeCoversLies(byzHub), initWith(byzHub) }
+  action initByzIndexer = all { payloadsWellFormed(byzIndexer), universeCoversLies(byzIndexer), initWith(byzIndexer) }
 
   // ------------------------------------------------------------------------
   // Roles
@@ -719,10 +708,10 @@ module protocol {
   def lookupAnswers(state: IndexerState, msg: Msg): Set[IndexerAnswer] =
     match msg {
       | Lookup(lookup) =>
-        indexerResults(state, LookupIInput(lookup.txid)).fold(Set(), (acc, result) =>
+        indexerResults(state, LookupIInput(lookup.txid)).filterMap(result =>
           match result.out {
-            | AnswerOutput(answer) => acc.union(Set(answer))
-            | _ => acc
+            | AnswerOutput(answer) => Some(answer)
+            | _ => None
           })
       | _ => Set(INotFound)
     }

@@ -411,7 +411,7 @@ declares a constant. Every other module is pure.
 
 | File | Module | Owns |
 |---|---|---|
-| `spells/basicSpells.qnt` | `basicSpells` | `Option`, and a few set and map helpers, each with its test |
+| `spells/basicSpells.qnt` | `basicSpells` | `Option`, `filterMap`, and a few set and map helpers, each with its test |
 | `spells/soup.qnt` | `soup` | The message soup: `Envelope[p, m]`, `Soup[p, m]`, `send`, `sendAll`, `inbox`, `outbox` |
 | `types.qnt` | `types` | The vocabulary: payloads, verdicts, refusals, roles, observations, `Result[s, o]`, `Config` |
 | `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply` |
@@ -491,7 +491,10 @@ abstract indexer per hub was a decision of the design.
 
 One variable, `cfg`, holds a configuration. It is written by `initWith` and
 kept by every step; `protocol.qnt` names its fields (`PAYLOADS`, `ROLES`, ...).
-Each configuration has a named init whose guard is `payloadsWellFormed`.
+Each configuration has a named init whose guard is `payloadsWellFormed`. The
+Byzantine inits also check `universeCoversLies`: the universe a lie is built
+from holds a wallet payload, its twin, and a payload with another txid, so a
+lie can be the twin or a foreign transaction and G3 has something to catch.
 
 | Configuration | Init | Roles (hub / indexer) |
 |---|---|---|

@@ -69,7 +69,7 @@ module scenariosTest {
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
       .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: None, height: AtZero }))))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
       .expect(wQueuedDisclosed)
       .expect(s.tpLearned() == Set() and queuedBytesConfidential)
 
@@ -103,7 +103,7 @@ module scenariosTest {
       .then(sendToHub(tight))
       .then(answerSubmitFrom(ShimAddr, 0, tight, WRefused(WExpiryTooTight)))
       .expect(s.wallet.log == [Sent({ input: Clean(tight), obs: SentOk })])
-      .expect(s.acks(ShimAddr) == Set((0, WRefused(WExpiryTooTight))))
+      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WRefused(WExpiryTooTight) }))
       .expect(audit.everQueued == Set())
       .expect(wToldRefusedEverywhere)
 

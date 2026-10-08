@@ -35,7 +35,7 @@ module trustTest {
         fromThirdParty(lookupMail(0, "early")), INotFound,
         { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtZero })))) },
       ))
-      .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: Some(early), height: AtZero }))))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
@@ -47,7 +47,7 @@ module trustTest {
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
       .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: None, height: AtZero }))))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
       .expect(queuedBytesConfidential)
 
   /// G4 needs the hub. It answers not found for a transaction it has queued.
@@ -101,7 +101,7 @@ module trustTest {
     initByzHub
       .then(sendToHub(early))
       .then(hubReceiveWith(submitMail(0, early), INotFound, { hub: s.hub, reply: AAck(WAccepted) }))
-      .expect(s.acks(ShimAddr) == Set((0, WAccepted)))
+      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WAccepted }))
       .expect(s.hub.queue == Set() and audit.everQueued == Set())
       .expect(not(ackImpliesQueued))
 
@@ -109,7 +109,7 @@ module trustTest {
     initByzHub
       .then(sendToHub(early))
       .then(deliverSubmit(0, early))
-      .expect(s.acks(ShimAddr) == Set((0, WAccepted)) and s.hub.queue == Set(early))
+      .expect(s.acks(ShimAddr) == Set({ nonce: 0, ack: WAccepted }) and s.hub.queue == Set(early))
       .expect(ackImpliesQueued)
 
   /// G3 survives. The hub answers with another transaction; the shim compares
@@ -150,7 +150,7 @@ module trustTest {
       .then(deliverLookupFrom(
         ThirdPartyAddr, 0, "early", IFound({ body: Some(early), height: AtZero }),
       ))
-      .expect(s.replies(ThirdPartyAddr) == Set((0, WFound({ body: Some(early), height: AtZero }))))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
       // What it learned came in the body of a reply addressed to it.
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
@@ -164,7 +164,7 @@ module trustTest {
       .then(thirdPartyLearnsTxidWith("early"))
       .then(thirdPartyLookupWith("early"))
       .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set((0, WNotFound)))
+      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WNotFound }))
       .expect(queuedBytesConfidential)
 
   /// G4 needs the indexer. For a transaction that exists nowhere it answers
