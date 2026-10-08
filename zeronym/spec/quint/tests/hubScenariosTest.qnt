@@ -276,7 +276,7 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(flightStart == 8 and h.inFlight() == Set(early) and not(marginLeft(early, flightStart)))
 
-  /// K8 (finding 8). The hub crashed in between and lost its queue. To it the
+  /// K8 (finding 6). The hub crashed in between and lost its queue. To it the
   /// duplicate is a first arrival, four blocks late, and admission counts on
   /// the flush at 6, which will not happen. The wallet's transaction was on
   /// time, was acknowledged, and is first offered with one block of margin
@@ -392,7 +392,7 @@ module hubScenariosTest {
     requeuedTwiceWhileStale
       .expect(not(conformingEveryOfferBeforeExpiry) and conformingFirstOfferBeforeExpiry)
 
-  /// Finding 9. The third flush comes back unjudged as well, and the entry,
+  /// Finding 7. The third flush comes back unjudged as well, and the entry,
   /// which has an expiry, is dropped as exhausted: the expiry rule, reading a
   /// tip that stopped at 5, still does not give it up.
   run expiringEntryDroppedAsExhaustedTest =
