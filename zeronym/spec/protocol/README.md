@@ -40,7 +40,7 @@ either the tier fails. `CHECK_TIERS=simulation` runs tiers 1 to 3b and
 | Tier | What | Command | Expectation |
 |---|---|---|---|
 | 1 | typecheck | `quint typecheck` on every file | ok |
-| 2 | tests | `quint test` on the spells and every test file | all pass |
+| 2 | tests | `quint test` on the spells and every test file | all pass, and each file reports at least the count `check.sh` gives it |
 | 3 | invariants | `quint run --invariants ... --max-samples=2000 --max-steps=40 --seed=7` | "holds" rows hold; the "fails" row is violated |
 | 3b | witnesses | `quint run --witnesses ... --invariants ...` | every witness reached at least once; no invariant violated on the way |
 | 4 | hub specification | `tlc.sh hubMachine.qnt hubMachine <init> <step> <invariant>`, one row each | "holds" rows hold over every reachable state; "violated" rows are violated, by a counterexample no longer than the recorded one |
@@ -49,11 +49,12 @@ Rust evaluator): about 10 minutes wall for all four tiers with four rows at
 a time (`QUINT_JOBS=4`, the default), of which tiers 1 to 3 are about 2
 minutes. It
 has not been timed on a CI runner. `QUINT_SAMPLES` changes the trace count.
-The rarest witness, `vLookupValidityPerHub`, is reached in 2 of the 2000
-traces, so a lower count risks losing it.
+The rarest witness, W19 (`wThirdPartyServedBody`), is reached in 10 of the
+2000 traces, so a lower count risks losing it.
 
 The tier 3 "fails" row and tier 3b run under `step` or under a narrower
-relation, `quietStep` (no faults, no outsiders). It is a part of `step`, so a
+relation: `quietStep` (no faults, no outsiders), or `earlyLookupStep` (only
+`early` sent and asked about, for G4's antecedent). Each is a part of `step`, so a
 state or a violation found under it is reachable under `step`. Uniform random choice over `step`
 rarely gets a transaction as far as a block in 40 steps; the narrower relations
 do. Tier 3b re-checks each configuration's guarantees on those deeper traces.
@@ -677,7 +678,8 @@ Non-vacuity: for each guarantee, a state where its antecedent holds, reached on
 every configuration where the guarantee is claimed: `vOperatorBlind`,
 `vQueuedBytesConfidential` (with W19 for its reply-body branch),
 `vTxidAuthenticity`, `vLookupValidityPerHub` (the log has a pending, a served
-transaction and a not-found), `vAckImpliesQueued`.
+transaction and a not-found; reached under `earlyLookupStep`, about 25 traces
+in 2000, against 2 under `quietStep`), `vAckImpliesQueued`.
 The antecedents of G6a, G6b and G6c are reachability rows of the hub
 specification.
 

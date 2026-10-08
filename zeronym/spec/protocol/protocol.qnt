@@ -1040,6 +1040,14 @@ module protocol {
     chainMine,
   }
 
+  /// One migration, `early`, sent and asked about, with no faults and no
+  /// outsiders. Its three lookups can be answered pending (queued), not found
+  /// (the flush window) and served (accepted): G4's antecedent.
+  action earlyLookupStep = any {
+    walletSendWith(Clean(early), true), walletGetWith("early"),
+    shimReceive, hubReceive, hubTake, indexerVerdict,
+  }
+
   // ------------------------------------------------------------------------
   // Guarantees
   // ------------------------------------------------------------------------

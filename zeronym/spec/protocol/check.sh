@@ -77,28 +77,30 @@ finish() {
   done
 }
 
-SPELLS="spells/basicSpells.qnt spells/soup.qnt"
+# Each file with tests carries the fewest it may report, so a test that stops
+# being found (renamed so it no longer ends in `Test`, say) fails the gate.
+SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt tests/indexerTest.qnt tests/hubTest.qnt tests/shimTest.qnt tests/hubScenariosTest.qnt tests/realisedRunsTest.qnt tests/scenariosTest.qnt tests/trustTest.qnt"
+FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:27 tests/shimTest.qnt:13
+  tests/hubScenariosTest.qnt:38 tests/realisedRunsTest.qnt:8 tests/scenariosTest.qnt:21 tests/trustTest.qnt:19"
 
 fail() {
   echo "FAIL  $1"
 }
 
-# run_tests FILE [MODULE]
+# run_tests FILE:MIN: every test passes, and there are at least MIN.
 run_tests() {
-  if [ $# -eq 2 ]; then
-    out=$($QUINT test "$1" --main="$2" --backend="$BACKEND" 2>&1)
-  else
-    out=$($QUINT test "$1" --backend="$BACKEND" 2>&1)
-  fi
+  file=${1%:*} least=${1##*:}
+  out=$($QUINT test "$file" --backend="$BACKEND" 2>&1)
   status=$?
   passing=$(echo "$out" | sed -n 's/^ *\([0-9][0-9]*\) passing.*/\1/p')
-  if [ "$status" -eq 0 ] && [ -n "$passing" ]; then
-    echo "ok    test ${2:-$1}: $passing passing"
+  if [ "$status" -eq 0 ] && [ -n "$passing" ] && [ "$passing" -ge "$least" ]; then
+    echo "ok    test $file: $passing passing"
+  elif [ "$status" -eq 0 ] && [ -n "$passing" ]; then
+    fail "test $file: $passing passing, expected at least $least"
   else
     echo "$out" | tail -25
-    fail "test ${2:-$1}"
+    fail "test $file"
   fi
 }
 
@@ -262,7 +264,7 @@ typecheck() {
 
 echo "---- 1 typecheck"
 for file in $SPELLS $MODULES $FUNCTIONAL; do
-  job typecheck "$file"
+  job typecheck "${file%:*}"
 done
 finish
 if [ "$failures" -ne 0 ]; then
@@ -299,9 +301,12 @@ job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyServedBody wToldRefusedEverywhere wToldNeverDelivered \
   vOperatorBlind vQueuedBytesConfidential vAckImpliesQueued \
   -- $BASELINE_HOLDS
-# The antecedents of G3, G4.
+# The antecedent of G3, and G4's under a step that keeps to one migration.
 job reaches baseline quietStep 80 \
-  vTxidAuthenticity vLookupValidityPerHub \
+  vTxidAuthenticity \
+  -- $BASELINE_HOLDS
+job reaches baseline earlyLookupStep 40 \
+  vLookupValidityPerHub \
   -- $BASELINE_HOLDS
 
 # W16, both halves.
