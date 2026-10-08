@@ -271,11 +271,11 @@ finish
 
 echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
-# The guarantees, where they are claimed. G7 `wellFormed` is checked everywhere.
+# The guarantees, where they are claimed.
 job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub \
-                              ackImpliesQueued wellFormed
-job holds byzHub              operatorBlind txidAuthenticity wellFormed
-job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued wellFormed
+                              ackImpliesQueued
+job holds byzHub              operatorBlind txidAuthenticity
+job holds byzIndexer          operatorBlind txidAuthenticity ackImpliesQueued
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
@@ -284,7 +284,7 @@ finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued wellFormed"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub ackImpliesQueued"
 
 # W8, K1a, K1b, and the antecedents of G1, G2, G8.
 job reaches baseline step 40 \
@@ -299,10 +299,10 @@ job reaches baseline quietStep 80 \
 # W16, both halves.
 job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity wTwinServed wFalseHeightServed \
-  -- operatorBlind txidAuthenticity wellFormed
+  -- operatorBlind txidAuthenticity
 job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity vAckImpliesQueued \
-  -- operatorBlind txidAuthenticity ackImpliesQueued wellFormed
+  -- operatorBlind txidAuthenticity ackImpliesQueued
 finish
 
 echo "---- 4 hub specification (TLC, exhaustive)"

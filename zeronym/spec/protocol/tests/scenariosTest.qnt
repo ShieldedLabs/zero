@@ -51,7 +51,7 @@ module scenariosTest {
       .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(3) }))
       .expect(wPending and wTxInMempool and wTxMined)
       .expect(operatorBlind and queuedBytesConfidential and txidAuthenticity and lookupValidityPerHub)
-      .expect(ackImpliesQueued and wellFormed and statusNeverRegresses)
+      .expect(ackImpliesQueued and statusNeverRegresses)
 
   /// A pass-through transaction goes to the operator and nowhere else.
   run passThroughIsForwardedTest =

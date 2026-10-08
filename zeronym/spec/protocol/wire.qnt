@@ -30,18 +30,6 @@ module wire {
     | Lookup({ nonce: Nonce, txid: TxId })
     | LookupReply({ nonce: Nonce, reply: WireReply })
 
-  /// The on-wire length of a frame. Every frame of a kind is padded to one
-  /// length, so length reveals the kind and nothing about the content.
-  type SizeClass = FrameSize | AckSize | LookupSize
-
-  pure def sizeOf(msg: Msg): SizeClass =
-    match msg {
-      | Submit(_) => FrameSize
-      | LookupReply(_) => FrameSize
-      | Ack(_) => AckSize
-      | Lookup(_) => LookupSize
-    }
-
   /// A hub's decision as an ack. A draining hub answers under the queue-full
   /// code, as the implementation does.
   pure def renderAck(kind: AckKind): WireAck =

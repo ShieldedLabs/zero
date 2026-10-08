@@ -453,20 +453,6 @@ module protocol {
         | _ => true
       })
 
-  /// G7. Structural sanity: every nonce in use was minted.
-  pure def wellFormedIn(s: System): bool =
-    and {
-      s.shim.waiters.keys().forall(nonce => nonce < s.shim.nextNonce),
-      s.net.forall(mail =>
-        match mail.msg {
-          | Submit(submit) =>
-            submit.nonce < (if (mail.src == ShimAddr) s.shim.nextNonce else s.thirdParty.nextNonce)
-          | Lookup(lookup) =>
-            lookup.nonce < (if (mail.src == ShimAddr) s.shim.nextNonce else s.thirdParty.nextNonce)
-          | _ => true
-        }),
-    }
-
   /// G8. An accepted ack from the hub is for a payload it had queued by the
   /// time it acked. It holds whether or not anyone waits for the ack.
   pure def ackImpliesQueuedIn(s: System, audit: Audit): bool =
@@ -1070,7 +1056,6 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
-  val wellFormed = wellFormedIn(s)
   val ackImpliesQueued = ackImpliesQueuedIn(s, audit)
 
   // ------------------------------------------------------------------------

@@ -20,7 +20,7 @@ depth. A property that "holds" is one no sampled trace violated.
 runs TLC on the hub specification through `tlc.sh`, not through `quint verify`.
 
 Statements that do not rest on sampling are the ones backed by `quint test`:
-the functional properties F1-F14 and the two-state properties A2-A3, which are
+the functional properties F1-F15 (F6 is cut) and the two-state properties A2-A3, which are
 exhaustive over small finite universes, and the scripted runs, each of which
 is one concrete execution.
 
@@ -120,7 +120,7 @@ definitions they justify.
 | Shim / hub exchange | `Submit`, `Ack`, `Lookup`, `LookupReply` over a grow-only soup; nonce correlation; one hub: a submission is one frame, handed over or not, and a lookup goes to the hub and fails closed on a timeout | S6-S9 |
 | Hub | In the hub specification: lifecycle; admission with its three refusals (tip stale, draining, expiry too tight); queue keyed by payload; flush cadence on tip epochs; flush window; per-entry verdicts; requeue; crash. In the protocol specification: the abstract hub, a queue and the entries out with a flush, which accepts, refuses, takes, settles, gives back and loses (see [The abstraction lemma](#the-abstraction-lemma)) | S10-S19 |
 | Chain / indexer | per-txid status (absent, mempool, mined); what the indexer has been offered; verdict and lookup-answer relations. A lookup answer's height is 0, the height the transaction was mined at, or another (`WireHeight`). The protocol specification has no chain height and no block clock, and its verdict relation has no expiry clause (`heightlessIndexerResults`); the hub specification keeps the chain height, which its tip and expiry rules read | S15, S22 |
-| Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation; frame size classes | S20, S22 |
+| Wire encoding | pure `render` / `interpretReply` between hub outcome and wallet observation | S20, S22 |
 | Trust | role `Honest \| Byzantine` for the hub and its indexer; the shim is honest | S23 |
 | Third party | a client of the hub's public, unauthenticated address: looks up txids it knows; submits payloads it has learned or the chain has published; its payload knowledge is derived from what it can observe | S13, S25 |
 | Network | drop, duplicate, delay, reorder; cannot forge |  |
@@ -142,6 +142,7 @@ definitions they justify.
 | A Byzantine shim. Not a code path: the production shim runs attested (`DEBUG=0`) | Removed. Its column said only that every wallet-facing guarantee needs it honest. Also lost: the checked claim that the hub-side G6 and G8 survive a Byzantine shim |
 | Disclosure by a Byzantine hub or indexer outside the protocol (`byzDisclose`) | Removed (C7): a Byzantine hub or indexer already leaks through a lookup reply; for each, a scripted run violates G2 with the third party's knowledge coming from the body of a reply addressed to it, with its control |
 | Payloads of the third party's own making, and W17 (one of them queued) | Removed (C8): the hub's address is public and unauthenticated, so this is possible, but only W17 read them. The third party still submits what it has learned or the chain has published (K2c) |
+| The frame-size lemma, `sizeOf` and F6 | Removed (C9): true by construction; the code pads four fixed-size frames (`zeronym/hub/src/wire.rs:29-59`), and length side channels were already out of the model |
 | More than one hub: replication (S24), the lookup cursor and its failover on a timeout (S8, S27), the prefix send (S29) | A scope choice; see [One hub](#one-hub) for what it costs and what composes |
 | The hub's capacity and size refusals (`Full`, `TooLarge`) and the queue's entry budget (`queueCap`). In code: S10's byte and entry budget and its too-large check | Removed: no finding came from them. With them went W12, a queue over capacity after a requeue. The shim's own too-large arm (S3) stays |
 | The hub's schedule in the protocol specification: its phases, tip, cadence, drain, crash and restart, flight time, and what read them there: G6a-G6c, the refusal witnesses W4, the requeue witnesses W5-W7, the offer, verdict, admission, refusal and drop records, the tip models | Moved: the protocol uses the abstract hub, which `hubTest` checks the real hub refines; the schedule is checked exhaustively in the hub specification. The protocol's pinned runs that need a real hub step are replayed through it in `realisedRunsTest` |
@@ -413,13 +414,13 @@ declares a constant. Every other module is pure.
 | `spells/basicSpells.qnt` | `basicSpells` | `Option`, and a few set and map helpers, each with its test |
 | `spells/soup.qnt` | `soup` | The message soup: `Envelope[p, m]`, `Soup[p, m]`, `send`, `sendAll`, `inbox`, `outbox` |
 | `types.qnt` | `types` | The vocabulary: payloads, verdicts, refusals, roles, observations, `Result[s, o]`, `Config` |
-| `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply`, `sizeOf` |
+| `wire.qnt` | `wire` | The four frames; `render`, `renderAck`, `meaning`, `interpretReply` |
 | `indexer.qnt` | `indexer` | The chain and indexer as a relation: honest and Byzantine outputs, and their effect |
 | `hub.qnt` | `hub` | `hub(state, input)`; admission, the tip rule, the flush cycle, requeue; `byzHubResults` |
 | `abstractHub.qnt` | `abstractHub` | The hub as the protocol sees it: `AHub`, its honest and Byzantine answers, its internal moves |
 | `shim.qnt` | `shim` | `shim(state, input)`; routing, reply correlation |
 | `protocol.qnt` | `protocol` | The transactions and the three configurations; `System`, `Audit`, where each output goes and the derived views; `truth`, the audit monitor `advance`, the guarantees, gaps and witnesses; the variables, `commit`, the named inits, the steps, the property aliases, the run vocabulary |
-| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F14; A2-A3 and the abstraction lemma in `hubTest.qnt` |
+| `tests/wireTest.qnt`, `indexerTest.qnt`, `hubTest.qnt`, `shimTest.qnt` | | F1-F15; A2-A3 and the abstraction lemma in `hubTest.qnt` |
 | `tests/realisedRunsTest.qnt` | `realisedRunsTest` | The hub inputs of each pinned run, replayed through the real hub |
 | `tests/scenariosTest.qnt` | `scenariosTest` | Witnesses and pinned gap causes; `liveInitsTest` |
 | `tests/trustTest.qnt` | `trustTest` | One run and one control per "required" cell |
@@ -515,7 +516,6 @@ it keeps with the shipped one are in `hubMachine.qnt`.
 | F3 | The shim serves a transaction only if its txid is the one asked for. A twin is served; the height is passed through unchecked | `wireTest::servedOnlyOnMatchingTxidTest` |
 | F4 | An error never becomes "not found" | `wireTest::errorIsNeverNotFoundTest` |
 | F5 | The shim forwards only cleanly read pass-through transactions | `shimTest::onlyPassThroughIsForwardedTest` |
-| F6 | A frame's size depends on its kind only | `wireTest::sizeIsIndependentOfContentTest` |
 | F7 | Under the startup budget, a conforming payload arriving within the delivery lag passes the expiry check. This is about admission at one tip, not about when the flush happens | `hubTest::conformingTimelyPayloadIsAdmissibleTest` |
 | F8 | The admission decision table, in the implementation's order | `hubTest::admissionDecisionTableTest` |
 | F9 | Requeue, entry by entry, and the counts it reports | `hubTest::requeueTest` |
@@ -537,7 +537,7 @@ it keeps with the shipped one are in `hubMachine.qnt`.
 | G6a | `offeredBeforeExpiry` | Every transaction a hub offers is offered with the mining margin to spare: whatever was admitted, on every attempt. About the margin left when the flush begins, not about acceptance. Claimed under a timely tip |
 | G6b | `conformingFirstOfferBeforeExpiry` | The same for supported wallets and for the first time a hub offers the transaction. Nothing about a later offer of a requeued entry. Also about the margin at the offer |
 | G6c | `conformingFirstOfferJudgedBeforeExpiry` | End to end: when a node judges the first offer of a supported wallet's transaction, it has not expired. Needs G6b and `flightWithinMargin` |
-| G7 | `wellFormed` | Structural sanity: every nonce in use was minted. Checked in every configuration; not a trust-matrix row. Its hub half, a queued entry within its attempts and a down hub holding nothing, is `hubTest::wellFormedTest` over `REACH` |
+| G7 | `hubTest::wellFormedTest` | Structural sanity of the hub: a queued entry is within its attempts and a down hub holds nothing, over every state in `REACH`. Not a trust-matrix row. Its nonce half (every nonce in use was minted) was a trace invariant and is cut (C10): the shim and the third party mint every nonce they send |
 | G8 | `ackImpliesQueued` | An accepted ack from a hub is for a payload that hub had queued by then, whether or not anyone waits for the ack |
 
 No guarantee reads a field written by the function it constrains. The history
@@ -1014,7 +1014,7 @@ and Quint fetched by `npx`.
 ## The protocol specification under TLC (measured once, not a gate)
 
 Measured once at step 19, on the all-honest configuration with
-`maxRequests` 2 and invariant `wellFormed`, through `tlc.sh` with 4 workers,
+`maxRequests` 2 and invariant `wellFormed` (since cut, C10), through `tlc.sh` with 4 workers,
 an 8 GB heap and a 300 s limit (the plan said 10 minutes; the cap used for
 every TLC run here is 5). A tier 1-3 gate shared the machine for most of the
 run. The compiled JSON is 39.2 MB (133.0 MB before step 18, with a constant

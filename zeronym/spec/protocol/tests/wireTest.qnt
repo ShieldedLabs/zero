@@ -96,16 +96,6 @@ module wireTest {
   run errorIsNeverNotFoundTest =
     assert(QUERIES.forall(query => interpretReply(WError, query) == Unavailable))
 
-  /// F6. A frame's length depends on its kind and on nothing else.
-  run sizeIsIndependentOfContentTest = all {
-    assert(tuples(REPLIES, Set(0, 1)).forall(((reply, nonce)) =>
-      sizeOf(LookupReply({ nonce: nonce, reply: reply })) == FrameSize)),
-    assert(tuples(PAYLOADS, Set(0, 1)).forall(((payload, nonce)) =>
-      sizeOf(Submit({ nonce: nonce, payload: payload })) == FrameSize)),
-    assert(sizeOf(Ack({ nonce: 0, ack: WAccepted })) == sizeOf(Ack({ nonce: 1, ack: WRefused(WTipStale) }))),
-    assert(sizeOf(Lookup({ nonce: 0, txid: "ta" })) == sizeOf(Lookup({ nonce: 1, txid: "tb" }))),
-  }
-
   /// F10. A draining hub refuses under the queue-full code; a fresh admission
   /// and a duplicate are one acceptance. Every refusal has its own code.
   run ackRenderingTest = all {
