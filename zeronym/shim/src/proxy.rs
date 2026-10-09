@@ -37,6 +37,8 @@
 //! Transport is plaintext h2c with prior knowledge: no TLS, no HTTP/1.1, no
 //! upgrade dance. `curl http://...` will look broken; `grpcurl -plaintext` and
 //! tonic channels over `http://` both work, because both use prior knowledge.
+//! Browser wallets reach it as gRPC-web through the TLS-terminating proxy in
+//! front, which speaks h2c here; see `serve_connection`.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -47,16 +49,18 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::uri::{Authority, PathAndQuery, Scheme};
-use http::{HeaderMap, HeaderValue, Request, Response, Uri};
-use http_body_util::combinators::BoxBody;
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, Uri};
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as client_h1;
 use hyper::client::conn::http2 as client_h2;
 use hyper::server::conn::http2 as server_h2;
-use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
+use tonic_web::GrpcWebLayer;
+use tower_http::cors::{self, CorsLayer};
 
 use crate::intercept;
 use crate::tls::{BackendTls, ServerTls};
@@ -64,7 +68,11 @@ use crate::BoxError;
 
 /// One body type for both legs and both paths, so [`forward`] is shared
 /// verbatim between the pass-through and the intercept.
-pub type ProxyBody = BoxBody<Bytes, BoxError>;
+pub type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
+
+/// A wallet's request body once the gRPC-web layer has seen it: plain gRPC
+/// framing, whichever dialect the wallet spoke. See `serve_connection`.
+pub type InboundBody = tonic::body::Body;
 
 /// The one method the shim decodes. Everything else is opaque.
 pub const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
@@ -641,20 +649,64 @@ async fn serve_connection<IO>(
     // dropping the TCP connection on the floor.
     let pool = Arc::new(UpstreamPool::new(backend));
 
-    let service = service_fn(move |req: Request<Incoming>| {
+    let handler = tower::service_fn(move |req: Request<InboundBody>| {
         let pool = pool.clone();
         let diversion = diversion.clone();
         let caution = caution.clone();
         let status = status.clone();
+        // The request side of the same tonic-web length bug as below: a
+        // grpc-web-text body keeps its base64 length after decoding, which hyper
+        // would send upstream as content-length.
+        let req = req.map(|body| InboundBody::new(body.map_frame(|frame| frame)));
         async move { handle(req, pool, diversion, caution, status).await }
     });
 
-    if let Err(err) = server_h2::Builder::new(TokioExecutor::new())
-        .initial_stream_window_size(STREAM_WINDOW)
-        .initial_connection_window_size(CONNECTION_WINDOW)
-        .serve_connection(TokioIo::new(stream), service)
-        .await
-    {
+    // Browser wallets speak gRPC-web, which carries the status in the body
+    // because a browser cannot read HTTP/2 trailers. The layer translates it to
+    // plain gRPC BEFORE `handle`, so `route_for` and the classifier see every
+    // SendTransaction in one dialect (rule 3), and translates the response back.
+    // Plain gRPC passes through it untouched. CORS sits outside it so the
+    // browser's preflight is answered here and never reaches the indexer.
+    let service = tower::ServiceBuilder::new()
+        .layer(
+            CorsLayer::new()
+                .allow_origin(cors::Any)
+                .allow_methods([http::Method::POST])
+                .allow_headers([
+                    http::header::CONTENT_TYPE,
+                    HeaderName::from_static("x-grpc-web"),
+                    HeaderName::from_static("x-user-agent"),
+                    HeaderName::from_static("grpc-timeout"),
+                ])
+                .expose_headers([
+                    HeaderName::from_static("grpc-status"),
+                    HeaderName::from_static("grpc-message"),
+                    HeaderName::from_static("grpc-status-details-bin"),
+                ]),
+        )
+        // tonic-web appends the status frame to the body but keeps the inner
+        // body's length (its size_hint and any content-length header), so a
+        // backend reply that declared one is overrun and the stream reset. h2
+        // frames the body itself: drop both. `map_frame` reports an unknown size.
+        .map_response(|resp: Response<tonic::body::Body>| {
+            let mut resp = resp.map(|body| tonic::body::Body::new(body.map_frame(|frame| frame)));
+            resp.headers_mut().remove(http::header::CONTENT_LENGTH);
+            resp
+        })
+        .layer(GrpcWebLayer::new())
+        .service(handler);
+    let service = TowerToHyperService::new(service);
+
+    // Boxed as `dyn Future + Send` here, where every type is concrete: left to
+    // the spawn site, rustc's higher-ranked Send check over the layered service
+    // fails with "implementation of `From` is not general enough".
+    let conn: std::pin::Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>> = Box::pin(
+        server_h2::Builder::new(TokioExecutor::new())
+            .initial_stream_window_size(STREAM_WINDOW)
+            .initial_connection_window_size(CONNECTION_WINDOW)
+            .serve_connection(TokioIo::new(stream), service),
+    );
+    if let Err(err) = conn.await {
         tracing::debug!(%peer, %err, "client connection ended");
     }
 }
@@ -662,7 +714,7 @@ async fn serve_connection<IO>(
 /// Route one request, converting any internal failure into a gRPC status so the
 /// client sees a clean error instead of a reset stream.
 async fn handle(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<intercept::Diversion>>,
     caution: CautionRelay,
@@ -835,7 +887,7 @@ pub fn route_for(path: &str) -> Route {
 /// Forward a request the shim does not decode: every method except
 /// `SendTransaction`, including streams, unknown methods and other services.
 pub(crate) async fn pass_through(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
 ) -> Result<Response<ProxyBody>, BoxError> {
     let method = req.method().clone();
@@ -848,7 +900,7 @@ pub(crate) async fn pass_through(
 
     // `map` rewraps the body value without polling it, so a client-streaming
     // request body is relayed frame by frame and is never buffered here.
-    let req = req.map(|body| body.map_err(BoxError::from).boxed());
+    let req = req.map(|body| body.map_err(BoxError::from).boxed_unsync());
     let resp = forward(upstream, req).await?;
 
     // A trailers-only gRPC response carries its status in the response HEADERS
@@ -878,7 +930,7 @@ pub(crate) async fn pass_through(
 
     // Same `map` discipline on the way back: this is what keeps GetBlockRange
     // streaming and what carries the grpc-status trailer to the client.
-    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed_unsync()))
 }
 
 /// Strip the client-address headers a TLS-terminating proxy in front of the shim
@@ -895,6 +947,8 @@ pub(crate) async fn pass_through(
 /// parent host to attribute queries to IPs -- the enclave was hiding nothing.
 /// The whole `Forwarded` family goes, plus `X-Real-IP` and `Via`, which some
 /// proxies use instead; none of them is gRPC metadata and no indexer needs them.
+/// `Origin` and `Referer` go too: a browser wallet sends them on every gRPC-web
+/// call, and a `chrome-extension://<id>` origin names the wallet to the operator.
 fn strip_client_address_headers(headers: &mut HeaderMap) {
     for name in [
         "x-forwarded-for",
@@ -904,6 +958,8 @@ fn strip_client_address_headers(headers: &mut HeaderMap) {
         "x-real-ip",
         "forwarded",
         "via",
+        "origin",
+        "referer",
     ] {
         headers.remove(name);
     }
@@ -1001,7 +1057,7 @@ fn normalize_response_encoding(headers: &mut HeaderMap) {
 /// map and no message body, which is exactly the shape gRPC specifies for a
 /// call that fails before producing a message.
 pub(crate) fn grpc_error(code: u16, message: &str) -> Response<ProxyBody> {
-    let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed();
+    let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync();
     let mut resp = Response::new(body);
 
     // gRPC failures are HTTP 200. Never map a gRPC error onto an HTTP status.
@@ -1043,7 +1099,7 @@ fn sanitize_grpc_message(message: &str) -> String {
 fn text_response(status: u16, body: &str) -> Response<ProxyBody> {
     let body = Full::new(Bytes::from(body.to_owned()))
         .map_err(BoxError::from)
-        .boxed();
+        .boxed_unsync();
     Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -1055,7 +1111,7 @@ fn text_response(status: u16, body: &str) -> Response<ProxyBody> {
 fn json_response(body: &str) -> Response<ProxyBody> {
     let body = Full::new(Bytes::from(body.to_owned()))
         .map_err(BoxError::from)
-        .boxed();
+        .boxed_unsync();
     Response::builder()
         .status(200)
         .header(http::header::CONTENT_TYPE, "application/json")
@@ -1064,7 +1120,7 @@ fn json_response(body: &str) -> Response<ProxyBody> {
 }
 
 fn caution_health_ok() -> Response<ProxyBody> {
-    let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed();
+    let body = Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync();
     Response::builder()
         .status(200)
         .body(body)
@@ -1080,7 +1136,7 @@ fn caution_health_ok() -> Response<ProxyBody> {
 /// WORKAROUND: this exists because the platform routes `/attestation` to the app
 /// under h2c. If Caution serves it itself, disable the relay and remove this.
 async fn forward_to_bootproofd(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     addr: &str,
 ) -> Result<Response<ProxyBody>, BoxError> {
     let stream = TcpStream::connect(addr).await?;
@@ -1105,11 +1161,11 @@ async fn forward_to_bootproofd(
         .headers
         .insert(http::header::HOST, HeaderValue::from_str(addr)?);
 
-    let body = body.map_err(BoxError::from).boxed();
+    let body = body.map_err(BoxError::from).boxed_unsync();
     let resp = sender
         .send_request(Request::from_parts(parts, body))
         .await?;
-    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed_unsync()))
 }
 
 #[cfg(test)]

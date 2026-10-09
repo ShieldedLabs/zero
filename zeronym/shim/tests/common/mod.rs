@@ -318,3 +318,81 @@ pub fn decode_raw_transaction(framed: &[u8]) -> RawTransaction {
     );
     RawTransaction::decode(&framed[5..]).expect("a RawTransaction")
 }
+
+/// A gRPC-web reply as a browser sees it: no HTTP trailers, the status in a
+/// final body frame flagged 0x80.
+pub struct GrpcWebReply {
+    pub headers: HeaderMap,
+    pub messages: Vec<Bytes>,
+    pub trailers: String,
+}
+
+/// Send one gRPC-web request the way a browser wallet does: `content_type` is
+/// `application/grpc-web+proto` or `application/grpc-web-text` (base64 body
+/// both ways), with an `Origin` and a `Referer` riding along.
+pub async fn grpc_web_call(
+    sender: &mut client_h2::SendRequest<BoxBody<Bytes, Infallible>>,
+    shim: SocketAddr,
+    path: &str,
+    content_type: &str,
+    message: &[u8],
+) -> GrpcWebReply {
+    use base64::Engine;
+    let text = content_type.starts_with("application/grpc-web-text");
+    let frame = grpc_frame(message);
+    let body = if text {
+        Bytes::from(base64::engine::general_purpose::STANDARD.encode(&frame))
+    } else {
+        frame
+    };
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{shim}{path}"))
+        .header("content-type", content_type)
+        .header("accept", content_type)
+        .header("x-grpc-web", "1")
+        .header("origin", "chrome-extension://abcdefghijklmnop")
+        .header("referer", "chrome-extension://abcdefghijklmnop/popup.html")
+        .body(Full::new(body).boxed())
+        .unwrap();
+    sender.ready().await.unwrap();
+    let response = bounded(sender.send_request(request)).await.unwrap();
+    let headers = response.headers().clone();
+    let collected = bounded(response.into_body().collect()).await.unwrap();
+    assert!(
+        collected.trailers().is_none(),
+        "gRPC-web carries its status in the body, never in HTTP trailers"
+    );
+    let mut raw = collected.to_bytes();
+    if text {
+        // Each response chunk is base64'd and padded on its own, so the body is
+        // a run of padded segments; decode it one 4-character quantum at a time.
+        let mut decoded = Vec::new();
+        for quantum in raw.chunks(4) {
+            decoded.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(quantum)
+                    .expect("a base64 grpc-web-text body"),
+            );
+        }
+        raw = Bytes::from(decoded);
+    }
+    let mut messages = Vec::new();
+    let mut trailers = String::new();
+    while raw.len() >= 5 {
+        let flag = raw[0];
+        let len = u32::from_be_bytes(raw[1..5].try_into().unwrap()) as usize;
+        let payload = raw.slice(5..5 + len);
+        raw = raw.slice(5 + len..);
+        if flag & 0x80 != 0 {
+            trailers = String::from_utf8(payload.to_vec()).unwrap();
+        } else {
+            messages.push(payload);
+        }
+    }
+    GrpcWebReply {
+        headers,
+        messages,
+        trailers,
+    }
+}
