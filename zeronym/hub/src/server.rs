@@ -404,10 +404,14 @@ impl Hub {
     /// `broadcast_batch` has reached the indexer, so a lookup in that window
     /// gets a queue miss then an indexer NOT_FOUND for a transaction it was
     /// told height-0 about seconds earlier. Wallets poll on multi-second
-    /// intervals and tolerate a transient NOT_FOUND; a resubmit is harmless
-    /// (deduped pre-flush, already-known post-flush). Holding entries until
-    /// broadcast returns would extend how long the hub remembers a txid, which
-    /// is the wrong trade.
+    /// intervals and tolerate a transient NOT_FOUND. A resubmit's PUBLISH is
+    /// harmless (deduped pre-flush, already-known post-flush), but its lookup
+    /// is not: the queue only deduplicates against what it holds now, so
+    /// resubmitted bytes that were already published are admitted again, and
+    /// until the next flush a lookup is answered from the queue as "found,
+    /// height 0, no bytes" for a transaction the indexer may have at a real
+    /// height. Holding entries until broadcast returns would extend how long
+    /// the hub remembers a txid, which is the wrong trade.
     pub async fn lookup(&self, wire_hash: &[u8]) -> LookupOutcome {
         if self.queue.find_by_txid(wire_hash).is_some() {
             // FOUND, HEIGHT 0, AND NO BYTES.
