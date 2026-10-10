@@ -250,9 +250,11 @@ impl TipTracker {
     }
 
     /// Record the boundary height of the epoch the cadence has just adopted or
-    /// is about to flush for. Only the cadence loop calls this.
+    /// is about to flush for. Only the cadence loop calls this. The record
+    /// never goes down: a spent flush stays spent, whatever a caller passes.
     pub(crate) fn record_flush_boundary(&self, boundary: u32) {
-        self.write().recorded_boundary = boundary;
+        let mut state = self.write();
+        state.recorded_boundary = state.recorded_boundary.max(boundary);
     }
 
     /// The height the cadence runs on: the observed height, or, while the tip is
@@ -338,8 +340,9 @@ async fn run_with_poll_interval(
         }
 
         if tip.is_ready() {
-            let epoch = tip.cadence_height() / params.flush_interval.max(1);
-            let boundary = epoch.saturating_mul(params.flush_interval.max(1));
+            let interval = params.flush_interval.max(1);
+            let epoch = tip.cadence_height() / interval;
+            let boundary = epoch.saturating_mul(interval);
             match last_flush_epoch {
                 // First observation: adopt the current epoch without
                 // flushing, so a restart does not publish a partial batch
@@ -638,6 +641,32 @@ mod tests {
         let tip = TipTracker::new();
         tip.observe(1000);
         assert_eq!(tip.cadence_height(), 1000);
+    }
+
+    #[test]
+    fn the_admission_height_is_the_higher_of_the_tip_and_the_recorded_boundary() {
+        let tip = TipTracker::new();
+        tip.observe(995);
+        assert_eq!(tip.admission_height(), 995, "nothing recorded yet");
+        tip.record_flush_boundary(1000);
+        assert_eq!(tip.admission_height(), 1000);
+        tip.observe(1003);
+        assert_eq!(tip.admission_height(), 1003);
+    }
+
+    #[test]
+    fn a_recorded_boundary_is_never_lowered() {
+        let tip = TipTracker::new();
+        tip.observe(995);
+        tip.record_flush_boundary(1000);
+        tip.record_flush_boundary(980);
+        assert_eq!(
+            tip.admission_height(),
+            1000,
+            "the flush at 1000 is spent and a lower record must not unspend it"
+        );
+        tip.record_flush_boundary(1020);
+        assert_eq!(tip.admission_height(), 1020);
     }
 
     #[test]
