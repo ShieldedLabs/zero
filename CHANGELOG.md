@@ -45,6 +45,10 @@ date) before dispatching the release.
   gRPC-web `SendTransaction` is classified and diverted like any other; the
   CORS preflight is answered by the shim; `Origin` and `Referer` are stripped
   before the indexer.
+- The hub judges admission and requeue at the boundary of the flush epoch the
+  cadence last recorded when that is above the observed tip, so an entry is no
+  longer accepted counting on a flush that was already spent (after a tip dip,
+  or after the free-running clock ran ahead of a stale tip).
 
 ## v29 - 2026-09-07
 

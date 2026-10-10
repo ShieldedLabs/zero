@@ -350,7 +350,7 @@ impl Hub {
 
         match self.queue.admit(
             tx_bytes,
-            self.tip.observed_height(),
+            self.tip.admission_height(),
             self.params.flush_interval,
             self.params.mining_margin,
         ) {

@@ -125,6 +125,10 @@ struct TipState {
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
     observed: bool,
+    /// The boundary height (`epoch * flush_interval`) of the epoch the cadence
+    /// last recorded, by adopting it at startup or by flushing for it. 0 until
+    /// the first. That flush is spent, whatever the observed height says now.
+    recorded_boundary: u32,
 }
 
 /// The hub's view of the chain tip, and whether it can still be trusted.
@@ -139,6 +143,7 @@ impl TipTracker {
                 height: 0,
                 last_advance: Instant::now(),
                 observed: false,
+                recorded_boundary: 0,
             }),
         }
     }
@@ -224,11 +229,30 @@ impl TipTracker {
         !state.observed || state.last_advance.elapsed() > TIP_STALE_AFTER
     }
 
-    /// The last observed height, without extrapolation. This is what admission
-    /// checks expiry against, because admission must never be more optimistic
-    /// than the chain actually is.
+    /// The last observed height, without extrapolation. Admission does not
+    /// judge against this alone; see [`TipTracker::admission_height`].
     pub fn observed_height(&self) -> u32 {
         self.read().height
+    }
+
+    /// The height admission and requeue judge expiry against: the observed
+    /// height, or the boundary of the epoch the cadence last recorded if that is
+    /// higher.
+    ///
+    /// The observed height alone is not enough. It can sit below a boundary the
+    /// cadence has already adopted or flushed for (a tip that dipped inside the
+    /// reorg allowance, or a free-running clock that ran ahead while the tip was
+    /// stale), and the next flush worked out from it would then be one the
+    /// cadence has already spent and will not run again.
+    pub fn admission_height(&self) -> u32 {
+        let state = self.read();
+        state.height.max(state.recorded_boundary)
+    }
+
+    /// Record the boundary height of the epoch the cadence has just adopted or
+    /// is about to flush for. Only the cadence loop calls this.
+    pub(crate) fn record_flush_boundary(&self, boundary: u32) {
+        self.write().recorded_boundary = boundary;
     }
 
     /// The height the cadence runs on: the observed height, or, while the tip is
@@ -315,12 +339,19 @@ async fn run_with_poll_interval(
 
         if tip.is_ready() {
             let epoch = tip.cadence_height() / params.flush_interval.max(1);
+            let boundary = epoch.saturating_mul(params.flush_interval.max(1));
             match last_flush_epoch {
                 // First observation: adopt the current epoch without
                 // flushing, so a restart does not publish a partial batch
                 // off-cadence.
-                None => last_flush_epoch = Some(epoch),
+                None => {
+                    tip.record_flush_boundary(boundary);
+                    last_flush_epoch = Some(epoch);
+                }
                 Some(previous) if epoch > previous => {
+                    // Recorded BEFORE the flush, so the requeue inside it and
+                    // any admission during it already see this epoch as spent.
+                    tip.record_flush_boundary(boundary);
                     flush(&queue, &chain, &tip, params).await;
                     last_flush_epoch = Some(epoch);
                 }
@@ -410,13 +441,15 @@ pub async fn flush(
     // Rejected verdict is not put back: the node said no, and re-offering the
     // same bytes buys the same answer every flush until expiry.
     //
-    // `observed_height`, the same tip admission uses, so an entry is judged
-    // against the same clock on the way back in as on the way in. Using the
-    // cadence height here would test it against a different notion of "now" and
-    // could hold an entry admission would already have refused.
+    // `admission_height`, the same height admission uses, so an entry is judged
+    // against the same clock on the way back in as on the way in: the flush
+    // this one belongs to is already recorded, so the entry must survive the
+    // one after it. On a stale hub that boundary follows the free-running
+    // estimate, so an entry that does not survive the estimate's next flush is
+    // dropped here rather than held and offered past its expiry.
     let requeued = queue.requeue(
         unplaced,
-        tip.observed_height(),
+        tip.admission_height(),
         params.flush_interval,
         params.mining_margin,
     );
@@ -980,5 +1013,264 @@ mod tests {
             "the batch drained by the interrupted flush must be offered again by the shutdown flush"
         );
         assert!(queue.is_empty(), "and the shutdown flush placed it");
+    }
+
+    // ---- admission and the cadence agree on which flush is next ---------------
+
+    use crate::queue::survives_next_flush;
+
+    /// Poll `ready` until it holds. The cadence loop has no "a poll completed"
+    /// hook, so tests watch for its effect, as the shutdown test above does.
+    async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Long enough for the cadence loop, polling every 10 ms, to have polled
+    /// many times over and acted on what it saw.
+    async fn let_the_cadence_run() {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    /// Admission must not count on a flush the cadence has already ticked off,
+    /// after a tip regression.
+    ///
+    /// The cadence loop keeps its own record, `last_flush_epoch`, and flushes
+    /// only when `cadence_height / n` exceeds it. The observed tip can go down
+    /// (`observe` follows a drop within `REORG_ALLOWANCE`; the maximum over
+    /// endpoints drops whenever the leading endpoint misses a poll).
+    /// `last_flush_epoch` never does.
+    ///
+    /// Here the hub starts at TIP = 1000 and adopts epoch 50 without flushing,
+    /// as a restart does. The tip is then reported as 999. Worked out from 999
+    /// alone the next flush is 1000, which a transaction expiring at 1010
+    /// survives; but when the chain reaches 1000 the epoch is 50, not greater
+    /// than 50, so nothing is flushed, and the next flush is at 1020, after the
+    /// expiry. Admission must refuse it.
+    ///
+    /// No committed fixture has a non-zero expiry, so the admission decision is
+    /// taken from `survives_next_flush` itself, and the control entry is a
+    /// stand-in with no expiry.
+    #[tokio::test]
+    async fn an_entry_admitted_after_a_tip_regression_is_flushed_when_admission_said() {
+        let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        let queue = Arc::new(Queue::new());
+        let tip = Arc::new(TipTracker::new());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let cadence = tokio::spawn(run_with_poll_interval(
+            queue.clone(),
+            client(mock.addr),
+            tip.clone(),
+            BatchParams::default(),
+            async move {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(10),
+        ));
+
+        // First observation: epoch TIP / N is adopted, nothing is flushed.
+        wait_until("the first tip", || tip.observed_height() == TIP).await;
+        let_the_cadence_run().await;
+
+        // The tip is reported one block back and the hub follows it.
+        mock.height.store(TIP - 1, Ordering::SeqCst);
+        wait_until("the regression", || tip.observed_height() == TIP - 1).await;
+
+        // A transaction that survives a flush at TIP and not one at TIP + N.
+        let expiry = TIP + MARGIN + 6;
+        assert!(
+            expiry < TIP + N + MARGIN,
+            "it must not survive the flush after"
+        );
+        assert!(
+            survives_next_flush(Some(expiry), tip.observed_height(), N, MARGIN),
+            "precondition: judged at the observed tip alone it would be accepted"
+        );
+        assert!(
+            !survives_next_flush(Some(expiry), tip.admission_height(), N, MARGIN),
+            "an expiry of {expiry} was accepted counting on a flush at {TIP}, which the cadence \
+             adopted without flushing; the next flush is at {}",
+            TIP + N
+        );
+
+        // Control: what IS admitted at this point is offered at TIP + N and not
+        // at TIP.
+        assert!(matches!(
+            queue.admit(&junk(1), tip.admission_height(), N, MARGIN),
+            crate::queue::Admission::Admitted { .. }
+        ));
+
+        mock.height.store(TIP, Ordering::SeqCst);
+        wait_until("the boundary", || tip.observed_height() == TIP).await;
+        let_the_cadence_run().await;
+        let offered = mock.sent.lock().unwrap().len();
+
+        mock.height.store(TIP + N, Ordering::SeqCst);
+        wait_until("the next boundary", || tip.observed_height() == TIP + N).await;
+        let_the_cadence_run().await;
+        let offered_an_interval_later = mock.sent.lock().unwrap().len();
+        let _ = stop.send(());
+        let _ = cadence.await;
+
+        assert_eq!(
+            offered, 0,
+            "nothing is flushed at {TIP}: that epoch is spent"
+        );
+        assert_eq!(
+            offered_an_interval_later,
+            1,
+            "the entry is offered at {}",
+            TIP + N
+        );
+    }
+
+    /// The same disagreement, reached through the free-running clock.
+    ///
+    /// While the tip is stale, `cadence_height` is the last observed height
+    /// plus `elapsed / NOMINAL_BLOCK_SECS`, with no cap. The comment on
+    /// `NOMINAL_BLOCK_SECS` calls a clock that runs ahead "the safe direction
+    /// to err": it publishes what is queued earlier. It is not safe for what is
+    /// admitted afterwards unless admission knows about it. The loop records
+    /// the epoch it reached on the timer, and when the real tip returns below
+    /// that boundary, a flush there has already happened.
+    ///
+    /// Here the tip stops at 995. The hub goes stale and its clock free-runs
+    /// past 1000, so the loop flushes for epoch 50 with an empty queue. The tip
+    /// returns at 998, a forward move, and the hub tracks it again. Worked out
+    /// from 998 alone the next flush is 1000, which an expiry of 1010 survives;
+    /// at 1000 nothing is flushed. Admission must refuse it.
+    #[tokio::test]
+    async fn an_entry_admitted_after_the_free_running_clock_ran_ahead_is_flushed_when_admission_said(
+    ) {
+        let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        mock.height.store(TIP - 5, Ordering::SeqCst);
+        let queue = Arc::new(Queue::new());
+        let tip = Arc::new(TipTracker::new());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let cadence = tokio::spawn(run_with_poll_interval(
+            queue.clone(),
+            client(mock.addr),
+            tip.clone(),
+            BatchParams::default(),
+            async move {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(10),
+        ));
+
+        // First observation at 995: epoch 49 is adopted.
+        wait_until("the first tip", || tip.observed_height() == TIP - 5).await;
+        let_the_cadence_run().await;
+
+        // No forward tip for the staleness window and six nominal blocks more:
+        // the clock free-runs to 995 + (900 + 450) / 75 = 1013, which is epoch
+        // 50. The loop flushes an empty queue and records epoch 50.
+        tip.age_last_advance_for_test(
+            TIP_STALE_AFTER + Duration::from_secs(6 * NOMINAL_BLOCK_SECS),
+        );
+        assert!(tip.is_stale() && tip.cadence_height() >= TIP);
+        let_the_cadence_run().await;
+
+        // The tip returns, two blocks short of the boundary.
+        mock.height.store(TIP - 2, Ordering::SeqCst);
+        wait_until("the tip to return", || tip.observed_height() == TIP - 2).await;
+        assert!(
+            !tip.is_stale(),
+            "a forward move clears staleness, so admission is open"
+        );
+
+        let expiry = TIP + MARGIN + 6;
+        assert!(
+            survives_next_flush(Some(expiry), tip.observed_height(), N, MARGIN),
+            "precondition: judged at the observed tip alone it would be accepted"
+        );
+        assert!(
+            !survives_next_flush(Some(expiry), tip.admission_height(), N, MARGIN),
+            "an expiry of {expiry} was accepted counting on a flush at {TIP}, which the \
+             free-running clock had already spent; the next flush is at {}",
+            TIP + N
+        );
+
+        // Control: what IS admitted at this point is offered at TIP + N and not
+        // at TIP.
+        assert!(matches!(
+            queue.admit(&junk(1), tip.admission_height(), N, MARGIN),
+            crate::queue::Admission::Admitted { .. }
+        ));
+
+        mock.height.store(TIP, Ordering::SeqCst);
+        wait_until("the boundary", || tip.observed_height() == TIP).await;
+        let_the_cadence_run().await;
+        let offered = mock.sent.lock().unwrap().len();
+
+        mock.height.store(TIP + N, Ordering::SeqCst);
+        wait_until("the next boundary", || tip.observed_height() == TIP + N).await;
+        let_the_cadence_run().await;
+        let offered_an_interval_later = mock.sent.lock().unwrap().len();
+        let _ = stop.send(());
+        let _ = cadence.await;
+
+        assert_eq!(
+            offered, 0,
+            "nothing is flushed at {TIP}: that epoch is spent"
+        );
+        assert_eq!(
+            offered_an_interval_later,
+            1,
+            "the entry is offered at {}",
+            TIP + N
+        );
+    }
+
+    #[tokio::test]
+    async fn a_requeue_judges_at_the_recorded_boundary_not_the_observed_tip() {
+        // The tip stopped at 995 and went stale; the free-running clock has
+        // carried the cadence into the epoch at 1000, which is recorded. An
+        // entry expiring at 1010 that the indexer could not be reached for must
+        // survive the flush AFTER this one, at 1020, to be worth holding. Judged
+        // at 995 the next flush looks like 1000 and it would be held, then
+        // offered past its expiry.
+        let tip = Arc::new(TipTracker::new());
+        tip.observe(TIP - 5);
+        tip.age_last_advance_for_test(
+            TIP_STALE_AFTER + Duration::from_secs(6 * NOMINAL_BLOCK_SECS),
+        );
+        tip.record_flush_boundary(TIP);
+
+        let expiry = TIP + MARGIN + 6;
+        assert!(
+            survives_next_flush(Some(expiry), tip.observed_height(), N, MARGIN),
+            "precondition: judged at the observed tip it would be held"
+        );
+        let queue = Arc::new(Queue::new());
+        let seeded = queue.requeue(
+            vec![crate::queue::Entry {
+                key: [7; 32],
+                txid: None,
+                expiry: Some(expiry),
+                tx_bytes: zeroize::Zeroizing::new(junk(7)),
+                attempts: 0,
+                received_height: TIP - 5,
+            }],
+            tip.observed_height(),
+            N,
+            MARGIN,
+        );
+        assert_eq!(seeded.held, 1, "precondition: the entry is in the queue");
+
+        let mock = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
+        assert_eq!(
+            flush(&queue, &client(mock.addr), &tip, BatchParams::default()).await,
+            0
+        );
+        assert_eq!(mock.sent.lock().unwrap().len(), 1, "it was offered once");
+        assert!(
+            queue.is_empty(),
+            "it cannot survive the flush at {}, so it is dropped as expired, not held",
+            TIP + N
+        );
     }
 }
