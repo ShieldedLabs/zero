@@ -324,10 +324,14 @@ job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyServedBody \
   vOperatorBlind vQueuedBytesConfidential \
   -- $BASELINE_HOLDS
-# The antecedent of G3, and G4's under a step that keeps to one migration.
+# G3's antecedent, and the wallet observations a quiet run reaches: pending,
+# served from the mempool, served from a block, and an unparseable payload
+# missed while it is still queued.
 job reaches baseline quietStep 80 \
+  wPending wTxInMempool wTxMined wUnparseableMissed \
   vTxidAuthenticity \
   -- $BASELINE_HOLDS
+# G4's antecedent, under a step that keeps to one migration.
 job reaches baseline earlyLookupStep 40 \
   vLookupValidityPerHub \
   -- $BASELINE_HOLDS
