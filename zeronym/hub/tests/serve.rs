@@ -568,6 +568,24 @@ async fn an_indexer_answer_without_a_body_is_502_not_pending() {
 }
 
 #[tokio::test]
+async fn an_empty_answer_does_not_mask_an_endpoint_that_has_the_transaction() {
+    // The empty answer is listed first, where a `Found` would win.
+    let mut indexers = Vec::new();
+    for data in [Vec::new(), vec![0xAB; 64]] {
+        let get_tx = GetTx::Found { data, height: 5 };
+        let (sent, asked) = Default::default();
+        indexers.push(spawn_mock_indexer_full(0, "unused", get_tx, sent, asked).await);
+    }
+    let chain = ChainClient::new(indexers, None).unwrap();
+
+    let found = chain.get_transaction(&[0x55; 32]).await.unwrap();
+    assert!(matches!(
+        found,
+        zero_indexer_hub::chain::TxLookup::Found { data, height: 5 } if data == vec![0xAB; 64]
+    ));
+}
+
+#[tokio::test]
 async fn lookup_bodies_are_never_queued() {
     // Regression guard against the any-POST-is-a-submission past: a lookup body
     // must never become a queue entry, whatever its size.
