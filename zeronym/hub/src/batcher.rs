@@ -125,10 +125,11 @@ struct TipState {
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
     observed: bool,
-    /// The boundary height (`epoch * flush_interval`) of the epoch the cadence
-    /// last recorded, by adopting it at startup or by flushing for it. 0 until
-    /// the first. That flush is spent, whatever the observed height says now.
-    recorded_boundary: u32,
+    /// The boundary height of the flush epoch the cadence last recorded, by
+    /// adopting it at startup or by flushing for it. `None` until the first;
+    /// height 0 is the real boundary of epoch 0. The flush at that boundary is
+    /// spent, whatever the observed height says now.
+    last_flush_boundary: Option<u32>,
 }
 
 /// The hub's view of the chain tip, and whether it can still be trusted.
@@ -143,7 +144,7 @@ impl TipTracker {
                 height: 0,
                 last_advance: Instant::now(),
                 observed: false,
-                recorded_boundary: 0,
+                last_flush_boundary: None,
             }),
         }
     }
@@ -236,25 +237,38 @@ impl TipTracker {
     }
 
     /// The height admission and requeue judge expiry against: the observed
-    /// height, or the boundary of the epoch the cadence last recorded if that is
-    /// higher.
+    /// height, or the boundary the cadence last recorded if that is higher.
     ///
     /// The observed height alone is not enough. It can sit below a boundary the
     /// cadence has already adopted or flushed for (a tip that dipped inside the
     /// reorg allowance, or a free-running clock that ran ahead while the tip was
     /// stale), and the next flush worked out from it would then be one the
     /// cadence has already spent and will not run again.
+    ///
+    /// With nothing recorded yet this is the observed height.
     pub fn admission_height(&self) -> u32 {
         let state = self.read();
-        state.height.max(state.recorded_boundary)
+        match state.last_flush_boundary {
+            None => state.height,
+            Some(boundary) => state.height.max(boundary),
+        }
     }
 
-    /// Record the boundary height of the epoch the cadence has just adopted or
-    /// is about to flush for. Only the cadence loop calls this. The record
-    /// never goes down: a spent flush stays spent, whatever a caller passes.
+    /// The boundary the cadence last recorded, `None` before the first. This is
+    /// the cadence loop's only memory of what it has acted on.
+    fn last_flush_boundary(&self) -> Option<u32> {
+        self.read().last_flush_boundary
+    }
+
+    /// Record the boundary of the epoch the cadence has just adopted or is
+    /// about to flush for. Only the cadence loop calls this. The record never
+    /// goes down: a spent flush stays spent, whatever a caller passes.
     pub(crate) fn record_flush_boundary(&self, boundary: u32) {
         let mut state = self.write();
-        state.recorded_boundary = state.recorded_boundary.max(boundary);
+        state.last_flush_boundary = Some(match state.last_flush_boundary {
+            None => boundary,
+            Some(recorded) => recorded.max(boundary),
+        });
     }
 
     /// The height the cadence runs on: the observed height, or, while the tip is
@@ -312,7 +326,6 @@ async fn run_with_poll_interval(
     );
 
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut last_flush_epoch: Option<u32> = None;
     let mut next_poll = tokio::time::Instant::now();
     loop {
         // The shutdown signal is observed here, between iterations, and nowhere
@@ -340,23 +353,20 @@ async fn run_with_poll_interval(
         }
 
         if tip.is_ready() {
+            // The boundary of the epoch the cadence height is in. Rounding a
+            // height down, so it cannot overflow.
             let interval = params.flush_interval.max(1);
-            let epoch = tip.cadence_height() / interval;
-            let boundary = epoch.saturating_mul(interval);
-            match last_flush_epoch {
+            let boundary = tip.cadence_height() / interval * interval;
+            match tip.last_flush_boundary() {
                 // First observation: adopt the current epoch without
                 // flushing, so a restart does not publish a partial batch
                 // off-cadence.
-                None => {
-                    tip.record_flush_boundary(boundary);
-                    last_flush_epoch = Some(epoch);
-                }
-                Some(previous) if epoch > previous => {
+                None => tip.record_flush_boundary(boundary),
+                Some(previous) if boundary > previous => {
                     // Recorded BEFORE the flush, so the requeue inside it and
                     // any admission during it already see this epoch as spent.
                     tip.record_flush_boundary(boundary);
                     flush(&queue, &chain, &tip, params).await;
-                    last_flush_epoch = Some(epoch);
                 }
                 _ => {}
             }
