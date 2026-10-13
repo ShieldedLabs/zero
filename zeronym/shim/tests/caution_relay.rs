@@ -38,6 +38,7 @@ async fn spawn_shim(backend: SocketAddr, caution: CautionRelay) -> SocketAddr {
             None,
             None,
             caution,
+            false,
             zero_indexer_shim::nym::MixnetStatus::default(),
             std::future::pending::<()>(),
         )
@@ -108,6 +109,7 @@ async fn the_shim_serves_its_own_status_and_never_proxies_it() {
             None,
             None,
             CautionRelay::default(),
+            false,
             served,
             std::future::pending::<()>(),
         )

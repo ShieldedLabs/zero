@@ -174,11 +174,27 @@ async fn main() -> Result<(), BoxError> {
             bootproofd = %caution.bootproofd_addr,
             "Caution control-plane paths owned by the shim (/attestation relayed, /health local)"
         );
+    } else if config.broadcast_only {
+        tracing::warn!(
+            "Caution attestation relay DISABLED: /attestation and \
+             /.well-known/caution/health answer UNIMPLEMENTED (broadcast-only) and the backend \
+             is not dialled. Correct only off managed Caution/h2c, or once the platform serves \
+             them itself."
+        );
     } else {
         tracing::warn!(
             "Caution attestation relay DISABLED: /attestation and \
              /.well-known/caution/health pass through to the backend. Correct only off managed \
              Caution/h2c, or once the platform serves them itself."
+        );
+    }
+
+    if config.broadcast_only {
+        tracing::info!(
+            "broadcast-only: only SendTransaction and GetTransaction are relayed to the backing \
+             indexer or hub; every other gRPC method answers UNIMPLEMENTED. The shim's own \
+             endpoints are served as before, and the Caution control-plane paths only while the \
+             relay owns them."
         );
     }
 
@@ -188,6 +204,7 @@ async fn main() -> Result<(), BoxError> {
         server_tls,
         diversion,
         caution,
+        config.broadcast_only,
         mixnet_status,
         shutdown(),
     )

@@ -34,6 +34,12 @@
 //!    earlier version of [`route_for`] also required `POST`, which made exactly
 //!    that request bypass the classifier. See [`Route`].
 //!
+//! Broadcast-only mode (`ZIS_BROADCAST_ONLY`) narrows what is relayed to
+//! `SendTransaction` and `GetTransaction`. [`handle`] applies it on the route
+//! alone, through `served_when_broadcast_only`, and answers every other method
+//! with UNIMPLEMENTED before the request body is polled or any connection is
+//! taken. [`route_for`] is unchanged by it.
+//!
 //! Transport is plaintext h2c with prior knowledge: no TLS, no HTTP/1.1, no
 //! upgrade dance. `curl http://...` will look broken; `grpcurl -plaintext` and
 //! tonic channels over `http://` both work, because both use prior knowledge.
@@ -186,6 +192,10 @@ pub const GRPC_NOT_FOUND: u16 = 5;
 /// gRPC status code 3, INVALID_ARGUMENT. A malformed or empty `TxFilter`: caught
 /// locally so a bad filter never becomes a hub round trip or a dialled operator.
 pub const GRPC_INVALID_ARGUMENT: u16 = 3;
+
+/// gRPC status code 12, UNIMPLEMENTED. What a method outside the served set
+/// gets in broadcast-only mode, the same answer a server without it gives.
+pub const GRPC_UNIMPLEMENTED: u16 = 12;
 
 /// Per-stream HTTP/2 flow-control window, both legs.
 ///
@@ -480,6 +490,7 @@ pub async fn serve(listener: TcpListener, backend: impl Into<Backend>) -> Result
         None,
         None,
         CautionRelay::default(),
+        false,
         crate::nym::MixnetStatus::default(),
         std::future::pending::<()>(),
     )
@@ -501,6 +512,7 @@ pub async fn serve_with_shutdown<S>(
     tls: Option<Arc<ServerTls>>,
     diversion: Option<Arc<crate::intercept::Diversion>>,
     caution: CautionRelay,
+    broadcast_only: bool,
     status: crate::nym::MixnetStatus,
     shutdown: S,
 ) -> Result<(), BoxError>
@@ -575,16 +587,32 @@ where
                     let _permit = permit;
                     match tls {
                         None => {
-                            serve_connection(stream, peer, backend, diversion, caution, status)
-                                .await
+                            serve_connection(
+                                stream,
+                                peer,
+                                backend,
+                                diversion,
+                                caution,
+                                broadcast_only,
+                                status,
+                            )
+                            .await
                         }
                         Some(tls) => match tls.accept(stream).await {
                             // A TLS-ALPN-01 validation, already answered and
                             // closed by the acceptor. Not wallet traffic.
                             Ok(None) => {}
                             Ok(Some(stream)) => {
-                                serve_connection(stream, peer, backend, diversion, caution, status)
-                                    .await
+                                serve_connection(
+                                    stream,
+                                    peer,
+                                    backend,
+                                    diversion,
+                                    caution,
+                                    broadcast_only,
+                                    status,
+                                )
+                                .await
                             }
                             // Handshake failures are ordinary on a public
                             // listener (scanners, a wallet that gave up, or a
@@ -636,6 +664,7 @@ async fn serve_connection<IO>(
     backend: Backend,
     diversion: Option<Arc<intercept::Diversion>>,
     caution: CautionRelay,
+    broadcast_only: bool,
     status: crate::nym::MixnetStatus,
 ) where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -658,7 +687,7 @@ async fn serve_connection<IO>(
         // grpc-web-text body keeps its base64 length after decoding, which hyper
         // would send upstream as content-length.
         let req = req.map(|body| InboundBody::new(body.map_frame(|frame| frame)));
-        async move { handle(req, pool, diversion, caution, status).await }
+        async move { handle(req, pool, diversion, caution, broadcast_only, status).await }
     });
 
     // Browser wallets speak gRPC-web, which carries the status in the body
@@ -718,6 +747,7 @@ async fn handle(
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<intercept::Diversion>>,
     caution: CautionRelay,
+    broadcast_only: bool,
     status: crate::nym::MixnetStatus,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let method = req.method().clone();
@@ -729,7 +759,23 @@ async fn handle(
     // operator's indexer. A diverted migration therefore never opens even a TCP
     // connection to the operator: the reason the pool is lazy and the dial lives
     // here rather than at accept time.
-    let result = match route_for(&path) {
+    let route = route_for(&path);
+
+    // Broadcast-only: decided on the route alone, before `req` is consumed, so
+    // a method outside the served set is answered without its body being
+    // polled and without a connection to the indexer, the hub or bootproofd.
+    // One fixed reply for every such path. DEBUG for the same reason the
+    // `proxied` line is.
+    if broadcast_only && !served_when_broadcast_only(route, caution.enabled, status.diag_enabled())
+    {
+        tracing::debug!(target: "zis::proxy", %method, %path, "rejected: broadcast-only");
+        return Ok(grpc_error(
+            GRPC_UNIMPLEMENTED,
+            "zero-indexer-shim: method not served (broadcast-only)",
+        ));
+    }
+
+    let result = match route {
         // Caution's control-plane paths. Owned here (NEVER proxied to the indexer:
         // health answered locally, attestation relayed to bootproofd) ONLY when
         // the relay is enabled; see `CautionRelay`. With it disabled the shim is a
@@ -881,6 +927,27 @@ pub fn route_for(path: &str) -> Route {
     match trimmed.rsplit('/').next() {
         Some(last) if last.eq_ignore_ascii_case("sendtransaction") => Route::InterceptNearMiss,
         _ => Route::PassThrough,
+    }
+}
+
+/// Whether a request on `route` is served when broadcast-only mode is on.
+///
+/// With the mode on, the backing indexer is reached only by a request routed
+/// as [`Route::Intercept`], [`Route::InterceptNearMiss`] or
+/// [`Route::GetTransaction`]. The other routes this returns `true` for are the
+/// ones answered without it: the shim's own endpoints, the Caution paths while
+/// the relay owns them (`caution_relay`), and `/nym-diag` while it is open
+/// (`diag_open`). Everything else is rejected by [`handle`].
+///
+/// No wildcard arm, on purpose: a new [`Route`] variant does not compile until
+/// it is given a line here.
+fn served_when_broadcast_only(route: Route, caution_relay: bool, diag_open: bool) -> bool {
+    match route {
+        Route::Intercept | Route::InterceptNearMiss | Route::GetTransaction => true,
+        Route::ShimHealth | Route::ShimNymStatus => true,
+        Route::CautionHealth | Route::CautionAttestation => caution_relay,
+        Route::ShimNymDiag => diag_open,
+        Route::PassThrough => false,
     }
 }
 
@@ -1236,6 +1303,31 @@ mod tests {
             "",
         ] {
             assert_eq!(route_for(path), Route::PassThrough, "path {path}");
+        }
+    }
+
+    #[test]
+    fn broadcast_only_serves_the_two_methods_and_the_local_endpoints() {
+        for caution_relay in [false, true] {
+            for diag_open in [false, true] {
+                for (route, served) in [
+                    (Route::Intercept, true),
+                    (Route::InterceptNearMiss, true),
+                    (Route::GetTransaction, true),
+                    (Route::ShimHealth, true),
+                    (Route::ShimNymStatus, true),
+                    (Route::CautionHealth, caution_relay),
+                    (Route::CautionAttestation, caution_relay),
+                    (Route::ShimNymDiag, diag_open),
+                    (Route::PassThrough, false),
+                ] {
+                    assert_eq!(
+                        served_when_broadcast_only(route, caution_relay, diag_open),
+                        served,
+                        "{route:?} with caution_relay={caution_relay} diag_open={diag_open}"
+                    );
+                }
+            }
         }
     }
 
