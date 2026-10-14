@@ -49,6 +49,13 @@ date) before dispatching the release.
   `ZIS_BROADCAST_ONLY`, off by default): only `SendTransaction` and
   `GetTransaction` are relayed, and every other gRPC method is answered
   `UNIMPLEMENTED` without reaching the indexer.
+- The hub judges admission at the boundary of the flush epoch the cadence last
+  recorded when that is above the observed tip, so an entry is no longer
+  accepted counting on a flush that was already spent (after a tip dip, or
+  after the free-running clock ran ahead of a stale tip).
+- The hub treats an indexer lookup answer with no transaction body as that
+  endpoint failing, so it is no longer served as "found, height 0, no bytes",
+  the reply reserved for a transaction the hub itself is holding.
 
 ## v29 - 2026-09-07
 

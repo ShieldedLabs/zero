@@ -125,6 +125,11 @@ struct TipState {
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
     observed: bool,
+    /// The boundary height of the flush epoch the cadence last recorded, by
+    /// adopting it at startup or by flushing for it. `None` until the first;
+    /// height 0 is the real boundary of epoch 0. The flush at that boundary is
+    /// spent, whatever the observed height says now.
+    last_flush_boundary: Option<u32>,
 }
 
 /// The hub's view of the chain tip, and whether it can still be trusted.
@@ -139,6 +144,7 @@ impl TipTracker {
                 height: 0,
                 last_advance: Instant::now(),
                 observed: false,
+                last_flush_boundary: None,
             }),
         }
     }
@@ -224,11 +230,45 @@ impl TipTracker {
         !state.observed || state.last_advance.elapsed() > TIP_STALE_AFTER
     }
 
-    /// The last observed height, without extrapolation. This is what admission
-    /// checks expiry against, because admission must never be more optimistic
-    /// than the chain actually is.
+    /// The last observed height, without extrapolation. Admission does not
+    /// judge against this alone; see [`TipTracker::admission_height`].
     pub fn observed_height(&self) -> u32 {
         self.read().height
+    }
+
+    /// The height admission judges expiry against: the observed
+    /// height, or the boundary the cadence last recorded if that is higher.
+    ///
+    /// The observed height alone is not enough. It can sit below a boundary the
+    /// cadence has already adopted or flushed for (a tip that dipped inside the
+    /// reorg allowance, or a free-running clock that ran ahead while the tip was
+    /// stale), and the next flush worked out from it would then be one the
+    /// cadence has already spent and will not run again.
+    ///
+    /// With nothing recorded yet this is the observed height.
+    pub fn admission_height(&self) -> u32 {
+        let state = self.read();
+        match state.last_flush_boundary {
+            None => state.height,
+            Some(boundary) => state.height.max(boundary),
+        }
+    }
+
+    /// The boundary the cadence last recorded, `None` before the first. This is
+    /// the cadence loop's only memory of what it has acted on.
+    fn last_flush_boundary(&self) -> Option<u32> {
+        self.read().last_flush_boundary
+    }
+
+    /// Record the boundary of the epoch the cadence has just adopted or is
+    /// about to flush for. Only the cadence loop calls this. The record never
+    /// goes down: a spent flush stays spent, whatever a caller passes.
+    pub(crate) fn record_flush_boundary(&self, boundary: u32) {
+        let mut state = self.write();
+        state.last_flush_boundary = Some(match state.last_flush_boundary {
+            None => boundary,
+            Some(recorded) => recorded.max(boundary),
+        });
     }
 
     /// The height the cadence runs on: the observed height, or, while the tip is
@@ -286,7 +326,6 @@ async fn run_with_poll_interval(
     );
 
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut last_flush_epoch: Option<u32> = None;
     let mut next_poll = tokio::time::Instant::now();
     loop {
         // The shutdown signal is observed here, between iterations, and nowhere
@@ -314,15 +353,21 @@ async fn run_with_poll_interval(
         }
 
         if tip.is_ready() {
-            let epoch = tip.cadence_height() / params.flush_interval.max(1);
-            match last_flush_epoch {
+            // The boundary of the epoch the cadence height is in. Rounding a
+            // height down, so it cannot overflow.
+            let interval = params.flush_interval.max(1);
+            let boundary = tip.cadence_height() / interval * interval;
+            match tip.last_flush_boundary() {
                 // First observation: adopt the current epoch without
                 // flushing, so a restart does not publish a partial batch
                 // off-cadence.
-                None => last_flush_epoch = Some(epoch),
-                Some(previous) if epoch > previous => {
+                None => tip.record_flush_boundary(boundary),
+                Some(previous) if boundary > previous => {
+                    // Recorded before the flush. The order does not matter
+                    // while only this loop observes the tip, since the tip
+                    // cannot change during the flush; it would if that moved.
+                    tip.record_flush_boundary(boundary);
                     flush(&queue, &chain, &tip, params).await;
-                    last_flush_epoch = Some(epoch);
                 }
                 _ => {}
             }
@@ -410,10 +455,11 @@ pub async fn flush(
     // Rejected verdict is not put back: the node said no, and re-offering the
     // same bytes buys the same answer every flush until expiry.
     //
-    // `observed_height`, the same tip admission uses, so an entry is judged
-    // against the same clock on the way back in as on the way in. Using the
-    // cadence height here would test it against a different notion of "now" and
-    // could hold an entry admission would already have refused.
+    // `observed_height`, not `admission_height`. On a stale hub the recorded
+    // boundary follows the free-running estimate, which runs ahead of a stalled
+    // chain. Judging a new arrival on that clock only refuses it, and the
+    // wallet can rebuild; judging an acknowledged entry on it would drop one
+    // that may still be mined.
     let requeued = queue.requeue(
         unplaced,
         tip.observed_height(),
@@ -605,6 +651,19 @@ mod tests {
         let tip = TipTracker::new();
         tip.observe(1000);
         assert_eq!(tip.cadence_height(), 1000);
+    }
+
+    #[test]
+    fn the_admission_height_is_the_higher_of_the_tip_and_the_last_flush_boundary() {
+        let tip = TipTracker::new();
+        tip.observe(995);
+        assert_eq!(tip.admission_height(), 995, "nothing recorded yet");
+        tip.record_flush_boundary(1000);
+        assert_eq!(tip.admission_height(), 1000);
+        tip.record_flush_boundary(980);
+        assert_eq!(tip.admission_height(), 1000, "a spent flush stays spent");
+        tip.observe(1003);
+        assert_eq!(tip.admission_height(), 1003);
     }
 
     #[test]
@@ -980,5 +1039,169 @@ mod tests {
             "the batch drained by the interrupted flush must be offered again by the shutdown flush"
         );
         assert!(queue.is_empty(), "and the shutdown flush placed it");
+    }
+
+    // ---- admission and the cadence agree on which flush is next ---------------
+
+    /// Poll `ready` until it holds. The cadence loop has no "a poll completed"
+    /// hook, so tests watch for its effect, as the shutdown test above does.
+    async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A committed fixture with its `nExpiryHeight` field overwritten, because
+    /// every committed fixture has no expiry and a refusal needs one. The field
+    /// is the fifth little-endian word of the header (after the version, the
+    /// version group id, the branch id and the lock time). Nothing here checks
+    /// a signature, so the bytes still parse.
+    fn fixture_expiring_at(expiry: u32) -> Vec<u8> {
+        let mut bytes = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+        bytes[16..20].copy_from_slice(&expiry.to_le_bytes());
+        bytes
+    }
+
+    /// The hub starts at TIP = 1000 and adopts epoch 50 without flushing, as a
+    /// restart does. The tip is then reported as 999. Worked out from 999 alone
+    /// the next flush is 1000, which an expiry of 1010 survives; but the cadence
+    /// will not flush at 1000 again, so the next flush is 1020 and the hub must
+    /// refuse.
+    #[tokio::test]
+    async fn the_hub_refuses_an_expiry_counting_on_a_boundary_adopted_before_a_tip_regression() {
+        let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        let queue = Arc::new(Queue::new());
+        let tip = Arc::new(TipTracker::new());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let cadence = tokio::spawn(run_with_poll_interval(
+            queue.clone(),
+            client(mock.addr),
+            tip.clone(),
+            BatchParams::default(),
+            async move {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(10),
+        ));
+        wait_until("the adoption", || tip.last_flush_boundary() == Some(TIP)).await;
+        mock.height.store(TIP - 1, Ordering::SeqCst);
+        wait_until("the regression", || tip.observed_height() == TIP - 1).await;
+
+        let hub = crate::server::Hub {
+            queue: queue.clone(),
+            tip: tip.clone(),
+            params: BatchParams::default(),
+            chain: client(mock.addr),
+        };
+        let tx = fixture_expiring_at(TIP + MARGIN + 6);
+        assert!(
+            matches!(
+                Queue::new().admit(&tx, tip.observed_height(), N, MARGIN),
+                crate::queue::Admission::Admitted { txid: Some(_) }
+            ),
+            "precondition: the fixture parses, and judged at the observed tip it is accepted"
+        );
+        assert!(
+            matches!(hub.admit(&tx), Err(crate::queue::Refusal::ExpiryTooTight)),
+            "the hub accepted an expiry counting on the flush at {TIP}, which is spent"
+        );
+
+        // And the cadence does not flush inside the epoch it adopted. The second
+        // height only shows that the poll which saw the first has finished.
+        assert!(matches!(
+            queue.admit(&junk(1), tip.admission_height(), N, MARGIN),
+            crate::queue::Admission::Admitted { .. }
+        ));
+        for height in [TIP + 1, TIP + 2] {
+            mock.height.store(height, Ordering::SeqCst);
+            wait_until("the tip to move on", || tip.observed_height() == height).await;
+        }
+        assert!(
+            mock.sent.lock().unwrap().is_empty(),
+            "flushed inside a spent epoch"
+        );
+        let _ = stop.send(());
+        let _ = cadence.await;
+    }
+
+    /// The tip stops at 995 with an entry expiring at 1010 held. The hub goes
+    /// stale, its clock free-runs into the epoch at 1000, and the loop flushes;
+    /// the indexer cannot be reached. That epoch is spent for admission, but
+    /// not for an entry already acknowledged:
+    ///
+    /// - the requeue inside that flush judges at the observed 995, so the entry
+    ///   is held and offered again, not dropped on the estimate's clock;
+    /// - when the tip returns at 998, the hub refuses an expiry of 1010, which
+    ///   judged at 998 alone would count on a flush at 1000.
+    #[tokio::test]
+    async fn a_free_running_flush_spends_its_epoch_for_admission_not_for_requeue() {
+        let mock = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
+        mock.height.store(TIP - 5, Ordering::SeqCst);
+        let queue = Arc::new(Queue::new());
+        let seeded = queue.requeue(
+            vec![crate::queue::Entry {
+                key: [7; 32],
+                txid: None,
+                expiry: Some(TIP + MARGIN + 6),
+                tx_bytes: zeroize::Zeroizing::new(junk(7)),
+                attempts: 0,
+                received_height: TIP - 5,
+            }],
+            TIP - 5,
+            N,
+            MARGIN,
+        );
+        assert_eq!(seeded.held, 1, "precondition: the entry is in the queue");
+
+        let tip = Arc::new(TipTracker::new());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let cadence = tokio::spawn(run_with_poll_interval(
+            queue.clone(),
+            client(mock.addr),
+            tip.clone(),
+            BatchParams::default(),
+            async move {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(10),
+        ));
+        wait_until("the adoption", || {
+            tip.last_flush_boundary() == Some(TIP - N)
+        })
+        .await;
+        tip.age_last_advance_for_test(
+            TIP_STALE_AFTER + Duration::from_secs(6 * NOMINAL_BLOCK_SECS),
+        );
+        wait_until("the free-running flush to offer the entry", || {
+            !mock.sent.lock().unwrap().is_empty()
+        })
+        .await;
+
+        mock.height.store(TIP - 2, Ordering::SeqCst);
+        wait_until("the tip to return", || tip.observed_height() == TIP - 2).await;
+        let hub = crate::server::Hub {
+            queue: queue.clone(),
+            tip: tip.clone(),
+            params: BatchParams::default(),
+            chain: client(mock.addr),
+        };
+        assert!(
+            matches!(
+                hub.admit(&fixture_expiring_at(TIP + MARGIN + 6)),
+                Err(crate::queue::Refusal::ExpiryTooTight)
+            ),
+            "the hub accepted an expiry counting on the flush at {TIP}, which is spent"
+        );
+
+        // The shutdown flush offers whatever the free-running flush held.
+        let _ = stop.send(());
+        let _ = cadence.await;
+        assert_eq!(
+            mock.sent.lock().unwrap().len(),
+            2,
+            "the entry was dropped by the flush at {TIP} instead of held"
+        );
     }
 }

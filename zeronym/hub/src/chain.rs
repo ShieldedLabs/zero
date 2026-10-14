@@ -268,7 +268,8 @@ impl ChainClient {
     /// Queried against every endpoint concurrently, folded like `broadcast`: any
     /// `Found` wins, `NotFound` only if every endpoint that answered said so, and
     /// an error only if none answered. A single endpoint returning NOT_FOUND does
-    /// not mask another that has the transaction.
+    /// not mask another that has the transaction. An OK answer with no body, at
+    /// any height, counts as that endpoint failing, not as `Found`.
     pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<TxLookup, BoxError> {
         let calls = self.endpoints.iter().map(|addr| {
             let filter = TxFilter {
@@ -281,6 +282,12 @@ impl ChainClient {
                     .unary::<_, RawTransaction>(*addr, GET_TRANSACTION, filter)
                     .await
                 {
+                    // Found with no bytes is the hub's own queue-hit reply, and
+                    // only the queue may say it. An indexer that answers OK with
+                    // nothing in it has not answered.
+                    Ok(raw) if raw.data.is_empty() => {
+                        Err("an indexer answered a lookup with an empty transaction".into())
+                    }
                     Ok(raw) => Ok(TxLookup::Found {
                         // `RawTransaction.data` is `Bytes` since zaino-proto 0.4.0;
                         // copy it out because `TxLookup` feeds `Zeroizing`, which

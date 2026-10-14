@@ -249,10 +249,12 @@ impl Queue {
 
     /// Offer a transaction to the queue.
     ///
-    /// `tip` is the current height and `flush_interval` the cadence, together
-    /// deciding whether this entry provably survives the flush that would
-    /// publish it. The parse here is telemetry only: a payload that does not
-    /// deserialize is admitted with no txid and no expiry.
+    /// `tip` is the height admission judges at (the observed tip, or the
+    /// boundary of the flush epoch the cadence last recorded if that is higher)
+    /// and `flush_interval` the cadence, together deciding whether this entry
+    /// provably survives the flush that would publish it. The parse here is
+    /// telemetry only: a payload that does not deserialize is admitted with no
+    /// txid and no expiry.
     pub fn admit(
         &self,
         tx_bytes: &[u8],

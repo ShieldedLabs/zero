@@ -544,6 +544,48 @@ async fn an_unreachable_indexer_is_502_not_404() {
 }
 
 #[tokio::test]
+async fn an_indexer_answer_without_a_body_is_502_not_pending() {
+    // "Found, height 0, no bytes" is the hub's own reply for a transaction it
+    // holds unbroadcast, and a wallet renders "pending" from it. An indexer
+    // answer with no body, at any height, is therefore that endpoint failing.
+    for height in [0, 12345] {
+        let indexer = spawn_mock_indexer_full(
+            0,
+            "unused",
+            GetTx::Found {
+                data: Vec::new(),
+                height,
+            },
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .await;
+        let hub = spawn_hub(indexer).await;
+
+        let (status, _, _) = lookup(&hub.addr, vec![0x55; 32]).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "at height {height}");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_answer_does_not_mask_an_endpoint_that_has_the_transaction() {
+    // The empty answer is listed first, where a `Found` would win.
+    let mut indexers = Vec::new();
+    for data in [Vec::new(), vec![0xAB; 64]] {
+        let get_tx = GetTx::Found { data, height: 5 };
+        let (sent, asked) = Default::default();
+        indexers.push(spawn_mock_indexer_full(0, "unused", get_tx, sent, asked).await);
+    }
+    let chain = ChainClient::new(indexers, None).unwrap();
+
+    let found = chain.get_transaction(&[0x55; 32]).await.unwrap();
+    assert!(matches!(
+        found,
+        zero_indexer_hub::chain::TxLookup::Found { data, height: 5 } if data == vec![0xAB; 64]
+    ));
+}
+
+#[tokio::test]
 async fn lookup_bodies_are_never_queued() {
     // Regression guard against the any-POST-is-a-submission past: a lookup body
     // must never become a queue entry, whatever its size.
