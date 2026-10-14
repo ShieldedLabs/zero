@@ -236,7 +236,7 @@ impl TipTracker {
         self.read().height
     }
 
-    /// The height admission and requeue judge expiry against: the observed
+    /// The height admission judges expiry against: the observed
     /// height, or the boundary the cadence last recorded if that is higher.
     ///
     /// The observed height alone is not enough. It can sit below a boundary the
@@ -363,8 +363,8 @@ async fn run_with_poll_interval(
                 // off-cadence.
                 None => tip.record_flush_boundary(boundary),
                 Some(previous) if boundary > previous => {
-                    // Recorded BEFORE the flush, so the requeue inside it and
-                    // any admission during it already see this epoch as spent.
+                    // Recorded BEFORE the flush, so any admission during it
+                    // already sees this epoch as spent.
                     tip.record_flush_boundary(boundary);
                     flush(&queue, &chain, &tip, params).await;
                 }
@@ -454,15 +454,14 @@ pub async fn flush(
     // Rejected verdict is not put back: the node said no, and re-offering the
     // same bytes buys the same answer every flush until expiry.
     //
-    // `admission_height`, the same height admission uses, so an entry is judged
-    // against the same clock on the way back in as on the way in: the flush
-    // this one belongs to is already recorded, so the entry must survive the
-    // one after it. On a stale hub that boundary follows the free-running
-    // estimate, so an entry that does not survive the estimate's next flush is
-    // dropped here rather than held and offered past its expiry.
+    // `observed_height`, not `admission_height`. On a stale hub the recorded
+    // boundary follows the free-running estimate, which runs ahead of a stalled
+    // chain. Judging a new arrival on that clock only refuses it, and the
+    // wallet can rebuild; judging an acknowledged entry on it would drop one
+    // that may still be mined.
     let requeued = queue.requeue(
         unplaced,
-        tip.admission_height(),
+        tip.observed_height(),
         params.flush_interval,
         params.mining_margin,
     );
@@ -1128,15 +1127,15 @@ mod tests {
 
     /// The tip stops at 995 with an entry expiring at 1010 held. The hub goes
     /// stale, its clock free-runs into the epoch at 1000, and the loop flushes;
-    /// the indexer cannot be reached. That epoch is spent from then on:
+    /// the indexer cannot be reached. That epoch is spent for admission, but
+    /// not for an entry already acknowledged:
     ///
-    /// - the requeue inside that flush judges at 1000, so the entry, which
-    ///   cannot survive the next flush at 1020, is dropped and not offered again
-    ///   (which also needs the epoch recorded before the flush, not after);
+    /// - the requeue inside that flush judges at the observed 995, so the entry
+    ///   is held and offered again, not dropped on the estimate's clock;
     /// - when the tip returns at 998, the hub refuses an expiry of 1010, which
     ///   judged at 998 alone would count on a flush at 1000.
     #[tokio::test]
-    async fn a_free_running_flush_spends_its_epoch_for_requeue_and_for_admission() {
+    async fn a_free_running_flush_spends_its_epoch_for_admission_not_for_requeue() {
         let mock = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
         mock.height.store(TIP - 5, Ordering::SeqCst);
         let queue = Arc::new(Queue::new());
@@ -1200,9 +1199,8 @@ mod tests {
         let _ = cadence.await;
         assert_eq!(
             mock.sent.lock().unwrap().len(),
-            1,
-            "the entry was held by the flush at {TIP} and offered again"
+            2,
+            "the entry was dropped by the flush at {TIP} instead of held"
         );
-        assert!(queue.is_empty());
     }
 }
