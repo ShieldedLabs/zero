@@ -45,6 +45,10 @@ date) before dispatching the release.
   gRPC-web `SendTransaction` is classified and diverted like any other; the
   CORS preflight is answered by the shim; `Origin` and `Referer` are stripped
   before the indexer.
+- The shim gains a broadcast-only mode (`--broadcast-only` /
+  `ZIS_BROADCAST_ONLY`, off by default): only `SendTransaction` and
+  `GetTransaction` are relayed, and every other gRPC method is answered
+  `UNIMPLEMENTED` without reaching the indexer.
 - The hub judges admission at the boundary of the flush epoch the cadence last
   recorded when that is above the observed tip, so an entry is no longer
   accepted counting on a flush that was already spent (after a tip dip, or

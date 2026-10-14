@@ -175,6 +175,11 @@ printf '\x00\x00\x00\x00\x00' | curl -s --http2 \
   https://<tls-domain>/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo | strings
 ```
 
+Both probes above are the check for a shim with `ZIS_BROADCAST_ONLY` off. With
+it on, `GetLightdInfo` is not relayed: the same probe returns HTTP 200 with
+`grpc-status: 12` and an empty body (add `-i` to the curl to see the header),
+and `https://<tls-domain>/healthz` is the liveness check.
+
 **On fully-managed apps, pass the attestation URL explicitly.** `caution apps
 create` does not write a `.caution/deployment.json` (that is `caution init`, the
 BYOC path), so verify has nothing to infer from and fails with *"No deployment
@@ -229,7 +234,8 @@ Fully supported, no changes: the classifier is a pure function of the transactio
 bytes with no network parameters, so behavior is identical. Just point `--backend`
 at a testnet indexer. A worked example, courtesy of zec.rocks:
 `--backend 199.170.132.107:443 --backend-tls na-jfk.testnet.metal.zec.rocks`,
-and `GetLightdInfo` through the shim answers `chainName: "test"`.
+and `GetLightdInfo` through the shim answers `chainName: "test"` (on a
+broadcast-only shim, see the note under "Verify").
 
 ## Diversion (Phase 2) — two transports, one hub
 
@@ -354,6 +360,7 @@ understanding what they mean.
 | `ZIS_NYM_ROTATION_SECS` | rotate the shim's mixnet identity every N seconds, bounding how long the hub can link your submissions | a deployment decision; unset = never |
 | `ZIS_CAUTION_ATTESTATION` | let the shim answer Caution's own `/attestation` and health paths | **`true` on managed Caution** (the default). Under h2c the platform routes these to the app, and a shim that proxied them to your indexer would fail its health check and never boot |
 | `ZIS_LOOKUP_TIMEOUT_SECS` | how long a `GetTransaction` waits for the hub before failing closed | default **90 s** (raised from 25 s against measurement). Tuning it changes the enclave config, not the binary, so your `EXPECTED_SHA256` and reproducibility trail stay put. It **multiplies** by the number of `--hub-nym` addresses |
+| `ZIS_BROADCAST_ONLY` | relay only `SendTransaction` and `GetTransaction`; every other gRPC method answers `UNIMPLEMENTED` | default `false`. `assemble-caution.sh` has no switch for it: add `ZIS_BROADCAST_ONLY = "true"` by hand to `unit.env` in the generated manifest. Setting it changes PCR0/PCR1 |
 | `ZIS_HUB` / `ZIS_HUB_TLS` | **legacy** clearnet hop | unset — the current hub refuses clearnet submissions |
 
 `ZIS_BACKEND_TLS` does double duty: the name the backend's certificate must
@@ -477,7 +484,8 @@ Worth knowing for diagnosis: **the timing tells you which failure you have.** A
 lookup that fails after the full ~25 s means the shim sent and got no reply (the
 mixnet). A lookup that fails *instantly* means the shim had no transport to send
 on at all (a configuration or client-lifecycle problem). A healthy pass-through
-call like `GetLightdInfo` answers in about 2 s and is your control.
+call like `GetLightdInfo` answers in about 2 s and is your control (not on a
+broadcast-only shim, which answers it locally; see the note under "Verify").
 
 ## Forward-only caveat
 
