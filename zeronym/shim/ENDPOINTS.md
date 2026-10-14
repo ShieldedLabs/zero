@@ -172,6 +172,14 @@ a browser wallet cannot call `GetTaddressBalanceStream`, the one
 client-streaming method; it calls the unary `GetTaddressBalance` instead. The
 shim relays a client stream unchanged, so the limit sits in the browser.
 
+### Broadcast-only mode
+
+With `--broadcast-only true` (`ZIS_BROADCAST_ONLY=true`, off by default) the
+shim relays only `SendTransaction` and `GetTransaction`, handled exactly as
+described above. Every other method, in any service, is answered `UNIMPLEMENTED`
+(gRPC status 12) by the shim and is not relayed to the indexer. The same holds
+in both dialects; over gRPC-web the status arrives in the response headers.
+
 ## Residual leaks (state them, do not pretend)
 
 The Zeronym indexer closed the three that used to sit here (reused address,

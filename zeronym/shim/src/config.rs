@@ -107,6 +107,30 @@ pub struct Config {
     )]
     pub require_diversion: bool,
 
+    /// Relay only `SendTransaction` and `GetTransaction`, and answer every other
+    /// gRPC method with UNIMPLEMENTED (12) without contacting the backing
+    /// indexer.
+    ///
+    /// For an endpoint whose wallets sync elsewhere and use the shim to
+    /// broadcast: block ranges, tree state, mempool streams and the rest of
+    /// wallet sync are refused here rather than relayed. The two served methods
+    /// are handled exactly as they are without this flag, and the shim's own
+    /// endpoints and the Caution control-plane paths are served as before.
+    ///
+    /// Independent of `--hub`, `--hub-nym` and `--require-diversion`: it decides
+    /// which methods are relayed, not where a relayed one goes. The served set is
+    /// fixed in the source and is not configurable.
+    /// Takes an explicit `true`/`false`: it is usually set from the
+    /// environment, where a bare flag would read as set whenever the variable
+    /// merely exists.
+    #[arg(
+        long = "broadcast-only",
+        env = "ZIS_BROADCAST_ONLY",
+        action = clap::ArgAction::Set,
+        default_value_t = false
+    )]
+    pub broadcast_only: bool,
+
     /// Rotate the mixnet client's identity every N seconds (D11): the window
     /// within which the hub can link one shim's submissions under a single
     /// sender tag. Unset means NEVER rotate, which leaves that window at the
@@ -607,6 +631,23 @@ mod production_flag_tests {
         assert!(
             !defaulted.tls_production,
             "staging must be the default; production is an act, not an omission"
+        );
+    }
+
+    /// Broadcast-only is off unless it is asked for by value, so a deployment
+    /// that does not mention it keeps relaying every method.
+    #[test]
+    fn broadcast_only_requires_an_explicit_true() {
+        let off = Config::parse_from(["zero-indexer-shim", "--broadcast-only", "false"]);
+        assert!(!off.broadcast_only);
+
+        let on = Config::parse_from(["zero-indexer-shim", "--broadcast-only", "true"]);
+        assert!(on.broadcast_only);
+
+        let defaulted = Config::parse_from(["zero-indexer-shim"]);
+        assert!(
+            !defaulted.broadcast_only,
+            "relaying every method must be the default"
         );
     }
 }

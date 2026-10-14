@@ -45,6 +45,10 @@ date) before dispatching the release.
   gRPC-web `SendTransaction` is classified and diverted like any other; the
   CORS preflight is answered by the shim; `Origin` and `Referer` are stripped
   before the indexer.
+- The shim gains a broadcast-only mode (`--broadcast-only` /
+  `ZIS_BROADCAST_ONLY`, off by default): only `SendTransaction` and
+  `GetTransaction` are relayed, and every other gRPC method is answered
+  `UNIMPLEMENTED` without reaching the indexer.
 
 ## v29 - 2026-09-07
 
