@@ -363,8 +363,9 @@ async fn run_with_poll_interval(
                 // off-cadence.
                 None => tip.record_flush_boundary(boundary),
                 Some(previous) if boundary > previous => {
-                    // Recorded BEFORE the flush, so any admission during it
-                    // already sees this epoch as spent.
+                    // Recorded before the flush. The order does not matter
+                    // while only this loop observes the tip, since the tip
+                    // cannot change during the flush; it would if that moved.
                     tip.record_flush_boundary(boundary);
                     flush(&queue, &chain, &tip, params).await;
                 }
