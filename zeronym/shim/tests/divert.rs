@@ -738,7 +738,7 @@ async fn broadcast_only_with_a_hub_diverts_and_looks_up_and_rejects_the_rest() {
 }
 
 #[tokio::test]
-async fn broadcast_only_diverts_a_migration_sent_to_a_lower_case_path() {
+async fn broadcast_only_rejects_a_migration_sent_to_a_lower_case_path() {
     let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
     let hub_seen = Arc::new(Mutex::new(None));
     let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
@@ -760,9 +760,9 @@ async fn broadcast_only_diverts_a_migration_sent_to_a_lower_case_path() {
     )
     .await;
 
-    assert_eq!(reply.status, 0);
-    assert_eq!(decode_send_response(&reply.body).error_message, txid);
-    assert_eq!(hub_seen.lock().unwrap().as_deref(), Some(V6_MIGRATION));
+    // Not the method, so neither the hub nor the operator receives it.
+    assert_eq!(reply.status, 12);
+    assert!(hub_seen.lock().unwrap().is_none());
     assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
 }
 

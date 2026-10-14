@@ -33,8 +33,7 @@ use zero_indexer_shim::CautionRelay;
 
 use common::{
     bounded, connect_h2, dead_addr, decode_send_response, get_transaction, grpc_call, grpc_frame,
-    grpc_web_call, send_tx_reply, spawn_counting_backend, spawn_forward_only_shim,
-    V6_IRONWOOD_ONLY,
+    grpc_web_call, send_tx_reply, spawn_counting_backend, V6_IRONWOOD_ONLY,
 };
 
 const SERVICE: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer";
@@ -189,18 +188,15 @@ async fn both_served_methods_work_over_grpc_web_in_both_encodings() {
 }
 
 #[tokio::test]
-async fn paths_that_spell_send_transaction_are_classified_as_they_are_with_the_mode_off() {
+async fn paths_that_only_spell_send_transaction_are_unimplemented() {
     let (shim, connections) = default_shim().await;
-    let off_connections = Arc::new(AtomicUsize::new(0));
-    let off_backend = spawn_counting_backend(off_connections.clone()).await;
-    let off_shim = spawn_forward_only_shim(off_backend).await;
 
     let message = raw_transaction(V6_IRONWOOD_ONLY);
     let mut sender = connect_h2(shim).await;
-    let mut off_sender = connect_h2(off_shim).await;
 
     // The paths `near_miss_paths_fail_safe_toward_the_classifier` pins in
-    // `proxy.rs`.
+    // `proxy.rs`. With the mode off they go to the classifier; with it on they
+    // are not the method, so they get the same answer as any other path.
     for path in [
         "/cash.z.wallet.sdk.rpc.CompactTxStreamer/sendtransaction",
         "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SENDTRANSACTION",
@@ -208,23 +204,19 @@ async fn paths_that_spell_send_transaction_are_classified_as_they_are_with_the_m
         "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction//",
         "/some.other.Service/SendTransaction",
     ] {
-        let body = || Full::new(grpc_frame(&message)).boxed();
-        let on = grpc_call(&mut sender, shim, path, body()).await;
-        let off = grpc_call(&mut off_sender, off_shim, path, body()).await;
-
-        assert_ne!(on.status, 12, "{path} must not be rejected");
-        assert_eq!(
-            decode_send_response(&on.body).error_message,
-            "operator-answered",
-            "{path} must reach the operator on a pass-through verdict"
-        );
-        assert_eq!(on.status, off.status, "{path}");
-        assert_eq!(on.message, off.message, "{path}");
-        assert_eq!(on.body, off.body, "{path}");
+        let reply = grpc_call(
+            &mut sender,
+            shim,
+            path,
+            Full::new(grpc_frame(&message)).boxed(),
+        )
+        .await;
+        assert_eq!(reply.status, 12, "{path}");
+        assert_eq!(reply.message.as_deref(), Some(REJECTED), "{path}");
+        assert!(reply.body.is_empty(), "{path}");
     }
 
-    assert_eq!(connections.load(Ordering::SeqCst), 1);
-    assert_eq!(off_connections.load(Ordering::SeqCst), 1);
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

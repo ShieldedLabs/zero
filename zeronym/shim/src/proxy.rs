@@ -933,17 +933,21 @@ pub fn route_for(path: &str) -> Route {
 /// Whether a request on `route` is served when broadcast-only mode is on.
 ///
 /// With the mode on, the backing indexer is reached only by a request routed
-/// as [`Route::Intercept`], [`Route::InterceptNearMiss`] or
-/// [`Route::GetTransaction`]. The other routes this returns `true` for are the
-/// ones answered without it: the shim's own endpoints, the Caution paths while
-/// the relay owns them (`caution_relay`), and `/nym-diag` while it is open
-/// (`diag_open`). Everything else is rejected by [`handle`].
+/// as [`Route::Intercept`] or [`Route::GetTransaction`], the two exact method
+/// paths. [`Route::InterceptNearMiss`] is rejected: it is not the method, and a
+/// rejection hands neither the hub nor the operator anything, which is a
+/// stronger answer than classifying it. The other routes this returns `true`
+/// for are the ones answered without the indexer: the shim's own endpoints,
+/// the Caution paths while the relay owns them (`caution_relay`), and
+/// `/nym-diag` while it is open (`diag_open`). Everything else is rejected by
+/// [`handle`].
 ///
 /// No wildcard arm, on purpose: a new [`Route`] variant does not compile until
 /// it is given a line here.
 fn served_when_broadcast_only(route: Route, caution_relay: bool, diag_open: bool) -> bool {
     match route {
-        Route::Intercept | Route::InterceptNearMiss | Route::GetTransaction => true,
+        Route::Intercept | Route::GetTransaction => true,
+        Route::InterceptNearMiss => false,
         Route::ShimHealth | Route::ShimNymStatus => true,
         Route::CautionHealth | Route::CautionAttestation => caution_relay,
         Route::ShimNymDiag => diag_open,
@@ -1312,7 +1316,7 @@ mod tests {
             for diag_open in [false, true] {
                 for (route, served) in [
                     (Route::Intercept, true),
-                    (Route::InterceptNearMiss, true),
+                    (Route::InterceptNearMiss, false),
                     (Route::GetTransaction, true),
                     (Route::ShimHealth, true),
                     (Route::ShimNymStatus, true),
