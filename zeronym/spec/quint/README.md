@@ -236,8 +236,8 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G1 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G2 | holds (`baseline`) | **required**: `hubServesQueuedBodyTest` | **required**: `indexerServesUnpublishedBodyTest`. One endpoint suffices |
 | G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
-| G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: a false height or a false not-found; one endpoint suffices. No scripted run since #85 |
-| G5 | holds (`baseline`) | **required**: a lookup reply of pending; not scripted | holds (`byzIndexer`); `indexerEmptyAnswerIsUnavailableTest` |
+| G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerServesFalseHeightTest`. One endpoint suffices |
+| G5 | holds (`baseline`) | **required**: `hubForgesPendingTest` | holds (`byzIndexer`); `indexerEmptyAnswerIsUnavailableTest` |
 | G6b | holds (`timely`, `flakyTip`) | argued, not checked: a hub that admits while it has no tip breaks it | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G8 | holds (`timely`, `flakyTip`, `staleLagWithSlack`) | argued, not checked | argued, not checked: admission never judges below the recorded boundary, whatever the tip |
 | A3 | holds | argued, not checked: draining is an admission rule | holds |
@@ -309,7 +309,7 @@ Argued, not checked, on the assumption that hubs share nothing but the chain and
 | What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
 | The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled |
 | A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
-| Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them (but see finding 6). Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs:497-519`) is not checked, and is known not to hold under a tip reported behind the chain |
+| Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them. Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs`) is G8, for entries not requeued; before #85 it did not hold under a tip reported behind the chain (finding 6) |
 | A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
 | A Byzantine hub in the hub specification | It produced no finding, and an adversary's moves are not an implementation to check against the abstract hub. The protocol specification keeps its Byzantine hub, which lies in lookup replies and admits or refuses as it likes |
 | More than one Byzantine component at once | The trust matrix is single-fault |
@@ -445,6 +445,6 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 
 > What would make these results bind the code.
 
-1. **Failing Rust tests for the findings.** Each finding is shown on the model and matched to the code by reading; no test has been written. A reading of the existing harnesses suggests most need no production change: finding 8 fits the hub's integration tests with its mock indexer, and the cadence findings (1, 2 and 6) fit `batcher.rs`'s own unit tests, where the loop and the cadence clock are visible. Missing today: a fixture with a non-zero expiry, and a way to know the cadence loop has completed a poll. Finding 4 is impractical to reproduce.
+1. **Failing Rust tests for the findings.** Findings 2, 6 and 8 have Rust tests, written with their fixes in #85; the part of finding 2 that #85 leaves has none. The other findings are shown on the model and matched to the code by reading. Finding 1 fits `batcher.rs`'s unit tests as 2 and 6 did. Finding 4 is impractical to reproduce.
 2. **Model-based testing with `quint-connect`.** Depends on 1, and needs driver code in Rust. The specification is shaped for it: every branch of a step is a named action with its choices as named picks; each step gives one input to one component function and applies one output; and those functions map onto the seams in the table under [System](#system).
 3. **`quint verify` with Apalache for a subset of the claims.** The compiled specification is too large for the Apalache server today. A subset small enough to pass would give bounded symbolic checking of the protocol guarantees, which are simulated only.

@@ -89,7 +89,7 @@ finish() {
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
 FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:24 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
+  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:20 tests/trustTest.qnt:14"
 
 fail() {
   echo "FAIL  $1"
@@ -315,7 +315,7 @@ finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue"
 
 # The accepted disclosure, a third party served a published body, and the
 # antecedents of G1 and G2. The served body is G2's reply-body branch, which
@@ -341,7 +341,7 @@ job reaches byzHub quietStep 40 \
   -- operatorBlind txidAuthenticity
 job reaches byzIndexer quietStep 40 \
   vOperatorBlind vTxidAuthenticity \
-  -- operatorBlind txidAuthenticity
+  -- operatorBlind txidAuthenticity pendingOnlyFromQueue
 finish
 fi
 

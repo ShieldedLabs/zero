@@ -337,7 +337,9 @@ module hub {
   /// - The same bytes already resident (resubmitted during the flush) win, and
   ///   the returning copy is dropped without being counted.
   /// - An entry that no longer survives the next flush, judged at the observed
-  ///   tip exactly as admission judges it, is dropped as expired.
+  ///   tip, is dropped as expired. Admission judges at `admissionHeight`,
+  ///   which can be higher; requeue does not, so as not to drop an
+  ///   acknowledged entry that may still be mined.
   /// - An entry out of attempts is dropped as exhausted. Only an entry with no
   ///   expiry gets that far.
   /// - The rest are held.

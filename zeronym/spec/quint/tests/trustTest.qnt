@@ -74,6 +74,21 @@ module trustTest {
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
 
+  /// G5 needs the hub. It answers pending for a transaction it does not hold.
+  run hubForgesPendingTest =
+    initByzHub
+      .then(sends(Clean(early), true))
+      .then(ask("early"))
+      .expect(pendingOnlyFromQueue)
+      .then(hubReceiveWith(
+        lookupMail(1, "early"), INotFound,
+        { hub: s.hub, reply: AWire(WFound({ body: None, height: AtZero })) },
+      ))
+      .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
+      .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
+      .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
+      .expect(not(pendingOnlyFromQueue))
+
   /// G3 survives. The hub answers with another transaction; the shim compares
   /// txids and refuses it.
   run wrongTransactionIsRefusedTest =
@@ -131,4 +146,19 @@ module trustTest {
       .then(deliverToShim(replyMail(1, WError)))
       .expect(lastEvent == Got({ query: "early", obs: Unavailable, via: Some(1) }))
       .expect(lookupValidityPerHub and pendingOnlyFromQueue)
+
+  /// G4 needs the indexer. It serves a published mempool transaction as
+  /// mined. The txid is right, so the shim passes it on.
+  run indexerServesFalseHeightTest =
+    initByzIndexer
+      .then(submitTo(0, early))
+      .then(flush([early], Accepted))
+      .then(ask("early"))
+      .expect(lookupValidityPerHub)
+      .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: Some(early), height: AtMined })))
+      .then(deliverToShim(replyMail(1, WFound({ body: Some(early), height: AtMined }))))
+      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(1) }))
+      .expect(s.onChain("early") == InMempool)
+      .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
+      .expect(not(lookupValidityPerHub) and txidAuthenticity)
 }
