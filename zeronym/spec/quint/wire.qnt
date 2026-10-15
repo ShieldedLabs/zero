@@ -67,8 +67,6 @@ module wire {
   /// answer of "found, height 0, no body". It means nothing was returned, and
   /// on the wire it is the hub's own "queued here", so the wallet is told
   /// pending. The encoding is not injective there, and the shim cannot tell.
-  /// Since #85 the hub's client never lets that answer through (`hubReads`),
-  /// so no hub outcome carries it.
   pure def meaning(outcome: HubOutcome, query: TxId): LookupObs =
     match outcome {
       | QueueHit => Pending

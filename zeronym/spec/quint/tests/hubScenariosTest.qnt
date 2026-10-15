@@ -236,9 +236,10 @@ module hubScenariosTest {
 
   /// A supported wallet's transaction is admitted on time at height 2. At
   /// height 6 the hub, having adopted that epoch without flushing, is told
-  /// the tip is 5, and a duplicate of the submission is about to arrive.
-  run duplicateBehindTheBoundary(c: HubConfig, lost: bool): bool =
-    started(c)
+  /// the tip is 5, and a duplicate of the submission arrives. The hub is shut
+  /// down at 8.
+  run duplicateBehindTheBoundary(lost: bool): bool =
+    started(flakyTip)
       .then(block)
       .then(deliver(early))
       .expect(onTime == Set(early))
@@ -248,11 +249,6 @@ module hubScenariosTest {
       )
       .expect(height == 6 and h.lastEpoch == Some(2))
       .then(observeWith(5))
-
-  /// Before #85: the duplicate is admitted, counting on the flush at 6,
-  /// which will not happen. The hub is shut down at 8 and offers it then.
-  run lateDuplicateOfferedLate(lost: bool): bool =
-    duplicateBehindTheBoundary(pre85(flakyTip), lost)
       .then(deliver(early))
       .expect(h.queued() == Set(early))
       .then(see)
@@ -261,56 +257,26 @@ module hubScenariosTest {
       .then(flushBegin)
       .expect(flightStart == 8 and h.inFlight() == Set(early) and not(marginLeft(early, flightStart)))
 
-  /// K8 (finding 6), before #85. The hub crashed in between and lost its
-  /// queue. To it the duplicate is a first arrival, four blocks late, and
-  /// admission counts on the flush at 6, which will not happen. The wallet's
-  /// transaction was on time, was acknowledged, and is first offered with
-  /// one block of margin where two are reserved. G6b holds: it is about
-  /// arrivals this run of the hub knows to be timely.
-  run crashThenLateDuplicatePre85Test =
-    lateDuplicateOfferedLate(true)
+  /// K8 (finding 6). The hub crashed in between and lost its queue. To it the
+  /// duplicate is a first arrival, four blocks late, and admission counts on
+  /// the flush at 6, which will not happen. The wallet's transaction was on
+  /// time, was acknowledged, and is first offered with one block of margin
+  /// where two are reserved. G6b holds: it is about arrivals this
+  /// run of the hub knows to be timely.
+  run crashThenLateDuplicateTest =
+    duplicateBehindTheBoundary(true)
       .expect(reorgSlackFits(cfg) and onTime == Set() and offered == Set())
       .expect(conformingFirstOfferBeforeExpiry)
       .then(advance)
       .expect(not(nodeWouldTake(early)))
 
-  /// K8, control, before #85. No crash: the transaction is published by the
-  /// flush at 3. The late offer at 8 is a second offer of an entry whose
-  /// first was in time.
-  run lateDuplicateWithoutCrashPre85Test =
-    lateDuplicateOfferedLate(false)
+  /// K8, control. No crash: the transaction is published by the flush at 3.
+  /// The late offer at 8 is a second offer of an entry whose first was in
+  /// time.
+  run lateDuplicateWithoutCrashTest =
+    duplicateBehindTheBoundary(false)
       .expect(onTime == Set(early) and offered == Set(early))
       .expect(conformingFirstOfferBeforeExpiry and not(conformingEveryOfferBeforeExpiry))
-
-  /// Since #85 the hub judges the duplicate at the boundary it has recorded,
-  /// 6, not at the tip it was told, 5. The next flush is at 9, which an
-  /// expiry of 9 does not survive, so the duplicate is refused. At 8, where
-  /// the hub before #85 was shut down and offered it, there is nothing to
-  /// offer.
-  run lateDuplicateRefused(lost: bool): bool =
-    duplicateBehindTheBoundary(flakyTip, lost)
-      .expect(h.observedTip() == 5 and h.admissionHeight() == 6)
-      .expect(decision(early) == Refused(ExpiryTooTight))
-      .then(deliver(early))
-      .expect(h.queued() == Set())
-      .then(see)
-      .then(blocks(2))
-      .expect(height == 8 and h.queued() == Set() and h.inFlight() == Set())
-
-  /// K8 (finding 6), fixed by #85. After the crash the transaction is lost
-  /// as K5 says, and its resend is refused instead of being offered with
-  /// less than the margin.
-  run crashThenLateDuplicateTest =
-    lateDuplicateRefused(true)
-      .expect(onTime == Set() and offered == Set())
-      .expect(conformingFirstOfferBeforeExpiry and conformingEveryOfferBeforeExpiry)
-
-  /// K8, control, fixed by #85. The transaction was published at 3; the
-  /// duplicate is refused rather than offered a second time.
-  run lateDuplicateWithoutCrashTest =
-    lateDuplicateRefused(false)
-      .expect(onTime == Set(early) and offered == Set(early))
-      .expect(conformingFirstOfferBeforeExpiry and conformingEveryOfferBeforeExpiry)
 
   /// A hub that comes back up owes a fresh arrival the whole margin, even
   /// with the tip reported one block behind throughout. The hub restarts at

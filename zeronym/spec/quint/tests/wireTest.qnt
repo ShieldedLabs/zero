@@ -52,10 +52,9 @@ module wireTest {
   /// The documented collision: a queue hit and an indexer answer of
   /// "found, height 0, no body" are the same reply, though they mean different
   /// things. The wallet cannot tell them apart: it is told pending for both,
-  /// so an indexer that answers that way for a transaction nobody holds made
-  /// the wallet see pending before #85 (`indexerForgesPendingPre85Test`).
-  /// Since #85 the hub reads that answer as a failure, so the collision is
-  /// no longer reachable (`hubReadsTest`). No two honest outcomes collide.
+  /// so an indexer that answers that way for a transaction nobody holds makes
+  /// the wallet see pending (`indexerForgesPendingTest` is that run). No two
+  /// honest outcomes collide.
   run sentinelCollisionTest = all {
     assert(render(QueueHit) == render(FromIndexer(IFound({ body: None, height: AtZero })))),
     assert(QUERIES.forall(query =>
@@ -68,21 +67,6 @@ module wireTest {
         != meaning(FromIndexer(IFound({ body: None, height: AtZero })), query))),
     assert(tuples(HONEST_OUTCOMES, HONEST_OUTCOMES).forall(((left, right)) =>
       left != right implies render(left) != render(right))),
-  }
-
-  /// The hub's client turns an indexer's found answer with no body, at any
-  /// height, into a failure, and passes every other answer on (#85). Before
-  /// #85 it passed everything on.
-  run hubReadsTest = all {
-    assert(Set(AtZero, AtMined).forall(height =>
-      hubReads(IFound({ body: None, height: height }), true) == IUnavailable)),
-    assert(tuples(BODIES, HEIGHTS).forall(((body, height)) =>
-      body != None implies hubReads(IFound({ body: body, height: height }), true) == IFound({ body: body, height: height }))),
-    assert(hubReads(INotFound, true) == INotFound and hubReads(IUnavailable, true) == IUnavailable),
-    assert(hubReads(IFound({ body: None, height: AtZero }), false) == IFound({ body: None, height: AtZero })),
-    // No answer the hub reads renders as its queue-hit reply.
-    assert(tuples(BODIES, HEIGHTS).forall(((body, height)) =>
-      render(FromIndexer(hubReads(IFound({ body: body, height: height }), true))) != render(QueueHit))),
   }
 
   /// The shim serves a transaction only when its txid is the one asked

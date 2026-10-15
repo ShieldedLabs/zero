@@ -29,10 +29,6 @@ module hub {
     minWalletExpiry: int,   // the smallest expiry delta a supported wallet sets
     reorgAllowance: int,    // how far back a tip report is followed
     maxAttempts: int,       // requeues an entry is allowed
-    // Admission judges at the boundary of the last flush epoch when that is
-    // above the observed tip (#85, findings 2 and 6). False is the code
-    // before #85, which judged at the observed tip alone.
-    admitAtLastFlush: bool,
   }
 
   /// The startup check: a transaction that takes `deliveryLag` blocks to
@@ -49,8 +45,7 @@ module hub {
 
   /// The clock the flush schedule runs on. It follows the observed tip until
   /// the hub is stale, and then free-runs from an estimate of elapsed time.
-  /// Admission and requeue never read it directly. Requeue reads the observed
-  /// tip; admission reads `admissionHeight`.
+  /// Admission and requeue never use it: they read the observed tip.
   type Cadence = Tracking | FreeRunning(Height)
 
   /// The flush cycle. While broadcasting, `batch` holds the entries still
@@ -63,9 +58,7 @@ module hub {
   /// - `tip`: the last tip observed, absent until the first observation.
   /// - `queue`: the admitted entries, keyed by their bytes, each with the
   ///   number of requeues it has had.
-  /// - `lastEpoch`: the flush epoch last acted on, absent until adopted. It
-  ///   is recorded when that epoch's flush begins, as `record_flush_boundary`
-  ///   is called before the flush.
+  /// - `lastEpoch`: the flush epoch last acted on, absent until adopted.
   type HubState = {
     params: HubParams,
     phase: Phase,
@@ -97,9 +90,8 @@ module hub {
 
   type HubInput =
     | SubmitHInput({ nonce: Nonce, payload: Payload })
-    // A lookup, together with what the hub's indexer would answer, as its
-    // client returns it (`hubReads`). The answer is used only when the queue
-    // misses.
+    // A lookup, together with what the hub's indexer would answer. The answer
+    // is used only when the queue misses.
     | LookupHInput({ nonce: Nonce, txid: TxId, answer: IndexerAnswer })
     | TipHInput(Height)        // the cadence loop observes a tip
     // No forward tip progress for the staleness window. The height is what
@@ -211,19 +203,6 @@ module hub {
   pure def nextFlushHeight(height: Height, flushInterval: int): Height =
     (height / flushInterval + 1) * flushInterval
 
-  /// The height admission judges expiry at: the observed tip, or the boundary
-  /// of the last flush epoch if that is higher, because the flush at that
-  /// boundary is spent whatever the tip says now (`TipTracker::admission_height`).
-  /// Before #85 it was the observed tip alone.
-  pure def admissionHeight(state: HubState): Height =
-    match state.lastEpoch {
-      | Some(epoch) =>
-        val boundary = epoch * state.params.flushInterval
-        if (state.params.admitAtLastFlush and boundary > state.observedTip()) boundary
-        else state.observedTip()
-      | None => state.observedTip()
-    }
-
   /// Whether an entry with `expiry`, judged at `tip`, provably survives the
   /// flush that would publish it with `miningMargin` blocks to spare. A
   /// transaction with no expiry always does.
@@ -241,7 +220,7 @@ module hub {
       Refused(TipStale)
     else if (state.phase == Draining)
       Refused(HubDraining)
-    else if (not(survivesNextFlush(payload.expiry, state.admissionHeight(), state.params.flushInterval, state.params.miningMargin)))
+    else if (not(survivesNextFlush(payload.expiry, state.observedTip(), state.params.flushInterval, state.params.miningMargin)))
       Refused(ExpiryTooTight)
     else if (state.queued().contains(payload))
       Duplicate
@@ -302,10 +281,8 @@ module hub {
   // ------------------------------------------------------------------------
 
   /// A flush begins: the whole queue moves out at once. An empty queue is
-  /// still a flush event. The epoch is recorded here, before the batch goes
-  /// out, so admission during the flight already counts it as spent. The
-  /// final flush of a draining hub records nothing, and with nothing to
-  /// publish it stops the hub.
+  /// still a flush event, and the epoch is recorded. The final flush of a
+  /// draining hub with nothing to publish stops it.
   pure def beginFlush(state: HubState): HubResult =
     if (not(state.isFlushDue()))
       state.toHubErrorOutput("no flush is due")
@@ -318,7 +295,6 @@ module hub {
       { ...state,
         queue: Map(),
         flush: Broadcasting({ batch: state.queue, unplaced: Map(), final: state.phase == Draining }),
-        lastEpoch: if (state.phase == Draining) state.lastEpoch else Some(state.cadenceEpoch()),
       }.toBroadcastOutput(state.queued())
 
   /// The indexer's verdict on one entry. Accepted and already-known entries
@@ -370,7 +346,7 @@ module hub {
             if (held.contains(payload)) flush.unplaced.get(payload) + 1 else state.queue.get(payload))
           val idle =
             if (flush.final) { ...state, phase: Stopped, queue: Map(), flush: Idle }
-            else { ...state, queue: queue, flush: Idle }
+            else { ...state, queue: queue, flush: Idle, lastEpoch: Some(state.cadenceEpoch()) }
           idle.toRequeuedOutput(held.size(), expired.size(), exhausted.size())
     }
 

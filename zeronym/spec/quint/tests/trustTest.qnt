@@ -74,22 +74,6 @@ module trustTest {
       .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
       .expect(not(lookupValidityPerHub) and txidAuthenticity)
 
-  /// G5 needs the hub. It answers pending for a transaction it does not
-  /// hold, the reply only a queue hit should give.
-  run hubForgesPendingTest =
-    initByzHub
-      .then(sends(Clean(early), true))
-      .then(ask("early"))
-      .expect(pendingOnlyFromQueue)
-      .then(hubReceiveWith(
-        lookupMail(1, "early"), INotFound,
-        { hub: s.hub, reply: AWire(WFound({ body: None, height: AtZero })) },
-      ))
-      .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
-      .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
-      .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
-      .expect(not(pendingOnlyFromQueue))
-
   /// G3 survives. The hub answers with another transaction; the shim compares
   /// txids and refuses it.
   run wrongTransactionIsRefusedTest =
@@ -135,47 +119,17 @@ module trustTest {
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
-  /// Finding 8, before #85. For a transaction that exists nowhere the
-  /// indexer answers "found, height 0, no body". The hub forwards it
-  /// unchanged, and on the wire it is the hub's own "queued here": the wallet
-  /// sees pending. That broke G4 and G5.
-  run indexerForgesPendingPre85Test =
-    initByzIndexerPre85
+  /// G4 needs the indexer. For a transaction that exists nowhere it answers
+  /// "found, height 0, no body". The hub forwards it unchanged, and on the
+  /// wire it is the hub's own "queued here": the wallet sees pending.
+  run indexerForgesPendingTest =
+    initByzIndexer
       .then(sends(Clean(early), true))
       .then(ask("early"))
-      .expect(lookupValidityPerHub and pendingOnlyFromQueue)
+      .expect(lookupValidityPerHub)
       .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: None, height: AtZero })))
       .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
       .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
       .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
-      .expect(not(lookupValidityPerHub) and not(pendingOnlyFromQueue))
-
-  /// Finding 8, fixed by #85. The same answer is that endpoint failing. With
-  /// no other endpoint the hub answers with an error, and the wallet sees the
-  /// lookup as unavailable, not pending. G4 and G5 hold.
-  run indexerEmptyAnswerIsUnavailableTest =
-    initByzIndexer
-      .then(sends(Clean(early), true))
-      .then(ask("early"))
-      .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: None, height: AtZero })))
-      .expect(s.replies(ShimAddr) == Set({ nonce: 1, reply: WError }))
-      .then(deliverToShim(replyMail(1, WError)))
-      .expect(lastEvent == Got({ query: "early", obs: Unavailable, via: Some(1) }))
-      .expect(lookupValidityPerHub and pendingOnlyFromQueue)
-
-  /// G4 still needs the indexer after #85. It serves a published mempool
-  /// transaction as mined. The txid is right, so the shim passes it on. G5
-  /// is not touched: nothing here reads as pending.
-  run indexerServesFalseHeightTest =
-    initByzIndexer
-      .then(submitTo(0, early))
-      .then(flush([early], Accepted))
-      .then(ask("early"))
-      .expect(lookupValidityPerHub)
-      .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: Some(early), height: AtMined })))
-      .then(deliverToShim(replyMail(1, WFound({ body: Some(early), height: AtMined }))))
-      .expect(lastEvent == Got({ query: "early", obs: Tx({ payload: early, height: AtMined }), via: Some(1) }))
-      .expect(s.onChain("early") == InMempool)
-      .expect(audit.windows.get(1) == Set(Tx({ payload: early, height: AtZero })))
-      .expect(not(lookupValidityPerHub) and pendingOnlyFromQueue and txidAuthenticity)
+      .expect(not(lookupValidityPerHub))
 }
