@@ -88,8 +88,8 @@ finish() {
 # being found (renamed so it no longer ends in `Test`, say) fails the gate.
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:24 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:20 tests/trustTest.qnt:12"
+FUNCTIONAL="tests/wireTest.qnt:12 tests/indexerTest.qnt:14 tests/hubTest.qnt:25 tests/shimTest.qnt:13
+  tests/hubScenariosTest.qnt:27 tests/scenariosTest.qnt:20 tests/trustTest.qnt:15"
 
 fail() {
   echo "FAIL  $1"
@@ -121,6 +121,7 @@ simulate() {
     baseline) init=initBaseline ;;
     byzHub) init=initByzHub ;;
     byzIndexer) init=initByzIndexer ;;
+    byzIndexerPre85) init=initByzIndexerPre85 ;;
     *) init=none ;;
   esac
   out=$($QUINT run protocol.qnt --backend="$BACKEND" --main=protocol --init="$init" --step="$step" \
@@ -304,9 +305,13 @@ finish
 echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
 # The guarantees, where they are claimed.
-job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub
+job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue
 job holds byzHub              operatorBlind txidAuthenticity
-job holds byzIndexer          operatorBlind txidAuthenticity
+job holds byzIndexer          operatorBlind txidAuthenticity pendingOnlyFromQueue  # G5: finding 8, fixed by #85
+
+# Fixed bugs, with the fix switched off: each must still be violated, so a
+# fix row above cannot hold for some other reason.
+job fails byzIndexerPre85     quietStep 40 pendingOnlyFromQueue                    # G5: finding 8, before #85
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
@@ -315,7 +320,7 @@ finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue"
 
 # The accepted disclosure, a third party served a published body, and the
 # antecedents of G1 and G2. The served body is G2's reply-body branch, which
@@ -339,9 +344,10 @@ job reaches baseline earlyLookupStep 40 \
 job reaches byzHub quietStep 40 \
   vOperatorBlind vTxidAuthenticity \
   -- operatorBlind txidAuthenticity
+# G5's antecedent is a pending answer, `wPending`.
 job reaches byzIndexer quietStep 40 \
-  vOperatorBlind vTxidAuthenticity \
-  -- operatorBlind txidAuthenticity
+  vOperatorBlind vTxidAuthenticity wPending \
+  -- operatorBlind txidAuthenticity pendingOnlyFromQueue
 finish
 fi
 
@@ -357,6 +363,7 @@ fi
 G6B=conformingFirstOfferBeforeExpiry
 K5=ackedIsHeldOrSettled
 K6=conformingEveryOfferBeforeExpiry
+G8=admissionMatchesCadence
 
 # The schedule guarantee with every component honest: under a timely tip, and
 # under a tip that may be reported behind the chain.
@@ -364,12 +371,20 @@ job tlc_holds    initTimely             step $G6B
 job tlc_holds    initTimely             step $K6
 job tlc_holds    initFlakyTip           step $G6B
 
+# Admission agrees with the cadence on the next flush. It holds since #85, and
+# is violated with that fix switched off, on the configuration of each finding.
+job tlc_holds    initTimely             step $G8
+job tlc_holds    initFlakyTip           step $G8                        # finding 6, fixed by #85
+job tlc_holds    initStaleLagWithSlack  step $G8                        # finding 2, fixed by #85
+job tlc_violated initFlakyTipPre85      step $G8 9                      # finding 6, before #85
+job tlc_violated initStaleLagWithSlackPre85 step $G8 9                  # finding 2, before #85
+
 # The known gaps, each on the configuration that isolates its cause. The last
 # argument is the length of TLC's counterexample.
 job tlc_violated initFlakyTipNoSlack    step $G6B 12                    # K3'
 job tlc_violated initStaleLag           step $G6B 13                    # K4
 job tlc_violated initStaleLag           step $K6 13                     # K6
-job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2
+job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2, the part #85 leaves
 # K5, three causes: a crash; without one, a final flush nothing judged; with
 # no shutdown either, a requeue that gives the entry up as expired.
 job tlc_violated initTimely             step $K5 5

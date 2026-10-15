@@ -16,6 +16,7 @@ module hubTest {
     minWalletExpiry: 6,
     reorgAllowance: 1,
     maxAttempts: 2,
+    admitAtLastFlush: true,
   }
 
   pure def orchard(id: str, expiry: Option[Height]): Payload =
@@ -95,6 +96,23 @@ module hubTest {
     // one block before a boundary, arriving on it, is refused.
     assert(not(scheduleFitsBudget({ ...PARAMS, minWalletExpiry: 4 }))),
     assert(not(survivesNextFlush(Some(2 + 4), 2 + 1, PARAMS.flushInterval, PARAMS.miningMargin))),
+  }
+
+  /// Admission judges at the observed tip, or at the boundary of the last
+  /// flush epoch if that is higher (#85). Running at 5, the hub adopted the
+  /// epoch whose boundary is 3; at 6 it begins the flush for 6 and records it.
+  /// Told the tip is 5 again, it still judges at 6. Before #85 it judged at 5.
+  run admissionHeightTest = all {
+    assert(running(5).admissionHeight() == 5),
+    assert(flushing.lastEpoch == Some(2) and flushing.admissionHeight() == 6),
+    assert(flushing.after(verdict(pA, Accepted)).after(verdict(pJunk, Accepted)).after(FlushDoneHInput)
+      .after(TipHInput(5)).admissionHeight() == 6),
+    assert({ ...flushing, params: { ...PARAMS, admitAtLastFlush: false } }
+      .after(verdict(pA, Accepted)).after(verdict(pJunk, Accepted)).after(FlushDoneHInput)
+      .after(TipHInput(5)).admissionHeight() == 5),
+    // A higher tip is judged at the tip.
+    assert(flushing.after(verdict(pA, Accepted)).after(verdict(pJunk, Accepted)).after(FlushDoneHInput)
+      .after(TipHInput(7)).admissionHeight() == 7),
   }
 
   run nextFlushHeightTest = all {
@@ -262,7 +280,8 @@ module hubTest {
     assert(returning.after(FlushDoneHInput).lastEpoch == Some(1)),
     // Expiry is judged at the observed tip, not at the cadence height.
     assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).queued().contains(pA)),
-    assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).lastEpoch == Some(3)),
+    // The epoch was recorded when the flush began, so its end leaves it alone.
+    assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).lastEpoch == Some(1)),
     assert(not({ ...returning, tip: Some(8) }.after(FlushDoneHInput).queued().contains(pA))),
   }
 

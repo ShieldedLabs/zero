@@ -82,11 +82,17 @@ module protocol {
     payloads: Set(early, late, tight, junk, plain),
     maxRequests: 3,
     roles: allHonest,
+    emptyFoundIsError: true,
   }
 
   // One Byzantine component at a time.
   pure val byzHub = { ...baseline, roles: { ...allHonest, hub: Byzantine } }
   pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
+
+  /// A Byzantine indexer in front of the hub as it was before #85, which
+  /// forwarded an empty found answer. Kept so that the gate shows finding 8
+  /// still reproduces without the fix.
+  pure val byzIndexerPre85 = { ...byzIndexer, emptyFoundIsError: false }
 
   // ========================================================================
   // The system
@@ -416,6 +422,26 @@ module protocol {
         | _ => true
       })
 
+  /// G5. Every "pending" the wallet is told was true at the hub that gave
+  /// it, at some point between the request and the answer: the transaction
+  /// was queued there. G4 restricted to pending. Unlike G4 it survives a
+  /// Byzantine indexer, because since #85 the hub's client refuses the one
+  /// indexer answer that reads as pending (finding 8).
+  pure def pendingOnlyFromQueueIn(s: System, audit: Audit): bool =
+    s.events().forall(event =>
+      match event {
+        | Got(got) =>
+          or {
+            got.obs != Pending,
+            match got.via {
+              | Some(nonce) =>
+                audit.windows.keys().contains(nonce) and audit.windows.get(nonce).contains(Pending)
+              | None => false
+            },
+          }
+        | _ => true
+      })
+
   // ------------------------------------------------------------------------
   // Known gaps
   // ------------------------------------------------------------------------
@@ -602,6 +628,11 @@ module protocol {
   action initBaseline = all { payloadsWellFormed(baseline), initWith(baseline) }
   action initByzHub = all { payloadsWellFormed(byzHub), aForeignTransactionExists(byzHub), initWith(byzHub) }
   action initByzIndexer = all { payloadsWellFormed(byzIndexer), aForeignTransactionExists(byzIndexer), initWith(byzIndexer) }
+  action initByzIndexerPre85 = all {
+    payloadsWellFormed(byzIndexerPre85),
+    aForeignTransactionExists(byzIndexerPre85),
+    initWith(byzIndexerPre85),
+  }
 
   // ------------------------------------------------------------------------
   // Roles
@@ -747,9 +778,10 @@ module protocol {
     s.net.inbox(HubAddr).filter(mail => requestOf(mail.msg, INotFound) != Set())
 
   /// What the hub may answer when `mail` is delivered and its indexer would
-  /// answer a lookup with `answer`.
+  /// answer a lookup with `answer`. The hub sees that answer through its
+  /// client.
   def hubReceipts(mail: Mail, answer: IndexerAnswer): Set[AAnswer] =
-    requestOf(mail.msg, answer).map(request => hubAnswers(s.hub, request)).flatten()
+    requestOf(mail.msg, hubReads(answer, cfg.emptyFoundIsError)).map(request => hubAnswers(s.hub, request)).flatten()
 
   /// The network delivers a request to the hub, which answers its sender. For
   /// a lookup, `answer` is what the hub's indexer says if the queue misses.
@@ -969,6 +1001,7 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
+  val pendingOnlyFromQueue = pendingOnlyFromQueueIn(s, audit)
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
@@ -1072,7 +1105,10 @@ module protocol {
   /// The reply an honest hub gives, in the current state, to a lookup of
   /// `txid` on which its indexer would answer `answer`.
   def honestReplyOn(txid: TxId, answer: IndexerAnswer): WireReply =
-    render(if (s.hub.queue.exists(payload => payload.txid == Some(txid))) QueueHit else FromIndexer(answer))
+    render(
+      if (s.hub.queue.exists(payload => payload.txid == Some(txid))) QueueHit
+      else FromIndexer(hubReads(answer, cfg.emptyFoundIsError))
+    )
 
   /// The same, with a truthful indexer.
   def honestReply(txid: TxId): WireReply =

@@ -539,6 +539,23 @@ module hubMachine {
     h.inFlight().forall(payload =>
       isConformingAndOnTime(payload) and isFirstOffer(payload) implies marginLeft(payload, flightStart))
 
+  /// G8. Admission and the cadence agree on which flush is next: every entry
+  /// the hub has admitted, and not requeued, survives the first flush the
+  /// cadence has not yet spent, with the mining margin to spare. Before #85
+  /// admission worked the next flush out from the observed tip alone, which
+  /// can sit below a boundary the cadence has already adopted or flushed for
+  /// (findings 2 and 6). A requeued entry is judged at the observed tip on
+  /// purpose (`flush` in `batcher.rs`), so it is not covered.
+  val admissionMatchesCadence =
+    match h.lastEpoch {
+      | Some(epoch) =>
+        h.queued().forall(payload =>
+          h.queue.get(payload) == 0 implies
+            survivesNextFlush(payload.expiry, epoch * cfg.params.flushInterval,
+              cfg.params.flushInterval, cfg.params.miningMargin))
+      | None => true
+    }
+
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
   // ------------------------------------------------------------------------
@@ -626,6 +643,7 @@ module hubMachine {
       minWalletExpiry: 7,
       reorgAllowance: 1,
       maxAttempts: 2,
+      admitAtLastFlush: true,
     },
     staleWindow: 3,
     maxFlightBlocks: 1,
@@ -654,6 +672,12 @@ module hubMachine {
     payloads: Set(orchard("early", 2, 10), orchard("late", 4, 12)),
   }
 
+  /// `c` with the admission of the code before #85, which judged expiry at
+  /// the observed tip alone. Kept so that the gate shows findings 2 and 6
+  /// still reproduce without the fix.
+  pure def pre85(c: HubConfig): HubConfig =
+    { ...c, params: { ...c.params, admitAtLastFlush: false } }
+
   // A Byzantine indexer, on the schedule of `timely`, with one supported
   // migration and `tight`.
   pure val byzIndexer: HubConfig = { ...timely, indexerRole: Byzantine, payloads: Set(early, tight) }
@@ -671,6 +695,7 @@ module hubMachine {
 
   action initTimely = all { shippedAssumptions(timely), initWith(timely) }
   action initFlakyTip = all { shippedAssumptions(flakyTip), initWith(flakyTip) }
+  action initFlakyTipPre85 = all { shippedAssumptions(pre85(flakyTip)), initWith(pre85(flakyTip)) }
   action initFlakyTipNoSlack = all {
     standingAssumptions(flakyTipNoSlack),
     not(reorgSlackFits(flakyTipNoSlack)),
@@ -685,5 +710,12 @@ module hubMachine {
     staleSlackFits(staleLagWithSlack),
     not(shippedRelationsKept(staleLagWithSlack)),
     initWith(staleLagWithSlack),
+  }
+  action initStaleLagWithSlackPre85 = all {
+    standingAssumptions(pre85(staleLagWithSlack)),
+    reorgSlackFits(pre85(staleLagWithSlack)),
+    staleSlackFits(pre85(staleLagWithSlack)),
+    not(shippedRelationsKept(pre85(staleLagWithSlack))),
+    initWith(pre85(staleLagWithSlack)),
   }
 }

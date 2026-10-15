@@ -107,6 +107,18 @@ module types {
     | INotFound
     | IUnavailable
 
+  /// An indexer's lookup answer as the hub's client returns it
+  /// (`ChainClient::get_transaction`). Since #85 a found answer with no body,
+  /// at any height, counts as that endpoint failing: "found, height 0, no
+  /// body" is the hub's own reply for a queue hit, and only the queue may give
+  /// it. The model has one endpoint, so the failure is the fold's "none
+  /// answered". Before #85 the answer was passed on as it came.
+  pure def hubReads(answer: IndexerAnswer, emptyFoundIsError: bool): IndexerAnswer =
+    match answer {
+      | IFound(found) => if (emptyFoundIsError and found.body == None) IUnavailable else answer
+      | _ => answer
+    }
+
   /// An indexer's verdict on one broadcast transaction. `Retryable` means
   /// nothing judged it: the indexer could not be reached or could not be read.
   type Verdict = Accepted | AlreadyKnown | Rejected | Retryable
@@ -197,5 +209,8 @@ module types {
     payloads: Set[Payload],
     maxRequests: int,
     roles: Roles,
+    // The hub reads an indexer's empty found answer as a failure (#85,
+    // finding 8). False is the code before #85, which forwarded it.
+    emptyFoundIsError: bool,
   }
 }
