@@ -107,6 +107,16 @@ module types {
     | INotFound
     | IUnavailable
 
+  /// An indexer's lookup answer as the hub's client returns it
+  /// (`ChainClient::get_transaction`). A found answer with no body, at any
+  /// height, is that endpoint failing: "found, height 0, no body" is the hub's
+  /// own queue-hit reply. With the model's one endpoint that is unavailable.
+  pure def hubReads(answer: IndexerAnswer): IndexerAnswer =
+    match answer {
+      | IFound(found) => if (found.body == None) IUnavailable else answer
+      | _ => answer
+    }
+
   /// An indexer's verdict on one broadcast transaction. `Retryable` means
   /// nothing judged it: the indexer could not be reached or could not be read.
   type Verdict = Accepted | AlreadyKnown | Rejected | Retryable

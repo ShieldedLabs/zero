@@ -304,9 +304,9 @@ finish
 echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
 # The guarantees, where they are claimed.
-job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub
+job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue
 job holds byzHub              operatorBlind txidAuthenticity
-job holds byzIndexer          operatorBlind txidAuthenticity
+job holds byzIndexer          operatorBlind txidAuthenticity pendingOnlyFromQueue
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
@@ -357,19 +357,23 @@ fi
 G6B=conformingFirstOfferBeforeExpiry
 K5=ackedIsHeldOrSettled
 K6=conformingEveryOfferBeforeExpiry
+G8=admissionMatchesCadence
 
 # The schedule guarantee with every component honest: under a timely tip, and
 # under a tip that may be reported behind the chain.
 job tlc_holds    initTimely             step $G6B
 job tlc_holds    initTimely             step $K6
 job tlc_holds    initFlakyTip           step $G6B
+job tlc_holds    initTimely             step $G8
+job tlc_holds    initFlakyTip           step $G8                        # finding 6, fixed by #85
+job tlc_holds    initStaleLagWithSlack  step $G8                        # finding 2's admission half, fixed by #85
 
 # The known gaps, each on the configuration that isolates its cause. The last
 # argument is the length of TLC's counterexample.
 job tlc_violated initFlakyTipNoSlack    step $G6B 12                    # K3'
 job tlc_violated initStaleLag           step $G6B 13                    # K4
 job tlc_violated initStaleLag           step $K6 13                     # K6
-job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2
+job tlc_violated initStaleLagWithSlack  step $G6B 19                    # finding 2's spent epoch, not fixed by #85
 # K5, three causes: a crash; without one, a final flush nothing judged; with
 # no shutdown either, a requeue that gives the entry up as expired.
 job tlc_violated initTimely             step $K5 5

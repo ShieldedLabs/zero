@@ -262,7 +262,8 @@ module hubTest {
     assert(returning.after(FlushDoneHInput).lastEpoch == Some(1)),
     // Expiry is judged at the observed tip, not at the cadence height.
     assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).queued().contains(pA)),
-    assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).lastEpoch == Some(3)),
+    // The epoch was recorded when the flush began; its end leaves it alone.
+    assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).lastEpoch == Some(1)),
     assert(not({ ...returning, tip: Some(8) }.after(FlushDoneHInput).queued().contains(pA))),
   }
 

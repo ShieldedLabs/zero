@@ -522,7 +522,7 @@ module hubMachine {
   /// honours the expiry floor, and it first entered the queue of this run of
   /// the hub within the delivery lag of the height it was built at. A copy
   /// that arrives late at a hub that has been down since the first one is not
-  /// timely, whatever happened before (K8).
+  /// timely, whatever happened before (finding 6).
   def isConformingAndOnTime(payload: Payload): bool =
     conforming(payload, cfg.params.minWalletExpiry) and onTime.contains(payload)
 
@@ -538,6 +538,20 @@ module hubMachine {
   val conformingFirstOfferBeforeExpiry =
     h.inFlight().forall(payload =>
       isConformingAndOnTime(payload) and isFirstOffer(payload) implies marginLeft(payload, flightStart))
+
+  /// G8. Every entry the hub has admitted, and not requeued, survives the
+  /// first flush the cadence has not spent, with the mining margin to spare:
+  /// admission's "provably survives". A requeued entry is judged at the
+  /// observed tip on purpose, so it is not covered.
+  val admissionMatchesCadence =
+    match h.lastEpoch {
+      | Some(epoch) =>
+        h.queued().forall(payload =>
+          h.queue.get(payload) == 0 implies
+            survivesNextFlush(payload.expiry, epoch * cfg.params.flushInterval,
+              cfg.params.flushInterval, cfg.params.miningMargin))
+      | None => true
+    }
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold

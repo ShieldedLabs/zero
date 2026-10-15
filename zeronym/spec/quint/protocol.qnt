@@ -416,6 +416,22 @@ module protocol {
         | _ => true
       })
 
+  /// G5. Every "pending" the wallet is told was true at the hub that gave
+  /// it: the transaction was queued there at some point between the request
+  /// and the answer. G4 restricted to pending; unlike G4 it survives a
+  /// Byzantine indexer, whose empty "found" the hub reads as a failure.
+  pure def pendingOnlyFromQueueIn(s: System, audit: Audit): bool =
+    s.events().forall(event =>
+      match event {
+        | Got(got) =>
+          got.obs != Pending or
+            match got.via {
+              | Some(nonce) => audit.windows.keys().contains(nonce) and audit.windows.get(nonce).contains(Pending)
+              | None => false
+            }
+        | _ => true
+      })
+
   // ------------------------------------------------------------------------
   // Known gaps
   // ------------------------------------------------------------------------
@@ -749,7 +765,7 @@ module protocol {
   /// What the hub may answer when `mail` is delivered and its indexer would
   /// answer a lookup with `answer`.
   def hubReceipts(mail: Mail, answer: IndexerAnswer): Set[AAnswer] =
-    requestOf(mail.msg, answer).map(request => hubAnswers(s.hub, request)).flatten()
+    requestOf(mail.msg, hubReads(answer)).map(request => hubAnswers(s.hub, request)).flatten()
 
   /// The network delivers a request to the hub, which answers its sender. For
   /// a lookup, `answer` is what the hub's indexer says if the queue misses.
@@ -969,6 +985,7 @@ module protocol {
   val queuedBytesConfidential = queuedBytesConfidentialIn(s)
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
+  val pendingOnlyFromQueue = pendingOnlyFromQueueIn(s, audit)
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
@@ -1072,7 +1089,7 @@ module protocol {
   /// The reply an honest hub gives, in the current state, to a lookup of
   /// `txid` on which its indexer would answer `answer`.
   def honestReplyOn(txid: TxId, answer: IndexerAnswer): WireReply =
-    render(if (s.hub.queue.exists(payload => payload.txid == Some(txid))) QueueHit else FromIndexer(answer))
+    render(if (s.hub.queue.exists(payload => payload.txid == Some(txid))) QueueHit else FromIndexer(hubReads(answer)))
 
   /// The same, with a truthful indexer.
   def honestReply(txid: TxId): WireReply =

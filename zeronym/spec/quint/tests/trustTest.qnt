@@ -119,17 +119,16 @@ module trustTest {
       .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
-  /// G4 needs the indexer. For a transaction that exists nowhere it answers
-  /// "found, height 0, no body". The hub forwards it unchanged, and on the
-  /// wire it is the hub's own "queued here": the wallet sees pending.
-  run indexerForgesPendingTest =
+  /// Finding 8, fixed by #85. For a transaction that exists nowhere the
+  /// indexer answers "found, height 0, no body". Before #85 the hub forwarded
+  /// it and the wallet saw pending. The hub's client now reads it as the
+  /// endpoint failing, and the wallet sees the lookup as unavailable.
+  run indexerEmptyAnswerIsUnavailableTest =
     initByzIndexer
       .then(sends(Clean(early), true))
       .then(ask("early"))
-      .expect(lookupValidityPerHub)
       .then(deliverLookupFrom(ShimAddr, 1, "early", IFound({ body: None, height: AtZero })))
-      .then(deliverToShim(replyMail(1, WFound({ body: None, height: AtZero }))))
-      .expect(lastEvent == Got({ query: "early", obs: Pending, via: Some(1) }))
-      .expect(s.hub.queue == Set() and audit.windows.get(1) == Set(NotFound))
-      .expect(not(lookupValidityPerHub))
+      .then(deliverToShim(replyMail(1, WError)))
+      .expect(lastEvent == Got({ query: "early", obs: Unavailable, via: Some(1) }))
+      .expect(lookupValidityPerHub and pendingOnlyFromQueue)
 }
