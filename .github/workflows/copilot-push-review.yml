@@ -317,15 +317,18 @@ jobs:
           if ! vis=$(gh api "repos/$REVIEW_REPO" --jq .visibility 2>/dev/null); then
             vis=""
           fi
+          # Unknown visibility refuses in every mode, so a private target is
+          # never handled as a public one.
+          if [ -z "$vis" ]; then
+            refuse "could not read REVIEW_REPO's visibility (not visible to the token, or does not exist)"
+          fi
           private=false
           if [ "$vis" = "private" ]; then
             private=true
           fi
 
           if [ "$MODE" = "security" ] || [ "$MODE" = "full" ]; then
-            if [ -z "$vis" ]; then
-              refuse "could not read REVIEW_REPO's visibility (not visible to the token, or does not exist)"
-            elif [ "$private" != "true" ]; then
+            if [ "$private" != "true" ]; then
               refuse "REVIEW_REPO visibility is \`$vis\`, not private"
             fi
           fi
@@ -689,4 +692,7 @@ jobs:
             fi
             gh pr close "$PR" --repo "$REVIEW_REPO" --comment "$comment" || true
           fi
-          git push "$REMOTE" --delete "$HEAD_BRANCH" "$BASE_BRANCH" || true
+          # One push per ref: a ref that was never created must not block
+          # deleting the other.
+          git push "$REMOTE" --delete "$HEAD_BRANCH" || true
+          git push "$REMOTE" --delete "$BASE_BRANCH" || true
