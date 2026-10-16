@@ -1,37 +1,65 @@
 name: Copilot Review
 
 # Copilot code review only ever looks at pull requests. There is no trigger, API
-# or setting that reviews a bare commit range, so a commit pushed straight to
-# main is invisible to it -- and this repository does not require pull requests.
+# or setting that reviews a bare commit range, and no per-run way to hand it a
+# different prompt.
 #
-# This workflow manufactures the one thing Copilot will look at. On a push to
-# main it points a scratch base branch at the commit main was on BEFORE the push,
-# snapshots the new tip on a second branch, and opens a pull request between
-# them. The diff of that pull request is exactly the commits that were just
-# pushed, so Copilot reviews them. The review is copied into this run's job
-# summary, then the pull request is closed and the snapshot deleted.
+# This workflow manufactures the one thing Copilot will look at. It points a
+# scratch base branch at the start of a commit range, snapshots the end of the
+# range on a second branch, and opens a pull request between them. The diff of
+# that pull request is exactly the range, so Copilot reviews it, under the
+# prompt of whichever mode was asked for. Then the pull request is closed and
+# both branches deleted.
 #
-# The base is derived from `github.event.before` every run rather than being
-# advanced and remembered, so there is no lagging state to get out of step with
-# main. A force-push makes before/after non-linear, which the two-dot diff still
-# renders correctly.
+# TRIGGERS. A pull request into main that touches a sensitive path, or carries
+# the `security-review` label, gets a `security` review of its whole range,
+# from its merge base with main to its head. The path list lives in the "Check
+# the pull request needs a security review" step. Fork and draft pull requests
+# are skipped, and a new push to the pull request supersedes the run reviewing
+# the old head. A manual dispatch can run any mode against one commit. Code
+# review of every pull request is not done here: the repository's Copilot code
+# review ruleset already does it on the pull request itself.
 #
-# Pushes that ARRIVED through a pull request are skipped: Copilot already
-# reviewed them on the way in, and reviewing the merge again is pure noise.
+# Pushes to main get a `code` review of the pushed range, from
+# `github.event.before` to the new tip. Pushes that ARRIVED through a pull
+# request are skipped: Copilot already reviewed them on the way in.
 #
-# The pull requests this opens are scratch. They are closed automatically, never
-# merged, and the branches under copilot-review/ are deleted on the way out.
+# REVIEW_REPO. The scratch branches and pull request go to the repository named
+# by the REVIEW_REPO variable, which defaults to this one. `security` and `full`
+# only run when REVIEW_REPO is private, read from the API on every run, and
+# anything short of a definite "private" counts as not private. Otherwise they
+# skip, with the reason in the job summary, rather than publish anywhere.
+# `code` may target any repository. Moving to a different target later is a
+# change to the variable only.
+#
+# WHAT LEAVES THE RUN. When REVIEW_REPO is private, the job summary and the
+# logs carry only the status and a link to the private pull request: never a
+# review body, an inline comment, or a count of them. The review stays where it
+# was written. When the target is public the scratch pull request is public
+# too, and the summary copies the review into the run.
+#
+# BRANCH NAMING. Each run pushes copilot-review/base-<run>-<attempt> and
+# copilot-review/head-<run>-<attempt>, and deletes both on the way out, so no
+# two runs share a branch. The scratch pull requests are closed automatically
+# and never merged. REVIEW_REPO's Copilot code review ruleset should include
+# refs/heads/copilot-review/base-* so the review is requested automatically;
+# the workflow also asks for it explicitly.
+#
+# MIRROR. A REVIEW_REPO other than this one must hold a seeded copy of main, so
+# that each run only sends the objects that are new since; the workflow does
+# not maintain it. GitHub Actions should be disabled there, since the pushed
+# tree carries this repository's workflows -- provided Copilot code review
+# still works with Actions off.
 #
 # REVIEW MODES. Copilot reads its custom instructions from
 # .github/copilot-instructions.md on the head branch of the pull request, and
-# from nowhere else -- there is no per-run way to hand it a different prompt.
-# The modes therefore live as fragments in .github/review-modes/, and this
-# workflow composes the requested one into that path on BOTH scratch branch
-# tips. Writing the same content to both keeps it out of the two-dot diff, so
-# the review still sees exactly the pushed range and nothing else. Pushes use
-# `code`; `security` and `full` are for manual runs.
+# from nowhere else. The modes therefore live as fragments in
+# .github/review-modes/, and this workflow composes the requested one into that
+# path on BOTH scratch branch tips. Writing the same content to both keeps it
+# out of the diff (see the overlay notes in "Open the review pull request"), so
+# the review still sees exactly the range and nothing else.
 #
-# One consequence worth knowing: a pushed range that itself edits
+# One consequence worth knowing: a reviewed range that itself edits
 # .github/copilot-instructions.md or .github/review-modes/** has that edit
 # masked by the overlay, so changes to the review prompt are not themselves
 # reviewed. That is a fair trade for being able to select a mode at all.
@@ -40,17 +68,32 @@ name: Copilot Review
 # authored by github-actions[bot], and Copilot does not review it: measured
 # directly, the identical diff into the identical base got no review as the bot
 # (PR #39) and a review in under two minutes as a real user (PR #41). So the
-# pull request is created with COPILOT_REVIEW_PAT, a personal access token
-# belonging to someone holding a Copilot seat. It needs BOTH `repo` and
-# `workflow` scopes: the snapshot branch mirrors whatever landed on main, and a
-# token without `workflow` is refused the moment a pushed range touches
-# .github/workflows/**. Without that secret the workflow
-# still runs and still cleans up, but the review will not arrive, and the job
-# summary says so rather than implying the range came back clean.
+# pull request is created with COPILOT_REVIEW_PAT, a token belonging to someone
+# holding a Copilot seat. It should be a fine-grained token with the org as
+# resource owner, repository access limited to this repository and REVIEW_REPO,
+# and Contents, Pull requests and Workflows read/write. Workflows, because the
+# snapshot carries whatever the range does, and a token without it is refused
+# the moment a range touches .github/workflows/**. A classic token with `repo`
+# and `workflow` also works, but reaches every repository its owner can.
+# Without that secret the workflow still runs and still cleans up, but the
+# review will not arrive, and the job summary says so rather than implying the
+# range came back clean.
+#
+# TRUST. On a pull request, this workflow and the compose.sh it runs come from
+# the pull request's own tree, with COPILOT_REVIEW_PAT available. That is the
+# trust level of any workflow on a same-repo branch, and why the token is
+# scoped as narrowly as above.
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    # No `paths:` filter: it would gate `labeled` as well, so the label could
+    # never ask for a review of a pull request outside the list. The path
+    # check runs inside the job instead. `unlabeled`, `edited` and
+    # `converted_to_draft` are left out; they change nothing worth reviewing.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       mode:
@@ -82,6 +125,15 @@ env:
 
 jobs:
   review:
+    # Drops pull request runs that should never start, without a runner, and
+    # shows them as skipped: fork pull requests (they get no secrets), drafts
+    # (`ready_for_review` picks them up later), and any label other than
+    # `security-review` being added.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        (github.event.action != 'labeled' || github.event.label.name == 'security-review'))
     # Job level, not workflow level: a workflow-level group is joined before
     # the job's `if:` is evaluated, so a run that is about to skip itself could
     # still cancel one that is doing real work. One group per pull request, so
@@ -98,12 +150,19 @@ jobs:
       - name: Pick the review mode
         id: mode
         env:
-          # A push is unattended, so it gets the cheap, high-signal review.
+          # A pull request is here for a security review; code review of every
+          # pull request already comes from the Copilot code review ruleset. A
+          # push is unattended, so it gets the cheap, high-signal review.
           # Anything heavier is asked for deliberately.
+          EVENT: ${{ github.event_name }}
           REQUESTED: ${{ github.event.inputs.mode }}
         run: |
           set -euo pipefail
-          mode="${REQUESTED:-code}"
+          if [ "$EVENT" = "pull_request" ]; then
+            mode=security
+          else
+            mode="${REQUESTED:-code}"
+          fi
           case "$mode" in
             code)     label="Code review";                     timeout=420 ;;
             security) label="Security review";                 timeout=600 ;;
@@ -118,6 +177,83 @@ jobs:
           echo "timeout=$timeout" >>"$GITHUB_OUTPUT"
           echo "Review mode: $mode ($label)"
 
+      # Runs first and uses only GITHUB_TOKEN, so a pull request that does not
+      # qualify never touches COPILOT_REVIEW_PAT and ends as "not requested"
+      # rather than as a refusal further down. It reads the changed files from
+      # the API rather than `git diff`, so a pull request that does not qualify
+      # never pays for a full-history clone of the vendored trees.
+      - name: Check the pull request needs a security review
+        id: trigger
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'security-review') }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Anything other than a pull request was asked for, or pushed, on
+          # purpose. Do not second-guess it.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$LABELED" = "true" ]; then
+            echo "security-review label present"
+            echo "run=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Files past the API's 3000-file limit cannot be listed, so a large
+          # pull request is reviewed rather than assumed clean. That catches
+          # most subtree pulls, and is intended.
+          if [ "$CHANGED_FILES" -gt 3000 ]; then
+            echo "$CHANGED_FILES files changed, more than the API can list; reviewing"
+            echo "run=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A failure to list the files fails the step: an unknown file list
+          # is not a clean one.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
+
+          # The sensitive paths. Keep in step with the areas the reviewing
+          # guidance singles out: .github/instructions/*.instructions.md and
+          # the "Where the bugs are" section of .github/review-modes/security.md.
+          # In `case`, `*` also matches `/`, so `dir/*` covers everything
+          # below dir.
+          sensitive=0
+          while IFS= read -r path; do
+            case "$path" in
+              zeronym/* \
+              | .github/workflows/* | .githooks/* \
+              | zebra/zebra-chain/* | zebra/zebra-consensus/* \
+              | zebra/zebra-script/* | zebra/zebra-network/* \
+              | zcashd/src/consensus/* | zcashd/src/primitives/* \
+              | zcashd/src/script/* | zcashd/src/crypto/* | zcashd/src/rust/* \
+              | zcashd/src/main.cpp | zcashd/src/serialize.h \
+              | librustzcash/zcash_primitives/* | librustzcash/zcash_proofs/* \
+              | librustzcash/zcash_transparent/* | librustzcash/zcash_keys/* \
+              | librustzcash/components/* \
+              | orchard/src/*)
+                echo "sensitive path changed: $path"
+                sensitive=1
+                break
+                ;;
+            esac
+          done <<<"$files"
+
+          if [ "$sensitive" = "0" ]; then
+            echo "No sensitive paths changed and no \`security-review\` label; security review not requested." \
+              >>"$GITHUB_STEP_SUMMARY"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >>"$GITHUB_OUTPUT"
+
       # Decides where the review may go before anything is cloned or pushed.
       # `security` and `full` output may only ever land in a private
       # repository, so they need REVIEW_REPO to report itself private, read
@@ -127,6 +263,7 @@ jobs:
       # somewhere else.
       - name: Check the review target
         id: target
+        if: steps.trigger.outputs.run == 'true'
         env:
           MODE: ${{ steps.mode.outputs.mode }}
           HAVE_PAT: ${{ secrets.COPILOT_REVIEW_PAT != '' }}
@@ -159,7 +296,11 @@ jobs:
             refuse "COPILOT_REVIEW_PAT is not available"
           fi
 
-          vis=$(gh api "repos/$REVIEW_REPO" --jq .visibility 2>/dev/null || true)
+          # Not `|| true` on the substitution: on an error gh prints the error
+          # body to stdout, which would land in `vis`. Any failure means empty.
+          if ! vis=$(gh api "repos/$REVIEW_REPO" --jq .visibility 2>/dev/null); then
+            vis=""
+          fi
           private=false
           if [ "$vis" = "private" ]; then
             private=true
@@ -180,7 +321,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Checkout
-        if: steps.target.outputs.run == 'true'
+        if: steps.target.outputs.run == 'true' && steps.trigger.outputs.run == 'true'
         # Pinned by SHA, not tag: this job holds contents:write and
         # pull-requests:write, and a tag can be moved under it.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -202,23 +343,36 @@ jobs:
       # own copy and is unaffected.
       - name: Check the checked-in instructions are in sync
         id: drift
-        if: steps.target.outputs.run == 'true'
+        if: steps.target.outputs.run == 'true' && steps.trigger.outputs.run == 'true'
         continue-on-error: true
         run: .github/review-modes/compose.sh --check code
 
-      - name: Decide whether this push needs a review
+      - name: Decide the range to review
         id: gate
-        if: steps.target.outputs.run == 'true'
+        if: steps.target.outputs.run == 'true' && steps.trigger.outputs.run == 'true'
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
           REF_INPUT: ${{ github.event.inputs.ref }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
           after="$AFTER"
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "$EVENT" = "pull_request" ]; then
+            # The whole pull request as GitHub shows it: from its merge base
+            # with main to its head. The checkout is the merge ref with full
+            # history, so both commits are present.
+            after="$PR_HEAD"
+            if ! before=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
+              echo "no merge base between $PR_BASE and $PR_HEAD; skipping"
+              echo "run=false" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
             # Manual runs review one commit, so the workflow can be tested
             # without pushing anything, and so an older commit can be re-reviewed
             # under a different mode.
@@ -277,7 +431,12 @@ jobs:
           echo "key=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_OUTPUT"
           # What the scratch pull request says it reviews. Deliberately never
           # `#N` or owner/repo#N, so nothing autolinks inside REVIEW_REPO.
-          echo "subject=main $(git rev-parse --short "$after")" >>"$GITHUB_OUTPUT"
+          if [ "$EVENT" = "pull_request" ]; then
+            subject="pr-${PR}"
+          else
+            subject="main $(git rev-parse --short "$after")"
+          fi
+          echo "subject=$subject" >>"$GITHUB_OUTPUT"
           echo "run=true" >>"$GITHUB_OUTPUT"
 
       - name: Skip pushes that already came through a pull request
@@ -291,8 +450,9 @@ jobs:
         run: |
           set -euo pipefail
           # A manual run is a deliberate request, usually to re-review something
-          # under a heavier mode. Do not second-guess it.
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          # under a heavier mode, and a pull request run reviews the pull
+          # request itself. Do not second-guess either.
+          if [ "$EVENT" != "push" ]; then
             echo "run=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
