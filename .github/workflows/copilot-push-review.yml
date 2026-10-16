@@ -20,10 +20,6 @@ name: Copilot Review
 # review of every pull request is not done here: the repository's Copilot code
 # review ruleset already does it on the pull request itself.
 #
-# Pushes to main get a `code` review of the pushed range, from
-# `github.event.before` to the new tip. Pushes that ARRIVED through a pull
-# request are skipped: Copilot already reviewed them on the way in.
-#
 # REVIEW_REPO. The scratch branches and pull request go to the repository named
 # by the REVIEW_REPO variable, which defaults to this one. `security` and `full`
 # only run when REVIEW_REPO is private, read from the API on every run, and
@@ -85,8 +81,6 @@ name: Copilot Review
 # scoped as narrowly as above.
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
     # No `paths:` filter: it would gate `labeled` as well, so the label could
@@ -152,8 +146,8 @@ jobs:
         env:
           # A pull request is here for a security review; code review of every
           # pull request already comes from the Copilot code review ruleset. A
-          # push is unattended, so it gets the cheap, high-signal review.
-          # Anything heavier is asked for deliberately.
+          # manual run defaults to the cheap, high-signal review; anything
+          # heavier is asked for deliberately.
           EVENT: ${{ github.event_name }}
           REQUESTED: ${{ github.event.inputs.mode }}
         run: |
@@ -194,9 +188,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Anything other than a pull request was asked for, or pushed, on
-          # purpose. Do not second-guess it.
-          if [ "$EVENT" != "pull_request" ]; then
+          # A manual run is a deliberate request, usually to re-review something
+          # under a heavier mode. Do not second-guess it.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
             echo "run=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
@@ -351,7 +345,6 @@ jobs:
         id: gate
         if: steps.target.outputs.run == 'true' && steps.trigger.outputs.run == 'true'
         env:
-          BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
           REF_INPUT: ${{ github.event.inputs.ref }}
@@ -381,7 +374,7 @@ jobs:
               # `-`, bare rev-parse neither resolves it nor fails: it echoes the
               # argument back and exits 0, so `set -e` never fires and the bogus
               # string flows on into `before`, cat-file rejects it, and the run
-              # ends as a green "previous tip is not present; skipping" having
+              # ends as a green "base commit is not present; skipping" having
               # reviewed nothing. A workflow that silently does not run is the
               # one failure mode worth engineering against here.
               #
@@ -393,19 +386,10 @@ jobs:
               fi
             fi
             before=$(git rev-parse "${after}~1")
-          else
-            before="$BEFORE"
           fi
 
-          # A push that created the branch, or whose previous tip has been
-          # garbage collected, has nothing coherent to diff against.
-          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            echo "no usable base for this push; skipping"
-            echo "run=false" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
           if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            echo "previous tip $before is not present; skipping"
+            echo "base commit $before is not present; skipping"
             echo "run=false" >>"$GITHUB_OUTPUT"
             exit 0
           fi
@@ -439,35 +423,8 @@ jobs:
           echo "subject=$subject" >>"$GITHUB_OUTPUT"
           echo "run=true" >>"$GITHUB_OUTPUT"
 
-      - name: Skip pushes that already came through a pull request
-        if: steps.gate.outputs.run == 'true'
-        id: prcheck
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.gate.outputs.head }}
-          REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          # A manual run is a deliberate request, usually to re-review something
-          # under a heavier mode, and a pull request run reviews the pull
-          # request itself. Do not second-guess either.
-          if [ "$EVENT" != "push" ]; then
-            echo "run=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Any pull request already associated with this commit means Copilot
-          # saw it on the way in.
-          count=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq 'length' 2>/dev/null || echo 0)
-          if [ "$count" != "0" ]; then
-            echo "commit arrived via a pull request; already reviewed"
-            echo "run=false" >>"$GITHUB_OUTPUT"
-          else
-            echo "run=true" >>"$GITHUB_OUTPUT"
-          fi
-
       - name: Open the review pull request
-        if: steps.gate.outputs.run == 'true' && steps.prcheck.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ secrets.COPILOT_REVIEW_PAT || github.token }}
