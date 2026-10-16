@@ -574,7 +574,10 @@ mod tests {
         let tip = TipTracker::new();
         tip.observe(1000);
         tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
-        assert!(tip.is_stale(), "precondition: the tip is stale before the reorg");
+        assert!(
+            tip.is_stale(),
+            "precondition: the tip is stale before the reorg"
+        );
 
         tip.observe(999);
         assert_eq!(tip.observed_height(), 999, "the reorg is still followed");

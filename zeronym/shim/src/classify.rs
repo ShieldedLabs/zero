@@ -444,7 +444,11 @@ mod branch_id_tests {
         // signal off, because the signal is what says a shim has started
         // diverting the entire network's traffic.
         let ev = classify_with_evidence(&v5_with_branch(0xDEAD_BEEF));
-        assert_eq!(ev.class, Class::Unparseable, "precondition: it does not parse");
+        assert_eq!(
+            ev.class,
+            Class::Unparseable,
+            "precondition: it does not parse"
+        );
         assert!(
             ev.is_unrecognised_branch(),
             "an unknown branch must be distinguishable from garbage, got {:?}",
