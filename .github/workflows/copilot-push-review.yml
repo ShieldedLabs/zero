@@ -56,9 +56,12 @@ name: Copilot Review
 # the review still sees exactly the range and nothing else.
 #
 # One consequence worth knowing: a reviewed range that itself edits
-# .github/copilot-instructions.md or .github/review-modes/** has that edit
-# masked by the overlay, so changes to the review prompt are not themselves
-# reviewed. That is a fair trade for being able to select a mode at all.
+# .github/copilot-instructions.md has that edit masked by the overlay, so it is
+# not itself reviewed. Edits to .github/review-modes/** stay in the diff and are
+# reviewed as code. That is a fair trade for being able to select a mode at all. On a
+# pull request the prompt is always main's (see TRUST), so a pull request that
+# edits .github/review-modes/** is reviewed under main's prompt, not its own;
+# the edit takes effect for reviews once it has merged.
 #
 # IDENTITY MATTERS. A pull request opened with the built-in GITHUB_TOKEN is
 # authored by github-actions[bot], and Copilot does not review it: measured
@@ -75,19 +78,29 @@ name: Copilot Review
 # review will not arrive, and the job summary says so rather than implying the
 # range came back clean.
 #
-# TRUST. On a pull request, this workflow and the compose.sh it runs come from
-# the pull request's own tree, with COPILOT_REVIEW_PAT available. That is the
-# trust level of any workflow on a same-repo branch, and why the token is
-# scoped as narrowly as above.
+# TRUST. Pull requests arrive through `pull_request_target`, so the workflow
+# that runs with COPILOT_REVIEW_PAT is always main's copy, never the pull
+# request's. The checkout is pinned to the pull request's base commit on main,
+# and everything executed afterwards -- compose.sh, the drift check -- comes
+# from that tree. The pull request's head is fetched as git objects only: it
+# is read with merge-base, diff, log and read-tree, and its tree is written
+# into a new commit for the scratch branch, but it is never checked out into
+# the working tree and nothing in it is run. No step interpolates a pull
+# request's title, body or branch name into a shell; the values a step needs
+# reach it through env. Fork pull requests are skipped before the job starts.
 
 on:
-  pull_request:
+  # `pull_request_target`, not `pull_request`: the workflow and prompt come
+  # from main rather than from the pull request. See TRUST above.
+  pull_request_target:
     branches: [main]
     # No `paths:` filter: it would gate `labeled` as well, so the label could
     # never ask for a review of a pull request outside the list. The path
-    # check runs inside the job instead. `unlabeled`, `edited` and
-    # `converted_to_draft` are left out; they change nothing worth reviewing.
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    # check runs inside the job instead. `edited` is here only for a pull
+    # request retargeted onto main; the job's `if:` drops title and body
+    # edits. `unlabeled` and `converted_to_draft` are left out; they change
+    # nothing worth reviewing.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, edited]
   workflow_dispatch:
     inputs:
       mode:
@@ -120,14 +133,18 @@ env:
 jobs:
   review:
     # Drops pull request runs that should never start, without a runner, and
-    # shows them as skipped: fork pull requests (they get no secrets), drafts
-    # (`ready_for_review` picks them up later), and any label other than
-    # `security-review` being added.
+    # shows them as skipped: fork pull requests (only same-repository pull
+    # requests ever reach a step holding COPILOT_REVIEW_PAT), drafts
+    # (`ready_for_review` picks them up later), any label other than
+    # `security-review` being added, and any edit other than a change of
+    # base. `changes.base` is only in the payload when the base changed, so a
+    # title or body edit evaluates to null here and is dropped.
     if: >-
-      github.event_name != 'pull_request' || (
+      github.event_name != 'pull_request_target' || (
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
-        (github.event.action != 'labeled' || github.event.label.name == 'security-review'))
+        (github.event.action != 'labeled' || github.event.label.name == 'security-review') &&
+        (github.event.action != 'edited' || github.event.changes.base.ref.from))
     # Job level, not workflow level: a workflow-level group is joined before
     # the job's `if:` is evaluated, so a run that is about to skip itself could
     # still cancel one that is doing real work. One group per pull request, so
@@ -137,7 +154,7 @@ jobs:
     # cancelled run's cleanup can only ever delete its own.
     concurrency:
       group: ${{ github.event.pull_request.number && format('copilot-review-pr-{0}', github.event.pull_request.number) || format('copilot-review-run-{0}', github.run_id) }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -152,7 +169,7 @@ jobs:
           REQUESTED: ${{ github.event.inputs.mode }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "pull_request" ]; then
+          if [ "$EVENT" = "pull_request_target" ]; then
             mode=security
           else
             mode="${REQUESTED:-code}"
@@ -201,18 +218,21 @@ jobs:
             exit 0
           fi
 
-          # Files past the API's 3000-file limit cannot be listed, so a large
+          # The files API lists at most 3000 files, and `changed_files` stops
+          # counting at 3000 too, so at 3000 the list may be incomplete. Such a
           # pull request is reviewed rather than assumed clean. That catches
           # most subtree pulls, and is intended.
-          if [ "$CHANGED_FILES" -gt 3000 ]; then
-            echo "$CHANGED_FILES files changed, more than the API can list; reviewing"
+          if [ "$CHANGED_FILES" -ge 3000 ]; then
+            echo "$CHANGED_FILES files changed, at the limit the API can list; reviewing"
             echo "run=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
 
           # A failure to list the files fails the step: an unknown file list
-          # is not a clean one.
-          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
+          # is not a clean one. A rename counts under both its old and its
+          # new path, so moving a file out of a sensitive area still matches.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+                    --jq '.[] | .filename, (.previous_filename // empty)')
 
           # The sensitive paths. Keep in step with the areas the reviewing
           # guidance singles out: .github/instructions/*.instructions.md and
@@ -278,8 +298,10 @@ jobs:
             {
               printf 'Mode: `%s` -- not run.\n\n' "$MODE"
               printf 'Reason: %s.\n\n' "$1"
-              printf 'Security reviews are skipped, not published, until a private\n'
-              printf 'REVIEW_REPO is configured. See the note at the top of the workflow.\n'
+              if [ "$MODE" = "security" ] || [ "$MODE" = "full" ]; then
+                printf 'Security reviews are skipped, not published, until a private\n'
+                printf 'REVIEW_REPO is configured. See the note at the top of the workflow.\n'
+              fi
             } >>"$GITHUB_STEP_SUMMARY"
             exit 0
           }
@@ -320,6 +342,11 @@ jobs:
         # pull-requests:write, and a tag can be moved under it.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # A pull request checks out its base commit on main, so every script
+          # run below is main's. The head is fetched as data in the range step
+          # and never checked out. A manual run leaves this empty and gets the
+          # default, the commit it was dispatched on.
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           # The credential git pushes with, not just the one `gh` calls with.
           # checkout persists whatever it is given, so leaving this at the
@@ -354,16 +381,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A skip is visible in the job summary as well as the log. The
+          # reason names commits only, never anything from a review.
+          skip() {
+            echo "$1; skipping"
+            printf 'Range check: %s; not reviewed.\n' "$1" >>"$GITHUB_STEP_SUMMARY"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+
           after="$AFTER"
-          if [ "$EVENT" = "pull_request" ]; then
+          if [ "$EVENT" = "pull_request_target" ]; then
             # The whole pull request as GitHub shows it: from its merge base
-            # with main to its head. The checkout is the merge ref with full
-            # history, so both commits are present.
+            # with main to its head. The checkout is the base commit with full
+            # history; the head is fetched as objects only, never checked out.
+            # A failed fetch fails the step: an unreadable head is not a clean
+            # one.
+            git fetch --no-tags --quiet origin "$PR_HEAD"
             after="$PR_HEAD"
             if ! before=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
-              echo "no merge base between $PR_BASE and $PR_HEAD; skipping"
-              echo "run=false" >>"$GITHUB_OUTPUT"
-              exit 0
+              skip "no merge base between $PR_BASE and $PR_HEAD"
             fi
           elif [ "$EVENT" = "workflow_dispatch" ]; then
             # Manual runs review one commit, so the workflow can be tested
@@ -389,22 +426,16 @@ jobs:
           fi
 
           if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            echo "base commit $before is not present; skipping"
-            echo "run=false" >>"$GITHUB_OUTPUT"
-            exit 0
+            skip "base commit $before is not present"
           fi
 
           if [ "$before" = "$after" ]; then
-            echo "nothing new; skipping"
-            echo "run=false" >>"$GITHUB_OUTPUT"
-            exit 0
+            skip "nothing new"
           fi
 
           changed=$(git diff --name-only "$before" "$after" | wc -l | tr -d ' ')
           if [ "$changed" -eq 0 ]; then
-            echo "empty diff; skipping"
-            echo "run=false" >>"$GITHUB_OUTPUT"
-            exit 0
+            skip "empty diff"
           fi
 
           echo "base=$before" >>"$GITHUB_OUTPUT"
@@ -415,7 +446,7 @@ jobs:
           echo "key=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_OUTPUT"
           # What the scratch pull request says it reviews. Deliberately never
           # `#N` or owner/repo#N, so nothing autolinks inside REVIEW_REPO.
-          if [ "$EVENT" = "pull_request" ]; then
+          if [ "$EVENT" = "pull_request_target" ]; then
             subject="pr-${PR}"
           else
             subject="main $(git rev-parse --short "$after")"
@@ -491,7 +522,7 @@ jobs:
           # the subjects are still useful context, so carry them in the message.
           head_msg=$(printf '%s\n\n%s\n' \
             "Reviewed range: ${short_base}..${short_head}" \
-            "$(git log --format='%h %s' "${BASE_SHA}..${HEAD_SHA}" | head -50)")
+            "$(git log -n 50 --format='%h %s' "${BASE_SHA}..${HEAD_SHA}")")
           head_commit=$(overlay "$HEAD_SHA" "$base_commit" "$head_msg")
 
           # Recorded BEFORE anything is pushed, so that a failure on either push
