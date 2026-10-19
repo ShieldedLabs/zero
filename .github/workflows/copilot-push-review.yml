@@ -689,9 +689,10 @@ jobs:
           echo "found=$found" >>"$GITHUB_OUTPUT"
 
       # Security mode into a private target only. Nothing here may depend on
-      # what the review found: the step prints nothing, ends green, posts one
-      # comment on the private review pull request and pads itself to the
-      # same duration on every path. The reads run first and fail loudly; their
+      # what the review found. The step prints nothing. Once the reads succeed,
+      # it ends green, posts one comment on the private review pull request and
+      # pads itself to the same duration on every path. A failed read is
+      # reported on the private review pull request and fails the step; that
       # failure depends on the API, not on what the review says.
       - name: File a draft security advisory
         if: >-
@@ -715,13 +716,19 @@ jobs:
           fi
           start=$SECONDS
 
+          read_failed() {
+            timeout 15 gh pr comment "$PR" --repo "$REVIEW_REPO" \
+              --body "Reading the review failed (exit $1); no advisory filed." >/dev/null 2>&1 || true
+            exit 1
+          }
           comments="$RUNNER_TEMP/comments.json"
           timeout 10 gh api --paginate "repos/$REVIEW_REPO/pulls/$PR/comments?per_page=100" \
-            --jq '.[] | select((.user.login // "") | test("copilot";"i"))' | jq -s . >"$comments"
+            --jq '.[] | select((.user.login // "") | test("copilot";"i"))' 2>/dev/null \
+            | jq -s . >"$comments" 2>/dev/null || read_failed "${PIPESTATUS[*]}"
           # A scratch pull request gets far fewer than 30 reviews; one page is enough.
           timeout 10 gh api "repos/$REVIEW_REPO/pulls/$PR/reviews" \
             --jq '[.[] | select((.user.login // "") | test("copilot";"i")) | .body] | join("\n\n")' \
-            >"$RUNNER_TEMP/review.md"
+            >"$RUNNER_TEMP/review.md" 2>/dev/null || read_failed "$?"
           # `vulnerabilities` may not be null; one package entry under the
           # `other` ecosystem is the least the API accepts.
           jq -n --arg summary "$MODE_LABEL of $SUBJECT $RANGE" --arg url "$PR_URL" \
