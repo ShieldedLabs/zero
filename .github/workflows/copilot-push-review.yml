@@ -32,7 +32,11 @@ name: Copilot Review
 # logs carry only the status and a link to the private pull request: never a
 # review body, an inline comment, or a count of them. The review stays where it
 # was written. When the target is public the scratch pull request is public
-# too, and the summary copies the review into the run.
+# too, and the summary copies the review into the run. A `security` review into
+# a private target that leaves inline comments is also filed as a draft
+# security advisory on this repository. That step prints nothing, ends green
+# and takes the same time whether or not it files; its outcome is a comment on
+# the private review pull request.
 #
 # BRANCH NAMING. Each run pushes copilot-review/base-<run>-<attempt> and
 # copilot-review/head-<run>-<attempt>, and deletes both on the way out, so no
@@ -77,6 +81,12 @@ name: Copilot Review
 # Without that secret the workflow still runs and still cleans up, but the
 # review will not arrive, and the job summary says so rather than implying the
 # range came back clean.
+#
+# Filing the draft advisory uses a second token, COPILOT_ADVISORY_PAT. It is
+# fine-grained, limited to this repository, holds Repository security
+# advisories read/write and no other repository permissions, and belongs to an
+# admin or security manager of this repository. Only that step receives it.
+# Without it no advisory is filed and the review stays on the mirror as before.
 #
 # TRUST. Pull requests arrive through `pull_request_target`, so the workflow
 # that runs with COPILOT_REVIEW_PAT is always main's copy, never the pull
@@ -677,6 +687,72 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
           echo "found=$found" >>"$GITHUB_OUTPUT"
+
+      # Security mode into a private target only. Nothing here may depend on
+      # what the review found: the step prints nothing, ends green, posts one
+      # comment on the private review pull request and pads itself to the
+      # same duration on every path. The reads run first and fail loudly; their
+      # failure depends on the API, not on what the review says.
+      - name: File a draft security advisory
+        if: >-
+          steps.wait.outputs.found == '1' && steps.target.outputs.private == 'true' &&
+          steps.mode.outputs.mode == 'security'
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_REVIEW_PAT }}
+          # Its own token, seen by this step only. See IDENTITY MATTERS.
+          ADVISORY_TOKEN: ${{ secrets.COPILOT_ADVISORY_PAT }}
+          HAVE_ADVISORY_PAT: ${{ secrets.COPILOT_ADVISORY_PAT != '' }}
+          PR: ${{ steps.pr.outputs.number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          RANGE: ${{ steps.pr.outputs.range }}
+          SUBJECT: ${{ steps.gate.outputs.subject }}
+          MODE_LABEL: ${{ steps.mode.outputs.label }}
+        run: |
+          set -euo pipefail
+          # Configuration, not review content: no token, no advisory.
+          if [ "$HAVE_ADVISORY_PAT" != "true" ]; then
+            exit 0
+          fi
+          start=$SECONDS
+
+          comments="$RUNNER_TEMP/comments.json"
+          timeout 10 gh api --paginate "repos/$REVIEW_REPO/pulls/$PR/comments?per_page=100" \
+            --jq '.[] | select((.user.login // "") | test("copilot";"i"))' | jq -s . >"$comments"
+          # A scratch pull request gets far fewer than 30 reviews; one page is enough.
+          timeout 10 gh api "repos/$REVIEW_REPO/pulls/$PR/reviews" \
+            --jq '[.[] | select((.user.login // "") | test("copilot";"i")) | .body] | join("\n\n")' \
+            >"$RUNNER_TEMP/review.md"
+          # `vulnerabilities` may not be null; one package entry under the
+          # `other` ecosystem is the least the API accepts.
+          jq -n --arg summary "$MODE_LABEL of $SUBJECT $RANGE" --arg url "$PR_URL" \
+                --arg pkg "${GITHUB_REPOSITORY#*/}" \
+                --rawfile review "$RUNNER_TEMP/review.md" --slurpfile c "$comments" '{
+              summary: $summary,
+              description: ("Copilot review on " + $url + "\n\n" + $review + "\n\n## Inline comments\n\n"
+                + ($c[0] | map("### `\(.path):\(.line // .original_line)`\n\n\(.body)\n") | join("\n"))),
+              vulnerabilities: [{package: {ecosystem: "other", name: $pkg}}]
+            }' >"$RUNNER_TEMP/advisory.json"
+
+          # From here on nothing is printed and nothing fails the step.
+          if jq -e 'length > 0' "$comments" >/dev/null; then
+            if out=$(GH_TOKEN="$ADVISORY_TOKEN" timeout 20 gh api \
+                       "repos/$GITHUB_REPOSITORY/security-advisories" -X POST \
+                       --input "$RUNNER_TEMP/advisory.json" --jq .html_url 2>&1); then
+              note="Draft security advisory filed: $out"
+            else
+              note=$(printf 'Filing the draft security advisory failed:\n\n```\n%s\n```\n' "$out")
+            fi
+          else
+            note="No inline comments; no advisory filed."
+          fi
+          timeout 15 gh pr comment "$PR" --repo "$REVIEW_REPO" --body "$note" >/dev/null 2>&1 || true
+
+          # The same duration on every path. The bounds above (10+10+20+15 s)
+          # stay under it.
+          pad=$(( 60 - (SECONDS - start) ))
+          if [ "$pad" -gt 0 ]; then
+            sleep "$pad"
+          fi
 
       # Always runs, so a timeout, a failure or a cancellation above still
       # cleans up rather than leaving scratch pull requests and branches behind.
