@@ -608,9 +608,13 @@ jobs:
           set -euo pipefail
           deadline=$(( $(date +%s) + REVIEW_TIMEOUT_SECONDS ))
           found=0
+          errors=0
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            n=$(gh api "repos/$REVIEW_REPO/pulls/$PR/reviews" \
-                  --jq '[.[] | select(.user.login | test("copilot";"i"))] | length' 2>/dev/null || echo 0)
+            if ! n=$(gh api "repos/$REVIEW_REPO/pulls/$PR/reviews" \
+                       --jq '[.[] | select(.user.login | test("copilot";"i"))] | length' 2>/dev/null); then
+              n=0
+              errors=$((errors + 1))
+            fi
             if [ "$n" != "0" ]; then
               found=1
               break
@@ -631,6 +635,9 @@ jobs:
             if [ "$found" = "0" ]; then
               printf '**No review arrived within %ss.**\n\n' "$REVIEW_TIMEOUT_SECONDS"
               printf 'This is a reviewer failure, not a clean review: nothing was checked.\n\n'
+              if [ "$errors" -gt 0 ]; then
+                printf '%s review checks failed with an API error.\n\n' "$errors"
+              fi
               if [ "$HAVE_PAT" != "true" ]; then
                 printf 'The COPILOT_REVIEW_PAT secret is not set, so the pull request was opened\n'
                 printf 'by github-actions[bot], which Copilot does not review. That is the most\n'
