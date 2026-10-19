@@ -413,7 +413,10 @@ mod tests {
         let mut clearnet = forward_only();
         clearnet.require_diversion = true;
         clearnet.hub = Some("127.0.0.1:443".parse().unwrap());
-        assert!(matches!(clearnet.hub_selection(), Ok(HubSelection::Http(_))));
+        assert!(matches!(
+            clearnet.hub_selection(),
+            Ok(HubSelection::Http(_))
+        ));
     }
 
     #[test]
@@ -449,7 +452,10 @@ mod tests {
     fn forward_only_still_works_when_nobody_asked_for_privacy() {
         // It is the merged proof-of-concept behaviour and a legitimate
         // pass-through test mode, which is why the check is opt-in.
-        assert_eq!(forward_only().hub_selection(), Ok(HubSelection::ForwardOnly));
+        assert_eq!(
+            forward_only().hub_selection(),
+            Ok(HubSelection::ForwardOnly)
+        );
     }
 
     #[test]
