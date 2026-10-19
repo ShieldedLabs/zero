@@ -586,7 +586,7 @@ jobs:
           PR: ${{ steps.pr.outputs.number }}
         run: |
           set -euo pipefail
-          echo '{"reviewers":["Copilot"]}' \
+          echo '{"reviewers":["copilot-pull-request-reviewer[bot]"]}' \
             | gh api "repos/$REVIEW_REPO/pulls/$PR/requested_reviewers" -X POST --input - >/dev/null || true
 
       - name: Wait for the review, then record it
