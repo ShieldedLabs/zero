@@ -35,8 +35,8 @@ name: Copilot Review
 # too, and the summary copies the review into the run. A `security` review into
 # a private target that leaves inline comments is also filed as a draft
 # security advisory on this repository. That step prints nothing, ends green
-# and takes the same time whether or not it files; its outcome is a comment on
-# the private review pull request.
+# unless a read from the API fails, and takes the same time whether or not it
+# files; its outcome is a comment on the private review pull request.
 #
 # BRANCH NAMING. Each run pushes copilot-review/base-<run>-<attempt> and
 # copilot-review/head-<run>-<attempt>, and deletes both on the way out, so no
@@ -740,7 +740,9 @@ jobs:
                        --input "$RUNNER_TEMP/advisory.json" --jq .html_url 2>&1); then
               note="Draft security advisory filed: $out"
             else
-              note=$(printf 'Filing the draft security advisory failed:\n\n```\n%s\n```\n' "$out")
+              # Exit status 124 means the request timed out.
+              rc=$?
+              note=$(printf 'Filing the draft security advisory failed (exit %s):\n\n```\n%s\n```\n' "$rc" "$out")
             fi
           else
             note="No inline comments; no advisory filed."
