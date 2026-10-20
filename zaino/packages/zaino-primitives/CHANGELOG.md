@@ -8,6 +8,46 @@ and this library adheres to Rust's notion of
 ## [Unreleased]
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.1] - 2026-09-11
+
+### Added
+- `BlockTxPosition`: a transaction's position as a block height and an
+  index within the block, with `is_coinbase` read from the position.
+- `MempoolInfo`, moved here from zaino-state.
+- `ScriptType` and `classify_script`, which classify a transparent output
+  script into its 20-byte hash and its type.
+- `ShieldedPool::ALL`, every shielded pool in activation order.
+### Changed
+- Documentation no longer refers to zcashd.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.0] - 2026-08-28
+
+### Added
+- `types::EquihashSolution`, and `version` / `solution` on `BlockHeader`. A
+  header now carries everything needed to re-derive its own hash. Breaking for
+  code that constructs `BlockHeader` literals.
+- `types::ChainStateEpoch` — a generation plus the tip it describes, naming
+  *which* chain state a published view represents. Lives here because two
+  subsystems need the vocabulary and neither may depend on the other: the chain
+  head publishes epochs, and the mempool's coherence layer freezes and thaws
+  against them. It replaces `zaino_chain_head::ChainHeadEpoch` and
+  `zaino_mempool::NonFinalizedEpoch`, which were field-identical.
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.1.0] - 2026-08-14
+
+### Added
 - New crate. Zaino's domain vocabulary: chain types (`Block`, `BlockHeader`,
   `Transaction`, `BlockHash`, `TransactionHash`, `Height`, `TreeRoot`,
   `Treestate`, `ShieldedPool`, `ChainMetadata`, `Zatoshis`, `SignedZatoshis`)

@@ -8,6 +8,41 @@ and this library adheres to Rust's notion of
 ## [Unreleased]
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.1] - 2026-09-11
+
+### Added
+### Changed
+- Documentation no longer refers to zcashd, whose support was removed from
+  Zaino. No code change.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.0] - 2026-08-28
+
+### Added
+### Changed
+- `MempoolSource` bounds the renamed single-attempt ports of `zaino-source`
+  0.2.0 (`OneShotGetMempoolTxids`, `OneShotGetMempoolMetadata`,
+  `OneShotGetRawMempoolTransaction`, `OneShotGetMempoolSourceTip`).
+- `NfsEpochObserver::current_epoch` and
+  `TipAwareMempool::stream_transactions_until_tip_change` speak
+  `zaino_primitives::types::ChainStateEpoch`.
+### Deprecated
+### Removed
+- `NonFinalizedEpoch` — replaced by `zaino_primitives::types::ChainStateEpoch`,
+  which is field-identical and shared with the chain head subsystem that
+  publishes it.
+### Fixed
+
+## [0.1.0] - 2026-08-14
+
+### Added
 - New crate: `zaino-mempool`, the hexagonal *ports + foundational types* of
   Zaino's mempool subsystem — a bounded, coherent, local read model of the
   validator's mempool, separated from `zaino-state` (see

@@ -17,7 +17,14 @@ still pull upstream updates or split changes back out when useful.
 | `lightwalletd/` | https://github.com/zcash/lightwalletd.git | `master` | `up-lightwalletd` |
 
 Notes:
-- **zaino** tracks `dev` (its active default), not `stable`.
+- **zaino** tracks `dev` (its active default), not `stable`, but is pinned to a
+  release tag: currently **`0.10.0`** (2026-09-11). `dev` is an ancestor of each
+  tag rather than ahead of it, so the tag is strictly the better pin. As of the
+  0.10.0 re-vendor the finalised state lives in its own backend crates
+  (`zaino-chain-store`, `zaino-chain-store-zainodb`, `zaino-encoding`,
+  `zaino-primitives`, `zaino-chain-head-service`), zcashd support is gone, and
+  `chain_index/non_finalised_state.rs` no longer exists. Test with
+  `cargo nextest run`, not `cargo test`; see the `update-subtree` skill.
 - **zallet** is the `zallet` crate, which lives in the `zcash/wallet` repo.
 - **orchard** tracks `main` and is pinned to a release tag. The `feat/ironwood`
   branch it used to track was merged into `main` and shipped as the 0.15.x line,
@@ -32,7 +39,11 @@ Notes:
   2026-08-19 cohort, which is what zallet builds against.
 - **lightwalletd** is the original Go light client server (Zaino serves the same
   protocol in the Z3 stack). Vendored as the platform for private-lookup (PIR)
-  experimentation. Tracks `master`, pinned to a release tag (currently `v0.5.4`).
+  experimentation. Tracks `master`, normally pinned to a release tag.
+  **Deliberately un-pinned as of 2026-09-15**, at `aa9acac2f9`, nine commits past
+  `v0.5.4`: upstream shipped three CVE dependency bumps (x/crypto CVE-2026-56854,
+  x/net CVE-2026-46600, x/text CVE-2026-56852) after cutting that tag and has not
+  cut another. Re-pin when `v0.5.5` appears.
 
 ## Why subtrees (not submodules)
 

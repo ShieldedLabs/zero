@@ -37,14 +37,13 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use hyper::body::Incoming;
 use prost::Message;
 use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use crate::classify::{classify_with_evidence, Class, Evidence};
 use crate::hub::{HubTransport, Lookup, Submit};
 use crate::proxy::{
-    forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
+    forward, grpc_error, pass_through, InboundBody, ProxyBody, UpstreamPool, GRPC_CANCELLED,
     GRPC_DEADLINE_EXCEEDED, GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED,
     GRPC_UNAVAILABLE,
 };
@@ -100,7 +99,7 @@ const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// in [`crate::proxy`]. A backend that acts on a `GET` must not be handed one
 /// the classifier never saw.
 pub(crate) async fn send_transaction(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
@@ -143,8 +142,7 @@ pub(crate) async fn send_transaction(
     // otherwise careful not to write. The condition is a property of the BUILD,
     // so saying it once says all of it, and the remedy it names is a redeploy.
     if inspection.is_unrecognised_branch() {
-        static REPORTED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tracing::warn!(
                 target: "zis::classify",
@@ -169,9 +167,9 @@ pub(crate) async fn send_transaction(
     // Pass-through, or a migration with no hub: replay the ORIGINAL bytes to the
     // backing indexer, which sees exactly what the wallet sent, trailers and all.
     let upstream = pool.get().await?;
-    let replay = ReplayBody::new(frame, trailers).boxed();
+    let replay = ReplayBody::new(frame, trailers).boxed_unsync();
     let resp = forward(upstream, Request::from_parts(parts, replay)).await?;
-    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed_unsync()))
 }
 
 /// Send a migration to the hub instead of the operator's indexer, then answer
@@ -303,7 +301,7 @@ fn grpc_send_response(error_code: i32, error_message: &str) -> Response<ProxyBod
 /// queue (a diverted, unflushed migration) or from its own indexer. Forward-only
 /// mode (no hub) passes through to the operator unchanged.
 pub(crate) async fn get_transaction(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
@@ -368,6 +366,29 @@ pub(crate) async fn get_transaction(
     }
 
     match diversion.hub.get_transaction(&filter.hash).await {
+        // The hub's queue-hit sentinel: found, height 0, no bytes. Since
+        // 45e408f0ff the hub answers a lookup for a QUEUED migration this way,
+        // because the lookup is unauthenticated on both transports and serving
+        // a not-yet-published migration's bytes to whoever asks would let a
+        // third party broadcast it first. Relaying the sentinel is the whole
+        // point of it: height 0 is the mempool sentinel, and it is the
+        // existence-and-status signal this stateless shim has nothing else to
+        // answer from. A wallet renders "pending" from it.
+        //
+        // It must not go through the L4 guard below. The guard verifies the
+        // RETURNED BYTES against the queried txid, and there are none here; it
+        // would deserialize an empty body, fail, and turn every queued
+        // migration into NOT_FOUND. Nor is there anything for it to protect:
+        // the attack L4 exists to stop is a hub substituting a DIFFERENT
+        // transaction's bytes, which an empty body cannot do.
+        //
+        // Height 0 only. A mined transaction always has bytes, so an empty body
+        // at a nonzero height is not a queue hit and is not something to hand a
+        // wallet as a transaction; it falls through to the arm below, where the
+        // guard refuses it.
+        Ok(Lookup::Found { data, height }) if data.is_empty() && height == 0 => {
+            Ok(get_transaction_response(&data, height))
+        }
         Ok(Lookup::Found { data, height }) => {
             // L4: verify the hub returned the transaction that was ASKED for. A
             // hub, buggy or hostile, that answers a query with a DIFFERENT
@@ -455,9 +476,11 @@ fn not_found_message(wire_hash: &[u8]) -> String {
     )
 }
 
-/// A synthesized `GetTransaction` reply carrying the transaction the hub
-/// returned. Height 0 (from a queue hit) is the mempool sentinel; a mined
-/// transaction relays the indexer's height.
+/// A synthesized `GetTransaction` reply carrying what the hub returned. Height 0
+/// is the mempool sentinel; a mined transaction relays the indexer's height. The
+/// bytes are the hub's verbatim, and for a queue hit there are none: the hub
+/// withholds a queued migration's bytes, and the wallet that sent it already has
+/// them.
 fn get_transaction_response(tx_bytes: &[u8], height: u64) -> Response<ProxyBody> {
     let message = RawTransaction {
         data: tx_bytes.to_vec().into(),
@@ -478,7 +501,7 @@ fn grpc_unary(message: &[u8]) -> Response<ProxyBody> {
     let mut trailers = HeaderMap::new();
     trailers.insert("grpc-status", HeaderValue::from_static("0"));
 
-    let body = ReplayBody::new(Bytes::from(framed), Some(trailers)).boxed();
+    let body = ReplayBody::new(Bytes::from(framed), Some(trailers)).boxed_unsync();
     let mut resp = Response::new(body);
     resp.headers_mut().insert(
         http::header::CONTENT_TYPE,

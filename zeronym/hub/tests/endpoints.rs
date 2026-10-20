@@ -531,7 +531,6 @@ async fn a_malformed_frame_is_refused_rather_than_read_as_a_transaction() {
     );
 }
 
-
 /// The clearnet lookup arm is bounded, and says so rather than queueing.
 ///
 /// A ~100-byte unauthenticated `POST /transaction` used to buy an unbounded

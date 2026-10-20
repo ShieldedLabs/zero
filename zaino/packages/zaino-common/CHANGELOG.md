@@ -13,6 +13,27 @@ and this library adheres to Rust's notion of
 ### Removed
 ### Fixed
 
+## [0.5.2] - 2026-09-11
+
+### Added
+### Changed
+- Documentation no longer refers to zcashd, whose support was removed from
+  Zaino. No code change.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.5.1] - 2026-08-28
+
+### Added
+### Changed
+- Documentation-only republish: a comment on `SyncWriteBatchSize::default`
+  now notes that bulk sync is pipelined, so peak memory is up to twice the
+  batch bound. No code change.
+### Deprecated
+### Removed
+### Fixed
+
 ## [0.5.0] - 2026-08-14
 
 ### Added

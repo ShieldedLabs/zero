@@ -26,25 +26,19 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
 [policy.zaino-common]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.zaino-proto]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.zaino-serve]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.zaino-state]
-audit-as-crates-io = true
-
-[policy.zaino-testutils]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy.zainod]
-audit-as-crates-io = true
-
-[policy.zingo_test_vectors]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [[exemptions.addr2line]]
 version = "0.25.1"
@@ -1329,6 +1323,10 @@ criteria = "safe-to-deploy"
 [[exemptions.serde-big-array]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_arrays]]
+version = "0.2.0"
+criteria = "safe-to-run"
 
 [[exemptions.serde_derive_internals]]
 version = "0.29.1"

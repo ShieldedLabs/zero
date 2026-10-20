@@ -40,6 +40,26 @@ jobs:
       - name: Repository claim guards
         run: sh zeronym/guards.sh
 
+  # Formatting drift, on the cheap runner and without waiting for a compile.
+  # `hub` and `shim` are separate workspaces, so each gets its own step.
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: hub fmt
+        working-directory: zeronym/hub
+        run: cargo fmt --check
+
+      - name: shim fmt
+        working-directory: zeronym/shim
+        run: cargo fmt --check
+
   tests:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30

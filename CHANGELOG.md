@@ -10,6 +10,12 @@ date) before dispatching the release.
 
 ### Security
 
+- lightwalletd: pull upstream `master` to `aa9acac2f9`, nine commits past
+  `v0.5.4`, for three dependency CVE fixes: `golang.org/x/crypto`
+  (CVE-2026-56854, `5044f4b924`), `golang.org/x/net` (CVE-2026-46600,
+  `96fe9a145e`) and `golang.org/x/text` (CVE-2026-56852, `a3cb34c5e6`).
+  Upstream has not cut a tag carrying them, so the subtree is deliberately
+  un-pinned until `v0.5.5`; see SUBTREES.md.
 - zero-indexer: the shim, hub and probe take `webpki-roots` 1.0.10 and
   `rustls-webpki` 0.103.16 for the eMudhra intermediate CA key compromise
   disclosed 2026-10-20. `webpki-roots` drops the emSign ECC Root CA - G3 root,
@@ -17,6 +23,39 @@ date) before dispatching the release.
   intermediates' public keys. Both hops build their trust store from the
   bundled roots, so a certificate forged with those keys for a hub or backend
   hostname verified until now.
+
+### Changed
+
+- lightwalletd: `google.golang.org/grpc` 1.82.1 to 1.83.1 (`1cb42c5166`), and
+  the image now builds in a stage and ships on `debian:13-slim`
+  (`0e398d79cf`).
+- zaino: re-vendored to upstream `0.10.0` (265 commits, `07695fac5e..f1d2befe62`).
+  Upstream split the finalised state into backend crates
+  (`zaino-chain-store`, `zaino-chain-store-zainodb`, `zaino-encoding`,
+  `zaino-primitives`, `zaino-chain-head-service`) and removed zcashd support
+  entirely. Our sync-patience patch (`41d4342ded`) survives in
+  `chain_index.rs` and is still required: upstream's loop still escalates to
+  `CriticalError` after `max_consecutive_failures` with no startup exemption.
+
+### Removed
+
+- zaino: the two `[zero]` patches on `chain_index/non_finalised_state.rs`
+  (`fae256572a`, `1c1c3029ea`), obsolete because upstream deleted the module.
+  `UpdateError::DatabaseHole` and its "could not determine best chain" message,
+  which `fae256572a` existed to un-mask, no longer appear anywhere upstream.
+
+### zero-indexer
+
+- The shim serves gRPC-web (`application/grpc-web+proto` and
+  `grpc-web-text`) beside plain gRPC on the same port, so browser and
+  extension wallets can use it. Translation happens before routing, so a
+  gRPC-web `SendTransaction` is classified and diverted like any other; the
+  CORS preflight is answered by the shim; `Origin` and `Referer` are stripped
+  before the indexer.
+- The shim gains a broadcast-only mode (`--broadcast-only` /
+  `ZIS_BROADCAST_ONLY`, off by default): only `SendTransaction` and
+  `GetTransaction` are relayed, and every other gRPC method is answered
+  `UNIMPLEMENTED` without reaching the indexer.
 
 ## v29 - 2026-09-07
 

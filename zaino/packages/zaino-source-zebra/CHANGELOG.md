@@ -8,6 +8,34 @@ and this library adheres to Rust's notion of
 ## [Unreleased]
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.1] - 2026-09-11
+
+### Added
+### Changed
+- Documentation no longer refers to zcashd, whose support was removed from
+  Zaino. No code change.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.2.0] - 2026-08-28
+
+### Added
+### Changed
+- `ZebraValidator` implements `zaino-source` 0.2.0's renamed single-attempt
+  ports (`OneShotGetBlock` and peers); routing behaviour is unchanged.
+### Deprecated
+### Removed
+### Fixed
+
+## [0.1.0] - 2026-08-14
+
+### Added
 - New crate. `ZebraValidator` — the composite holding both Zebra adapters and
   implementing every `zaino-source` port by routing each question to whichever
   transport can answer it.

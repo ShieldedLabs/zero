@@ -81,11 +81,20 @@ futures-util = "0.3"
 
 # HTTP/2 (h2c) proxy stack. Versions match what zebra and zaino already resolve.
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
+
+# gRPC-web for browser wallets (a browser cannot read HTTP/2 trailers). tonic is
+# already in the shipped graph through zaino-proto, so tonic-web adds one small
+# crate; tower-http answers the CORS preflight a browser sends first, and tower
+# stacks the two around the handler.
+tonic = { version = "0.14", default-features = false }
+tonic-web = "0.14"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 # Only for parsing the hub's small JSON verdict (hub.rs). Already in the tree via
 # zebra-chain, so this is a direct-dependency declaration, not new compiled code.
@@ -125,6 +134,9 @@ tokio = { version = "1", features = ["test-util"] }
 # does not link proptest.
 zebra-chain = { path = "../../zebra/zebra-chain", features = ["proptest-impl"] }
 hex = "0.4"
+# Encodes and decodes grpc-web-text bodies in tests/grpc_web.rs. Already in the
+# tree through tonic-web.
+base64 = "0.22"
 
 # A REAL gRPC stack on both ends of the shim for tests/grpc_transparency.rs: a
 # tonic server standing in for lightwalletd or Zaino, and a tonic client
