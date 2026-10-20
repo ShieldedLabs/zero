@@ -6,6 +6,18 @@ in the GitHub release body and refuses to release without one. Stage upcoming
 entries under `## Unreleased`, then retitle the section to the version (with
 date) before dispatching the release.
 
+## Unreleased
+
+### Security
+
+- zero-indexer: the shim, hub and probe take `webpki-roots` 1.0.10 and
+  `rustls-webpki` 0.103.16 for the eMudhra intermediate CA key compromise
+  disclosed 2026-10-20. `webpki-roots` drops the emSign ECC Root CA - G3 root,
+  and `rustls-webpki` rejects any chain through the eight compromised
+  intermediates' public keys. Both hops build their trust store from the
+  bundled roots, so a certificate forged with those keys for a hub or backend
+  hostname verified until now.
+
 ## v29 - 2026-09-07
 
 ### Added
