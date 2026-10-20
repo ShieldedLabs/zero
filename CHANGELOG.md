@@ -26,7 +26,9 @@ date) before dispatching the release.
   mixnet-driver build also links nym-sdk's `rustls` 0.21 stack, whose
   `webpki-roots` 0.24 and 0.25 got no fix: `zeronym/vendor/` carries both with
   emSign ECC Root CA - G3 and AAA Certificate Services removed, bound through
-  `[patch.crates-io]`.
+  `[patch.crates-io]`. That stack's reqwest 0.11 also reads the system bundle,
+  so the shim and hub images drop emSign ECC Root CA - G3 from the pinned
+  StageX `ca-certificates.crt`.
 
 ### Changed
 

@@ -170,14 +170,21 @@ FROM busybox AS runtime
 USER root
 RUN mkdir -p /usr/lib /etc/ssl/certs /tmp && chmod 1777 /tmp
 
-# The hub speaks plaintext HTTP/1.1 and has no TLS stack in its dependency graph
-# today (on Caution the platform terminates TLS in-enclave and forwards here, and
-# the shim->hub hop is protected by the transport around it). This CA bundle is
-# purely defensive against a future dependency that expects a system trust store
-# (a stale zaino image once failed at startup with "No CA certificates were
-# loaded from the system"). Sourcing it from the same pinned pallet-rust keeps it
-# deterministic.
+# The system trust store. The mixnet-driver build reads it: nym-sdk's reqwest
+# 0.11 loads it through rustls-native-certs, and rustls-platform-verifier adds it
+# to its own roots. Sourcing it from the same pinned pallet-rust keeps it
+# deterministic. The awk drops the roots behind the compromised eMudhra
+# intermediates (disclosed 2026-10-20); reqwest 0.11 verifies with
+# rustls-webpki 0.101.7, which has no distrust list. This bundle carries
+# emSign ECC Root CA - G3; AAA Certificate Services is already absent.
 COPY --from=pallet-rust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN awk '/^(emSign ECC Root CA - G3|AAA Certificate Services)$/ { skip = 1 } \
+	!skip { print } \
+	skip && /^-----END CERTIFICATE-----$/ { skip = 0; getline }' \
+	/etc/ssl/certs/ca-certificates.crt > /tmp/ca-certificates.crt && \
+	mv /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt && \
+	! grep -qE '^(emSign ECC Root CA - G3|AAA Certificate Services)$' \
+	/etc/ssl/certs/ca-certificates.crt
 
 # Copy THROUGH the export stage, so the bytes an auditor hashes and the bytes
 # that ship are provably the same file.
