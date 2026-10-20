@@ -16,6 +16,19 @@ date) before dispatching the release.
   `96fe9a145e`) and `golang.org/x/text` (CVE-2026-56852, `a3cb34c5e6`).
   Upstream has not cut a tag carrying them, so the subtree is deliberately
   un-pinned until `v0.5.5`; see SUBTREES.md.
+- zero-indexer: the shim, hub and probe take `webpki-roots` 1.0.10 and
+  `rustls-webpki` 0.103.16 for the eMudhra intermediate CA key compromise
+  disclosed 2026-10-20. `webpki-roots` drops the emSign ECC Root CA - G3 root,
+  and `rustls-webpki` rejects any chain through the eight compromised
+  intermediates' public keys. Both hops build their trust store from the
+  bundled roots, so a certificate forged with those keys for a hub or backend
+  hostname verified until now. `webpki-root-certs` moves to 1.0.10 as well. The
+  mixnet-driver build also links nym-sdk's `rustls` 0.21 stack, whose
+  `webpki-roots` 0.24 and 0.25 got no fix: `zeronym/vendor/` carries both with
+  emSign ECC Root CA - G3 and AAA Certificate Services removed, bound through
+  `[patch.crates-io]`. That stack's reqwest 0.11 also reads the system bundle,
+  so the shim and hub images drop emSign ECC Root CA - G3 from the pinned
+  StageX `ca-certificates.crt`.
 
 ### Changed
 
