@@ -128,3 +128,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # patch), but only binds when nym-sdk is in the graph, i.e. with mixnet-driver.
 [patch."https://github.com/nymtech/nym"]
 nym-upgrade-mode-check = { path = "../vendor/nym-upgrade-mode-check" }
+
+# nym-sdk's tungstenite 0.20 stack pins webpki-roots 0.24 and 0.25, which still
+# trust the two roots behind the compromised eMudhra intermediates. These copies
+# drop both roots (see vendor/webpki-roots-0.25.4/Cargo.toml). Like the patch
+# above, they bind only when mixnet-driver puts nym-sdk in the graph.
+[patch.crates-io]
+webpki-roots-024 = { package = "webpki-roots", path = "../vendor/webpki-roots-0.24.0" }
+webpki-roots-025 = { package = "webpki-roots", path = "../vendor/webpki-roots-0.25.4" }

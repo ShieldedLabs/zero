@@ -52,9 +52,10 @@
 #   zaino/Cargo.toml              workspace root zaino-proto inherits from
 #   zaino/packages/zaino-proto/   the CompactTxStreamer codegen (the path dep)
 #   zeronym/vendor/nym-upgrade-mode-check/  the crypto-common [patch] target
+#   zeronym/vendor/webpki-roots-0.2{4.0,5.4}/  the eMudhra-distrust [patch] targets
 # The layout is the repo's own, so the shim's `../../zebra/zebra-chain`,
-# `../../zaino/packages/zaino-proto` and `../vendor/nym-upgrade-mode-check` path
-# references resolve unchanged. No manifest is edited, anywhere.
+# `../../zaino/packages/zaino-proto` and `../vendor/*` path references resolve
+# unchanged. No manifest is edited, anywhere.
 #
 # BUILD THIS FILE FROM INSIDE THE CONTEXT, not from the working tree:
 #   docker build -f "$CTX/zeronym/shim/deploy/Containerfile" "$CTX" ...

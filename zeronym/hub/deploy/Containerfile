@@ -39,6 +39,7 @@
 #   zebra/Cargo.toml              workspace root zebra-chain inherits from
 #   zebra/zebra-chain/            the vendored Zcash parser (the path dep)
 #   zebra/zebra-test/             optional dep of zebra-chain, manifest only
+#   zeronym/vendor/               the [patch] targets (see assemble.sh)
 # The layout is the repo's own, so the hub's `../../zebra/zebra-chain` path dep
 # resolves unchanged. No manifest is edited, anywhere. Unlike the shim, the hub
 # has NO zaino-proto dependency (it speaks JSON-RPC to full nodes, not the

@@ -22,7 +22,11 @@ date) before dispatching the release.
   and `rustls-webpki` rejects any chain through the eight compromised
   intermediates' public keys. Both hops build their trust store from the
   bundled roots, so a certificate forged with those keys for a hub or backend
-  hostname verified until now.
+  hostname verified until now. `webpki-root-certs` moves to 1.0.10 as well. The
+  mixnet-driver build also links nym-sdk's `rustls` 0.21 stack, whose
+  `webpki-roots` 0.24 and 0.25 got no fix: `zeronym/vendor/` carries both with
+  emSign ECC Root CA - G3 and AAA Certificate Services removed, bound through
+  `[patch.crates-io]`.
 
 ### Changed
 
