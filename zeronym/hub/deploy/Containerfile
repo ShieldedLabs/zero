@@ -176,14 +176,19 @@ RUN mkdir -p /usr/lib /etc/ssl/certs /tmp && chmod 1777 /tmp
 # deterministic. The awk drops the roots behind the compromised eMudhra
 # intermediates (disclosed 2026-10-20); reqwest 0.11 verifies with
 # rustls-webpki 0.101.7, which has no distrust list. This bundle carries
-# emSign ECC Root CA - G3; AAA Certificate Services is already absent.
+# emSign ECC Root CA - G3; AAA Certificate Services is already absent. The awk
+# keys on the label line curl's mk-ca-bundle writes above each PEM block; the
+# grep checks each certificate's first base64 line, so a bundle without labels
+# fails the build.
 COPY --from=pallet-rust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN awk '/^(emSign ECC Root CA - G3|AAA Certificate Services)$/ { skip = 1 } \
 	!skip { print } \
 	skip && /^-----END CERTIFICATE-----$/ { skip = 0; getline }' \
 	/etc/ssl/certs/ca-certificates.crt > /tmp/ca-certificates.crt && \
 	mv /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt && \
-	! grep -qE '^(emSign ECC Root CA - G3|AAA Certificate Services)$' \
+	! grep -qF \
+	-e MIICTjCCAdOgAwIBAgIKPPYHqWhwDtqLhDAKBggqhkjOPQQDAzBrMQswCQYDVQQG \
+	-e MIIEMjCCAxqgAwIBAgIBATANBgkqhkiG9w0BAQUFADB7MQswCQYDVQQGEwJHQjEb \
 	/etc/ssl/certs/ca-certificates.crt
 
 # Copy THROUGH the export stage, so the bytes an auditor hashes and the bytes
