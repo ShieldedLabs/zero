@@ -312,7 +312,7 @@ module protocol {
   // What a wallet can rely on, what it cannot, and what must be reachable.
   // Every definition is a pure predicate over the system and the audit
   // record. Three classes, kept apart: guarantees, invariants claimed under
-  // stated trust assumptions; known gaps, invariants a wallet might hope for
+  // stated assumptions; known gaps, invariants a wallet might hope for
   // that fail even when every component is honest; witnesses, states that
   // must be reachable. A predicate reads the system and the audit record, and
   // the audit record is derived from consecutive states by `advance`, never

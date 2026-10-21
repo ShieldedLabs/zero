@@ -145,7 +145,7 @@ module hub {
   pure def isServing(state: HubState): bool =
     state.phase != Down and state.phase != Stopped
 
-  /// Whether the tip cannot be trusted: none has been observed, or the hub is
+  /// Whether the tip is unreliable: none has been observed, or the hub is
   /// stale and its cadence is free-running.
   pure def isTipStale(state: HubState): bool =
     state.tip == None or state.cadence != Tracking
