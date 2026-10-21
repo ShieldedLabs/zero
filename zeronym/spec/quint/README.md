@@ -2,6 +2,9 @@
 
 A [Quint](https://quint-lang.org) specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
 
+> [!NOTE]
+> Checked against: `main` at `<commit>`.
+
 - [System](#system)
 - [Assumptions](#assumptions)
 - [Threat model](#threat-model)
@@ -64,7 +67,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 
 > What must be true of the world for the claims to apply.
 
-- **Roles.** The shim and the hub both run attested. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
+- **Roles.** The shim and the hub both run attested. An honest shim or hub runs a binary built from the commit under *Checked against*, which reproduces to the hash in its `deploy/EXPECTED_SHA256` and passes `caution verify`. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because it is trusted less, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
 - **Byzantine hub** (protocol specification only). It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
 - **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip.
