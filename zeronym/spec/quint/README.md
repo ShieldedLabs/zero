@@ -7,11 +7,11 @@ A [Quint](https://quint-lang.org) specification of zeronym: the protocol between
 
 - [System](#system)
 - [Assumptions](#assumptions)
+- [Out of scope](#out-of-scope)
 - [Threat model](#threat-model)
 - [Guarantees](#guarantees)
 - [Trust matrix](#trust-matrix)
 - [Known gaps](#known-gaps)
-- [Out of scope](#out-of-scope)
 - [Findings](#findings)
 - [How it is checked](#how-it-is-checked)
 - [Future work](#future-work)
@@ -80,6 +80,46 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Time.** There is no clock. A timeout may happen at any moment; the staleness window is counted in blocks.
 
 Each configuration's assumptions are the guard of its named `init`. A guard that is false leaves no initial state, and the gate fails on that.
+
+## Out of scope
+
+> What the specification deliberately does not cover, and why.
+
+### One hub
+
+The specification checks one hub; production runs one or more, replicated: every shim sends every submission to every hub, and each hub that receives a migration queues and broadcasts it (`zeronym/shim/src/nym.rs:602-647`). The single hub is a scope choice, not a claim about production.
+
+Not checked as a result: two hubs disagreeing about one transaction; duplicate publication, and a second enclave holding the plaintext, both accepted deliberately in production; told ok after a partial send, and its anonymity cost; a lookup moving to the next address on a timeout (finding 9); that one Byzantine replica is enough to break G2 and G4.
+
+Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
+
+- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, and gap K5.
+- **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
+- **Do not compose:** K1 and K2 each gain a cause with a second hub.
+
+### Not modelled
+
+| Item | Reason |
+|---|---|
+| Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist. Represented by the roles |
+| Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
+| The hub's lookup concurrency bound, reply deadline and dropped acks | Refinements of "the network lost the message" |
+| Wall-clock time | There is no clock: the staleness window is counted in blocks, and a timeout may happen at any moment |
+| Multiple indexer endpoints | One abstract indexer stands for all of a hub's endpoints. The trust matrix says, for each Byzantine-indexer cell, whether one lying endpoint suffices |
+| Wire codecs, byte layout, malformed frames | Pinned by the Rust tests and golden vectors in both crates. The specification works at the level of what a reply means, and does not bind the codec |
+| Reorgs of included transactions, mempool eviction | Assumed away: a transaction's chain status only moves forward |
+| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not properties of a single run |
+| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol |
+| The HTTP transport, where the shim waits for the hub's verdict before answering the wallet (`HubTransport::Http`, `--hub`) | The production deployment is the mixnet (`HTTP_SUBMIT=0`). So there is no configuration here in which the shim's ok means the hub has the transaction |
+| A Byzantine shim | The shim runs attested, sees every migration in plaintext and controls what the wallet observes. Every wallet-facing guarantee assumes it honest |
+| What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
+| The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled |
+| A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
+| Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them. Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs`) is G8, for entries not requeued; before #85 it did not hold under a tip reported behind the chain (finding 6) |
+| A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
+| A Byzantine hub in the hub specification | It produced no finding, and an adversary's moves are not an implementation to check against the abstract hub. The protocol specification keeps its Byzantine hub, which lies in lookup replies and admits or refuses as it likes |
+| More than one Byzantine component at once | The trust matrix is single-fault |
+| Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 
 ## Threat model
 
@@ -180,46 +220,6 @@ Behaviours that are accepted or only recorded:
 | **Premature flush.** A Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary: a batching harm, not an expiry one. What a report far ahead of the chain does is finding 11 | T11 | `tipAheadOfChainFlushesEarlyTest` |
 | **Early flush by the free-running clock.** A stale hub's clock is ahead of the chain and it flushes before the true boundary, with every component honest | T11, with no liar | `freeRunningClockFlushesEarlyTest` |
 | **Unparseable and queued.** A payload the hub cannot parse has no txid, so a lookup misses it while it is queued | none | `unparseableIsQueuedAndMissedTest` |
-
-## Out of scope
-
-> What the specification deliberately does not cover, and why.
-
-### One hub
-
-The specification checks one hub; production runs one or more, replicated: every shim sends every submission to every hub, and each hub that receives a migration queues and broadcasts it (`zeronym/shim/src/nym.rs:602-647`). The single hub is a scope choice, not a claim about production.
-
-Not checked as a result: two hubs disagreeing about one transaction; duplicate publication, and a second enclave holding the plaintext, both accepted deliberately in production; told ok after a partial send, and its anonymity cost; a lookup moving to the next address on a timeout (finding 9); that one Byzantine replica is enough to break G2 and G4.
-
-Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
-
-- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, and gap K5.
-- **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
-- **Do not compose:** K1 and K2 each gain a cause with a second hub.
-
-### Not modelled
-
-| Item | Reason |
-|---|---|
-| Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist. Represented by the roles |
-| Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
-| The hub's lookup concurrency bound, reply deadline and dropped acks | Refinements of "the network lost the message" |
-| Wall-clock time | There is no clock: the staleness window is counted in blocks, and a timeout may happen at any moment |
-| Multiple indexer endpoints | One abstract indexer stands for all of a hub's endpoints. The trust matrix says, for each Byzantine-indexer cell, whether one lying endpoint suffices |
-| Wire codecs, byte layout, malformed frames | Pinned by the Rust tests and golden vectors in both crates. The specification works at the level of what a reply means, and does not bind the codec |
-| Reorgs of included transactions, mempool eviction | Assumed away: a transaction's chain status only moves forward |
-| Anonymity-set size, shuffle, simultaneity, timing and length side channels | Not properties of a single run |
-| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol |
-| The HTTP transport, where the shim waits for the hub's verdict before answering the wallet (`HubTransport::Http`, `--hub`) | The production deployment is the mixnet (`HTTP_SUBMIT=0`). So there is no configuration here in which the shim's ok means the hub has the transaction |
-| A Byzantine shim | The shim runs attested, sees every migration in plaintext and controls what the wallet observes. Every wallet-facing guarantee assumes it honest |
-| What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
-| The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled |
-| A third party submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's third party submits only what it has learned or the chain has published |
-| Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them. Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs`) is G8, for entries not requeued; before #85 it did not hold under a tip reported behind the chain (finding 6) |
-| A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
-| A Byzantine hub in the hub specification | It produced no finding, and an adversary's moves are not an implementation to check against the abstract hub. The protocol specification keeps its Byzantine hub, which lies in lookup replies and admits or refuses as it likes |
-| More than one Byzantine component at once | The trust matrix is single-fault |
-| Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 
 ## Findings
 
