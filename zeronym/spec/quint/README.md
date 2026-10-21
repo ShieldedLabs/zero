@@ -155,7 +155,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 
 | Id | Name | What it says | Answers | Checked by |
 |---|---|---|---|---|
-| G1 | `operatorBlind` | Everything the shim hands the operator's indexer is a pass-through transaction | T1 | Simulation |
+| G1 | `operatorBlind` | Every message the shim sends the operator's indexer is a pass-through transaction, by message type | T1 | Simulation |
 | G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator's indexer. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true, as the implementation intends (`Hub::lookup`, `zeronym/hub/src/server.rs`). It does not say that successive answers agree | T4 | Simulation |
