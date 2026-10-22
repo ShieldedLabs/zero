@@ -1,0 +1,16 @@
+# webpki-roots 0.25.4 from crates.io, substituted via [patch.crates-io] in the shim,
+# hub and probe manifests. nym-sdk's tokio-tungstenite 0.20 pins this version, which
+# never received the eMudhra fix. Two trust anchors are removed from src/lib.rs:
+# emSign ECC Root CA - G3 and AAA Certificate Services, the two roots the eight
+# compromised eMudhra intermediates chain to (disclosed 2026-10-20). webpki-roots
+# 1.0.10 carries neither. src/lib.rs is otherwise byte-identical to the published
+# crate; dev-dependencies, tests and the generator binary are dropped.
+
+[package]
+edition = "2018"
+name = "webpki-roots"
+version = "0.25.4"
+description = "Mozilla's CA root certificates for use with webpki"
+homepage = "https://github.com/rustls/webpki-roots"
+license = "MPL-2.0"
+repository = "https://github.com/rustls/webpki-roots"

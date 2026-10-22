@@ -114,8 +114,11 @@ tar -xpf "$STAGE/zaino.tar" -C "$DEST"
 # mixnet-driver feature is on. The patch only BINDS when nym-sdk is in the graph
 # (that feature), but the path has to exist regardless, so this is not optional.
 # Keep it in the reproduce workflow's `paths:` filter alongside the crate itself.
+# The two webpki-roots copies are [patch.crates-io] targets under the same rule.
 git -C "$ZERO_ROOT" archive HEAD -o "$STAGE/vendor.tar" \
-	zeronym/vendor/nym-upgrade-mode-check
+	zeronym/vendor/nym-upgrade-mode-check \
+	zeronym/vendor/webpki-roots-0.24.0 \
+	zeronym/vendor/webpki-roots-0.25.4
 tar -xpf "$STAGE/vendor.tar" -C "$DEST"
 
 # Deliberately NOT in the context: orchard/. zebra/Cargo.toml carries a [zero]

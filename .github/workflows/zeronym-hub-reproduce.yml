@@ -27,6 +27,7 @@ on:
     paths:
       - ".github/workflows/zeronym-hub-reproduce.yml"
       - "zeronym/hub/**"
+      - "zeronym/vendor/**"
       # The vendored path dependencies. These are what assemble.sh archives into
       # the build context, so a subtree pull touching any of them changes the
       # compiled binary and stales the published hash. Keep in sync with the
@@ -40,6 +41,7 @@ on:
     paths:
       - ".github/workflows/zeronym-hub-reproduce.yml"
       - "zeronym/hub/**"
+      - "zeronym/vendor/**"
       # The vendored path dependencies. These are what assemble.sh archives into
       # the build context, so a subtree pull touching any of them changes the
       # compiled binary and stales the published hash. Keep in sync with the
