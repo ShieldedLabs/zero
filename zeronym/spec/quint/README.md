@@ -3,7 +3,7 @@
 A [Quint](https://quint-lang.org) specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
 
 > [!NOTE]
-> Checked against: `main` at `<commit>`.
+> Checked against: `main` at `2bae0a6`.
 
 - [System](#system)
 - [Assumptions](#assumptions)
