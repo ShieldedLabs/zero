@@ -37,3 +37,8 @@ zero-indexer-shim = { path = "../../shim", features = ["mixnet-localnet"] }
 # by the client-side closure; those are kept verbatim.
 [patch."https://github.com/nymtech/nym"]
 nym-upgrade-mode-check = { path = "../patched/nym-upgrade-mode-check" }
+
+# The shim and hub patch, for the same nym-sdk stack (see ../../hub/Cargo.toml).
+[patch.crates-io]
+webpki-roots-024 = { package = "webpki-roots", path = "../../vendor/webpki-roots-0.24.0" }
+webpki-roots-025 = { package = "webpki-roots", path = "../../vendor/webpki-roots-0.25.4" }

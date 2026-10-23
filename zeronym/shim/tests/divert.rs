@@ -23,6 +23,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1 as server_h1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use prost::Message;
 use tokio::net::TcpListener;
 use zaino_proto::proto::service::{BlockId, TxFilter};
 
@@ -157,6 +158,30 @@ async fn spawn_diverting_shim(backend: SocketAddr, hub: SocketAddr) -> SocketAdd
             None,
             diversion,
             zero_indexer_shim::CautionRelay::default(),
+            false,
+            zero_indexer_shim::nym::MixnetStatus::default(),
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+    addr
+}
+
+/// The same diverting shim with broadcast-only mode ON.
+async fn spawn_broadcast_only_diverting_shim(backend: SocketAddr, hub: SocketAddr) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let diversion = Some(Arc::new(Diversion {
+        hub: HubClient::new(hub, None).into(),
+    }));
+    tokio::spawn(async move {
+        let _ = zero_indexer_shim::serve_with_shutdown(
+            listener,
+            backend,
+            None,
+            diversion,
+            zero_indexer_shim::CautionRelay::default(),
+            true,
             zero_indexer_shim::nym::MixnetStatus::default(),
             std::future::pending::<()>(),
         )
@@ -193,6 +218,44 @@ async fn a_migration_is_diverted_and_the_operator_is_never_connected() {
         0,
         "classify-before-connect: a diverted migration must not dial the operator"
     );
+}
+
+#[tokio::test]
+async fn a_grpc_web_migration_is_diverted_and_the_operator_is_never_connected() {
+    let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    // A browser wallet's send: gRPC-web text, the dialect the classifier would
+    // never see if the translation sat anywhere but before routing.
+    let message = zaino_proto::proto::service::RawTransaction {
+        data: V6_MIGRATION.to_vec().into(),
+        height: 0,
+    }
+    .encode_to_vec();
+    let mut sender = connect_h2(shim).await;
+    let reply = common::grpc_web_call(
+        &mut sender,
+        shim,
+        zero_indexer_shim::proxy::SEND_TRANSACTION,
+        "application/grpc-web-text",
+        &message,
+    )
+    .await;
+
+    assert!(
+        reply.trailers.contains("grpc-status:0"),
+        "{:?}",
+        reply.trailers
+    );
+    let resp = zaino_proto::proto::service::SendResponse::decode(reply.messages[0].as_ref())
+        .expect("a SendResponse");
+    assert_eq!(resp.error_message, txid);
+    assert_eq!(hub_seen.lock().unwrap().as_deref(), Some(V6_MIGRATION));
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -619,6 +682,88 @@ async fn an_oversized_get_transaction_body_is_refused_before_it_is_buffered() {
         "a 100 KiB SendTransaction must not trip a body cap; the two caps are separate ({:?})",
         reply.message
     );
+}
+
+#[tokio::test]
+async fn broadcast_only_with_a_hub_diverts_and_looks_up_and_rejects_the_rest() {
+    let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let looked_up = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub_full(
+        txid,
+        HubLookup::Found {
+            data: V6_MIGRATION.to_vec(),
+            height: 0,
+        },
+        hub_seen.clone(),
+        looked_up.clone(),
+    )
+    .await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_broadcast_only_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+
+    // A migration is diverted: the hub gets the exact bytes, the wallet gets
+    // the hub's txid.
+    let reply = send_tx_reply(&mut sender, shim, V6_MIGRATION).await;
+    assert_eq!(reply.status, 0);
+    assert_eq!(decode_send_response(&reply.body).error_message, txid);
+    assert_eq!(hub_seen.lock().unwrap().as_deref(), Some(V6_MIGRATION));
+
+    // A lookup is answered by the hub.
+    let hash = wire_hash(V6_MIGRATION);
+    let reply = get_transaction(&mut sender, shim, &hash).await;
+    assert_eq!(reply.status, 0);
+    assert_eq!(decode_raw_transaction(&reply.body).data, V6_MIGRATION);
+    assert_eq!(looked_up.lock().unwrap().as_deref(), Some(&hash[..]));
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+
+    // Any other method on the same connection is UNIMPLEMENTED, and neither
+    // the hub nor the operator hears of it.
+    *hub_seen.lock().unwrap() = None;
+    *looked_up.lock().unwrap() = None;
+    let reply = common::grpc_call(
+        &mut sender,
+        shim,
+        "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo",
+        Full::new(common::grpc_frame(&[])).boxed(),
+    )
+    .await;
+    assert_eq!(reply.status, 12);
+    assert!(hub_seen.lock().unwrap().is_none());
+    assert!(looked_up.lock().unwrap().is_none());
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn broadcast_only_rejects_a_migration_sent_to_a_lower_case_path() {
+    let txid = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_broadcast_only_diverting_shim(backend, hub).await;
+
+    let message = zaino_proto::proto::service::RawTransaction {
+        data: V6_MIGRATION.to_vec().into(),
+        height: 0,
+    }
+    .encode_to_vec();
+    let mut sender = connect_h2(shim).await;
+    let reply = common::grpc_call(
+        &mut sender,
+        shim,
+        "/cash.z.wallet.sdk.rpc.CompactTxStreamer/sendtransaction",
+        Full::new(common::grpc_frame(&message)).boxed(),
+    )
+    .await;
+
+    // Not the method, so neither the hub nor the operator receives it.
+    assert_eq!(reply.status, 12);
+    assert!(hub_seen.lock().unwrap().is_none());
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
 }
 
 /// Pull the transaction out of a `SubmitV1` frame, as the hub's serving path

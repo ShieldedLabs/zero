@@ -55,7 +55,9 @@ other.
 4. The committed `Cargo.lock`, and the `zebra-chain` and `zaino-proto` sources
    archived into the context (a subtree pull in either can move the hash; the
    reproduce workflow fires on those paths for that reason). The vendored
-   `nym-upgrade-mode-check` (the crypto-common `[patch]` target) is archived too.
+   `nym-upgrade-mode-check` (the crypto-common `[patch]` target) and the two
+   `webpki-roots` copies (the eMudhra-distrust `[patch.crates-io]` targets) are
+   archived too.
 5. **Network exception, mixnet-driver build.** The default deploy build
    (`CARGO_FEATURES=mixnet-driver`) keeps the compile RUN's network on, because
    `nym-network-defaults`'s build.rs runs `cargo metadata` over the whole nym

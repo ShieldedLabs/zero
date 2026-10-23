@@ -37,14 +37,13 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Request, Response};
 use http_body::{Body, Frame};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use hyper::body::Incoming;
 use prost::Message;
 use zaino_proto::proto::service::{RawTransaction, SendResponse, TxFilter};
 
 use crate::classify::{classify_with_evidence, Class, Evidence};
 use crate::hub::{HubTransport, Lookup, Submit};
 use crate::proxy::{
-    forward, grpc_error, pass_through, ProxyBody, UpstreamPool, GRPC_CANCELLED,
+    forward, grpc_error, pass_through, InboundBody, ProxyBody, UpstreamPool, GRPC_CANCELLED,
     GRPC_DEADLINE_EXCEEDED, GRPC_INVALID_ARGUMENT, GRPC_NOT_FOUND, GRPC_RESOURCE_EXHAUSTED,
     GRPC_UNAVAILABLE,
 };
@@ -100,7 +99,7 @@ const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// in [`crate::proxy`]. A backend that acts on a `GET` must not be handed one
 /// the classifier never saw.
 pub(crate) async fn send_transaction(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
@@ -143,8 +142,7 @@ pub(crate) async fn send_transaction(
     // otherwise careful not to write. The condition is a property of the BUILD,
     // so saying it once says all of it, and the remedy it names is a redeploy.
     if inspection.is_unrecognised_branch() {
-        static REPORTED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tracing::warn!(
                 target: "zis::classify",
@@ -169,9 +167,9 @@ pub(crate) async fn send_transaction(
     // Pass-through, or a migration with no hub: replay the ORIGINAL bytes to the
     // backing indexer, which sees exactly what the wallet sent, trailers and all.
     let upstream = pool.get().await?;
-    let replay = ReplayBody::new(frame, trailers).boxed();
+    let replay = ReplayBody::new(frame, trailers).boxed_unsync();
     let resp = forward(upstream, Request::from_parts(parts, replay)).await?;
-    Ok(resp.map(|body| body.map_err(BoxError::from).boxed()))
+    Ok(resp.map(|body| body.map_err(BoxError::from).boxed_unsync()))
 }
 
 /// Send a migration to the hub instead of the operator's indexer, then answer
@@ -303,7 +301,7 @@ fn grpc_send_response(error_code: i32, error_message: &str) -> Response<ProxyBod
 /// queue (a diverted, unflushed migration) or from its own indexer. Forward-only
 /// mode (no hub) passes through to the operator unchanged.
 pub(crate) async fn get_transaction(
-    req: Request<Incoming>,
+    req: Request<InboundBody>,
     pool: Arc<UpstreamPool>,
     diversion: Option<Arc<Diversion>>,
 ) -> Result<Response<ProxyBody>, BoxError> {
@@ -503,7 +501,7 @@ fn grpc_unary(message: &[u8]) -> Response<ProxyBody> {
     let mut trailers = HeaderMap::new();
     trailers.insert("grpc-status", HeaderValue::from_static("0"));
 
-    let body = ReplayBody::new(Bytes::from(framed), Some(trailers)).boxed();
+    let body = ReplayBody::new(Bytes::from(framed), Some(trailers)).boxed_unsync();
     let mut resp = Response::new(body);
     resp.headers_mut().insert(
         http::header::CONTENT_TYPE,
