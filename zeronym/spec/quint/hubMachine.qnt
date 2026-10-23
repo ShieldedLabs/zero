@@ -149,7 +149,7 @@ module hubMachine {
   /// and `offered` are forgotten together when the hub goes down, as its
   /// queue is: a hub cannot be held to an arrival it no longer knows of, and
   /// a restarted hub's entries start again at no attempts
-  /// (`zeronym/hub/src/queue.rs:334`).
+  /// (`zeronym/hub/src/queue.rs:336`).
   var offered: Set[Payload]
   /// The payloads acknowledged as accepted that no node has judged since.
   var owed: Set[Payload]
