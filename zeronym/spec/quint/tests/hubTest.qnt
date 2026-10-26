@@ -183,14 +183,20 @@ module hubTest {
     assert(running(5).lastEpoch == Some(1) and not(running(5).isFlushDue())),
     // Forward: followed.
     assert(running(5).after(TipHInput(6)).tip == Some(6)),
-    // Back within the allowance: followed.
-    assert(running(5).after(TipHInput(4)).tip == Some(4)),
+    // Back within the allowance: followed, and the best is kept.
+    assert(running(5).after(TipHInput(4)).tip == Some(4) and running(5).after(TipHInput(4)).best == 5),
     // Back beyond it: ignored.
     assert(running(5).after(TipHInput(3)) == running(5)),
     assert(outputOf(running(5), TipHInput(3)) == NoHubOutput),
-    // A forward move ends staleness; a move back does not.
+    // Depth is measured from the best, so a reorg is not walked down one
+    // allowance at a time.
+    assert(running(5).after(TipHInput(4)).after(TipHInput(3)) == running(5).after(TipHInput(4))),
+    // A new high ends staleness; a move back does not, and neither does a
+    // climb back to the best.
     assert(stale.after(TipHInput(6)).phase == Running and stale.after(TipHInput(6)).cadence == Tracking),
     assert(stale.after(TipHInput(4)).phase == Stale and stale.after(TipHInput(4)).cadence == FreeRunning(8)),
+    assert(stale.after(TipHInput(4)).after(TipHInput(5)).phase == Stale),
+    assert(stale.after(TipHInput(5)).phase == Stale and stale.after(TipHInput(5)).cadence == FreeRunning(8)),
     // Never during a flush, and never without a cadence loop.
     assert(isError(outputOf(flushing, TipHInput(7)))),
     assert(isError(outputOf(down, TipHInput(7)))),
@@ -207,6 +213,9 @@ module hubTest {
     assert(isError(outputOf(running(5), StaleHInput(4)))),
     assert(isError(outputOf(starting, StaleHInput(4)))),
     assert(isError(outputOf(flushing, StaleHInput(9)))),
+    // The clock starts from the best height, not from a tip that dipped.
+    assert(isError(outputOf(running(5).after(TipHInput(4)), StaleHInput(4)))),
+    assert(running(5).after(TipHInput(4)).after(StaleHInput(5)).cadence == FreeRunning(5)),
   }
 
   // ------------------------------------------------------------------------
@@ -264,7 +273,7 @@ module hubTest {
     assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).queued().contains(pA)),
     // The epoch was recorded when the flush began; its end leaves it alone.
     assert({ ...returning, phase: Stale, cadence: FreeRunning(11) }.after(FlushDoneHInput).lastEpoch == Some(1)),
-    assert(not({ ...returning, tip: Some(8) }.after(FlushDoneHInput).queued().contains(pA))),
+    assert(not({ ...returning, tip: Some(8), best: 8 }.after(FlushDoneHInput).queued().contains(pA))),
   }
 
   run drainTest = all {
@@ -369,6 +378,14 @@ module hubTest {
       state.queued().forall(payload => state.queue.get(payload) >= 0 and state.queue.get(payload) <= PARAMS.maxAttempts),
       state.phase == Down implies state == down,
     }))
+
+  /// The observed tip is the best, or within the reorg allowance below it.
+  run tipNearBestTest =
+    assert(REACH.forall(state =>
+      match state.tip {
+        | Some(tip) => tip <= state.best and state.best - tip <= PARAMS.reorgAllowance
+        | None => state.best == 0
+      }))
 
   // ------------------------------------------------------------------------
   // The abstraction lemma

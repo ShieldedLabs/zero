@@ -34,8 +34,7 @@ module hubMachine {
 
   /// - `payloads`: the transactions that may be submitted.
   /// - `params`: the schedule the hub is started with.
-  /// - `staleWindow`: blocks without a forward tip observation after which a
-  ///   hub is stale.
+  /// - `staleWindow`: blocks without a new high after which a hub is stale.
   /// - `maxFlightBlocks`: blocks that may arrive while one flush is in flight.
   /// - `maxHeight`: where the chain stops growing; a bound of the model.
   /// - `tip`: how the hub's view of the tip relates to the true height.
@@ -186,6 +185,11 @@ module hubMachine {
   /// How far behind the chain the hub's observed tip is.
   def lag: int = height - h.observedTip()
 
+  /// How far the chain is past the best height the hub has seen. Staleness is
+  /// counted on this, as the implementation times it from the last new high.
+  /// Under `TipMayLag` every report is the true height, so it equals `lag`.
+  def silence: int = height - h.best
+
   /// The entries of the batch still waiting for a verdict.
   def awaiting: Set[Payload] =
     match h.flush {
@@ -305,11 +309,11 @@ module hubMachine {
     observeWith(tip)
   }
 
-  /// A hub that has seen no tip progress for the staleness window goes stale,
-  /// or, already stale, reads its free-running clock again.
+  /// A hub that has seen no new high for the staleness window goes stale, or,
+  /// already stale, reads its free-running clock again.
   action staleWith(estimate: Height): bool = all {
     cfg.tip == TipMayLag,
-    h.phase == Stale or lag >= cfg.staleWindow,
+    h.phase == Stale or silence >= cfg.staleWindow,
     freeRunEstimates.contains(estimate),
     hubTakes(StaleHInput(estimate)),
     flightStart' = flightStart,
@@ -446,9 +450,9 @@ module hubMachine {
   ///   zero at every block. A Byzantine one is asked just as often; what it
   ///   controls is the answer.
   /// - `TipMayRegress`: a running hub is no further behind than the allowance.
-  /// - `TipMayLag`: a hub whose silence has reached the staleness window has
-  ///   become stale, and a stale hub's free-running clock has caught up with
-  ///   the current block.
+  /// - `TipMayLag`: a hub that has gone the staleness window without a new
+  ///   high has become stale, and a stale hub's free-running clock has caught
+  ///   up with the current block.
   def mayAdvance: bool = and {
     height < cfg.maxHeight,
     not(h.isFlushDue()),
@@ -459,7 +463,7 @@ module hubMachine {
         | TipMayRegress => h.phase == Running implies lag <= cfg.params.reorgAllowance
         | TipMayLag =>
           and {
-            h.phase == Running implies lag < cfg.staleWindow,
+            h.phase == Running implies silence < cfg.staleWindow,
             h.phase == Stale implies h.cadenceHeight() >= height,
           }
       },
