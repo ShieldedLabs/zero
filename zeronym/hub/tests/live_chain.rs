@@ -12,6 +12,7 @@
 use std::net::SocketAddr;
 
 use zero_indexer_hub::chain::ChainClient;
+use zero_indexer_hub::tip_guard;
 use zero_indexer_hub::tls::IndexerTls;
 
 #[tokio::test]
@@ -28,11 +29,17 @@ async fn reads_the_tip_from_a_real_indexer() {
 
     let client = ChainClient::new(vec![addr], tls).expect("client");
 
-    let height = client.tip_height().await.expect("tip query failed");
+    let heights = client.tip_heights().await.expect("tip query failed");
+    let height = heights[0];
     println!("tip height from {addr}: {height}");
 
-    // Sanity rather than a fixed value: mainnet is far past this and it will
-    // not regress, so a plausible height proves we parsed a real answer rather
-    // than a default.
-    assert!(height > 3_000_000, "implausible height {height}");
+    // A real mainnet tip must sit inside the band the hub judges it by, or a
+    // mainnet hub would drop every answer this indexer gives.
+    let (low, high) = tip_guard::unix_now()
+        .and_then(tip_guard::mainnet_band)
+        .expect("a clock past the mainnet anchor");
+    assert!(
+        (low..=high).contains(&height),
+        "height {height} outside the mainnet band {low}..={high}"
+    );
 }

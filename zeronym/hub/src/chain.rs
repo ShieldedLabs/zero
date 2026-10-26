@@ -89,7 +89,7 @@ pub enum TxLookup {
 /// A non-zero gRPC status from an endpoint, carried as a typed error so a caller
 /// can tell a real answer (NOT_FOUND on a lookup, INVALID_ARGUMENT on a publish)
 /// from a transport failure. Its `Display` is byte-for-byte the string
-/// `round_trip` used to format, so `tip_height`, which only stringifies errors,
+/// `round_trip` used to format, so `tip_heights`, which only stringifies errors,
 /// is unchanged.
 #[derive(Debug)]
 pub(crate) struct GrpcStatusError {
@@ -173,14 +173,15 @@ impl ChainClient {
         self.endpoints.len()
     }
 
-    /// Current best-chain height: the MAX over every endpoint that answers.
+    /// Every endpoint's best-chain height, one per endpoint that answered. An
+    /// error only when none did.
     ///
-    /// Not "the first that answers", which would be a second, independent lever
-    /// on the flush clock: one lagging or hostile endpoint would otherwise stall
-    /// the cadence (freezing flushes) or advance it (draining the queue into a
-    /// near-empty batch). Taking the max means an adversary must slow down every
-    /// endpoint to slow the clock.
-    pub async fn tip_height(&self) -> Result<u32, BoxError> {
+    /// All of them, for the tracker to take the MAX of those it trusts
+    /// (`TipTracker::observe`). The MAX means an adversary must slow down every
+    /// endpoint to slow the flush clock. It favours whoever reports HIGHEST,
+    /// though, so the tracker judges each answer before the MAX, and an honest
+    /// answer survives beside a dropped one.
+    pub async fn tip_heights(&self) -> Result<Vec<u32>, BoxError> {
         let queries = self.endpoints.iter().map(|addr| async move {
             let info: LightdInfo = self.unary(*addr, GET_LIGHTD_INFO, Empty {}).await?;
             // Checked, not `as`: a wrapped u64 is still a height, just a wrong one.
@@ -189,8 +190,8 @@ impl ChainClient {
             })
         });
 
-        let results = join_all(queries).await;
-        results
+        let heights: Vec<u32> = join_all(queries)
+            .await
             .into_iter()
             .filter_map(|result| match result {
                 Ok(height) => Some(height),
@@ -199,8 +200,11 @@ impl ChainClient {
                     None
                 }
             })
-            .max()
-            .ok_or_else(|| "no indexer answered a tip query".into())
+            .collect();
+        if heights.is_empty() {
+            return Err("no indexer answered a tip query".into());
+        }
+        Ok(heights)
     }
 
     /// Publish one raw transaction to every configured endpoint.
@@ -346,7 +350,7 @@ impl ChainClient {
         // handshake (a bare tokio-rustls await with no timeout of its own) and
         // the h2 handshake were not, so an endpoint that ACKed the TCP connect
         // and then went silent before ServerHello hung this future forever. And
-        // this future is awaited INLINE by the flush cadence and by tip_height,
+        // this future is awaited INLINE by the flush cadence and by tip_heights,
         // so one such endpoint stopped every future flush; fifteen minutes later
         // is_stale() refused every submission as TipStale. Worse after the
         // requeue-on-transport-failure change: a hung flush never returns, so

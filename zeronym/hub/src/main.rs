@@ -10,7 +10,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{self, BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::config::{Config, Network};
 use zero_indexer_hub::queue::Queue;
@@ -59,11 +59,16 @@ async fn main() -> Result<(), BoxError> {
         );
     }
 
+    let guard = match config.network {
+        Network::Mainnet => TipGuard::Mainnet,
+        Network::Testnet | Network::Regtest => TipGuard::Unguarded,
+    };
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
+    let tip = Arc::new(TipTracker::new(guard));
 
     tracing::info!(
         network = ?config.network,
+        tip_guard = ?guard,
         nodes = chain.node_count(),
         flush_interval = params.flush_interval,
         mining_margin = params.mining_margin,
@@ -74,9 +79,10 @@ async fn main() -> Result<(), BoxError> {
 
     // The hub cannot admit anything until it knows a height, because both the
     // flush schedule and the expiry check are defined against one. Seed it here
-    // so a fresh boot does not spend a whole poll interval refusing.
-    match chain.tip_height().await {
-        Ok(height) => tip.observe(height),
+    // so a fresh boot does not spend a whole poll interval refusing. On mainnet
+    // this starts the tracker's warm-up, and admission opens when it ends.
+    match chain.tip_heights().await {
+        Ok(heights) => tip.observe(&heights),
         Err(err) => tracing::warn!(
             %err,
             "no tip at startup; refusing admissions until a node answers"
