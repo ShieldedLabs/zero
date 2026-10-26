@@ -70,6 +70,7 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name zeronym-hub-1 \
   --indexers 66.42.124.202:443 \
   --indexer-tls lwd.shieldedinfra.net \
+  --network mainnet \
   --tls-domain hub.example.org \
   [--debug]
 ```

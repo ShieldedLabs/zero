@@ -12,9 +12,10 @@ use tracing_subscriber::EnvFilter;
 
 use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
-use zero_indexer_hub::config::Config;
+use zero_indexer_hub::config::{Config, Network};
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub};
+use zero_indexer_hub::tip_guard;
 use zero_indexer_hub::BoxError;
 
 #[tokio::main]
@@ -43,10 +44,26 @@ async fn main() -> Result<(), BoxError> {
     let params = BatchParams::default();
     params.validate()?;
 
+    // On mainnet every tip is judged against the clock, so a clock reading
+    // before the compiled anchor would refuse every height with nothing saying
+    // why. Refuse to start instead, for the same reason as the TLS check above.
+    if config.network == Network::Mainnet
+        && tip_guard::unix_now()
+            .and_then(tip_guard::mainnet_band)
+            .is_none()
+    {
+        return Err(
+            "refusing to start: the clock reads before the compiled mainnet \
+             anchor, so no tip height can be judged against it"
+                .into(),
+        );
+    }
+
     let queue = Arc::new(Queue::new());
     let tip = Arc::new(TipTracker::new());
 
     tracing::info!(
+        network = ?config.network,
         nodes = chain.node_count(),
         flush_interval = params.flush_interval,
         mining_margin = params.mining_margin,

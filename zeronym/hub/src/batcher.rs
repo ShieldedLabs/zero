@@ -65,7 +65,7 @@ const TIP_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 /// stale. During a real stall blocks arrive slower than this, so the free-running
 /// clock runs ahead of the true height, which publishes EARLIER relative to true
 /// expiry. That is the safe direction to err.
-const NOMINAL_BLOCK_SECS: u64 = 75;
+const NOMINAL_BLOCK_SECS: u64 = crate::tip_guard::TARGET_BLOCK_SECS;
 
 /// How often the tip is polled.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
