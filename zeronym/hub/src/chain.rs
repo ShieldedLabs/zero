@@ -183,7 +183,10 @@ impl ChainClient {
     pub async fn tip_height(&self) -> Result<u32, BoxError> {
         let queries = self.endpoints.iter().map(|addr| async move {
             let info: LightdInfo = self.unary(*addr, GET_LIGHTD_INFO, Empty {}).await?;
-            Ok::<u32, BoxError>(info.block_height as u32)
+            // Checked, not `as`: a wrapped u64 is still a height, just a wrong one.
+            u32::try_from(info.block_height).map_err(|_| -> BoxError {
+                format!("indexer reported height {} beyond u32", info.block_height).into()
+            })
         });
 
         let results = join_all(queries).await;

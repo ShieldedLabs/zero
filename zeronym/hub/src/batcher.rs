@@ -121,6 +121,10 @@ impl BatchParams {
 #[derive(Debug, Clone, Copy)]
 struct TipState {
     height: u32,
+    /// The highest height ever adopted. Only a height above this is the chain
+    /// advancing; anything at or below it has been seen before.
+    best: u32,
+    /// When `best` was set.
     last_advance: Instant,
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
@@ -142,6 +146,7 @@ impl TipTracker {
         Self {
             inner: RwLock::new(TipState {
                 height: 0,
+                best: 0,
                 last_advance: Instant::now(),
                 observed: false,
                 last_flush_boundary: None,
@@ -169,45 +174,49 @@ impl TipTracker {
 
         if !state.observed {
             state.height = height;
+            state.best = height;
             state.last_advance = Instant::now();
             state.observed = true;
             return;
         }
 
-        if height > state.height {
+        // Liveness is a new HIGH, not a step up. `last_advance` means "the last
+        // time the chain reached a height it had never reached", which is what
+        // staleness asks about. Refreshing it on any upward step let a tip
+        // oscillating inside the reorg allowance -- 999, 1000, 999, 1000 -- look
+        // live forever: the reorg down did not refresh it (Hornby review,
+        // 2026-08-19), but the climb back to 1000 did, so `is_stale` never fired
+        // and the cadence froze with nothing saying why.
+        if height > state.best {
             state.height = height;
+            state.best = height;
             state.last_advance = Instant::now();
             return;
         }
 
-        if height < state.height {
-            let drop = state.height - height;
-            if drop <= REORG_ALLOWANCE {
-                // A real reorg. Follow it, and say so: this is rare enough that
-                // a quiet regression would be the wrong default.
-                tracing::warn!(
-                    drop,
-                    "chain tip moved backwards within the reorg allowance; following it"
-                );
-                state.height = height;
-                // `last_advance` is NOT refreshed here. It means "the last time
-                // the tip moved FORWARD", which is what staleness is asking
-                // about, and a reorg is not the chain advancing. Refreshing it
-                // let a tip oscillating inside the reorg allowance -- 999, 1000,
-                // 999, 1000 -- look like liveness forever: `is_stale` never
-                // fired, so the flush cadence froze and nothing ever said why
-                // (Hornby review, 2026-08-19). A genuine reorg followed by
-                // genuine progress refreshes it on the next forward observation,
-                // which is the only thing that should.
-            } else {
-                // Beyond any plausible reorg: a lagging or hostile node won the
-                // max, or a node is lying. Do not follow it.
-                tracing::warn!(
-                    drop,
-                    "ignoring a tip regression larger than the reorg allowance"
-                );
-            }
+        // Every other height is judged against `best`, so a reorg cannot be
+        // walked downward one allowance at a time.
+        let depth = state.best - height;
+        if depth > REORG_ALLOWANCE {
+            // Beyond any plausible reorg: a lagging or hostile node won the
+            // max, or a node is lying. Do not follow it.
+            tracing::warn!(
+                depth,
+                "ignoring a tip more than the reorg allowance below the best seen"
+            );
+            return;
         }
+        if height < state.height {
+            // A real reorg. Follow it, and say so: this is rare enough that a
+            // quiet regression would be the wrong default.
+            tracing::warn!(
+                depth,
+                "chain tip moved backwards within the reorg allowance; following it"
+            );
+        }
+        // Down into a reorg, or back up to a height already seen: followed, and
+        // not progress.
+        state.height = height;
     }
 
     /// Age `last_advance` by `by`, so a test can reach a staleness threshold
@@ -282,8 +291,10 @@ impl TipTracker {
         if elapsed <= TIP_STALE_AFTER {
             return state.height;
         }
+        // From `best`, the height `last_advance` timed, so the estimate and its
+        // clock start at the same block.
         let estimated_blocks = (elapsed.as_secs() / NOMINAL_BLOCK_SECS) as u32;
-        state.height.saturating_add(estimated_blocks)
+        state.best.saturating_add(estimated_blocks)
     }
 }
 
@@ -636,6 +647,38 @@ mod tests {
         assert!(
             !tip.is_stale(),
             "real forward progress is what clears staleness"
+        );
+    }
+
+    #[test]
+    fn an_oscillating_tip_goes_stale_and_the_cadence_free_runs() {
+        // The sequence the fix above names: the climb back to a height already
+        // seen must not count as progress either, or the oscillation still looks
+        // live and the cadence never flushes.
+        let tip = TipTracker::new();
+        tip.observe(1000);
+        tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
+        for height in [999, 1000, 999, 1000] {
+            tip.observe(height);
+            assert!(tip.is_stale(), "re-reaching {height} counted as progress");
+        }
+        assert!(
+            tip.cadence_height() > 1000,
+            "the stale cadence must free-run past the oscillation"
+        );
+    }
+
+    #[test]
+    fn a_reorg_cannot_be_walked_down_one_allowance_at_a_time() {
+        let tip = TipTracker::new();
+        tip.observe(1000);
+        tip.observe(1000 - REORG_ALLOWANCE);
+        assert_eq!(tip.observed_height(), 1000 - REORG_ALLOWANCE);
+        tip.observe(1000 - 2 * REORG_ALLOWANCE);
+        assert_eq!(
+            tip.observed_height(),
+            1000 - REORG_ALLOWANCE,
+            "depth is measured from the best height seen, not the last step"
         );
     }
 
