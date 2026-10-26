@@ -7,9 +7,8 @@
 //! are mainnet-only. Testnet's minimum-difficulty rule lets blocks arrive in
 //! bursts these bounds would refuse.
 //!
-//! The bounds limit how far one lying indexer can move the hub; they cannot
-//! remove that lever while one operator supplies every answer. `batcher.rs`
-//! says what is left.
+//! The bounds limit how far one lying indexer can move the hub. The module doc
+//! of `batcher.rs` lists what it can still do inside them.
 
 // See queue.rs: a panic here is a fleet-wide privacy event, not a crash.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

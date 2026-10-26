@@ -31,16 +31,18 @@
 //! would fire about 57 times a day, while 15 minutes is roughly one false
 //! positive every 140 days.
 //!
-//! **What is left while one operator answers for every endpoint.** The guard
-//! bounds that operator's lever; removing it takes indexers run by more than one
-//! operator. Inside the bounds, one operator can still (a) shift flush timing
-//! within the plausible rate, about twice the flush rate in a burst and 15%
-//! faster over a day; (b) hold a steady lead of about 16 blocks, which refuses
-//! tight expiries for as long as it is held; (c) hold the tip still, which
-//! closes admission; (d) drip low answers slowly enough to keep liveness while
-//! the chain runs ahead, which can expire what is queued; and (e) pick any
-//! in-band height at boot, which sticks until the chain catches up. In Nym mode
-//! a refusal reaches neither shim nor wallet, so (b) and (c) are silent losses.
+//! **What is left inside the bounds.** One operator answering for every
+//! endpoint can still (a) shift flush timing within the plausible rate, about
+//! twice the flush rate in a burst and 15% faster over a day; (b) hold a steady
+//! lead of about 16 blocks, which refuses tight expiries for as long as it is
+//! held; (c) hold the tip still, which closes admission; (d) drip low answers
+//! slowly enough to keep liveness while the chain runs ahead, which can expire
+//! what is queued; and (e) pick any in-band height at boot, which sticks until
+//! the chain catches up. Indexers from several operators close (c) and (d),
+//! because the MAX follows the honest ones. (a), (b) and (e) need only the
+//! highest answer, so closing them takes a majority rule across independent
+//! operators. In Nym mode a refusal reaches neither shim nor wallet, so (b) and
+//! (c) are silent losses.
 
 // See queue.rs: a panic here is a fleet-wide privacy event, not a crash.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
