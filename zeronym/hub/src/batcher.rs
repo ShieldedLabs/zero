@@ -35,10 +35,11 @@
 //! endpoint can still (a) shift flush timing within the plausible rate, about
 //! twice the flush rate in a burst and 15% faster over a day; (b) hold a steady
 //! lead of about 16 blocks, which refuses tight expiries for as long as it is
-//! held; (c) hold the tip still, which closes admission; (d) drip low answers
-//! slowly enough to keep liveness while the chain runs ahead, which can expire
-//! what is queued; and (e) pick any in-band height at boot, which sticks until
-//! the chain catches up. Indexers from several operators close (c) and (d),
+//! held; (c) hold the tip still, or keep it jumping through the warm-up, which
+//! closes admission; (d) drip low answers slowly enough to keep liveness while
+//! the chain runs ahead, which can expire what is queued; and (e) pick any
+//! in-band height at boot, which sticks until the chain catches up. Indexers
+//! from several operators close (c) and (d),
 //! because the MAX follows the honest ones. (a), (b) and (e) need only the
 //! highest answer, so closing them takes a majority rule across independent
 //! operators. In Nym mode a refusal reaches neither shim nor wallet, so (b) and
@@ -143,11 +144,14 @@ impl BatchParams {
 /// the whole uptime too.
 const RATE_HISTORY: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How long after its first answer a mainnet tracker re-anchors on each new
-/// high instead of rate-checking it, with admission closed. An indexer a few
-/// blocks behind at boot catches up inside this window; anchored on its first
-/// answer, the catch-up would read as an implausible jump and hold the hub
-/// stale for hours.
+/// The shortest warm-up a mainnet tracker runs after its first answer, with
+/// admission closed. While it warms, every new high re-anchors the rate
+/// history instead of being checked against it. Once this has passed, the
+/// first new high the chain could have climbed to from the anchor ends the
+/// warm-up; one it could not have re-anchors again. So an indexer behind at
+/// boot is followed as it catches up, however long that takes, instead of its
+/// catch-up reading as an implausible jump that holds the hub stale for hours
+/// (PR review, 2026-10-26).
 const WARMUP: Duration = Duration::from_secs(5 * 60);
 
 /// How the tracker judges the heights indexers report.
@@ -172,8 +176,9 @@ struct TipState {
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
     observed: bool,
-    /// When a mainnet tracker's warm-up ends. `None` before the first answer,
-    /// and always when unguarded.
+    /// `Some` while a mainnet tracker warms up: the instant after which a
+    /// plausible new high ends the warm-up ([`WARMUP`]). `None` before the
+    /// first answer, once warm, and always when unguarded.
     warm_until: Option<Instant>,
     /// New highs a mainnet tracker accepted, oldest first: the boot sample at
     /// the front, then every one from the last [`RATE_HISTORY`]. Each starts a
@@ -187,8 +192,8 @@ struct TipState {
 }
 
 impl TipState {
-    fn warming(&self, now: Instant) -> bool {
-        self.warm_until.is_some_and(|until| now < until)
+    fn warming(&self) -> bool {
+        self.warm_until.is_some()
     }
 
     /// Whether the chain could have climbed to `height` from every sample in
@@ -259,7 +264,7 @@ impl TipTracker {
             tracing::warn!("the clock reads before the mainnet anchor; no tip can be judged");
             return;
         };
-        let rate_checked = self.guard == TipGuard::Mainnet && !state.warming(now);
+        let rate_checked = self.guard == TipGuard::Mainnet && !state.warming();
 
         let mut adopted = None;
         for &height in answers {
@@ -290,6 +295,7 @@ impl TipTracker {
             if self.guard == TipGuard::Mainnet {
                 state.warm_until = Some(now + WARMUP);
                 state.history.push_back((now, height));
+                tracing::info!(height, "tip warm-up started; admission opens when it ends");
             }
             return;
         }
@@ -306,9 +312,14 @@ impl TipTracker {
             state.best = height;
             state.last_advance = now;
             if self.guard == TipGuard::Mainnet {
-                if state.warming(now) {
-                    // Still finding the tip: this high replaces the boot sample.
-                    state.history.clear();
+                match state.warm_until {
+                    Some(until) if now >= until && state.plausible_climb(height, now) => {
+                        state.warm_until = None;
+                        tracing::info!(height, "tip warm-up complete; admission open");
+                    }
+                    // Still finding the tip: this high replaces the anchor.
+                    Some(_) => state.history.clear(),
+                    None => {}
                 }
                 state.history.push_back((now, height));
                 // The boot sample at the front stays; the rest age out.
@@ -360,16 +371,14 @@ impl TipTracker {
     /// True once a tip has been observed and, on mainnet, the warm-up is over.
     pub fn is_ready(&self) -> bool {
         let state = self.read();
-        state.observed && !state.warming(Instant::now())
+        state.observed && !state.warming()
     }
 
     /// The hub cannot trust its tip: none yet, still warming up, or no node has
     /// advanced for [`TIP_STALE_AFTER`].
     pub fn is_stale(&self) -> bool {
         let state = self.read();
-        !state.observed
-            || state.warming(Instant::now())
-            || state.last_advance.elapsed() > TIP_STALE_AFTER
+        !state.observed || state.warming() || state.last_advance.elapsed() > TIP_STALE_AFTER
     }
 
     /// The last observed height, without extrapolation. Admission does not
@@ -818,13 +827,17 @@ mod tests {
     const UNIX: u64 = tip_guard::ANCHOR_EPOCH + 60 * 24 * 60 * 60;
     const ON_SCHEDULE: u32 = tip_guard::ANCHOR_HEIGHT + 69_120;
 
-    /// A mainnet tracker whose warm-up anchored at ON_SCHEDULE, and the instant
-    /// its warm-up ends; `at(warm, s)` is `s` seconds after that.
+    /// A warm mainnet tracker: it boots one block behind ON_SCHEDULE and warms
+    /// at ON_SCHEDULE once the minimum warm-up has passed. Returns the instant
+    /// it warmed; `at(warm, s)` is `s` seconds after that.
     fn warm_mainnet() -> (TipTracker, Instant) {
         let tip = TipTracker::new(TipGuard::Mainnet);
         let start = Instant::now();
-        tip.observe_at(&[ON_SCHEDULE], start, Some(UNIX));
-        (tip, start + WARMUP)
+        tip.observe_at(&[ON_SCHEDULE - 1], start, Some(UNIX));
+        let warm = start + WARMUP;
+        tip.observe_at(&[ON_SCHEDULE], warm, Some(UNIX + WARMUP.as_secs()));
+        assert!(tip.is_ready(), "precondition: the warm-up is over");
+        (tip, warm)
     }
 
     fn at(warm: Instant, secs: u64) -> (Instant, Option<u64>) {
@@ -836,10 +849,11 @@ mod tests {
     fn an_answer_outside_the_mainnet_band_is_dropped_at_boot() {
         let tip = TipTracker::new(TipGuard::Mainnet);
         let now = Instant::now();
-        // The report's brick, a wrapped-looking value, and a syncing indexer.
+        // The report's brick, a wrapped-looking value, and a height below the
+        // anchor.
         tip.observe_at(&[u32::MAX], now, Some(UNIX));
         tip.observe_at(&[4_000_000_000], now, Some(UNIX));
-        tip.observe_at(&[ON_SCHEDULE - 5_000], now, Some(UNIX));
+        tip.observe_at(&[tip_guard::ANCHOR_HEIGHT - 1], now, Some(UNIX));
         assert!(
             !tip.is_ready(),
             "a boot answer outside the band was adopted"
@@ -871,8 +885,8 @@ mod tests {
     #[test]
     fn a_jump_across_the_next_flush_boundary_is_dropped() {
         // The report's drain: any jump past the next 20-block boundary flushed
-        // at once. Twenty-one blocks in the 5.5 minutes since the boot sample
-        // is past what the chain can climb (17).
+        // at once. Twenty-one blocks in the 30 s since the last new high is
+        // past what the chain can climb (6).
         let (tip, warm) = warm_mainnet();
         let (now, unix) = at(warm, 30);
         tip.observe_at(&[ON_SCHEDULE + FLUSH_INTERVAL_BLOCKS + 1], now, unix);
@@ -898,11 +912,11 @@ mod tests {
             }
         }
         let since_boot = WARMUP + Duration::from_secs(30 * 50);
+        let climbed = tip.observed_height() - (ON_SCHEDULE - 1);
         assert!(refused > 0, "every +6 step was accepted");
         assert!(
-            tip.observed_height() - ON_SCHEDULE <= tip_guard::max_new_blocks(since_boot),
-            "climbed {} in {since_boot:?}",
-            tip.observed_height() - ON_SCHEDULE
+            climbed <= tip_guard::max_new_blocks(since_boot),
+            "climbed {climbed} in {since_boot:?}"
         );
     }
 
@@ -921,29 +935,73 @@ mod tests {
         let (now, unix) = at(warm, 30);
         tip.observe_at(&[ON_SCHEDULE + 18], now, unix);
         assert_eq!(tip.observed_height(), ON_SCHEDULE);
-        let (now, unix) = at(warm, 180);
+        let (now, unix) = at(warm, 420);
         tip.observe_at(&[ON_SCHEDULE + 18], now, unix);
         assert_eq!(tip.observed_height(), ON_SCHEDULE + 18);
     }
 
     #[test]
-    fn the_warm_up_follows_an_indexer_catching_up_at_boot() {
+    fn the_warm_up_follows_an_indexer_still_behind_when_its_time_runs_out() {
+        // The indexer is 200 blocks behind at boot and catches up only after
+        // the minimum warm-up. That catch-up is faster than the chain climbs
+        // from the boot anchor, so it re-anchors instead of being dropped, and
+        // the next plausible block ends the warm-up.
         let tip = TipTracker::new(TipGuard::Mainnet);
         let start = Instant::now();
-        tip.observe_at(&[ON_SCHEDULE - 50], start, Some(UNIX));
-        let caught_up = start + Duration::from_secs(60);
-        tip.observe_at(&[ON_SCHEDULE], caught_up, Some(UNIX + 60));
-        assert_eq!(tip.observed_height(), ON_SCHEDULE, "the warm-up re-anchors");
+        tip.observe_at(&[ON_SCHEDULE - 200], start, Some(UNIX));
 
-        // Past the warm-up the same 50-block step is a jump, judged from the
-        // boot sample the warm-up settled on.
-        let later = caught_up + WARMUP;
-        tip.observe_at(
-            &[ON_SCHEDULE + 50],
-            later,
-            Some(UNIX + 60 + WARMUP.as_secs()),
+        let caught_up = start + WARMUP + Duration::from_secs(30);
+        let unix = UNIX + WARMUP.as_secs() + 30;
+        tip.observe_at(&[ON_SCHEDULE], caught_up, Some(unix));
+        assert_eq!(
+            tip.observed_height(),
+            ON_SCHEDULE,
+            "the catch-up re-anchors"
         );
-        assert_eq!(tip.observed_height(), ON_SCHEDULE);
+        assert!(!tip.is_ready(), "a re-anchor keeps the warm-up going");
+
+        let next = caught_up + Duration::from_secs(60);
+        tip.observe_at(&[ON_SCHEDULE + 1], next, Some(unix + 60));
+        assert!(tip.is_ready(), "a plausible block ends the warm-up");
+
+        // From here the same kind of jump is dropped.
+        let later = next + Duration::from_secs(30);
+        tip.observe_at(&[ON_SCHEDULE + 50], later, Some(unix + 90));
+        assert_eq!(tip.observed_height(), ON_SCHEDULE + 1);
+    }
+
+    #[test]
+    fn a_syncing_indexer_at_boot_is_followed_up_to_the_tip() {
+        // The floor is the anchor, so an indexer still syncing far behind is in
+        // the band. Thousands of blocks a poll is never plausible, so every
+        // poll re-anchors until it reaches the tip.
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        let start = Instant::now();
+        let mut height = tip_guard::ANCHOR_HEIGHT + 10;
+        let mut secs = 0;
+        while height < ON_SCHEDULE {
+            tip.observe_at(
+                &[height],
+                start + Duration::from_secs(secs),
+                Some(UNIX + secs),
+            );
+            assert_eq!(tip.observed_height(), height);
+            height = (height + 5_000).min(ON_SCHEDULE);
+            secs += 30;
+        }
+        tip.observe_at(
+            &[ON_SCHEDULE],
+            start + Duration::from_secs(secs),
+            Some(UNIX + secs),
+        );
+        assert!(!tip.is_ready());
+        secs += 60;
+        tip.observe_at(
+            &[ON_SCHEDULE + 1],
+            start + Duration::from_secs(secs),
+            Some(UNIX + secs),
+        );
+        assert!(tip.is_ready());
     }
 
     #[test]

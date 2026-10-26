@@ -41,18 +41,17 @@ pub fn unix_now() -> Option<u64> {
 /// `None` before the anchor: a clock that early is wrong, and nothing can be
 /// judged against it.
 ///
-/// Centred on the anchor plus one block per 75 s. The slack is a SIGMA Poisson
+/// The ceiling is the anchor plus one block per 75 s, plus a SIGMA Poisson
 /// walk since the anchor, twice the drift observed before it (0.2%), and 200
-/// blocks for propagation and short halts.
+/// blocks for propagation. The floor is the anchor itself. A floor that rose
+/// with the clock would refuse the real tip after a halt longer than its
+/// slack; an indexer still syncing far behind sits in the band, and the
+/// tracker's warm-up follows it as it catches up.
 pub fn mainnet_band(unix_secs: u64) -> Option<(u32, u32)> {
     let blocks = unix_secs.checked_sub(ANCHOR_EPOCH)? / TARGET_BLOCK_SECS;
     let slack = (SIGMA * (blocks as f64).sqrt()) as u64 + blocks / 500 + 200;
-    let estimate = u64::from(ANCHOR_HEIGHT) + blocks;
-    let clamp = |height: u64| u32::try_from(height).unwrap_or(u32::MAX);
-    Some((
-        clamp(estimate.saturating_sub(slack)),
-        clamp(estimate.saturating_add(slack)),
-    ))
+    let ceiling = u64::from(ANCHOR_HEIGHT) + blocks + slack;
+    Some((ANCHOR_HEIGHT, u32::try_from(ceiling).unwrap_or(u32::MAX)))
 }
 
 /// The most blocks mainnet plausibly produces in `elapsed`: the Poisson mean
@@ -72,10 +71,10 @@ mod tests {
     const DAY: u64 = 24 * 60 * 60;
 
     #[test]
-    fn the_band_at_the_anchor_is_the_fixed_slack_around_it() {
+    fn the_band_at_the_anchor_runs_from_it_to_the_fixed_slack_above() {
         assert_eq!(
             mainnet_band(ANCHOR_EPOCH),
-            Some((ANCHOR_HEIGHT - 200, ANCHOR_HEIGHT + 200))
+            Some((ANCHOR_HEIGHT, ANCHOR_HEIGHT + 200))
         );
     }
 
@@ -86,11 +85,18 @@ mod tests {
     }
 
     #[test]
-    fn the_band_widens_with_age_and_tracks_the_target_rate() {
+    fn the_ceiling_rises_with_age_and_tracks_the_target_rate() {
         // Sixty days on: 69,120 blocks, slack 1314 + 138 + 200.
-        let (low, high) = mainnet_band(ANCHOR_EPOCH + 60 * DAY).unwrap();
-        let estimate = ANCHOR_HEIGHT + 69_120;
-        assert_eq!((low, high), (estimate - 1652, estimate + 1652));
+        let (_, high) = mainnet_band(ANCHOR_EPOCH + 60 * DAY).unwrap();
+        assert_eq!(high, ANCHOR_HEIGHT + 69_120 + 1652);
+    }
+
+    #[test]
+    fn the_floor_stays_at_the_anchor_so_a_long_halt_stays_in_the_band() {
+        // A chain halted since the anchor is a year behind schedule and still
+        // in the band.
+        let (low, _) = mainnet_band(ANCHOR_EPOCH + 365 * DAY).unwrap();
+        assert_eq!(low, ANCHOR_HEIGHT);
     }
 
     #[test]

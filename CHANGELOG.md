@@ -34,9 +34,9 @@ date) before dispatching the release.
   a tip oscillating inside the reorg allowance froze the cadence, and a height
   near `u32::MAX` refused every expiring migration until restart. Only a new
   high now counts as the tip advancing, the reported height is range-checked,
-  and on mainnet each answer must sit in a band around a compiled anchor and
-  climb at a rate the chain can plausibly reach before the hub takes the
-  highest. One operator running every indexer keeps a bounded lever, listed in
+  and on mainnet each answer must sit between a compiled anchor height and a
+  clock-driven ceiling, and climb at a rate the chain can plausibly reach,
+  before the hub takes the highest. One operator running every indexer keeps a bounded lever, listed in
   the hub's `OPERATORS.md`. Reported by [@ouicate](https://github.com/ouicate).
 
 ### Changed
