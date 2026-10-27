@@ -830,6 +830,46 @@ mod tests {
     }
 
     #[test]
+    fn a_child_published_before_its_parent_is_retried() {
+        // The shim diverts the second leg of a TEX payment, whose only input is
+        // the first leg's output. If the second leg reaches an earlier flush
+        // than the first, zebra answers with its missing-input error, and the
+        // entry must be requeued to go out with its parent next flush. Dropping
+        // it loses a payment the wallet was told was sent.
+        //
+        // zebra's wording, from `zebra-consensus/src/error.rs`
+        // (`TransparentInputNotFound`), bare and as the mempool's
+        // `TransactionDownloadVerifyError::Invalid` wraps it. lightwalletd
+        // relays either as a `SendResponse` with a non-zero code.
+        for message in [
+            "could not find transparent input UTXO in the best chain or mempool",
+            "transaction did not pass consensus validation: could not find transparent input \
+             UTXO in the best chain or mempool",
+        ] {
+            match classify_send_response(&SendResponse {
+                error_code: -25,
+                error_message: message.into(),
+            }) {
+                Publish::Retryable { .. } => {}
+                other => panic!("{message:?} must be retried, got {other:?}"),
+            }
+        }
+
+        // zaino relays the same node error as gRPC INTERNAL.
+        let status: BoxError = Box::new(GrpcStatusError {
+            code: "13".into(),
+            message: Some(
+                "RPC error: could not find transparent input UTXO in the best chain or mempool"
+                    .into(),
+            ),
+        });
+        assert!(matches!(
+            classify_publish_failure(&status),
+            Publish::Retryable { .. }
+        ));
+    }
+
+    #[test]
     fn a_failure_to_reach_a_verdict_is_retryable() {
         // The shapes `unary` produces when nothing judged the transaction: the
         // three timeouts and a raw I/O error carry no gRPC status at all, and
