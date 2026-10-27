@@ -35,7 +35,7 @@ mod common;
 use common::{
     connect_h2, dead_addr, decode_raw_transaction, decode_send_response, get_transaction,
     get_transaction_filter, send_tx, send_tx_reply, spawn_counting_backend,
-    spawn_forward_only_shim, wire_hash, V6_IRONWOOD_ONLY, V6_MIGRATION,
+    spawn_forward_only_shim, wire_hash, V6_IRONWOOD_ONLY, V6_MIGRATION, V6_TRANSPARENT_ONLY,
 };
 
 // -------------------------------------------------------------- mock hub
@@ -217,6 +217,34 @@ async fn a_migration_is_diverted_and_the_operator_is_never_connected() {
         backend_conns.load(Ordering::SeqCst),
         0,
         "classify-before-connect: a diverted migration must not dial the operator"
+    );
+}
+
+#[tokio::test]
+async fn the_second_leg_of_a_tex_payment_is_diverted_and_the_operator_is_never_connected() {
+    // Its prevout names the first leg, which the hub is holding, so it takes the
+    // same path as the migration it spends from.
+    let txid = "1122334455667788990011223344556677889900112233445566778899001122";
+    let hub_seen = Arc::new(Mutex::new(None));
+    let hub = spawn_mock_hub(txid, hub_seen.clone()).await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    let body = send_tx(&mut sender, shim, V6_TRANSPARENT_ONLY).await;
+
+    let resp = decode_send_response(&body);
+    assert_eq!(resp.error_code, 0);
+    assert_eq!(resp.error_message, txid);
+    assert_eq!(
+        hub_seen.lock().unwrap().as_deref(),
+        Some(V6_TRANSPARENT_ONLY)
+    );
+    assert_eq!(
+        backend_conns.load(Ordering::SeqCst),
+        0,
+        "a transparent-only spend must not dial the operator"
     );
 }
 

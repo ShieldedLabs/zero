@@ -50,6 +50,10 @@ const V6_ORCHARD_ZERO: &[u8] = include_bytes!("fixtures/v6_orchard_zero.bin");
 /// `{:+}` sign formatting that renders `orchard_vb` actually runs.
 const V6_REVERSE: &[u8] = include_bytes!("fixtures/v6_reverse.bin");
 
+/// V6 with transparent parts only, spending one prevout: the second leg of a TEX
+/// payment, diverted by the classifier's second arm.
+const V6_TRANSPARENT_ONLY: &[u8] = include_bytes!("fixtures/v6_transparent_only.bin");
+
 const LIMIT: StdDuration = StdDuration::from_secs(10);
 
 async fn bounded<F: Future>(fut: F) -> F::Output {
@@ -221,6 +225,7 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
     send_tx(&mut sender, shim, V6_ORCHARD_ZERO).await;
     send_tx(&mut sender, shim, V6_REVERSE).await;
     send_tx(&mut sender, shim, V6_IRONWOOD_ONLY).await;
+    send_tx(&mut sender, shim, V6_TRANSPARENT_ONLY).await;
     send_tx(&mut sender, shim, &[0xff; 64]).await;
     // A migration sent with a method the shim used to ignore. The tonic server
     // Zaino is built from dispatches on path alone, so this one reaches the
@@ -243,14 +248,17 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
     // 1. Every SendTransaction produces a verdict line, with its class.
     assert_eq!(
         log.matches("SendTransaction classified").count(),
-        6,
-        "one verdict per body: four migrations, one passthrough, one unparseable: log was:\n{log}"
+        7,
+        "one verdict per body: five migrations, one passthrough, one unparseable: log was:\n{log}"
     );
+    // The transparent-only spend logs the same label as the Orchard ones. A
+    // label of its own would tell the parent host which member of the batch is
+    // the transparent one.
     assert_eq!(
         log.matches("class=\"migration\"").count(),
-        4,
+        5,
         "four transactions carry Orchard actions (including the GET, which the \
-         classifier must not skip): log was:\n{log}"
+         classifier must not skip) and one is a transparent-only spend: log was:\n{log}"
     );
     assert!(log.contains("class=\"passthrough\""), "log was:\n{log}");
     // 64 bytes of 0xff wrapped in a valid RawTransaction: the wrapper decodes,
@@ -259,11 +267,12 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
     // reserved for a body the intercept could not even unwrap.
     assert!(log.contains("class=\"unparseable\""), "log was:\n{log}");
 
-    // 2. Five of the six would be diverted in production: four transactions
-    //    carrying Orchard actions, and the unreadable body.
+    // 2. Six of the seven would be diverted in production: four transactions
+    //    carrying Orchard actions, the transparent-only spend, and the
+    //    unreadable body.
     assert_eq!(
         log.matches("diverted_in_production=true").count(),
-        5,
+        6,
         "log was:\n{log}"
     );
     assert!(
@@ -283,6 +292,7 @@ async fn the_shim_logs_a_verdict_for_every_send_transaction() {
         "expiry=",
         "tx_len=",
         "orchard_actions=",
+        "transparent_only=",
         "inputs=",
         "outputs=",
         "version=V6",

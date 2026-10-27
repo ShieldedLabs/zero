@@ -5,11 +5,12 @@
 //! the SendTransaction path. `classify_generated.rs` regenerates equivalent
 //! transactions in memory and is the tripwire for these fixtures going stale.
 //!
-//! The five V6 fixtures were produced by the generator in
-//! `classify_generated.rs` (see the `regenerate_fixtures` note there). They are
-//! not reproducible byte-for-byte, because the dummy Orchard action inside is
-//! entropy-seeded, so they are captured once and committed. What the classifier
-//! reads is whether an Orchard bundle is present; the balances are evidence.
+//! The six V6 fixtures were produced by the generator in
+//! `classify_generated.rs` (see the `regenerate_fixtures` note there). Those
+//! with a shielded bundle are not reproducible byte-for-byte, because the dummy
+//! action inside is entropy-seeded, so they are captured once and committed.
+//! What the classifier reads is whether an Orchard bundle is present, or whether
+//! the transaction is a transparent-only spend; the balances are evidence.
 
 use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 
@@ -45,8 +46,13 @@ const V6_ORCHARD_ZERO: &[u8] = include_bytes!("fixtures/v6_orchard_zero.bin");
 /// ordinary commerce in the new pool, shielding value into Ironwood.
 const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("fixtures/v6_ironwood_only.bin");
 
+/// V6 with transparent parts only, spending one prevout to one P2PKH output: the
+/// shape of the second transaction of a TEX payment.
+const V6_TRANSPARENT_ONLY: &[u8] = include_bytes!("fixtures/v6_transparent_only.bin");
+
 /// A real mainnet V4 coinbase transaction. Transparent only, pre-V6, so it
-/// carries no Orchard bundle and is a genuine pass-through.
+/// carries no Orchard bundle, and its one input is a coinbase input, so it
+/// spends nothing: a genuine pass-through.
 const V4_COINBASE_HEX: &str = "0400008085202f89010000000000000000000000000000000000000000000000000000000000000000ffffffff0503b0e72100ffffffff04e8bbe60e000000001976a914ba92ff06081d5ff6542af8d3b2d209d29ba6337c88ac40787d010000000017a914931fec54c1fea86e574462cc32013f5400b891298738c94d010000000017a914c7a4285ed7aed78d8c0e28d7f1839ccb4046ab0c87286bee000000000017a914d45cb1adffb5215a42720532a076f02c7c778c908700000000b0e721000000000000000000000000";
 
 #[test]
@@ -144,17 +150,37 @@ fn an_ironwood_only_transaction_is_a_pass_through() {
 }
 
 #[test]
+fn a_transparent_only_spend_is_a_migration() {
+    let evidence = classify_with_evidence(V6_TRANSPARENT_ONLY);
+    println!("{evidence:?}");
+
+    // The second leg of a TEX payment names the first by its prevout, so it is
+    // diverted on its shape. The second arm, pinned on committed bytes.
+    assert_eq!(evidence.class, Class::Migration);
+    assert_eq!(evidence.version, "V6");
+    assert!(evidence.transparent_only);
+    assert_eq!(evidence.orchard_actions, 0, "no Orchard bundle at all");
+    assert_eq!(evidence.inputs, 1);
+    assert_eq!(evidence.outputs, 1);
+    assert!(evidence.error.is_none());
+    assert!(evidence.class.treat_as_migration());
+}
+
+#[test]
 fn transparent_pre_v6_is_pass_through() {
     // Real mainnet bytes, and the other realistic pass-through: no Orchard
-    // bundle, so the predicate does not fire. Nothing here depends on the
-    // version being pre-V6; the absent version guard is not what makes this
-    // pass, the absent Orchard bundle is.
+    // bundle, and a coinbase input spends no prevout, so neither arm fires.
+    // Nothing here depends on the version being pre-V6.
     let bytes = hex::decode(V4_COINBASE_HEX).expect("fixture is valid hex");
     let evidence = classify_with_evidence(&bytes);
     println!("{evidence:?}");
 
     assert_eq!(evidence.class, Class::PassThrough);
     assert_eq!(evidence.version, "V4");
+    assert!(
+        !evidence.transparent_only,
+        "a coinbase input is not a spend"
+    );
     assert_eq!(evidence.orchard_actions, 0);
     assert_eq!(evidence.orchard_vb, 0);
     assert_eq!(evidence.ironwood_vb, 0);
@@ -226,6 +252,7 @@ fn classify_matches_classify_with_evidence_everywhere() {
         V6_ORCHARD_ONLY,
         V6_ORCHARD_ZERO,
         V6_IRONWOOD_ONLY,
+        V6_TRANSPARENT_ONLY,
         &[][..],
         &[0xff; 32][..],
     ] {
