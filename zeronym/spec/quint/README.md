@@ -3,7 +3,7 @@
 A [Quint](https://quint-lang.org) specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
 
 > [!NOTE]
-> Checked against: `main` at `2bae0a6`.
+> Checked against: `main` at `2bae0a6`, except the hub's tip rule, which is checked against the open #92 at `b767ac9`. Citations marked "at #92" are line numbers there.
 
 - [System](#system)
 - [Assumptions](#assumptions)
@@ -33,7 +33,7 @@ Each component is one total function from its state and one input to its next st
 
 | Component | Inputs | Outputs | Seam in the implementation |
 |---|---|---|---|
-| `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
+| `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe` and `adopt`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
 | `shim` | `SendTxSInput` (with whether the transport took the frame), `GetTxSInput`, `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
 | indexer | `BroadcastIInput`, `LookupIInput`, `AdvanceIInput`, `MineIInput` | `VerdictOutput`, `AnswerOutput`, `NoIndexerOutput` | the mock indexer in `hub/tests/common/mod.rs` |
 
@@ -70,7 +70,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Roles.** The shim and the hub both run attested. An honest shim or hub runs a binary built from the commit under *Checked against*, which reproduces to the hash in its `deploy/EXPECTED_SHA256` and passes `caution verify`. The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine, not because the design relies on it more, but to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Honest and Byzantine.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`). No message or state field records which it took.
 - **Byzantine hub** (protocol specification only). It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
-- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip.
+- **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip in the model's range. On mainnet #92 drops a tip outside a band or above the plausible climb rate (`tip_guard.rs`), so this over-approximates the guard.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
 - **Third party.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
@@ -140,7 +140,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | T8 | The wallet sees its transaction's status go backwards | Network reordering; resubmission; the flush window (after a flush empties the queue, before the indexer has the batch) | Not prevented |
 | T9 | An acknowledged migration is lost to a crash, a failed final flush, or a requeue drop | None needed | Not prevented |
 | T10 | A third party who knows a txid learns it is queued | Unauthenticated third party | Accepted |
-| T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Not prevented; recorded |
+| T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Bounded on mainnet by #92 (finding 11); possible inside the bound; recorded |
 | T12 | Any admitted transaction, including a late arrival or one from an unsupported wallet, is offered too late | As T5 | Not checked |
 | T13 | The hub acknowledges a migration it never queued | Byzantine hub | Not modelled: nothing reads an ack |
 | T14 | Linking a wallet to its migration by source IP | Network observer; operator | Not modelled. Claimed protected in `zeronym/README.md` |
@@ -189,7 +189,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G8 | holds (`timely`, `flakyTip`, `staleLagWithSlack`) | argued, not checked | argued, not checked: admission never judges below the recorded boundary, whatever the tip |
 | A3 | holds | argued, not checked: draining is an admission rule | holds |
 
-- A hub folds several indexer endpoints into one answer: the tip is the maximum, a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip, inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
+- A hub folds several indexer endpoints into one answer: the tip is the maximum of the answers the tip guard keeps (`batcher.rs:245-282`, `chain.rs:176-208` at #92), a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip (on mainnet, only inside the guard's band and climb rate), inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
 - G1 depends on the shim alone.
@@ -218,7 +218,7 @@ Behaviours that are accepted or only recorded:
 | Behaviour | Threat | Shown by |
 |---|---|---|
 | **Accepted disclosure.** A third party that knows a txid learns that it is queued. The hub withholds the bytes, not the fact. The implementation leaves this open deliberately (`Hub::lookup`, `zeronym/hub/src/server.rs`): "the 200-versus-NotFound distinction still discloses that a given txid is queued here. Closing that too means answering NotFound, which costs a wallet the ability to tell "pending" from "never seen"" | T10 | `thirdPartyLearnsItIsQueuedTest`; witness `wQueuedDisclosed` on `baseline` |
-| **Premature flush.** A Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary: a batching harm, not an expiry one. What a report far ahead of the chain does is finding 11 | T11 | `tipAheadOfChainFlushesEarlyTest` |
+| **Premature flush.** A Byzantine indexer reports a tip ahead of the chain and the hub flushes before the true boundary: a batching harm, not an expiry one. A report far ahead of the chain is finding 11, which #92 bounds on mainnet | T11 | `tipAheadOfChainFlushesEarlyTest` |
 | **Early flush by the free-running clock.** A stale hub's clock is ahead of the chain and it flushes before the true boundary, with every component honest | T11, with no liar | `freeRunningClockFlushesEarlyTest` |
 | **Unparseable and queued.** A payload the hub cannot parse has no txid, so a lookup misses it while it is queued | none | `unparseableIsQueuedAndMissedTest` |
 
@@ -226,7 +226,7 @@ Behaviours that are accepted or only recorded:
 
 > Where the model disagrees with what the code or its comments assume.
 
-Findings 6 and 8 are fixed by #85, and finding 2 in part. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
+Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by #92, which is still open. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
 
 | # | Finding | Kind | Shown by | Against the Rust |
 |---|---|---|---|---|
@@ -240,7 +240,7 @@ Findings 6 and 8 are fixed by #85, and finding 2 in part. Nothing else here has 
 | 8 | **One indexer endpoint can make a wallet see "pending" for a transaction nobody holds.** "Found, height 0, no body" from an indexer is byte-identical to the hub's own queue-hit reply, and the hub forwards it unchanged | Code bug (MEDIUM), fixed by #85: an ambiguous wire reply, and no check on an indexer's answer | `sentinelCollisionTest`, `indexerEmptyAnswerIsUnavailableTest` | Code read before #85, at `ee910d6`: `server.rs:445-451`, `chain.rs:284-290`, `:305-319` |
 | 9 | **Lookups choose a hub by apparent liveness.** A lookup starts at a rotating cursor and moves to the next address only on a timeout, the pattern the submit path forbids. Whoever can make one hub time out decides which hub answers | Undecided: deliberate and tested, and in conflict with a rule written for submits. The `PRODUCTION.md` that rule cites is not in the repository | Not modelled: needs more than one hub | Code read: `shim/src/nym.rs:746-797`, against the rule at `:628-633`; `shim/tests/nym.rs` asserts the behaviour today |
 | 10 | **Anyone can make the hub answer "pending" for a published transaction, and pad its batch-size signal.** The queue deduplicates against resident entries only, so published bytes are admitted again if resubmitted, and a lookup answers from the queue first. The wallet reads "pending" for a transaction it has already been served, until the next flush. The flush also counts an already-known verdict toward the achieved batch size, which the code calls "the honest measure of the privacy", so free, public bytes can raise that figure and suppress the warning for a batch of one | Code bug (LOW): the comment on `Hub::lookup` calls a resubmit harmless. The batch-size figure is logged and returned but drives no decision | K2, `thirdPartyResubmitsPublishedTest`, `walletResendsPublishedTest` | Code read: `queue.rs:310-312`, `:360-361`; `Hub::lookup` in `server.rs`; `batcher.rs:397`, `:434`, `:526`. Not checked: that a node answers already-known for a transaction that is already mined |
-| 11 | **One high tip report pins the hub's tip.** `observe` adopts any higher height and ignores a later drop larger than the reorg allowance. So one endpoint reporting a height P makes every real height look like an oversized regression until the chain reaches P minus the allowance, which for a large P is until restart. The epoch jumps, so the hub flushes once off cadence; after that admission refuses every expiring transaction, because the observed height is P | Code bug (HIGH): the code says taking the maximum over endpoints defends the clock against being advanced, and it defends only against slowing it | Found by reading; not modelled, because the model's heights are bounded. `tipAheadOfChainFlushesEarlyTest` shows the one early flush | Code read: `batcher.rs:19-22`, `:177-209`, `:355-374`; `chain.rs:176-201` |
+| 11 | **One high tip report pinned the hub's tip.** Before #92, `observe` adopted any higher height and ignored a later drop larger than the reorg allowance. So one endpoint reporting a height P made every real height look like an oversized regression until the chain reached P minus the allowance, which for a large P is until restart. The epoch jumped, so the hub flushed once off cadence; after that admission refused every expiring transaction, because the observed height was P. The same rule could freeze the cadence: every step up refreshed liveness, so a tip that oscillated inside the allowance never went stale. #92 judges each answer before the maximum: on mainnet it drops a height outside a band around a compiled anchor, which also refuses a height near `u32::MAX`, and a new high faster than the chain can climb. Only a new high refreshes liveness, reorg depth is measured from the best height seen, and the free-running clock starts from that height | Code bug (HIGH), fixed by #92. On mainnet the guard bounds the lie: inside the band and rate one endpoint can still shift flush timing, hold a lead of about 16 blocks, or choose the boot height. Testnet and regtest are unguarded | `observeTip` follows #92: `tipRuleTest`, `staleCadenceTest`, `tipNearBestTest`. The Byzantine indexer still reports any tip in a bounded range, which over-approximates the guard. The freeze was invisible to the model before #92: staleness here is counted from the chain height alone, and the one configuration that goes stale reports the true height, which only climbs. `tipAheadOfChainFlushesEarlyTest` shows the one early flush | Code read at #92: `batcher.rs:19-45`, `:164-202`, `:240-349`, `:416-431`; `tip_guard.rs:40-65`; `chain.rs:176-208`. Before #92, at `2bae0a6`: `batcher.rs:19-22`, `:177-209`, `:355-374`; `chain.rs:176-201` |
 
 On finding 2, the model lets the free-running clock be at most one flush interval ahead, so it can spend one epoch. `cadence_height` has no such cap. Reading that code, a clock further ahead would skip more than one boundary; the model does not exhibit that.
 
@@ -298,7 +298,7 @@ The schedule flushes every 3 blocks with a mining margin of 2, a delivery lag of
 | `byzIndexer` | a Byzantine indexer, and a tight-expiry payload | the trust matrix |
 | `unknownUpgrade` | an unparseable payload; scripted runs only | the attempt bound |
 
-In every configuration a due flush begins before the next block, and at most one block arrives while a flush is in flight. Under `staleLag` a hub is stale once it has heard no tip for the staleness window; its free-running clock is then assumed never behind the chain and at most one flush interval ahead of it. The implementation relies on "never behind" and does not enforce it (`zeronym/hub/src/batcher.rs:64-67`).
+In every configuration a due flush begins before the next block, and at most one block arrives while a flush is in flight. Under `staleLag` a hub is stale once it has seen no new high for the staleness window; its free-running clock is then assumed never behind the chain and at most one flush interval ahead of it. The implementation relies on "never behind" and does not enforce it (`zeronym/hub/src/batcher.rs:64-67`).
 
 <details>
 <summary>What TLC visits</summary>
@@ -309,13 +309,15 @@ With 8 workers, on the machine this was written on:
 |---|---|---|
 | `timely` | G6b | holds, 20 030 states, depth 40 |
 | `timely` | K6's predicate | holds, 20 030 states, depth 40 |
-| `flakyTip` | G6b | holds, 81 518 states, depth 36 |
-| `timely`; `flakyTip`; `staleLagWithSlack` | G8 | holds: 20 030; 81 518; 952 657 states |
+| `flakyTip` | G6b | holds, 117 246 states, depth 36 |
+| `timely`; `flakyTip`; `staleLagWithSlack` | G8 | holds: 20 030; 117 246; 952 657 states |
 | `flakyTipNoSlack` | G6b (K3') | violated, 12 states |
 | `staleLag` | G6b; K6 | violated, 13; 13 states |
 | `staleLagWithSlack` | G6b (finding 2) | violated, 19 states |
 | `timely` | K5 | violated: 5 states; 8 without a crash; 12 without a shutdown either |
 | `byzIndexer` | G6b | violated, 16 states |
+
+`flakyTip` had 81 518 states before the tip rule followed #92. The hub's best height is now part of its state, so a tip one below the best and the same tip as the best are distinct states. Every verdict and counterexample length stayed the same.
 
 TLC runs with deadlock checking off, so a machine whose steps had died would hold everything. The gate therefore also requires one reachable state per family of steps, and the antecedent of G6b, each as a violated `not(..)` row.
 

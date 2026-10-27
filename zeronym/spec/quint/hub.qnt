@@ -38,13 +38,14 @@ module hub {
     params.flushInterval + params.miningMargin + params.deliveryLag <= params.minWalletExpiry
 
   /// Where the process is in its life. `Starting` has not seen a tip yet;
-  /// `Stale` has seen no forward tip progress for the staleness window;
+  /// `Stale` has seen no new high for the staleness window;
   /// `Draining` has had its shutdown signal and owes one final flush;
   /// `Stopped` has done it.
   type Phase = Down | Starting | Running | Stale | Draining | Stopped
 
   /// The clock the flush schedule runs on. It follows the observed tip until
-  /// the hub is stale, and then free-runs from an estimate of elapsed time.
+  /// the hub is stale, and then free-runs from the best height seen, on an
+  /// estimate of elapsed time.
   /// Admission and requeue never read it directly: requeue reads the observed
   /// tip, admission `admissionHeight`.
   type Cadence = Tracking | FreeRunning(Height)
@@ -57,6 +58,8 @@ module hub {
     | Broadcasting({ batch: Payload -> int, unplaced: Payload -> int, final: bool })
 
   /// - `tip`: the last tip observed, absent until the first observation.
+  /// - `best`: the highest tip observed, 0 until the first observation. Only
+  ///   a tip above it is progress, and a tip is judged against it.
   /// - `queue`: the admitted entries, keyed by their bytes, each with the
   ///   number of requeues it has had.
   /// - `lastEpoch`: the flush epoch last acted on, absent until adopted. A
@@ -65,6 +68,7 @@ module hub {
     params: HubParams,
     phase: Phase,
     tip: Option[Height],
+    best: Height,
     cadence: Cadence,
     queue: Payload -> int,
     flush: Flush,
@@ -76,6 +80,7 @@ module hub {
     params: params,
     phase: Down,
     tip: None,
+    best: 0,
     cadence: Tracking,
     queue: Map(),
     flush: Idle,
@@ -97,7 +102,7 @@ module hub {
     // misses.
     | LookupHInput({ nonce: Nonce, txid: TxId, answer: IndexerAnswer })
     | TipHInput(Height)        // the cadence loop observes a tip
-    // No forward tip progress for the staleness window. The height is what
+    // No new high for the staleness window. The height is what
     // the free-running cadence clock now reads.
     | StaleHInput(Height)
     | FlushDueHInput           // the cadence loop finds a flush due
@@ -245,10 +250,13 @@ module hub {
   // Tip
   // ------------------------------------------------------------------------
 
-  /// The cadence loop observes `height`. The first observation is adopted,
-  /// with its epoch, and nothing is flushed. After that a forward move is
-  /// followed and ends staleness; a move back within the reorg allowance is
-  /// followed and does not; a larger move back is ignored.
+  /// The cadence loop observes `height`. The first observation is adopted as
+  /// the best height, with its epoch, and nothing is flushed. After that only
+  /// a new high, above the best, is progress: it is followed, becomes the best
+  /// and ends staleness. A height within the reorg allowance below the best is
+  /// followed and leaves the phase and the cadence alone, so a tip that dips
+  /// and climbs back is not progress. A height further below the best is
+  /// ignored, so a reorg cannot be walked down one allowance at a time.
   pure def observeTip(state: HubState, height: Height): HubResult =
     match state.tip {
       | None =>
@@ -256,34 +264,36 @@ module hub {
           { ...state,
             phase: Running,
             tip: Some(height),
+            best: height,
             lastEpoch: Some(height / state.params.flushInterval),
           }.toNoHubOutput()
         else state.toHubErrorOutput("no cadence loop is running")
-      | Some(tip) =>
+      | Some(_) =>
         if (state.phase != Running and state.phase != Stale)
           state.toHubErrorOutput("no cadence loop is running")
         else if (state.flush != Idle)
           state.toHubErrorOutput("the tip is not observed during a flush")
-        else if (height > tip)
-          { ...state, phase: Running, tip: Some(height), cadence: Tracking }.toNoHubOutput()
-        else if (tip - height <= state.params.reorgAllowance)
+        else if (height > state.best)
+          { ...state, phase: Running, tip: Some(height), best: height, cadence: Tracking }.toNoHubOutput()
+        else if (state.best - height <= state.params.reorgAllowance)
           { ...state, tip: Some(height) }.toNoHubOutput()
         else
           state.toNoHubOutput()
     }
 
-  /// The staleness window passes with no forward progress, or passes further:
-  /// the cadence clock free-runs and now reads `height`. The estimate starts at
-  /// or above the observed tip and never runs backwards.
+  /// The staleness window passes with no new high, or passes further: the
+  /// cadence clock free-runs and now reads `height`. The estimate starts at or
+  /// above the best height, where the implementation's clock starts, and
+  /// never runs backwards.
   pure def freeRun(state: HubState, height: Height): HubResult =
     if (state.flush != Idle)
       state.toHubErrorOutput("the cadence clock is not read during a flush")
     else
       match state.cadence {
         | Tracking =>
-          if (state.phase == Running and height >= state.observedTip())
+          if (state.phase == Running and height >= state.best)
             { ...state, phase: Stale, cadence: FreeRunning(height) }.toNoHubOutput()
-          else state.toHubErrorOutput("not a running hub, or an estimate below the observed tip")
+          else state.toHubErrorOutput("not a running hub, or an estimate below the best height")
         | FreeRunning(estimate) =>
           if (state.phase == Stale and height >= estimate)
             { ...state, cadence: FreeRunning(height) }.toNoHubOutput()
