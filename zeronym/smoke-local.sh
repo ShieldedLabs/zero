@@ -38,7 +38,9 @@ HUB_PORT=${HUB_PORT:-19970}
 SHIM_PORT=${SHIM_PORT:-19971}
 INDEXER=${INDEXER:-66.241.124.200:443}
 INDEXER_TLS=${INDEXER_TLS:-na.zec.rocks}
+NETWORK=${NETWORK:-mainnet}
 CONNECT_WAIT_SECS=${CONNECT_WAIT_SECS:-200}
+WARMUP_WAIT_SECS=${WARMUP_WAIT_SECS:-900}
 LOG_DIR=${LOG_DIR:-${TMPDIR:-/tmp}/smoke-local.$$}
 
 for bin in "$SHIM_BIN" "$HUB_BIN"; do
@@ -80,9 +82,26 @@ wait_connected() {
     return 1
 }
 
+# A mainnet hub refuses every submission until its tip warm-up ends: at least
+# five minutes, then the next block the rate check accepts. smoke.sh's divert
+# check needs the hub to admit, so wait for the line the hub logs at the end.
+# The hub always logs its batcher at info for that line, whatever RUST_LOG says.
+wait_warm() {
+    _t=0
+    while [ "$_t" -lt "$WARMUP_WAIT_SECS" ]; do
+        if grep -q "tip warm-up complete" "$LOG_DIR/hub.log" 2>/dev/null; then
+            echo "smoke-local: hub tip warm-up complete after ${_t}s"
+            return 0
+        fi
+        sleep 5; _t=$((_t + 5))
+    done
+    echo "smoke-local: hub tip warm-up did not complete within ${WARMUP_WAIT_SECS}s; log: $LOG_DIR/hub.log" >&2
+    return 1
+}
+
 echo "smoke-local: starting hub on 127.0.0.1:$HUB_PORT (logs in $LOG_DIR)"
-ZIH_LISTEN=127.0.0.1:$HUB_PORT ZIH_INDEXERS=$INDEXER ZIH_INDEXER_TLS=$INDEXER_TLS ZIH_NYM=true \
-RUST_LOG=${RUST_LOG:-warn} "$HUB_BIN" >"$LOG_DIR/hub.log" 2>&1 &
+ZIH_LISTEN=127.0.0.1:$HUB_PORT ZIH_INDEXERS=$INDEXER ZIH_INDEXER_TLS=$INDEXER_TLS ZIH_NETWORK=$NETWORK ZIH_NYM=true \
+RUST_LOG="${RUST_LOG:-warn},zero_indexer_hub::batcher=info" "$HUB_BIN" >"$LOG_DIR/hub.log" 2>&1 &
 hub_pid=$!
 wait_connected "http://127.0.0.1:$HUB_PORT" hub || exit 1
 
@@ -100,6 +119,9 @@ RUST_LOG=${RUST_LOG:-warn} "$SHIM_BIN" >"$LOG_DIR/shim.log" 2>&1 &
 shim_pid=$!
 # The shim is h2c on loopback, so its status endpoint needs prior-knowledge h2.
 wait_connected "http://127.0.0.1:$SHIM_PORT" shim --http2-prior-knowledge || exit 1
+if [ "$NETWORK" = mainnet ]; then
+    wait_warm || exit 1
+fi
 
 echo "smoke-local: both connected; running smoke.sh"
 echo "----------------------------------------------------------------------"

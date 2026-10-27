@@ -27,7 +27,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tokio::net::TcpListener;
 
-use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub, NymAddress, ServeOptions};
@@ -40,8 +40,8 @@ HdjEPfnu2u5DV3jbZqZ6NJEhr1U5u9r41Gt8qncoByHx@tUiLPjz5nkPn5ZJT5ZXLPGDcZ3caQsfkMAp
 async fn spawn_with_indexer(options: ServeOptions, indexer: std::net::SocketAddr) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     tokio::spawn(server::serve(
         listener,
         Hub {
@@ -73,8 +73,8 @@ async fn hanging_indexer() -> std::net::SocketAddr {
 async fn spawn(options: ServeOptions) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     tokio::spawn(server::serve(
         listener,
         Hub {

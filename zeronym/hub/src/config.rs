@@ -52,6 +52,17 @@ pub struct Config {
     #[arg(long = "indexer-tls", env = "ZIH_INDEXER_TLS")]
     pub indexer_tls: Option<String>,
 
+    /// The Zcash network the indexers serve.
+    ///
+    /// On mainnet the hub bounds every tip an indexer reports against a
+    /// compiled anchor and the real chain's block rate (`tip_guard`). Testnet
+    /// and regtest run unguarded, because their blocks do not follow mainnet's
+    /// rate. Required with no default, since either default is wrong for
+    /// someone: a testnet hub assuming mainnet refuses every height, and a
+    /// mainnet hub assuming testnet runs unguarded.
+    #[arg(long, env = "ZIH_NETWORK", value_enum)]
+    pub network: Network,
+
     /// Run with an UNAUTHENTICATED hop to the indexer. Off by default, and it
     /// must stay that way in any real deployment.
     ///
@@ -123,6 +134,14 @@ pub struct Config {
     pub http_submit: bool,
 }
 
+/// A Zcash network, as `--network` names it.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    Mainnet,
+    Testnet,
+    Regtest,
+}
+
 impl Config {
     /// The TLS verifier for indexer connections, if one is configured.
     pub fn indexer_tls(&self) -> Result<Option<IndexerTls>, BoxError> {
@@ -176,7 +195,13 @@ mod tests {
 
     /// Build a config with only the fields these tests care about.
     fn cfg(indexer_tls: Option<&str>, allow_plaintext: bool) -> Config {
-        let mut c = Config::parse_from(["zero-indexer-hub", "--indexer", "127.0.0.1:1"]);
+        let mut c = Config::parse_from([
+            "zero-indexer-hub",
+            "--network",
+            "regtest",
+            "--indexer",
+            "127.0.0.1:1",
+        ]);
         c.indexer_tls = indexer_tls.map(str::to_owned);
         c.allow_plaintext_indexer = allow_plaintext;
         c
@@ -209,8 +234,27 @@ mod tests {
     }
 
     #[test]
+    fn the_network_is_required_and_named() {
+        assert!(Config::try_parse_from(["zero-indexer-hub", "--indexer", "1.2.3.4:443"]).is_err());
+        let cfg = Config::parse_from([
+            "zero-indexer-hub",
+            "--network",
+            "mainnet",
+            "--indexer",
+            "1.2.3.4:443",
+        ]);
+        assert_eq!(cfg.network, Network::Mainnet);
+    }
+
+    #[test]
     fn a_comma_separated_indexer_list_splits() {
-        let cfg = Config::parse_from(["zero-indexer-hub", "--indexer", "1.2.3.4:443,5.6.7.8:443"]);
+        let cfg = Config::parse_from([
+            "zero-indexer-hub",
+            "--network",
+            "regtest",
+            "--indexer",
+            "1.2.3.4:443,5.6.7.8:443",
+        ]);
         assert_eq!(cfg.indexers.len(), 2);
     }
 
@@ -218,6 +262,8 @@ mod tests {
     fn repeating_the_flag_accumulates_endpoints() {
         let cfg = Config::parse_from([
             "zero-indexer-hub",
+            "--network",
+            "regtest",
             "--indexer",
             "1.2.3.4:443",
             "--indexer",
@@ -230,18 +276,31 @@ mod tests {
     fn a_hostname_is_refused_because_the_enclave_resolves_no_dns() {
         // Caught by clap's SocketAddr parse, where the error is readable, rather
         // than inside an enclave with no console.
-        assert!(
-            Config::try_parse_from(["zero-indexer-hub", "--indexer", "example.net:443"]).is_err()
-        );
+        assert!(Config::try_parse_from([
+            "zero-indexer-hub",
+            "--network",
+            "regtest",
+            "--indexer",
+            "example.net:443"
+        ])
+        .is_err());
     }
 
     #[test]
     fn tls_is_optional_but_a_bad_name_is_refused() {
-        let cfg = Config::parse_from(["zero-indexer-hub", "--indexer", "1.2.3.4:443"]);
+        let cfg = Config::parse_from([
+            "zero-indexer-hub",
+            "--network",
+            "regtest",
+            "--indexer",
+            "1.2.3.4:443",
+        ]);
         assert!(cfg.indexer_tls().expect("no tls configured").is_none());
 
         let cfg = Config::parse_from([
             "zero-indexer-hub",
+            "--network",
+            "regtest",
             "--indexer",
             "1.2.3.4:443",
             "--indexer-tls",
@@ -251,6 +310,8 @@ mod tests {
 
         let cfg = Config::parse_from([
             "zero-indexer-hub",
+            "--network",
+            "regtest",
             "--indexer",
             "1.2.3.4:443",
             "--indexer-tls",

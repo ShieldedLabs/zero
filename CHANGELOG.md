@@ -29,6 +29,15 @@ date) before dispatching the release.
   `[patch.crates-io]`. That stack's reqwest 0.11 also reads the system bundle,
   so the shim and hub images drop emSign ECC Root CA - G3 from the pinned
   StageX `ca-certificates.crt`.
+- zero-indexer: one indexer could steer the hub's batcher through the chain tip
+  it reports. A jump past the next flush boundary flushed the queue on demand,
+  a tip oscillating inside the reorg allowance froze the cadence, and a height
+  near `u32::MAX` refused every expiring migration until restart. Only a new
+  high now counts as the tip advancing, the reported height is range-checked,
+  and on mainnet each answer must sit between a compiled anchor height and a
+  clock-driven ceiling, and climb at a rate the chain can plausibly reach,
+  before the hub takes the highest. One operator running every indexer keeps a bounded lever, listed in
+  the hub's `OPERATORS.md`. Reported by [@ouicate](https://github.com/ouicate).
 - zero-indexer: the shim forwarded the second transaction of a TEX payment to
   the operator. Paying a ZIP 320 (TEX) address from shielded funds takes two
   transactions, and the second spends the first's single-use transparent
@@ -81,6 +90,10 @@ date) before dispatching the release.
 - The hub treats an indexer lookup answer with no transaction body as that
   endpoint failing, so it is no longer served as "found, height 0, no bytes",
   the reply reserved for a transaction the hub itself is holding.
+- The hub requires `--network` / `ZIH_NETWORK` (`mainnet`, `testnet` or
+  `regtest`). Mainnet turns on the tip guard and refuses to start with a clock
+  before the compiled anchor. `assemble-caution.sh` takes `--network`, and
+  `deploy.sh` reads `NETWORK`.
 
 ## v29 - 2026-09-07
 

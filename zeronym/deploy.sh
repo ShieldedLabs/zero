@@ -128,7 +128,8 @@ if [ "$COMPONENT" = shim ]; then
   fi
 elif [ "$COMPONENT" = hub ]; then
   : "${INDEXERS:?set INDEXERS for a hub}"; : "${INDEXER_TLS:?set INDEXER_TLS for a hub}"
-  set -- "$@" --indexers "$INDEXERS" --indexer-tls "$INDEXER_TLS"
+  : "${NETWORK:?set NETWORK (mainnet, testnet or regtest) for a hub}"
+  set -- "$@" --indexers "$INDEXERS" --indexer-tls "$INDEXER_TLS" --network "$NETWORK"
   [ "${NYM:-0}" = 1 ] && set -- "$@" --nym
   # The clearnet submit path, which the hub keeps CLOSED unless asked. A hub
   # deployed without this answers 404 to every clearnet submission, so a

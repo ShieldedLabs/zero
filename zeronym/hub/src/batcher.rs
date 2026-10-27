@@ -17,23 +17,44 @@
 //! ordering.
 //!
 //! **Tip acquisition is adversarial too.** The height is taken as the MAX over
-//! all nodes that answer, not the first that answers, because a single lagging
-//! or hostile node would otherwise be a second independent lever on the flush
-//! clock: a stalled tip freezes flushes, an advanced tip drains the queue.
-//! Staleness is a wall-clock fact (no node has advanced for
-//! [`TIP_STALE_AFTER`]), not an absence of answers, and it stops *admission*
-//! rather than causing a flush. The 15-minute threshold is not arbitrary: block
-//! arrivals are Poisson at ~75 s, so a 3-block threshold would fire about 57
-//! times a day, while 15 minutes is roughly one false positive every 140 days.
+//! all nodes that answer, so one lagging or stalled node cannot slow the flush
+//! clock. The MAX protects that direction only: the highest answer wins, so one
+//! node that LEADS would flush on demand with a single answer, or saturate
+//! admission for the life of the process. On mainnet the tracker therefore
+//! drops any answer outside the band a compiled anchor and the clock allow, and
+//! any new high faster than the chain can climb over every window it remembers
+//! ([`crate::tip_guard`]). Liveness counts only new highs, so an oscillating tip
+//! goes stale and the cadence free-runs. Staleness is a wall-clock fact (no
+//! node has advanced for [`TIP_STALE_AFTER`]), not an absence of answers, and
+//! it stops *admission* rather than causing a flush. The 15-minute threshold is
+//! not arbitrary: block arrivals are Poisson at ~75 s, so a 3-block threshold
+//! would fire about 57 times a day, while 15 minutes is roughly one false
+//! positive every 140 days.
+//!
+//! **What is left inside the bounds.** One operator answering for every
+//! endpoint can still (a) shift flush timing within the plausible rate, about
+//! twice the flush rate in a burst and 15% faster over a day; (b) hold a steady
+//! lead of about 16 blocks, which refuses tight expiries for as long as it is
+//! held; (c) hold the tip still, or keep it jumping through the warm-up, which
+//! closes admission; (d) drip low answers slowly enough to keep liveness while
+//! the chain runs ahead, which can expire what is queued; and (e) pick any
+//! in-band height at boot, which sticks until the chain catches up. Indexers
+//! from several operators close (c) and (d),
+//! because the MAX follows the honest ones. (a), (b) and (e) need only the
+//! highest answer, so closing them takes a majority rule across independent
+//! operators. In Nym mode a refusal reaches neither shim nor wallet, so (b) and
+//! (c) are silent losses.
 
 // See queue.rs: a panic here is a fleet-wide privacy event, not a crash.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::chain::{ChainClient, Publish};
 use crate::queue::Queue;
+use crate::tip_guard;
 use crate::BoxError;
 
 /// Blocks between flushes. Twenty blocks is roughly 25 minutes.
@@ -65,7 +86,7 @@ const TIP_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 /// stale. During a real stall blocks arrive slower than this, so the free-running
 /// clock runs ahead of the true height, which publishes EARLIER relative to true
 /// expiry. That is the safe direction to err.
-const NOMINAL_BLOCK_SECS: u64 = 75;
+const NOMINAL_BLOCK_SECS: u64 = crate::tip_guard::TARGET_BLOCK_SECS;
 
 /// How often the tip is polled.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -118,13 +139,51 @@ impl BatchParams {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// How long accepted new highs stay in the rate history. The boot sample stays
+/// for the life of the process, so the lead a liar can build stays bounded by
+/// the whole uptime too.
+const RATE_HISTORY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The shortest warm-up a mainnet tracker runs after its first answer, with
+/// admission closed. While it warms, every new high re-anchors the rate
+/// history instead of being checked against it. Once this has passed, the
+/// first new high the chain could have climbed to from the anchor ends the
+/// warm-up; one it could not have re-anchors again. So an indexer behind at
+/// boot is followed as it catches up, however long that takes, instead of its
+/// catch-up reading as an implausible jump that holds the hub stale for hours
+/// (PR review, 2026-10-26).
+const WARMUP: Duration = Duration::from_secs(5 * 60);
+
+/// How the tracker judges the heights indexers report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipGuard {
+    /// Drop answers outside the mainnet band, and new highs faster than the
+    /// chain can climb ([`crate::tip_guard`]), after a [`WARMUP`].
+    Mainnet,
+    /// Take answers as reported. For testnet and regtest, whose blocks follow
+    /// a different rate.
+    Unguarded,
+}
+
+#[derive(Debug, Clone)]
 struct TipState {
     height: u32,
+    /// The highest height ever adopted. Only a height above this is the chain
+    /// advancing; anything at or below it has been seen before.
+    best: u32,
+    /// When `best` was set.
     last_advance: Instant,
     /// False until the first successful tip query. Before that the hub cannot
     /// schedule or expiry-check anything, so it admits nothing.
     observed: bool,
+    /// `Some` while a mainnet tracker warms up: the instant after which a
+    /// plausible new high ends the warm-up ([`WARMUP`]). `None` before the
+    /// first answer, once warm, and always when unguarded.
+    warm_until: Option<Instant>,
+    /// New highs a mainnet tracker accepted, oldest first: the boot sample at
+    /// the front, then every one from the last [`RATE_HISTORY`]. Each starts a
+    /// window the next new high must be plausible over.
+    history: VecDeque<(Instant, u32)>,
     /// The boundary height of the flush epoch the cadence last recorded, by
     /// adopting it at startup or by flushing for it. `None` until the first;
     /// height 0 is the real boundary of epoch 0. The flush at that boundary is
@@ -132,18 +191,38 @@ struct TipState {
     last_flush_boundary: Option<u32>,
 }
 
+impl TipState {
+    fn warming(&self) -> bool {
+        self.warm_until.is_some()
+    }
+
+    /// Whether the chain could have climbed to `height` from every sample in
+    /// the history, each over the time since it was taken.
+    fn plausible_climb(&self, height: u32, now: Instant) -> bool {
+        self.history.iter().all(|&(at, from)| {
+            height.saturating_sub(from)
+                <= tip_guard::max_new_blocks(now.saturating_duration_since(at))
+        })
+    }
+}
+
 /// The hub's view of the chain tip, and whether it can still be trusted.
 pub struct TipTracker {
+    guard: TipGuard,
     inner: RwLock<TipState>,
 }
 
 impl TipTracker {
-    pub fn new() -> Self {
+    pub fn new(guard: TipGuard) -> Self {
         Self {
+            guard,
             inner: RwLock::new(TipState {
                 height: 0,
+                best: 0,
                 last_advance: Instant::now(),
                 observed: false,
+                warm_until: None,
+                history: VecDeque::new(),
                 last_flush_boundary: None,
             }),
         }
@@ -163,51 +242,121 @@ impl TipTracker {
         }
     }
 
-    /// Record a height observed from the network (already the max over nodes).
-    pub fn observe(&self, height: u32) {
+    /// Record one poll's answers, one per endpoint that answered.
+    ///
+    /// The MAX of the answers that pass the guard is adopted. A dropped answer
+    /// counts as that endpoint not answering, so an honest answer in the same
+    /// poll still wins over a liar's.
+    pub fn observe(&self, answers: &[u32]) {
+        self.observe_at(answers, Instant::now(), tip_guard::unix_now());
+    }
+
+    /// [`observe`](Self::observe) at an explicit time, so a test can move the
+    /// clocks forward instead of waiting on them.
+    fn observe_at(&self, answers: &[u32], now: Instant, unix_secs: Option<u64>) {
         let mut state = self.write();
 
-        if !state.observed {
-            state.height = height;
-            state.last_advance = Instant::now();
-            state.observed = true;
+        let band = match self.guard {
+            TipGuard::Mainnet => unix_secs.and_then(tip_guard::mainnet_band),
+            TipGuard::Unguarded => Some((0, u32::MAX)),
+        };
+        let Some((low, high)) = band else {
+            tracing::warn!("the clock reads before the mainnet anchor; no tip can be judged");
             return;
-        }
+        };
+        let rate_checked = self.guard == TipGuard::Mainnet && !state.warming();
 
-        if height > state.height {
-            state.height = height;
-            state.last_advance = Instant::now();
-            return;
-        }
-
-        if height < state.height {
-            let drop = state.height - height;
-            if drop <= REORG_ALLOWANCE {
-                // A real reorg. Follow it, and say so: this is rare enough that
-                // a quiet regression would be the wrong default.
-                tracing::warn!(
-                    drop,
-                    "chain tip moved backwards within the reorg allowance; following it"
-                );
-                state.height = height;
-                // `last_advance` is NOT refreshed here. It means "the last time
-                // the tip moved FORWARD", which is what staleness is asking
-                // about, and a reorg is not the chain advancing. Refreshing it
-                // let a tip oscillating inside the reorg allowance -- 999, 1000,
-                // 999, 1000 -- look like liveness forever: `is_stale` never
-                // fired, so the flush cadence froze and nothing ever said why
-                // (Hornby review, 2026-08-19). A genuine reorg followed by
-                // genuine progress refreshes it on the next forward observation,
-                // which is the only thing that should.
+        let mut adopted = None;
+        for &height in answers {
+            let dropped = if height < low || height > high {
+                Some("outside the mainnet band")
+            } else if rate_checked && height > state.best && !state.plausible_climb(height, now) {
+                Some("a faster climb than the chain can make")
             } else {
-                // Beyond any plausible reorg: a lagging or hostile node won the
-                // max, or a node is lying. Do not follow it.
-                tracing::warn!(
-                    drop,
-                    "ignoring a tip regression larger than the reorg allowance"
-                );
+                None
+            };
+            match dropped {
+                // Heights are public chain data, unlike anything about a batch.
+                Some(reason) => tracing::warn!(height, reason, "dropping a tip answer"),
+                None => adopted = adopted.max(Some(height)),
             }
         }
+        if let Some(height) = adopted {
+            self.adopt(&mut state, height, now);
+        }
+    }
+
+    fn adopt(&self, state: &mut TipState, height: u32, now: Instant) {
+        if !state.observed {
+            state.height = height;
+            state.best = height;
+            state.last_advance = now;
+            state.observed = true;
+            if self.guard == TipGuard::Mainnet {
+                state.warm_until = Some(now + WARMUP);
+                state.history.push_back((now, height));
+                tracing::info!(height, "tip warm-up started; admission opens when it ends");
+            }
+            return;
+        }
+
+        // Liveness is a new HIGH, not a step up. `last_advance` means "the last
+        // time the chain reached a height it had never reached", which is what
+        // staleness asks about. Refreshing it on any upward step let a tip
+        // oscillating inside the reorg allowance -- 999, 1000, 999, 1000 -- look
+        // live forever: the reorg down did not refresh it (Hornby review,
+        // 2026-08-19), but the climb back to 1000 did, so `is_stale` never fired
+        // and the cadence froze with nothing saying why.
+        if height > state.best {
+            state.height = height;
+            state.best = height;
+            state.last_advance = now;
+            if self.guard == TipGuard::Mainnet {
+                match state.warm_until {
+                    Some(until) if now >= until && state.plausible_climb(height, now) => {
+                        state.warm_until = None;
+                        tracing::info!(height, "tip warm-up complete; admission open");
+                    }
+                    // Still finding the tip: this high replaces the anchor.
+                    Some(_) => state.history.clear(),
+                    None => {}
+                }
+                state.history.push_back((now, height));
+                // The boot sample at the front stays; the rest age out.
+                while state
+                    .history
+                    .get(1)
+                    .is_some_and(|&(at, _)| now.saturating_duration_since(at) > RATE_HISTORY)
+                {
+                    state.history.remove(1);
+                }
+            }
+            return;
+        }
+
+        // Every other height is judged against `best`, so a reorg cannot be
+        // walked downward one allowance at a time.
+        let depth = state.best - height;
+        if depth > REORG_ALLOWANCE {
+            // Beyond any plausible reorg: a lagging or hostile node won the
+            // max, or a node is lying. Do not follow it.
+            tracing::warn!(
+                depth,
+                "ignoring a tip more than the reorg allowance below the best seen"
+            );
+            return;
+        }
+        if height < state.height {
+            // A real reorg. Follow it, and say so: this is rare enough that a
+            // quiet regression would be the wrong default.
+            tracing::warn!(
+                depth,
+                "chain tip moved backwards within the reorg allowance; following it"
+            );
+        }
+        // Down into a reorg, or back up to a height already seen: followed, and
+        // not progress.
+        state.height = height;
     }
 
     /// Age `last_advance` by `by`, so a test can reach a staleness threshold
@@ -219,15 +368,17 @@ impl TipTracker {
         state.last_advance -= by;
     }
 
-    /// True once a tip has ever been observed.
+    /// True once a tip has been observed and, on mainnet, the warm-up is over.
     pub fn is_ready(&self) -> bool {
-        self.read().observed
+        let state = self.read();
+        state.observed && !state.warming()
     }
 
-    /// No node has advanced for [`TIP_STALE_AFTER`].
+    /// The hub cannot trust its tip: none yet, still warming up, or no node has
+    /// advanced for [`TIP_STALE_AFTER`].
     pub fn is_stale(&self) -> bool {
         let state = self.read();
-        !state.observed || state.last_advance.elapsed() > TIP_STALE_AFTER
+        !state.observed || state.warming() || state.last_advance.elapsed() > TIP_STALE_AFTER
     }
 
     /// The last observed height, without extrapolation. Admission does not
@@ -282,14 +433,10 @@ impl TipTracker {
         if elapsed <= TIP_STALE_AFTER {
             return state.height;
         }
+        // From `best`, the height `last_advance` timed, so the estimate and its
+        // clock start at the same block.
         let estimated_blocks = (elapsed.as_secs() / NOMINAL_BLOCK_SECS) as u32;
-        state.height.saturating_add(estimated_blocks)
-    }
-}
-
-impl Default for TipTracker {
-    fn default() -> Self {
-        Self::new()
+        state.best.saturating_add(estimated_blocks)
     }
 }
 
@@ -343,8 +490,8 @@ async fn run_with_poll_interval(
             _ = tokio::time::sleep_until(next_poll) => {}
         }
 
-        match chain.tip_height().await {
-            Ok(height) => tip.observe(height),
+        match chain.tip_heights().await {
+            Ok(heights) => tip.observe(&heights),
             Err(err) => {
                 // Not an error condition on its own: staleness is decided by
                 // elapsed time since the last advance, not by one failure.
@@ -586,7 +733,7 @@ mod tests {
 
     #[test]
     fn a_fresh_tracker_admits_nothing_because_it_knows_no_height() {
-        let tip = TipTracker::new();
+        let tip = TipTracker::new(TipGuard::Unguarded);
         assert!(!tip.is_ready());
         assert!(
             tip.is_stale(),
@@ -596,19 +743,19 @@ mod tests {
 
     #[test]
     fn the_tip_follows_advances() {
-        let tip = TipTracker::new();
-        tip.observe(1000);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
         assert_eq!(tip.observed_height(), 1000);
-        tip.observe(1001);
+        tip.observe(&[1001]);
         assert_eq!(tip.observed_height(), 1001);
         assert!(tip.is_ready() && !tip.is_stale());
     }
 
     #[test]
     fn a_small_regression_is_followed_as_a_reorg() {
-        let tip = TipTracker::new();
-        tip.observe(1000);
-        tip.observe(995);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
+        tip.observe(&[995]);
         assert_eq!(tip.observed_height(), 995, "a real reorg must be followed");
     }
 
@@ -617,22 +764,22 @@ mod tests {
         // An oscillating tip inside the reorg allowance used to refresh
         // `last_advance` on every backward step, so a chain that was not
         // advancing at all looked live forever and the flush cadence froze.
-        let tip = TipTracker::new();
-        tip.observe(1000);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
         tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
         assert!(
             tip.is_stale(),
             "precondition: the tip is stale before the reorg"
         );
 
-        tip.observe(999);
+        tip.observe(&[999]);
         assert_eq!(tip.observed_height(), 999, "the reorg is still followed");
         assert!(
             tip.is_stale(),
             "following a reorg must not reset the staleness clock"
         );
 
-        tip.observe(1001);
+        tip.observe(&[1001]);
         assert!(
             !tip.is_stale(),
             "real forward progress is what clears staleness"
@@ -640,32 +787,272 @@ mod tests {
     }
 
     #[test]
+    fn an_oscillating_tip_goes_stale_and_the_cadence_free_runs() {
+        // The sequence the fix above names: the climb back to a height already
+        // seen must not count as progress either, or the oscillation still looks
+        // live and the cadence never flushes.
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
+        tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
+        for height in [999, 1000, 999, 1000] {
+            tip.observe(&[height]);
+            assert!(tip.is_stale(), "re-reaching {height} counted as progress");
+        }
+        assert!(
+            tip.cadence_height() > 1000,
+            "the stale cadence must free-run past the oscillation"
+        );
+    }
+
+    #[test]
+    fn a_reorg_cannot_be_walked_down_one_allowance_at_a_time() {
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
+        tip.observe(&[1000 - REORG_ALLOWANCE]);
+        assert_eq!(tip.observed_height(), 1000 - REORG_ALLOWANCE);
+        tip.observe(&[1000 - 2 * REORG_ALLOWANCE]);
+        assert_eq!(
+            tip.observed_height(),
+            1000 - REORG_ALLOWANCE,
+            "depth is measured from the best height seen, not the last step"
+        );
+    }
+
+    // ---- the mainnet guard ---------------------------------------------------
+    //
+    // Driven through `observe_at` with clocks moved FORWARD from now, so no
+    // test waits and none subtracts from an `Instant` near process start.
+
+    /// Sixty days past the anchor, and the height on schedule then.
+    const UNIX: u64 = tip_guard::ANCHOR_EPOCH + 60 * 24 * 60 * 60;
+    const ON_SCHEDULE: u32 = tip_guard::ANCHOR_HEIGHT + 69_120;
+
+    /// A warm mainnet tracker: it boots one block behind ON_SCHEDULE and warms
+    /// at ON_SCHEDULE once the minimum warm-up has passed. Returns the instant
+    /// it warmed; `at(warm, s)` is `s` seconds after that.
+    fn warm_mainnet() -> (TipTracker, Instant) {
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        let start = Instant::now();
+        tip.observe_at(&[ON_SCHEDULE - 1], start, Some(UNIX));
+        let warm = start + WARMUP;
+        tip.observe_at(&[ON_SCHEDULE], warm, Some(UNIX + WARMUP.as_secs()));
+        assert!(tip.is_ready(), "precondition: the warm-up is over");
+        (tip, warm)
+    }
+
+    fn at(warm: Instant, secs: u64) -> (Instant, Option<u64>) {
+        let elapsed = WARMUP.as_secs() + secs;
+        (warm + Duration::from_secs(secs), Some(UNIX + elapsed))
+    }
+
+    #[test]
+    fn an_answer_outside_the_mainnet_band_is_dropped_at_boot() {
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        let now = Instant::now();
+        // The report's brick, a wrapped-looking value, and a height below the
+        // anchor.
+        tip.observe_at(&[u32::MAX], now, Some(UNIX));
+        tip.observe_at(&[4_000_000_000], now, Some(UNIX));
+        tip.observe_at(&[tip_guard::ANCHOR_HEIGHT - 1], now, Some(UNIX));
+        assert!(
+            !tip.is_ready(),
+            "a boot answer outside the band was adopted"
+        );
+
+        tip.observe_at(&[ON_SCHEDULE], now, Some(UNIX));
+        assert_eq!(tip.observed_height(), ON_SCHEDULE);
+        assert!(
+            !tip.is_ready() && tip.is_stale(),
+            "admission opens only after the warm-up"
+        );
+    }
+
+    #[test]
+    fn a_jump_to_the_top_of_the_range_cannot_brick_admission() {
+        // The report's brick: one answer near u32::MAX saturated the flush
+        // arithmetic and refused every finite expiry until a restart.
+        let (tip, warm) = warm_mainnet();
+        tip.record_flush_boundary(ON_SCHEDULE / FLUSH_INTERVAL_BLOCKS * FLUSH_INTERVAL_BLOCKS);
+        let before = tip.admission_height();
+        for liar in [u32::MAX, 4_000_000_000, ON_SCHEDULE + 1_000] {
+            let (now, unix) = at(warm, 30);
+            tip.observe_at(&[liar], now, unix);
+        }
+        assert_eq!(tip.observed_height(), ON_SCHEDULE);
+        assert_eq!(tip.admission_height(), before);
+    }
+
+    #[test]
+    fn a_jump_across_the_next_flush_boundary_is_dropped() {
+        // The report's drain: any jump past the next 20-block boundary flushed
+        // at once. Twenty-one blocks in the 30 s since the last new high is
+        // past what the chain can climb (6).
+        let (tip, warm) = warm_mainnet();
+        let (now, unix) = at(warm, 30);
+        tip.observe_at(&[ON_SCHEDULE + FLUSH_INTERVAL_BLOCKS + 1], now, unix);
+        assert_eq!(tip.observed_height(), ON_SCHEDULE);
+
+        tip.observe_at(&[ON_SCHEDULE + 2], now, unix);
+        assert_eq!(tip.observed_height(), ON_SCHEDULE + 2, "an honest step");
+    }
+
+    #[test]
+    fn small_steps_cannot_compound_past_the_longest_window() {
+        // Six blocks a poll passes any one 30 s window, so only the longer
+        // windows can stop it. A liar trying it for 25 minutes gains no more
+        // than the chain could have climbed since the boot sample.
+        let (tip, warm) = warm_mainnet();
+        let mut refused = 0;
+        for poll in 1..=50 {
+            let (now, unix) = at(warm, 30 * poll);
+            let before = tip.observed_height();
+            tip.observe_at(&[before + 6], now, unix);
+            if tip.observed_height() == before {
+                refused += 1;
+            }
+        }
+        let since_boot = WARMUP + Duration::from_secs(30 * 50);
+        let climbed = tip.observed_height() - (ON_SCHEDULE - 1);
+        assert!(refused > 0, "every +6 step was accepted");
+        assert!(
+            climbed <= tip_guard::max_new_blocks(since_boot),
+            "climbed {climbed} in {since_boot:?}"
+        );
+    }
+
+    #[test]
+    fn an_honest_answer_beside_a_liar_wins() {
+        let (tip, warm) = warm_mainnet();
+        let (now, unix) = at(warm, 30);
+        tip.observe_at(&[ON_SCHEDULE + 1, u32::MAX, ON_SCHEDULE + 500], now, unix);
+        assert_eq!(tip.observed_height(), ON_SCHEDULE + 1);
+    }
+
+    #[test]
+    fn an_honest_streak_dropped_once_passes_on_a_later_poll() {
+        // The window grows with every poll, so a real burst is only delayed.
+        let (tip, warm) = warm_mainnet();
+        let (now, unix) = at(warm, 30);
+        tip.observe_at(&[ON_SCHEDULE + 18], now, unix);
+        assert_eq!(tip.observed_height(), ON_SCHEDULE);
+        let (now, unix) = at(warm, 420);
+        tip.observe_at(&[ON_SCHEDULE + 18], now, unix);
+        assert_eq!(tip.observed_height(), ON_SCHEDULE + 18);
+    }
+
+    #[test]
+    fn the_warm_up_follows_an_indexer_still_behind_when_its_time_runs_out() {
+        // The indexer is 200 blocks behind at boot and catches up only after
+        // the minimum warm-up. That catch-up is faster than the chain climbs
+        // from the boot anchor, so it re-anchors instead of being dropped, and
+        // the next plausible block ends the warm-up.
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        let start = Instant::now();
+        tip.observe_at(&[ON_SCHEDULE - 200], start, Some(UNIX));
+
+        let caught_up = start + WARMUP + Duration::from_secs(30);
+        let unix = UNIX + WARMUP.as_secs() + 30;
+        tip.observe_at(&[ON_SCHEDULE], caught_up, Some(unix));
+        assert_eq!(
+            tip.observed_height(),
+            ON_SCHEDULE,
+            "the catch-up re-anchors"
+        );
+        assert!(!tip.is_ready(), "a re-anchor keeps the warm-up going");
+
+        let next = caught_up + Duration::from_secs(60);
+        tip.observe_at(&[ON_SCHEDULE + 1], next, Some(unix + 60));
+        assert!(tip.is_ready(), "a plausible block ends the warm-up");
+
+        // From here the same kind of jump is dropped.
+        let later = next + Duration::from_secs(30);
+        tip.observe_at(&[ON_SCHEDULE + 50], later, Some(unix + 90));
+        assert_eq!(tip.observed_height(), ON_SCHEDULE + 1);
+    }
+
+    #[test]
+    fn a_syncing_indexer_at_boot_is_followed_up_to_the_tip() {
+        // The floor is the anchor, so an indexer still syncing far behind is in
+        // the band. Thousands of blocks a poll is never plausible, so every
+        // poll re-anchors until it reaches the tip.
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        let start = Instant::now();
+        let mut height = tip_guard::ANCHOR_HEIGHT + 10;
+        let mut secs = 0;
+        while height < ON_SCHEDULE {
+            tip.observe_at(
+                &[height],
+                start + Duration::from_secs(secs),
+                Some(UNIX + secs),
+            );
+            assert_eq!(tip.observed_height(), height);
+            height = (height + 5_000).min(ON_SCHEDULE);
+            secs += 30;
+        }
+        tip.observe_at(
+            &[ON_SCHEDULE],
+            start + Duration::from_secs(secs),
+            Some(UNIX + secs),
+        );
+        assert!(!tip.is_ready());
+        secs += 60;
+        tip.observe_at(
+            &[ON_SCHEDULE + 1],
+            start + Duration::from_secs(secs),
+            Some(UNIX + secs),
+        );
+        assert!(tip.is_ready());
+    }
+
+    #[test]
+    fn a_clock_before_the_anchor_judges_nothing() {
+        let tip = TipTracker::new(TipGuard::Mainnet);
+        tip.observe_at(
+            &[ON_SCHEDULE],
+            Instant::now(),
+            Some(tip_guard::ANCHOR_EPOCH - 1),
+        );
+        tip.observe_at(&[ON_SCHEDULE], Instant::now(), None);
+        assert!(!tip.is_ready());
+    }
+
+    #[test]
+    fn an_unguarded_tracker_takes_any_height() {
+        // Testnet and regtest: the same jump a mainnet tracker drops.
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[100]);
+        tip.observe(&[100_000]);
+        assert_eq!(tip.observed_height(), 100_000);
+        assert!(tip.is_ready());
+    }
+
+    #[test]
     fn a_large_regression_is_ignored_rather_than_followed() {
         // Otherwise one lagging or hostile node winning the max would be a lever
         // on the flush clock.
-        let tip = TipTracker::new();
-        tip.observe(1000);
-        tip.observe(500);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
+        tip.observe(&[500]);
         assert_eq!(tip.observed_height(), 1000);
     }
 
     #[test]
     fn the_cadence_height_equals_the_observed_height_while_fresh() {
-        let tip = TipTracker::new();
-        tip.observe(1000);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[1000]);
         assert_eq!(tip.cadence_height(), 1000);
     }
 
     #[test]
     fn the_admission_height_is_the_higher_of_the_tip_and_the_last_flush_boundary() {
-        let tip = TipTracker::new();
-        tip.observe(995);
+        let tip = TipTracker::new(TipGuard::Unguarded);
+        tip.observe(&[995]);
         assert_eq!(tip.admission_height(), 995, "nothing recorded yet");
         tip.record_flush_boundary(1000);
         assert_eq!(tip.admission_height(), 1000);
         tip.record_flush_boundary(980);
         assert_eq!(tip.admission_height(), 1000, "a spent flush stays spent");
-        tip.observe(1003);
+        tip.observe(&[1003]);
         assert_eq!(tip.admission_height(), 1003);
     }
 
@@ -689,7 +1076,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     use bytes::Bytes;
@@ -720,8 +1107,8 @@ mod tests {
     /// admits against. `flush` needs one because the requeue is bounded by the
     /// same expiry test admission uses.
     fn test_tip() -> Arc<TipTracker> {
-        let tip = Arc::new(TipTracker::new());
-        tip.observe(TIP);
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+        tip.observe(&[TIP]);
         tip
     }
 
@@ -738,7 +1125,7 @@ mod tests {
     struct MockIndexer {
         addr: SocketAddr,
         /// What `GetLightdInfo` reports; a test moves it to advance the epoch.
-        height: Arc<AtomicU32>,
+        height: Arc<AtomicU64>,
         /// Every raw transaction the mock was asked to broadcast, in arrival
         /// order, whatever it answered.
         sent: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -751,7 +1138,7 @@ mod tests {
     async fn spawn_mock_indexer(script: Vec<Answer>, answer_delay: Duration) -> MockIndexer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let height = Arc::new(AtomicU32::new(TIP));
+        let height = Arc::new(AtomicU64::new(u64::from(TIP)));
         let sent: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
         let on_send = Arc::new(Notify::new());
         let script = Arc::new(Mutex::new(VecDeque::from(script)));
@@ -782,7 +1169,7 @@ mod tests {
                                     let message = if body.len() > 5 { &body[5..] } else { &[][..] };
                                     if path == GET_LIGHTD_INFO_PATH {
                                         let info = LightdInfo {
-                                            block_height: height.load(Ordering::SeqCst) as u64,
+                                            block_height: height.load(Ordering::SeqCst),
                                             ..Default::default()
                                         };
                                         return Ok::<_, Infallible>(grpc_ok(info.encode_to_vec()));
@@ -992,6 +1379,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_height_beyond_u32_counts_as_that_endpoint_failing() {
+        // 2^32 + TIP: a cast would have read it as exactly TIP.
+        let wrapped = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        wrapped
+            .height
+            .store((1u64 << 32) + u64::from(TIP), Ordering::SeqCst);
+        assert!(client(wrapped.addr).tip_heights().await.is_err());
+
+        let honest = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
+        let both = ChainClient::new(vec![wrapped.addr, honest.addr], None).unwrap();
+        assert_eq!(both.tip_heights().await.unwrap(), vec![TIP]);
+    }
+
+    #[tokio::test]
     async fn a_shutdown_during_an_in_flight_flush_does_not_drop_the_batch() {
         // The mock fires the shutdown signal the moment the first publish
         // reaches it, then answers UNAVAILABLE after a delay: shutdown lands
@@ -1007,7 +1408,7 @@ mod tests {
         .await;
         let chain = client(mock.addr);
         let queue = queue_holding(&[junk(1)]);
-        let tip = Arc::new(TipTracker::new());
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
 
         let signal = mock.on_send.clone();
         let cadence = tokio::spawn(run_with_poll_interval(
@@ -1029,7 +1430,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        mock.height.store(TIP + N, Ordering::SeqCst);
+        mock.height.store(u64::from(TIP + N), Ordering::SeqCst);
 
         tokio::time::timeout(Duration::from_secs(30), cadence)
             .await
@@ -1076,7 +1477,7 @@ mod tests {
     async fn the_hub_refuses_an_expiry_counting_on_a_boundary_adopted_before_a_tip_regression() {
         let mock = spawn_mock_indexer(vec![Answer::Send(0, "txid")], Duration::ZERO).await;
         let queue = Arc::new(Queue::new());
-        let tip = Arc::new(TipTracker::new());
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let cadence = tokio::spawn(run_with_poll_interval(
             queue.clone(),
@@ -1089,7 +1490,7 @@ mod tests {
             Duration::from_millis(10),
         ));
         wait_until("the adoption", || tip.last_flush_boundary() == Some(TIP)).await;
-        mock.height.store(TIP - 1, Ordering::SeqCst);
+        mock.height.store(u64::from(TIP - 1), Ordering::SeqCst);
         wait_until("the regression", || tip.observed_height() == TIP - 1).await;
 
         let hub = crate::server::Hub {
@@ -1118,7 +1519,7 @@ mod tests {
             crate::queue::Admission::Admitted { .. }
         ));
         for height in [TIP + 1, TIP + 2] {
-            mock.height.store(height, Ordering::SeqCst);
+            mock.height.store(u64::from(height), Ordering::SeqCst);
             wait_until("the tip to move on", || tip.observed_height() == height).await;
         }
         assert!(
@@ -1141,7 +1542,7 @@ mod tests {
     #[tokio::test]
     async fn a_free_running_flush_spends_its_epoch_for_admission_not_for_requeue() {
         let mock = spawn_mock_indexer(vec![Answer::Status("14")], Duration::ZERO).await;
-        mock.height.store(TIP - 5, Ordering::SeqCst);
+        mock.height.store(u64::from(TIP - 5), Ordering::SeqCst);
         let queue = Arc::new(Queue::new());
         let seeded = queue.requeue(
             vec![crate::queue::Entry {
@@ -1158,7 +1559,7 @@ mod tests {
         );
         assert_eq!(seeded.held, 1, "precondition: the entry is in the queue");
 
-        let tip = Arc::new(TipTracker::new());
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let cadence = tokio::spawn(run_with_poll_interval(
             queue.clone(),
@@ -1182,7 +1583,7 @@ mod tests {
         })
         .await;
 
-        mock.height.store(TIP - 2, Ordering::SeqCst);
+        mock.height.store(u64::from(TIP - 2), Ordering::SeqCst);
         wait_until("the tip to return", || tip.observed_height() == TIP - 2).await;
         let hub = crate::server::Hub {
             queue: queue.clone(),

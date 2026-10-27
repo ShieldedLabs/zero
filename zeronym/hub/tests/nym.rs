@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::nym::{run_listener, Received, Reply, SenderTag};
 use zero_indexer_hub::queue::Queue;
@@ -45,9 +45,9 @@ fn unreachable_indexer() -> SocketAddr {
 
 fn test_hub_with_indexer(observed_tip: Option<u32>, indexer: SocketAddr) -> Hub {
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
     if let Some(height) = observed_tip {
-        tip.observe(height);
+        tip.observe(&[height]);
     }
     let chain = Arc::new(ChainClient::new(vec![indexer], None).unwrap());
     Hub {
