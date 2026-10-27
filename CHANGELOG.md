@@ -29,6 +29,18 @@ date) before dispatching the release.
   `[patch.crates-io]`. That stack's reqwest 0.11 also reads the system bundle,
   so the shim and hub images drop emSign ECC Root CA - G3 from the pinned
   StageX `ca-certificates.crt`.
+- zero-indexer: the shim forwarded the second transaction of a TEX payment to
+  the operator. Paying a ZIP 320 (TEX) address from shielded funds takes two
+  transactions, and the second spends the first's single-use transparent
+  output. When the first touched Orchard the shim diverted it, but the second
+  has transparent parts only, so it reached the operator's indexer, naming the
+  diverted transaction's txid by its prevout and tying it to the wallet's
+  connection, broadcast-only mode included. The classifier now also diverts
+  every transaction that spends a transparent output and has transparent parts
+  only. Every such send now waits for a hub batch, including TEX payments
+  funded from Ironwood. A transparent spend that also carries a Sapling or
+  Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
+  by [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
