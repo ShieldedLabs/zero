@@ -154,6 +154,11 @@ __APP_SOURCE__
       # runs in an enclave at all.
       ZIH_INDEXER_TLS = "__INDEXER_TLS__"
 
+      # The network the indexers serve. On mainnet the hub bounds every tip they
+      # report against a compiled anchor and the chain's real block rate, so
+      # one indexer cannot steer the flush cadence with a single answer.
+      ZIH_NETWORK = "__NETWORK__"
+
       # Whether the hub accepts submissions over clearnet HTTP at POST /. The
       # binary defaults this to FALSE: the mixnet is the submit path, and an open
       # unauthenticated POST / on a 0.0.0.0/0 ingress is attack surface with no

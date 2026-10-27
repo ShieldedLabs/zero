@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 use zeroize::Zeroizing;
 
-use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::nym::{run_listener, Received, SenderTag};
 use zero_indexer_hub::queue::Queue;
@@ -63,8 +63,8 @@ async fn the_listener_logs_counts_and_reasons_but_never_a_txid_tag_or_nonce() {
         .expect("this test process owns the global subscriber");
 
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
     let hub = Hub {
         queue,

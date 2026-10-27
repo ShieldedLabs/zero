@@ -30,6 +30,7 @@
 //! * [`config`] is the command-line and environment surface.
 //! * [`queue`] holds admitted migrations, and decides what is admitted at all.
 //! * [`batcher`] drives the flush cadence and owns the hub's view of the tip.
+//! * [`tip_guard`] bounds which mainnet heights that view may adopt.
 //! * [`server`] is the inbound serving path: receive a migration, admit it.
 
 #![forbid(unsafe_code)]
@@ -44,6 +45,7 @@ pub mod nym;
 pub mod nym_driver;
 pub mod queue;
 pub mod server;
+pub mod tip_guard;
 pub mod tls;
 pub mod wire;
 

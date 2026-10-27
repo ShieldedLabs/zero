@@ -17,6 +17,7 @@
 # Usage:
 #   sh .../assemble-caution.sh --name <enclave> \
 #       --indexers <ip:port[,ip:port...]> --indexer-tls <indexer-cert-name> \
+#       --network <mainnet|testnet|regtest> \
 #       --tls-domain <hub-domain> \
 #       [--app-source <public-git-url>] \
 #       [--nym --nym-egress <cidr:port[:proto]> ... [--nym-gateway <id>] [--ack-wait-ms <n>]] \
@@ -71,6 +72,7 @@ umask 022
 NAME=""
 INDEXERS=""
 INDEXER_TLS=""
+NETWORK=""
 TLS_DOMAIN=""
 APP_SOURCE=""
 NYM="false"
@@ -86,6 +88,7 @@ while [ $# -gt 0 ]; do
 		--name)          NAME=$2; shift 2 ;;
 		--indexers)      INDEXERS=$2; shift 2 ;;
 		--indexer-tls)   INDEXER_TLS=$2; shift 2 ;;
+		--network)       NETWORK=$2; shift 2 ;;
 		--tls-domain)    TLS_DOMAIN=$2; shift 2 ;;
 		# The public git URL where this assembled repository is published.
 		# `caution verify` clones it and rebuilds; without it verify refuses
@@ -123,6 +126,13 @@ done
 [ -n "$NAME" ] || { echo "error: --name is required (e.g. zeronym-hub-1)" >&2; exit 2; }
 [ -n "$INDEXERS" ] || { echo "error: --indexers is required (e.g. 1.2.3.4:8232,5.6.7.8:8232)" >&2; exit 2; }
 [ -n "$TLS_DOMAIN" ] || { echo "error: --tls-domain is required (the name shims connect to)" >&2; exit 2; }
+
+# The hub refuses to start without it, inside an enclave with no console. Catch
+# a missing or misspelt value here, where the error is read.
+case $NETWORK in
+	mainnet|testnet|regtest) ;;
+	*) echo "error: --network must be mainnet, testnet or regtest (the indexers' network)" >&2; exit 2 ;;
+esac
 
 # Without TLS the enclave's parent host reads every batch in the clear moments
 # before it is public, which removes most of the reason to run the hub in an
@@ -497,6 +507,7 @@ sed \
 	-e "s|__ENCLAVE_NAME__|$NAME|g" \
 	-e "s|__INDEXERS__|$INDEXERS_ENV|g" \
 	-e "s|__INDEXER_TLS__|$INDEXER_TLS|g" \
+	-e "s|__NETWORK__|$NETWORK|g" \
 	-e "s|__HTTP_SUBMIT__|$HTTP_SUBMIT|g" \
 	-e "s|__TLS_DOMAIN__|$TLS_DOMAIN|g" \
 	"$RENDERED" > "$DEST/caution.hcl"
@@ -529,6 +540,7 @@ zero-indexer-hub Caution enclave ('$NAME')
 source repo:     github.com/ShieldedLabs/zero
 serves:          $TLS_DOMAIN (TLS terminated in-enclave, ACME production)
 broadcasts via:  $INDEXERS_ENV verified as $INDEXER_TLS
+network:         $NETWORK
 mixnet:          $([ "$NYM" = true ] && echo "ON (ZIH_NYM; egress:$NYM_EGRESS)" || echo "OFF (clearnet HTTP submit only)")
 app source:      $([ -n "$APP_SOURCE" ] && echo "$APP_SOURCE" || echo "none (not independently verifiable)")
 source commit:   $SHA

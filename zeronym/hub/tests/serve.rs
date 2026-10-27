@@ -21,7 +21,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tokio::net::TcpListener;
 
-use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{self, BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub, ServeOptions};
@@ -61,8 +61,8 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
     // No TLS in tests: the mock indexer speaks plaintext h2c.
     let chain = Arc::new(ChainClient::new(vec![indexer], None).unwrap());
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(TIP);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[TIP]);
 
     tokio::spawn(server::serve(
         listener,
@@ -287,9 +287,9 @@ async fn a_no_expiry_transaction_is_admissible_at_any_height() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
     // A height far beyond any plausible expiry.
-    tip.observe(u32::MAX - 1000);
+    tip.observe(&[u32::MAX - 1000]);
     tokio::spawn(server::serve(
         listener,
         Hub {
@@ -322,7 +322,7 @@ async fn a_stale_tip_stops_admission_rather_than_forcing_a_flush() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     // A tracker that has never observed a height is stale by definition.
-    let tip = Arc::new(TipTracker::new());
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
     let queue = Arc::new(Queue::new());
     tokio::spawn(server::serve(
         listener,

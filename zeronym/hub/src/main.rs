@@ -10,11 +10,12 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use zero_indexer_hub::batcher::{self, BatchParams, TipTracker};
+use zero_indexer_hub::batcher::{self, BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
-use zero_indexer_hub::config::Config;
+use zero_indexer_hub::config::{Config, Network};
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub};
+use zero_indexer_hub::tip_guard;
 use zero_indexer_hub::BoxError;
 
 #[tokio::main]
@@ -43,10 +44,31 @@ async fn main() -> Result<(), BoxError> {
     let params = BatchParams::default();
     params.validate()?;
 
+    // On mainnet every tip is judged against the clock, so a clock reading
+    // before the compiled anchor would refuse every height with nothing saying
+    // why. Refuse to start instead, for the same reason as the TLS check above.
+    if config.network == Network::Mainnet
+        && tip_guard::unix_now()
+            .and_then(tip_guard::mainnet_band)
+            .is_none()
+    {
+        return Err(
+            "refusing to start: the clock reads before the compiled mainnet \
+             anchor, so no tip height can be judged against it"
+                .into(),
+        );
+    }
+
+    let guard = match config.network {
+        Network::Mainnet => TipGuard::Mainnet,
+        Network::Testnet | Network::Regtest => TipGuard::Unguarded,
+    };
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
+    let tip = Arc::new(TipTracker::new(guard));
 
     tracing::info!(
+        network = ?config.network,
+        tip_guard = ?guard,
         nodes = chain.node_count(),
         flush_interval = params.flush_interval,
         mining_margin = params.mining_margin,
@@ -57,9 +79,10 @@ async fn main() -> Result<(), BoxError> {
 
     // The hub cannot admit anything until it knows a height, because both the
     // flush schedule and the expiry check are defined against one. Seed it here
-    // so a fresh boot does not spend a whole poll interval refusing.
-    match chain.tip_height().await {
-        Ok(height) => tip.observe(height),
+    // so a fresh boot does not spend a whole poll interval refusing. On mainnet
+    // this starts the tracker's warm-up, and admission opens when it ends.
+    match chain.tip_heights().await {
+        Ok(heights) => tip.observe(&heights),
         Err(err) => tracing::warn!(
             %err,
             "no tip at startup; refusing admissions until a node answers"

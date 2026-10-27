@@ -93,6 +93,7 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name        <enclave-name> \
   --indexers    <ipv4>:<port>[,<ipv4>:<port>...] \
   --indexer-tls <name-on-indexer-cert> \
+  --network     mainnet \
   --tls-domain  <hub-domain> \
   --app-source  https://github.com/ShieldedLabs/zero-hub \
   --http-submit
@@ -111,6 +112,7 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name        <enclave-name> \
   --indexers    <ipv4>:<port>[,<ipv4>:<port>...] \
   --indexer-tls <name-on-indexer-cert> \
+  --network     mainnet \
   --tls-domain  <hub-domain> \
   --app-source  https://github.com/ShieldedLabs/zero-hub \
   --nym --ack-wait-ms 15000 \
@@ -333,6 +335,64 @@ of `--http-submit`; assemble shims with `--hub-nym <address>` instead of
 `--hub <ip:port> --hub-tls <name>`. Nothing else changes; both binaries already
 contain both paths.
 
+## Tip guard: who can move the hub's chain tip
+
+The hub schedules every flush and judges every expiry against one number: the
+chain tip its indexers report. It takes the highest answer, so one lagging
+indexer cannot slow the flush clock. The highest answer also wins when it is a
+lie. So on mainnet (`ZIH_NETWORK=mainnet`) the hub judges each answer first:
+
+- **Band.** An answer must sit between a compiled anchor height and a
+  ceiling of that anchor plus one block per 75 s plus slack. The slack is 200
+  blocks at the anchor and grows with time (about 1,650 blocks 60 days later).
+  The ceiling refuses absurd heights. The floor stays at the anchor, so a long
+  mainnet halt keeps the real tip in the band.
+- **Rate.** A new high must be a climb the chain could make from every high the
+  hub accepted in the last 24 hours, and from its boot height. Each window
+  allows the Poisson mean plus five standard deviations: 6 blocks in 30 s, 45
+  in 25 minutes.
+- **Warm-up.** After boot the hub follows each new high without the rate
+  check, and refuses submissions with `tip_stale`. The warm-up lasts at least
+  5 minutes and ends at the first new high after that which passes the rate
+  check. A new high that fails it starts the anchor again, so an indexer that
+  is behind or still syncing at boot is followed until it reaches the tip.
+  `tip warm-up complete; admission open` in the log marks the end.
+- **Liveness.** Only a new high counts as the chain advancing. A tip that holds
+  still or oscillates goes stale after 15 minutes: admission closes, and the
+  flush cadence free-runs on the 75 s clock.
+
+Testnet and regtest run unguarded, because their blocks follow a different
+rate.
+
+**What an indexer operator can still do.** If every indexer you configure
+belongs to one operator, that operator keeps a bounded lever:
+
+1. Shift flush timing within the plausible rate: about twice the flush rate in
+   a burst, 15% faster over a day.
+2. Hold a steady lead of about 16 blocks. The hub then refuses tight expiries
+   for as long as the lead lasts.
+3. Hold the tip still, or keep it jumping during the warm-up. Admission
+   closes.
+4. Report low heights slowly enough to keep the hub live while the real chain
+   runs ahead. Queued migrations can then expire.
+5. At boot, report any height in the band. It sticks until the real chain
+   catches up.
+
+In Nym mode a refusal reaches neither the shim nor the wallet, so 2 and 3 are
+silent losses. Indexers from several operators close 3 and 4, because the
+highest answer is then an honest one. 1, 2 and 5 need only the highest answer;
+closing them takes a majority rule across independent operators, which is
+future work.
+
+One honest event also trips the guard:
+
+- If, after the warm-up, an indexer lags the chain by L blocks and then
+  catches up at once, the hub refuses submissions for about (L/5)² blocks.
+
+The band trusts the enclave's wall clock, and the rate windows trust its
+monotonic clock. On mainnet the hub refuses to start with a clock that reads
+before the anchor.
+
 ## Known failure modes
 
 **1. A restart changes your address and silently breaks every shim.** The identity
@@ -460,6 +520,7 @@ expensive and rare.
 | `ZIH_LISTEN` | listen address inside the enclave | `0.0.0.0:8083` (the port Caution's proxy forwards to) |
 | `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast through | your indexers; every batch member goes to all of them |
 | `ZIH_INDEXER_TLS` | DNS name the indexer certificates must carry | **required in practice** — without it the hop is plaintext |
+| `ZIH_NETWORK` | the network the indexers serve: `mainnet`, `testnet` or `regtest` | **required**; `mainnet` bounds every tip the indexers report (see "Tip guard") |
 | `ZIH_NYM` | receive submissions over the mixnet | `true` |
 | `ZIH_NYM_GATEWAY` | pin the entry gateway by IDENTITY key (single value; the address must stay stable) | **leave unset for now** — untested against public Nym |
 | `ZIH_HTTP_SUBMIT` | accept clearnet `POST /` submissions | **leave off** (default `false`) |
