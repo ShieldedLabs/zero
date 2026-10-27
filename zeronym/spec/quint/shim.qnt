@@ -79,11 +79,26 @@ module shim {
   // Views
   // ------------------------------------------------------------------------
 
-  /// Whether a transaction of this class is diverted. A body the shim cannot
-  /// parse is treated as a migration: forwarding it is the one outcome the
-  /// shim exists to prevent.
-  pure def treatAsMigration(class: Class): bool =
-    class != PassThrough
+  /// Whether a transaction is diverted (`classify`, `shim/src/classify.rs`
+  /// at #94). Two arms divert:
+  ///
+  /// - It touches Orchard.
+  /// - It spends a transparent output and has transparent parts only. The
+  ///   second leg of a ZIP 320 (TEX) payment has this shape, and its one
+  ///   prevout names the first leg. The shim keeps no record of what it
+  ///   diverted, so the arm reads the shape alone.
+  ///
+  /// A body the shim cannot parse is treated as a migration: forwarding it is
+  /// the one outcome the shim exists to prevent. Everything else forwards: a
+  /// Sprout, Sapling or Ironwood bundle, with or without transparent parts,
+  /// and a coinbase.
+  pure def treatAsMigration(payload: Payload): bool =
+    match payload.class {
+      | OrchardTouching => true
+      | Unparseable => true
+      | TransparentOnly => payload.spends != Set()
+      | OtherShielded => false
+    }
 
   pure def hasWaiter(state: ShimState, nonce: Nonce): bool =
     state.waiters.keys().contains(nonce)
@@ -115,15 +130,15 @@ module shim {
       { ...state, nextNonce: state.nextNonce + 1 }
         .toDivertedOutput(payload, Submit({ nonce: state.nextNonce, payload: payload }), SentOk)
 
-  /// Route a `SendTransaction`. Nothing but a cleanly read pass-through
-  /// transaction ever reaches the operator; everything else is diverted or
-  /// fails closed.
+  /// Route a `SendTransaction`. Nothing but a cleanly read transaction that
+  /// `treatAsMigration` passes ever reaches the operator; everything else is
+  /// diverted or fails closed.
   pure def sendTransaction(state: ShimState, input: SendInput, handedOver: bool): ShimResult =
     match input {
       | Unreadable => state.toSendDoneOutput(input, SendUnavailable)
       | EmptyBody => state.toSendDoneOutput(input, SendInvalid)
       | Clean(payload) =>
-        if (not(treatAsMigration(payload.class))) state.toForwardOutput(payload)
+        if (not(treatAsMigration(payload))) state.toForwardOutput(payload)
         else if (payload.oversize) state.toSendDoneOutput(input, SendTooLarge)
         else divert(state, payload, handedOver)
     }

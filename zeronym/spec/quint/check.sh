@@ -11,10 +11,10 @@
 #   2  quint test: the functional layer and the scripted runs, among them
 #      `liveInitsTest`, which starts from every named init.
 #   3  quint run: invariants. "holds" rows are the guarantees, on the
-#      configurations where they are claimed. The "fails" row is K2, a known
-#      gap; it shows polarity only, and the scripted runs in tier 2 carry the
-#      causes. A guarantee under the Byzantine component it depends on has a
-#      scripted run and its control, and no row here.
+#      configurations where they are claimed. The "fails" rows are K2 and
+#      K10, known gaps; they show polarity only, and the scripted runs in tier
+#      2 carry the causes. A guarantee under the Byzantine component it
+#      depends on has a scripted run and its control, and no row here.
 #   3b quint run: witnesses. Every listed state must be reached in at least
 #      one trace. These runs also re-check the configuration's guarantees, on
 #      longer traces and under the narrower step relations, which get deeper
@@ -88,8 +88,8 @@ finish() {
 # being found (renamed so it no longer ends in `Test`, say) fails the gate.
 SPELLS="spells/basicSpells.qnt:6 spells/soup.qnt:4"
 MODULES="types.qnt wire.qnt indexer.qnt hub.qnt abstractHub.qnt hubMachine.qnt shim.qnt protocol.qnt"
-FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:25 tests/shimTest.qnt:13
-  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:20 tests/trustTest.qnt:14"
+FUNCTIONAL="tests/wireTest.qnt:11 tests/indexerTest.qnt:14 tests/hubTest.qnt:25 tests/shimTest.qnt:14
+  tests/hubScenariosTest.qnt:25 tests/scenariosTest.qnt:22 tests/trustTest.qnt:14"
 
 fail() {
   echo "FAIL  $1"
@@ -121,6 +121,7 @@ simulate() {
     baseline) init=initBaseline ;;
     byzHub) init=initByzHub ;;
     byzIndexer) init=initByzIndexer ;;
+    shieldedSpend) init=initShieldedSpend ;;
     *) init=none ;;
   esac
   out=$($QUINT run protocol.qnt --backend="$BACKEND" --main=protocol --init="$init" --step="$step" \
@@ -304,25 +305,26 @@ finish
 echo "---- 3 invariants ($SAMPLES traces, seed $SEED)"
 
 # The guarantees, where they are claimed.
-job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue
-job holds byzHub              operatorBlind txidAuthenticity
-job holds byzIndexer          operatorBlind txidAuthenticity pendingOnlyFromQueue
+job holds baseline            operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue forwardedSpendsNoDiverted
+job holds byzHub              operatorBlind txidAuthenticity forwardedSpendsNoDiverted
+job holds byzIndexer          operatorBlind txidAuthenticity pendingOnlyFromQueue forwardedSpendsNoDiverted
 
 # The known gaps, with every component honest.
 job fails baseline            quietStep 40 statusNeverRegresses                    # K2
+job fails shieldedSpend       quietStep 40 forwardedSpendsNoDiverted               # K10
 
 finish
 
 echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
-BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue"
+BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue forwardedSpendsNoDiverted"
 
 # The accepted disclosure, a third party served a published body, and the
-# antecedents of G1 and G2. The served body is G2's reply-body branch, which
+# antecedents of G1, G2 and G9. The served body is G2's reply-body branch, which
 # `vQueuedBytesConfidential` does not reach on its own.
 job reaches baseline step 40 \
   wQueuedDisclosed wThirdPartyServedBody \
-  vOperatorBlind vQueuedBytesConfidential \
+  vOperatorBlind vQueuedBytesConfidential vForwardedSpendsNoDiverted \
   -- $BASELINE_HOLDS
 # G3's antecedent, and the wallet observations a quiet run reaches: pending,
 # served from the mempool, served from a block, and an unparseable payload
@@ -337,11 +339,11 @@ job reaches baseline earlyLookupStep 40 \
   -- $BASELINE_HOLDS
 
 job reaches byzHub quietStep 40 \
-  vOperatorBlind vTxidAuthenticity \
-  -- operatorBlind txidAuthenticity
+  vOperatorBlind vTxidAuthenticity vForwardedSpendsNoDiverted \
+  -- operatorBlind txidAuthenticity forwardedSpendsNoDiverted
 job reaches byzIndexer quietStep 40 \
-  vOperatorBlind vTxidAuthenticity \
-  -- operatorBlind txidAuthenticity pendingOnlyFromQueue
+  vOperatorBlind vTxidAuthenticity vForwardedSpendsNoDiverted \
+  -- operatorBlind txidAuthenticity pendingOnlyFromQueue forwardedSpendsNoDiverted
 finish
 fi
 

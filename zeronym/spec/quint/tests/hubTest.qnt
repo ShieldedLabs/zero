@@ -19,13 +19,13 @@ module hubTest {
   }
 
   pure def orchard(id: str, expiry: Option[Height]): Payload =
-    { id: id, txid: Some(id), created: 1, expiry: expiry, class: OrchardTouching, oversize: false }
+    { id: id, txid: Some(id), created: 1, expiry: expiry, class: OrchardTouching, spends: Set(), oversize: false }
 
   pure val pA = orchard("a", Some(9))
   pure val pB = orchard("b", Some(9))
   pure val pC = orchard("c", None)
   pure val pTight = orchard("tight", Some(6))
-  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
 
   pure val PAYLOADS = Set(pA, pB, pC, pTight, pJunk)
   pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)

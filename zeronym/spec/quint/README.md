@@ -3,7 +3,7 @@
 A [Quint](https://quint-lang.org) specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
 
 > [!NOTE]
-> Checked against: `main` at `2bae0a6`, except the hub's tip rule, which is checked against the open #92 at `b767ac9`. Citations marked "at #92" are line numbers there.
+> Checked against: `main` at `2bae0a6`, except the hub's tip rule, which is checked against the open #92 at `b767ac9`, and the shim's classifier, which is checked against the open #94 at `59b602a`. Citations marked "at #92" or "at #94" are line numbers there.
 
 - [System](#system)
 - [Assumptions](#assumptions)
@@ -34,7 +34,7 @@ Each component is one total function from its state and one input to its next st
 | Component | Inputs | Outputs | Seam in the implementation |
 |---|---|---|---|
 | `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe` and `adopt`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
-| `shim` | `SendTxSInput` (with whether the transport took the frame), `GetTxSInput`, `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
+| `shim` | `SendTxSInput` (with whether the transport took the frame), `GetTxSInput`, `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `classify` (`shim/src/classify.rs`), `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
 | indexer | `BroadcastIInput`, `LookupIInput`, `AdvanceIInput`, `MineIInput` | `VerdictOutput`, `AnswerOutput`, `NoIndexerOutput` | the mock indexer in `hub/tests/common/mod.rs` |
 
 <details>
@@ -93,7 +93,7 @@ Not checked as a result: two hubs disagreeing about one transaction; duplicate p
 
 Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
 
-- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, and gap K5.
+- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, G9, and gap K5.
 - **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
 - **Do not compose:** K1 and K2 each gain a cause with a second hub.
 
@@ -110,7 +110,9 @@ Argued, not checked, on the assumption that hubs share nothing but the chain and
 | Reorgs of included transactions, mempool eviction | Assumed away: a transaction's chain status only moves forward |
 | Anonymity-set size, shuffle, simultaneity | Not properties of a single run |
 | Covert channels: extra bytes on the real wire, sizes and timing | Messages are strictly typed. A message can carry only its type's fields, so one with extra data is unrepresentable in the model |
-| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol |
+| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol. A forwarded `SendTransaction` that spends a diverted one is part of it: G9 and K10 |
+| A transaction's inputs and outputs beyond the txids it spends from: output indices, values, scripts, addresses | A payload carries the txids its transparent inputs spend (`spends`) and what the shim's parser reads of its pools (`class`). The classifier and G9 read those two fields. Sprout, Sapling and Ironwood are one class, `OtherShielded`, because the classifier treats them alike |
+| Transaction dependencies at the node | The indexer judges each transaction on its own. #94 queues both legs of a TEX payment at the hub, and one flush may offer the second leg before the first; what a node answers then is outside the model |
 | The HTTP transport, where the shim waits for the hub's verdict before answering the wallet (`HubTransport::Http`, `--hub`) | The production deployment is the mixnet (`HTTP_SUBMIT=0`). So there is no configuration here in which the shim's ok means the hub has the transaction |
 | A Byzantine shim | The shim runs attested, sees every migration in plaintext and controls what the wallet observes. Every wallet-facing guarantee assumes it honest |
 | What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
@@ -143,11 +145,12 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Bounded on mainnet by #92 (finding 11); possible inside the bound; recorded |
 | T12 | Any admitted transaction, including a late arrival or one from an unsupported wallet, is offered too late | As T5 | Not checked |
 | T13 | The hub acknowledges a migration it never queued | Byzantine hub | Not modelled: nothing reads an ack |
-| T14 | Linking a wallet to its migration by source IP | Network observer; operator | Not modelled. Claimed protected in `zeronym/README.md` |
+| T14 | Linking a wallet to its migration by source IP | Network observer; operator | Not modelled, except the route through a forwarded transaction (T19). Claimed protected in `zeronym/README.md` |
 | T15 | Linking by submission size and arrival time | Operator | Not modelled. Listed as not protected in `zeronym/README.md` |
-| T16 | The operator recovering txid and value through transparent-pool queries | Operator | Not modelled. Listed as not protected in `zeronym/README.md` |
+| T16 | The operator recovering txid and value through transparent-pool queries | Operator | Not modelled: the queries are outside the divert protocol. Listed as not protected in `zeronym/README.md`. The same txid reaching the operator in a forwarded `SendTransaction` is T19 |
 | T17 | Batch-size and timing anonymity; partitioning the anonymity set across hubs | Network observer | Out of scope: timing and anonymity are not trace properties here, and there is one hub |
 | T18 | A compromised shim or enclave host | Host; a malicious build | Assumed away. A compromised host is delegated to AWS in `zeronym/README.md`; a malicious shim build is excluded by attestation and is not discussed there |
+| T19 | The operator learns a diverted transaction's txid on the wallet's connection, from a forwarded transaction that spends its output | Operator | Answered for a transparent-only spend, the second leg of a TEX payment (G9, by #94). Not prevented for a spend with a shielded bundle (K10) |
 
 ## Guarantees
 
@@ -155,11 +158,12 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 
 | Id | Name | What it says | Answers | Checked by |
 |---|---|---|---|---|
-| G1 | `operatorBlind` | Every transaction the shim forwards to the operator's indexer is a pass-through transaction | T1 | Simulation |
-| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a pass-through transaction given to the operator's indexer. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
+| G1 | `operatorBlind` | Every transaction the shim forwards to the operator's indexer is one the classifier passes: a Sprout, Sapling or Ironwood transaction, or a coinbase | T1 | Simulation |
+| G2 | `queuedBytesConfidential` | Everything the third party has learned is on the chain, or was a transaction the classifier passes, given to the operator's indexer. Its knowledge is derived from the replies sent to it and the operator's view | T2 | Simulation |
 | G3 | `txidAuthenticity` | A transaction served to the wallet has the txid asked for. It need not be the bytes the wallet sent, and its height is whatever the hub said | T3 | Simulation; `servedOnlyOnMatchingTxidTest` exhaustively |
 | G4 | `lookupValidityPerHub` | Every lookup answer other than "unavailable" was true at the hub that gave it at some point between request and answer. Not-found during the flush window counts as true, as the implementation intends (`Hub::lookup`, `zeronym/hub/src/server.rs`). It does not say that successive answers agree | T4 | Simulation |
 | G5 | `pendingOnlyFromQueue` | Every "pending" the wallet is told was true at the hub that gave it: the transaction was queued there. G4 restricted to pending | T4 | Simulation |
+| G9 | `forwardedSpendsNoDiverted` | No transaction the shim forwards to the operator's indexer spends an output of one the shim diverted, in either order and before or after publication. Holds while every such spend has transparent parts only; a spend with a shielded bundle is K10 | T19 | Simulation; `texSecondLegIsDivertedTest` |
 | G6b | `conformingFirstOfferBeforeExpiry` | A supported wallet's transaction is offered with the mining margin to spare, the first time a hub offers it. About the margin left when the flush begins, not about acceptance; nothing about a later offer of a requeued entry | T5 | TLC, exhaustive |
 | G8 | `admissionMatchesCadence` | Every entry admitted, and not requeued, survives the first flush the cadence has not spent, with the mining margin to spare | T5 | TLC, exhaustive |
 | G7 | `wellFormedTest` | Structural sanity of the hub: a queued entry is within its attempts and a down hub holds nothing | T6 | Exhaustive test over every reachable hub state |
@@ -185,6 +189,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | G3 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G4 | holds (`baseline`) | **required**: `hubDeniesQueuedTest`, `hubServesFalseHeightTest` | **required**: `indexerServesFalseHeightTest`. One endpoint suffices |
 | G5 | holds (`baseline`) | **required**: `hubForgesPendingTest` | holds (`byzIndexer`); `indexerEmptyAnswerIsUnavailableTest` |
+| G9 | holds (`baseline`) | holds (`byzHub`) | holds (`byzIndexer`) |
 | G6b | holds (`timely`, `flakyTip`) | argued, not checked: a hub that admits while it has no tip breaks it | **required**: `indexerWithholdsTipFromConformingTest`. Needs every endpoint |
 | G8 | holds (`timely`, `flakyTip`, `staleLagWithSlack`) | argued, not checked | argued, not checked: admission never judges below the recorded boundary, whatever the tip |
 | A3 | holds | argued, not checked: draining is an admission rule | holds |
@@ -192,7 +197,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 - A hub folds several indexer endpoints into one answer: the tip is the maximum of the answers the tip guard keeps (`batcher.rs:245-282`, `chain.rs:176-208` at #92), a lookup takes the first "found", a broadcast takes the best verdict. So one misbehaving endpoint can raise the tip (on mainnet, only inside the guard's band and climb rate), inject a lookup answer or change a verdict, while lowering or freezing the tip takes every endpoint. The model has one abstract indexer and does not enforce that difference; the indexer cells say which each needs.
 - There is no shim column: every wallet-facing guarantee assumes an honest, attested shim.
 - G3 is the only wallet-facing guarantee that survives a Byzantine hub or indexer, and it authenticates the txid only.
-- G1 depends on the shim alone.
+- G1 and G9 depend on the shim alone.
 - The hub specification has no Byzantine hub, so the hub column of G6b and A3 is an argument. A Byzantine hub breaks G6b by admitting while it has no tip, when an honest hub refuses everything. Admitting past the expiry rule cannot break it, because that rule never refuses a supported wallet's timely transaction (`conformingTimelyPayloadIsAdmissibleTest`). The protocol specification's Byzantine hub backs the other rows.
 
 ## Known gaps
@@ -210,6 +215,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 | K5 | T9 | `ackedIsHeldOrSettled`: an acknowledged payload is still held by the hub, or is on the chain, or a node judged it | By design: the queue is in memory only, and the code logs what it loses (`zeronym/hub/src/batcher.rs:382-392`, `:513-524`). How much one unjudged flush drops is not triaged (finding 5) | `timely` | TLC, violated three ways | `ackedThenCrashedTest`, `ackedThenLostAtDrainTest`, `requeueDropsAckedAsExpiredTest` |
 | K6 | T5 | `conformingEveryOfferBeforeExpiry`: G6b for every offer, not only the first | Found here (finding 7); not triaged | `staleLag` | TLC, violated | `requeuedPastExpiryTest` |
 | K9 | T5 | G6b even when the expiry floor is wide enough to cover a tip silence: a stale hub's free-running clock flushes an empty queue early and spends the next epoch, so a transaction admitted after the tip returns waits a full interval | Found here (finding 2). #85 fixed admission's half (G8); the spent epoch remains, and this counterexample is unchanged | `staleLagWithSlack` | TLC, violated | `earlyFlushSpendsTheNextEpochTest` |
+| K10 | T19 | G9 for a spend that carries a shielded bundle. A wallet deshields Orchard to its own address, then auto-shields that output into Ironwood: the second transaction forwards, and its prevout names the diverted first | By design in #94: catching it needs a record of what was diverted, and the shim keeps none (`zeronym/shim/ENDPOINTS.md:208-214` at #94) | `shieldedSpend` | simulation, violated | `shieldedSpendOfDivertedIsForwardedTest` |
 
 K1 is not an invariant because it would be false on the ordinary success path too: the wallet is told ok before the hub has the frame.
 
@@ -226,7 +232,7 @@ Behaviours that are accepted or only recorded:
 
 > Where the model disagrees with what the code or its comments assume.
 
-Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by #92, which is still open. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
+Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by #92, and finding 12 by #94; both are still open. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
 
 | # | Finding | Kind | Shown by | Against the Rust |
 |---|---|---|---|---|
@@ -241,6 +247,7 @@ Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by
 | 9 | **Lookups choose a hub by apparent liveness.** A lookup starts at a rotating cursor and moves to the next address only on a timeout, the pattern the submit path forbids. Whoever can make one hub time out decides which hub answers | Undecided: deliberate and tested, and in conflict with a rule written for submits. The `PRODUCTION.md` that rule cites is not in the repository | Not modelled: needs more than one hub | Code read: `shim/src/nym.rs:746-797`, against the rule at `:628-633`; `shim/tests/nym.rs` asserts the behaviour today |
 | 10 | **Anyone can make the hub answer "pending" for a published transaction, and pad its batch-size signal.** The queue deduplicates against resident entries only, so published bytes are admitted again if resubmitted, and a lookup answers from the queue first. The wallet reads "pending" for a transaction it has already been served, until the next flush. The flush also counts an already-known verdict toward the achieved batch size, which the code calls "the honest measure of the privacy", so free, public bytes can raise that figure and suppress the warning for a batch of one | Code bug (LOW): the comment on `Hub::lookup` calls a resubmit harmless. The batch-size figure is logged and returned but drives no decision | K2, `thirdPartyResubmitsPublishedTest`, `walletResendsPublishedTest` | Code read: `queue.rs:310-312`, `:360-361`; `Hub::lookup` in `server.rs`; `batcher.rs:397`, `:434`, `:526`. Not checked: that a node answers already-known for a transaction that is already mined |
 | 11 | **One high tip report pinned the hub's tip.** Before #92, `observe` adopted any higher height and ignored a later drop larger than the reorg allowance. So one endpoint reporting a height P made every real height look like an oversized regression until the chain reached P minus the allowance, which for a large P is until restart. The epoch jumped, so the hub flushed once off cadence; after that admission refused every expiring transaction, because the observed height was P. The same rule could freeze the cadence: every step up refreshed liveness, so a tip that oscillated inside the allowance never went stale. #92 judges each answer before the maximum: on mainnet it drops a height outside a band around a compiled anchor, which also refuses a height near `u32::MAX`, and a new high faster than the chain can climb. Only a new high refreshes liveness, reorg depth is measured from the best height seen, and the free-running clock starts from that height | Code bug (HIGH), fixed by #92. On mainnet the guard bounds the lie: inside the band and rate one endpoint can still shift flush timing, hold a lead of about 16 blocks, or choose the boot height. Testnet and regtest are unguarded | `observeTip` follows #92: `tipRuleTest`, `staleCadenceTest`, `tipNearBestTest`. The Byzantine indexer still reports any tip in a bounded range, which over-approximates the guard. The freeze was invisible to the model before #92: staleness here is counted from the chain height alone, and the one configuration that goes stale reports the true height, which only climbs. `tipAheadOfChainFlushesEarlyTest` shows the one early flush | Code read at #92: `batcher.rs:19-45`, `:164-202`, `:240-349`, `:416-431`; `tip_guard.rs:40-65`; `chain.rs:176-208`. Before #92, at `2bae0a6`: `batcher.rs:19-22`, `:177-209`, `:355-374`; `chain.rs:176-201` |
+| 12 | **The second leg of a TEX payment named a diverted transaction.** A ZIP 320 (TEX) payment from shielded funds is two transactions, and the second spends the first's single-use transparent output. When the first touched Orchard, the shim diverted it. The second has transparent parts only, so the shim forwarded it, and its one prevout handed the operator the txid the hub held, on the wallet's connection. An external report found it; this specification missed it. A payload carried a class label and nothing about its inputs, so G1 held by construction and every property read one send at a time. A payload now carries the txids it spends and its pool shape, the shim applies #94's rule to them, and G9 states the link | Code bug (privacy), fixed by #94, which is still open. The severity scale grades batching and availability harms, so this row is ungraded | G9, `texSecondLegIsDivertedTest`; K10 for what #94 leaves. A one-off mutation run with the transparent-only arm removed: the `baseline` simulation violates G9, and `texSecondLegIsDivertedTest` fails at its second send | Code read at #94: `classify.rs:274-295`, `:333-338` |
 
 On finding 2, the model lets the free-running clock be at most one flush interval ahead, so it can spend one epoch. `cadence_height` has no such cap. Reading that code, a clock further ahead would skip more than one boundary; the model does not exhibit that.
 
@@ -264,7 +271,7 @@ sh zeronym/spec/quint/check.sh
 |---|---|---|
 | 1 | `quint typecheck` on every file | ok |
 | 2 | `quint test` on every test file | all pass, and each file reports at least the count `check.sh` gives it |
-| 3 | `quint run`, invariants | "holds" rows hold; K2 is violated |
+| 3 | `quint run`, invariants | "holds" rows hold; K2 and K10 are violated |
 | 3b | `quint run`, witnesses | every listed state is reached at least once; no invariant is violated on the way |
 | 4 | `tlc.sh`, one row per invariant and configuration | "holds" rows hold over every reachable state; "violated" rows are violated by a counterexample no longer than the recorded one |
 
@@ -276,13 +283,14 @@ A configuration is a value held in the state and selected by a named init.
 
 #### Protocol specification
 
-At most 3 sends and 3 lookups by the wallet, 3 requests by the third party.
+At most 3 sends and 3 lookups by the wallet, 3 requests by the third party. The `baseline` transactions are three Orchard migrations (one with an expiry below the supported floor), bytes nobody can parse, a Sapling payment, and the second leg of a TEX payment that one migration starts.
 
-| Configuration | Hub | Indexer |
-|---|---|---|
-| `baseline` | honest | honest |
-| `byzHub` | **Byzantine** | honest |
-| `byzIndexer` | honest | **Byzantine** |
+| Configuration | Hub | Indexer | Transactions |
+|---|---|---|---|
+| `baseline` | honest | honest | |
+| `byzHub` | **Byzantine** | honest | |
+| `byzIndexer` | honest | **Byzantine** | |
+| `shieldedSpend` | honest | honest | and an auto-shield of a migration's output into Ironwood: K10 |
 
 #### Hub specification
 
@@ -337,11 +345,11 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 | File | Owns |
 |---|---|
 | `spells/basicSpells.qnt`, `spells/soup.qnt` | `Option` and set and map helpers; the message soup |
-| `types.qnt` | The vocabulary: payloads, verdicts, refusals, roles, observations |
+| `types.qnt` | The vocabulary: payloads with their pool shape and parents, verdicts, refusals, roles, observations |
 | `wire.qnt` | The four frames; `render`, `meaning`, `interpretReply` |
 | `indexer.qnt` | The chain and indexer as a relation, honest and Byzantine |
 | `hub.qnt` | `hub(state, input)`: admission, the tip rule, the flush cycle, requeue; the Byzantine relation |
-| `shim.qnt` | `shim(state, input)`: routing and reply correlation |
+| `shim.qnt` | `shim(state, input)`: the classifier, routing and reply correlation |
 | `hubMachine.qnt` | The hub specification: one hub, the chain, its configurations and invariants |
 | `abstractHub.qnt` | The hub as the protocol sees it |
 | `protocol.qnt` | The protocol specification: state, steps, guarantees, gaps, witnesses, configurations |

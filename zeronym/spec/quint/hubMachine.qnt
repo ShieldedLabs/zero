@@ -626,7 +626,7 @@ module hubMachine {
   // that leaves room for a block to arrive while a flush is in flight.
 
   pure def orchard(id: str, created: Height, expiry: Height): Payload =
-    { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, oversize: false }
+    { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, spends: Set(), oversize: false }
 
   /// Two migrations from supported wallets, built at heights 2 and 4.
   pure val early = orchard("early", 2, 9)
@@ -680,7 +680,7 @@ module hubMachine {
   /// a network upgrade a build does not know, every transaction looks like
   /// this to it.
   pure val junk: Payload =
-    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
   pure val unknownUpgrade: HubConfig = { ...timely, payloads: Set(early, tight, junk) }
 
   // One named init per configuration. A configuration built to show what a

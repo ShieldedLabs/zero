@@ -7,10 +7,10 @@ module wireTest {
   import types.* from "../types"
   import wire.* from "../wire"
 
-  pure val pA = { id: "a", txid: Some("ta"), created: 1, expiry: Some(9), class: OrchardTouching, oversize: false }
+  pure val pA = { id: "a", txid: Some("ta"), created: 1, expiry: Some(9), class: OrchardTouching, spends: Set(), oversize: false }
   pure val pATwin = { ...pA, id: "a-twin" }
-  pure val pB = { id: "b", txid: Some("tb"), created: 1, expiry: None, class: PassThrough, oversize: false }
-  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+  pure val pB = { id: "b", txid: Some("tb"), created: 1, expiry: None, class: OtherShielded, spends: Set(), oversize: false }
+  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
 
   pure val PAYLOADS = Set(pA, pATwin, pB, pJunk)
   pure val HEIGHTS = WIRE_HEIGHTS
