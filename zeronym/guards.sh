@@ -153,6 +153,19 @@ else
 		"Naming the endpoints without the consequence is the overclaim that was corrected."
 fi
 
+# ---------------------------------------------------------------- M32
+# Against the operator, source-IP protection is batching anonymity: at batch
+# size one the operator links a wallet's IP to its diverted transaction.
+if grep -qi "volume-independent" README.md; then
+	fail "M32 README calls source-IP protection volume-independent again" \
+		"Against the operator it depends on batch size, and the batch is size one."
+elif grep -q "batch size of one" README.md; then
+	pass "M32 README states the operator's batch-of-one IP link"
+else
+	fail "M32 README no longer states the operator's batch-of-one IP link" \
+		"Dropping it restores the overclaim that was corrected."
+fi
+
 # ---------------------------------------------------------------- M26
 # The only automated gate on the attested binaries must run on push, because
 # this branch takes direct pushes.
