@@ -50,6 +50,13 @@ date) before dispatching the release.
   funded from Ironwood. A transparent spend that also carries a Sapling or
   Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
   by [@ouicate](https://github.com/ouicate).
+- zero-indexer: every hub served its clearnet lookup route, `POST /transaction`,
+  to anyone, so anyone holding a candidate txid could ask whether it sat in the
+  queue. A Nym shim looks up over the mixnet, so on a Nym hub the route served
+  only strangers. It now closes with the clearnet submit path, behind
+  `ZIH_HTTP_SUBMIT`. A clearnet pair keeps it, and the mixnet lookup still
+  answers the same question; `zeronym/README.md` lists that residual. Reported
+  by [@ouicate](https://github.com/ouicate).
 
 ### Changed
 

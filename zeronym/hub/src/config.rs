@@ -124,8 +124,10 @@ pub struct Config {
     /// unauthenticated submit endpoint.
     ///
     /// Turn it on for a transitional clearnet shim, a local demo, or a test.
-    /// The lookup path (`POST /transaction`) is unaffected; so are
-    /// `/nym-address` and `/healthz`, which are read-only.
+    /// It also opens the clearnet lookup path (`POST /transaction`), which only
+    /// a clearnet shim uses: a Nym shim looks up over the mixnet, and an open
+    /// lookup tells anyone whether a txid sits in the queue. `/nym-address` and
+    /// `/healthz` stay open; they are read-only.
     ///
     /// Takes an explicit `true`/`false` for the same reason `--nym` does: it is
     /// usually set from the environment, where a bare flag would read as set
