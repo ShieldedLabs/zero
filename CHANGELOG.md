@@ -50,6 +50,15 @@ date) before dispatching the release.
   funded from Ironwood. A transparent spend that also carries a Sapling or
   Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
   by [@ouicate](https://github.com/ouicate).
+- zero-indexer: the README listed source-IP protection as volume-independent.
+  That holds against the hub and the network. Against the operator it is
+  batching anonymity: the operator's host sees each wallet's upload and the
+  `SendTransaction` missing from its indexer, and on the clearnet hop the
+  shim's fresh 64 KiB dial to the hub inside the wallet's request. At today's
+  batch size of one, the next flush names the transaction. The README and both
+  operator guides now state this link and which marker Nym's cover traffic
+  removes, and `guards.sh` keeps the claim from returning. Reported by
+  [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
