@@ -194,6 +194,11 @@ caution verify --attestation-url https://<tls-domain>/attestation
 The same command is what anyone else uses, with no Caution account and no
 checkout of yours.
 
+`caution verify` is step 2 of the [auditor procedure](../../../README.md#usage).
+A PASS proves the enclave runs the tree in your app-source repo. Steps 3 to 5
+tie that tree to `ShieldedLabs/zero`, check its parameters (the hub it diverts
+to included), and check the network path.
+
 Caveats:
 
 - Without `app_sources` in the manifest (the `--app-source` flag), verify cannot
@@ -361,7 +366,7 @@ understanding what they mean.
 | `ZIS_CAUTION_ATTESTATION` | let the shim answer Caution's own `/attestation` and health paths | **`true` on managed Caution** (the default). Under h2c the platform routes these to the app, and a shim that proxied them to your indexer would fail its health check and never boot |
 | `ZIS_LOOKUP_TIMEOUT_SECS` | how long a `GetTransaction` waits for the hub before failing closed | default **90 s** (raised from 25 s against measurement). Tuning it changes the enclave config, not the binary, so your `EXPECTED_SHA256` and reproducibility trail stay put. It **multiplies** by the number of `--hub-nym` addresses |
 | `ZIS_BROADCAST_ONLY` | relay only `SendTransaction` and `GetTransaction`; every other gRPC method answers `UNIMPLEMENTED` | default `false`. `assemble-caution.sh` has no switch for it: add `ZIS_BROADCAST_ONLY = "true"` by hand to `unit.env` in the generated manifest. Setting it changes PCR0/PCR1 |
-| `ZIS_HUB` / `ZIS_HUB_TLS` | **legacy** clearnet hop | unset — the current hub refuses clearnet submissions |
+| `ZIS_HUB` / `ZIS_HUB_TLS` | clearnet hub: a literal `IPv4:port`, and the name its certificate must carry | the hub's Caution-managed address and its domain. The shim dials this address and checks the name, so an auditor checks the address against the hub's domain (auditor procedure, step 4) |
 
 `ZIS_BACKEND_TLS` does double duty: the name the backend's certificate must
 present, and the request `:authority` your ingress routes on. Hence the one

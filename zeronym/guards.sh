@@ -8,8 +8,9 @@
 # hash `EXPECTED_SHA256` had already moved past, and PCR advice that survived a
 # documentation sweep because it lived in a `.sh` file rather than a `.md` one.
 #
-# Every check below corresponds to a finding in Taylor Hornby's 2026-08-19 review
-# that is now FIXED. The point is to keep it fixed.
+# Every check below corresponds to a finding that is now FIXED: from Taylor
+# Hornby's 2026-08-19 review, or from the external report its comment names. The
+# point is to keep it fixed.
 #
 # ASSERTION vs CITATION. A bare substring search flags the corrections as well as
 # the errors: a document that says "the old advice was X" contains X. So where a
@@ -123,6 +124,24 @@ else
 		"operator's published tree, not that the tree is zero-indexer."
 fi
 
+# ---------------------------------------------------------------- AUD
+# The four component guides stopped at `caution verify`, so an operator or
+# auditor following one never re-assembled, diffed, checked the hub the shim
+# points at, or resolved the domain (external report, @ouicate). H1 and M4 keep
+# the full procedure in README.md; each guide must link to it.
+aud_missing=""
+for guide in shim/deploy/caution/README.md shim/deploy/caution/OPERATORS.md \
+	hub/deploy/caution/README.md hub/deploy/caution/OPERATORS.md; do
+	grep -q 'README.md#usage' "$guide" || aud_missing="$aud_missing $guide"
+done
+if [ -z "$aud_missing" ]; then
+	pass "AUD every component guide links to the full auditor procedure"
+else
+	fail "AUD a component guide no longer links to the auditor procedure:$aud_missing" \
+		"A caution verify PASS alone proves only that the enclave runs the operator's" \
+		"published tree. Steps 3 to 5 live in README.md (Usage, Auditors)."
+fi
+
 # ---------------------------------------------------------------- M2
 # `debug.ssh_keys` is not gated on `debug.enabled`, and debug is a parent-side
 # launch flag, so a key listed on an attested build can reopen the console. Both
@@ -167,16 +186,37 @@ for comp in hub shim; do
 done
 
 # ---------------------------------------------------------------- M14
-# The example config must not send the wallet's txid to the very indexer the
-# interception exists to hide it from.
-backend=$(grep -E '^BACKEND=' deploy.env.example | cut -d= -f2 | awk '{print $1}')
-indexers=$(grep -E '^INDEXERS=' deploy.env.example | cut -d= -f2 | awk '{print $1}')
-if [ "$backend" = "$indexers" ]; then
-	fail "M14 deploy.env.example points BACKEND and INDEXERS at the same host" \
-		"BACKEND=$backend  INDEXERS=$indexers" \
-		"The hub's lookup fall-through then hands the txid to the operator's own indexer."
+# On a queue miss the hub looks a txid up through its indexers, so a shim's
+# backend and a hub's indexers must belong to different operators. Operators copy
+# the example config and the assemble examples in the docs, so the guard reads
+# all of them. It compares addresses, port dropped, AND certificate names: the
+# shim authenticates its backend by name, so one name on two addresses is one
+# indexer. Operator identity is beyond a string check; step 4 of the auditor
+# procedure in README.md covers it. The first version compared the two IPs in
+# deploy.env.example only, while its two names matched and the deploy guides
+# taught one host for both (external report, @ouicate).
+env_val() { grep -E "^$1=" deploy.env.example | cut -d= -f2 | awk '{print $1}'; }
+# Every literal value that follows the flag in the docs. `<placeholder>` values
+# are dropped, and a flag named in prose is followed by a backtick, not a value.
+doc_vals() {
+	find . -name '*.md' -not -path './vendor/*' -not -path '*/target/*' \
+		-not -path '*/node_modules/*' -exec cat {} + \
+		| grep -oE -- "$1[[:space:]]+[^[:space:]\`\\\\]+" | awk '{print $2}' | grep -v '<' || true
+}
+hosts() { tr ',' '\n' | sed 's/:[0-9]*$//'; }
+backends=$( { env_val BACKEND; doc_vals --backend; env_val BACKEND_TLS; doc_vals --backend-tls; } \
+	| hosts | sort -u)
+shared=""
+for v in $( { env_val INDEXERS; doc_vals --indexers; env_val INDEXER_TLS; doc_vals --indexer-tls; } \
+	| hosts | sort -u); do
+	printf '%s\n' "$backends" | grep -qxF "$v" && shared="$shared $v"
+done
+if [ -n "$shared" ]; then
+	fail "M14 a shim backend and a hub indexer share an address or name:$shared" \
+		"Checked: deploy.env.example and every --backend/--indexers example in the docs." \
+		"The hub's lookup fall-through then hands the txid to the backend's own indexer."
 else
-	pass "M14 example config separates the backend from the hub's indexers"
+	pass "M14 example config and docs keep the backend apart from the hub's indexers"
 fi
 
 printf '\n'

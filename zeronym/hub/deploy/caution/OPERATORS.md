@@ -131,6 +131,11 @@ Notes that apply to both:
 - `--indexers` are literal IPv4 addresses. The enclave resolves **no DNS** for
   them (there is no port 53 rule for that path), so a poisoned answer has nothing
   to poison.
+- **An operator other than the one behind every diverting shim's `--backend`
+  must run the `--indexers`.** On a queue miss the hub looks the txid up there,
+  so a hub pointed at a shim's own backend hands that backend every such txid.
+  Compare operators, beyond IPs and names: one operator can serve two addresses
+  under two names.
 - **`--indexer-tls` is not optional in practice.** Without it the broadcast hop
   is plaintext and the enclave's parent host reads every batch in the clear
   moments before it is public — which would undo most of the reason this runs in
@@ -196,6 +201,10 @@ force-push, and it must land BEFORE the enclave push: a verifier who arrives in
 the gap gets a PCR mismatch indistinguishable from a compromised enclave. This
 step was skipped by hand once (2026-08-17) and caught only by checking; put it in
 the same script as the enclave push, or use `deploy.sh`, which does it.
+
+A PASS proves the enclave runs the tree in `zero-hub`. Steps 3 to 5 of the
+[auditor procedure](../../../README.md#usage) tie that tree to
+`ShieldedLabs/zero`, check its parameters, and check the network path.
 
 **Measured, 2026-08-17, from fresh public clones with the build cache cleared:**
 hub-6 (`zero-hub` @ `a1e703a8`) and shim-9 (`zero-shim` @ `cc70e9af`) both
@@ -518,7 +527,7 @@ expensive and rare.
 | env var | meaning | you point it at |
 |---|---|---|
 | `ZIH_LISTEN` | listen address inside the enclave | `0.0.0.0:8083` (the port Caution's proxy forwards to) |
-| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast through | your indexers; every batch member goes to all of them |
+| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast and look up through | indexers run by an operator other than every diverting shim's backend; every batch member goes to all of them |
 | `ZIH_INDEXER_TLS` | DNS name the indexer certificates must carry | **required in practice** — without it the hop is plaintext |
 | `ZIH_NETWORK` | the network the indexers serve: `mainnet`, `testnet` or `regtest` | **required**; `mainnet` bounds every tip the indexers report (see "Tip guard") |
 | `ZIH_NYM` | receive submissions over the mixnet | `true` |
