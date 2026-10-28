@@ -50,6 +50,16 @@ date) before dispatching the release.
   funded from Ironwood. A transparent spend that also carries a Sapling or
   Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
   by [@ouicate](https://github.com/ouicate).
+- zero-indexer: one free burst of junk held the hub's queue for hours.
+  Unparseable bytes enter the queue with no expiry, and 1024 of them (64 KiB)
+  fill its entry cap. A node answers such bytes with `-22`, the deserialization
+  error, and the hub retried that answer, so each junk entry went back into the
+  queue for 8 more flushes (about 3.3 hours) and reached every indexer 9 times.
+  The hub now reads that answer as a rejection: the `-22` lightwalletd relays,
+  and zaino's `malformed transaction` rejection inside a gRPC INTERNAL (the hub
+  now percent-decodes `grpc-message`). A burst now lasts one flush window. Any
+  submitter can still fill the cap for that window. Reported by
+  [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
