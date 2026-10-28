@@ -508,7 +508,9 @@ expensive and rare.
 - **`ZIH_HTTP_SUBMIT` stays off.** The clearnet `POST /` submit path is disabled
   by default; with the mixnet carrying submissions nothing legitimate posts there,
   while the enclave accepts inbound from anywhere. Disabled, it returns the same
-  `404` as any unknown path, so a scanner cannot tell it exists.
+  `404` as any unknown path, so a scanner cannot tell it exists. The flag also
+  gates the clearnet lookup path, `POST /transaction`, which tells anyone whether
+  a txid sits in the queue. A clearnet pair needs both, so it turns the flag on.
 - **Certificates**: diskless means every restart is a fresh ACME order, against 5
   production issuances per name per week. Iterate on throwaway names.
 - **Watch Certificate Transparency** for your hub domain.
@@ -523,5 +525,5 @@ expensive and rare.
 | `ZIH_NETWORK` | the network the indexers serve: `mainnet`, `testnet` or `regtest` | **required**; `mainnet` bounds every tip the indexers report (see "Tip guard") |
 | `ZIH_NYM` | receive submissions over the mixnet | `true` |
 | `ZIH_NYM_GATEWAY` | pin the entry gateway by IDENTITY key (single value; the address must stay stable) | **leave unset for now** — untested against public Nym |
-| `ZIH_HTTP_SUBMIT` | accept clearnet `POST /` submissions | **leave off** (default `false`) |
+| `ZIH_HTTP_SUBMIT` | accept clearnet `POST /` submissions and `POST /transaction` lookups | **leave off** (default `false`) unless the pair runs clearnet |
 | `RUST_LOG` | log level | leave at the default `info`; never `debug` on a deployed enclave |

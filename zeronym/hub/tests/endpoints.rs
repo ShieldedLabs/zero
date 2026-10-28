@@ -10,7 +10,8 @@
 //! unauthenticated submission from anyone on the internet, on an enclave that
 //! declares `ingress 0.0.0.0/0` and has no submitter ACL by design. With the
 //! mixnet carrying submissions, nothing legitimate posts there, so it is off
-//! unless `ServeOptions::http_submit` asks for it (NYM_PLAN M7).
+//! unless `ServeOptions::http_submit` asks for it (NYM_PLAN M7). The clearnet
+//! lookup path `POST /transaction` closes with it.
 //!
 //! What every assertion below also guards: these responses carry the address
 //! and liveness and NOTHING else. A queue depth or batch size returned here
@@ -202,15 +203,29 @@ async fn clearnet_submit_works_when_explicitly_enabled() {
     assert_eq!(post(&addr, "/", tx).await, StatusCode::OK);
 }
 
-/// The lookup path stays open regardless of the submit gate: a shim that
-/// diverted over the mixnet still has to answer its wallet's `GetTransaction`.
+/// The clearnet lookup path closes with the clearnet submit path. A Nym shim
+/// looks up over the mixnet, so on a Nym hub the open route served only
+/// strangers, telling each one whether a txid sat in the queue (external
+/// report, @ouicate). Closed, it gives the unknown-path answer.
 #[tokio::test]
-async fn the_lookup_path_is_not_gated_by_the_submit_flag() {
-    let addr = spawn(ServeOptions::default()).await;
-    // An empty key is a malformed query, and a 400 proves the handler ran at
-    // all — which is the point here, versus the 404 a gated path returns.
+async fn the_lookup_path_is_gated_by_the_submit_flag() {
+    let closed = spawn(ServeOptions::default()).await;
     assert_eq!(
-        post(&addr, "/transaction", Vec::new()).await,
+        post(&closed, "/transaction", Vec::new()).await,
+        StatusCode::NOT_FOUND
+    );
+    let (wrong_method, _) = get(&closed, "/transaction").await;
+    assert_eq!(wrong_method, StatusCode::NOT_FOUND);
+
+    let open = spawn(ServeOptions {
+        http_submit: true,
+        ..Default::default()
+    })
+    .await;
+    // An empty key is a malformed query, and a 400 proves the handler ran at
+    // all, versus the 404 of the closed hub above.
+    assert_eq!(
+        post(&open, "/transaction", Vec::new()).await,
         StatusCode::BAD_REQUEST
     );
 }
@@ -416,12 +431,15 @@ async fn nym_status_separates_a_client_being_rebuilt_from_a_driver_that_is_gone(
 async fn a_body_that_never_arrives_is_timed_out_rather_than_held() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let addr = spawn(ServeOptions::default()).await;
+    let addr = spawn(ServeOptions {
+        http_submit: true,
+        ..Default::default()
+    })
+    .await;
     let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
 
     // A complete, well-formed head promising a body that will never come. The
-    // lookup path is used because it is open unconditionally; the deadline is
-    // the same one on both paths.
+    // lookup path is used; the deadline is the same one on both paths.
     sock.write_all(b"POST /transaction HTTP/1.1\r\nHost: hub\r\nContent-Length: 64\r\n\r\n")
         .await
         .unwrap();
@@ -546,7 +564,7 @@ async fn the_clearnet_lookup_arm_refuses_rather_than_queueing_when_full() {
     let hub = spawn_with_indexer(
         ServeOptions {
             nym_address: NymAddress::unknown(),
-            http_submit: false,
+            http_submit: true,
         },
         indexer,
     )
@@ -591,7 +609,7 @@ async fn a_saturated_lookup_arm_does_not_block_the_health_endpoint() {
     let hub = spawn_with_indexer(
         ServeOptions {
             nym_address: NymAddress::unknown(),
-            http_submit: false,
+            http_submit: true,
         },
         indexer,
     )
