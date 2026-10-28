@@ -145,10 +145,10 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Bounded on mainnet by #92 (finding 11); possible inside the bound; recorded |
 | T12 | Any admitted transaction, including a late arrival or one from an unsupported wallet, is offered too late | As T5 | Not checked |
 | T13 | The hub acknowledges a migration it never queued | Byzantine hub | Not modelled: nothing reads an ack |
-| T14 | Linking a wallet to its migration by source IP | Network observer; operator | Not modelled, except the route through a forwarded transaction (T19). Claimed protected in `zeronym/README.md` |
+| T14 | Linking a wallet to its migration by source IP | Network observer; operator | Not modelled, except the route through a forwarded transaction (T19). `zeronym/README.md` claims it against the hub and the peer-to-peer network at any volume, and lists the operator's and the wallet's ISP's link at batch size one as not protected (T17) |
 | T15 | Linking by submission size and arrival time | Operator | Not modelled. Listed as not protected in `zeronym/README.md` |
 | T16 | The operator recovering txid and value through transparent-pool queries | Operator | Not modelled: the queries are outside the divert protocol. Listed as not protected in `zeronym/README.md`. The same txid reaching the operator in a forwarded `SendTransaction` is T19 |
-| T17 | Batch-size and timing anonymity; partitioning the anonymity set across hubs | Network observer | Out of scope: timing and anonymity are not trace properties here, and there is one hub |
+| T17 | Batch-size and timing anonymity; partitioning the anonymity set across hubs | Network observer; operator | Out of scope: timing and anonymity are not trace properties here, and there is one hub |
 | T18 | A compromised shim or enclave host | Host; a malicious build | Assumed away. A compromised host is delegated to AWS in `zeronym/README.md`; a malicious shim build is excluded by attestation and is not discussed there |
 | T19 | The operator learns a diverted transaction's txid on the wallet's connection, from a forwarded transaction that spends its output | Operator | Answered for a transparent-only spend, the second leg of a TEX payment (G9, by #94). Not prevented for a spend with a shielded bundle (K10) |
 
