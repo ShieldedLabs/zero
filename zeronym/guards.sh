@@ -203,7 +203,7 @@ doc_vals() {
 		-not -path '*/node_modules/*' -exec cat {} + \
 		| grep -oE -- "$1[[:space:]]+[^[:space:]\`\\\\]+" | awk '{print $2}' | grep -v '<' || true
 }
-hosts() { tr ',' '\n' | sed 's/:[0-9]*$//'; }
+hosts() { tr ',' '\n' | sed 's/:[0-9]*$//' | tr '[:upper:]' '[:lower:]'; }
 backends=$( { env_val BACKEND; doc_vals --backend; env_val BACKEND_TLS; doc_vals --backend-tls; } \
 	| hosts | sort -u)
 shared=""
