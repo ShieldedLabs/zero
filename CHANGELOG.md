@@ -60,6 +60,18 @@ date) before dispatching the release.
   now percent-decodes `grpc-message`). A burst now lasts one flush window. Any
   submitter can still fill the cap for that window. Reported by
   [@ouicate](https://github.com/ouicate).
+- zero-indexer: junk now costs a Halo2 proof to put in front of a migration.
+  The hub verifies the Orchard and Ironwood proofs of every submission that
+  touches Orchard (and its signatures, when it has no transparent inputs),
+  against the NU6.3 key it builds at boot, and refuses one that fails. The
+  entry cap splits into lanes: 896 entries for verified transactions, 112 for
+  transparent-only spends, 16 for what the hub cannot verify (unparseable
+  bytes, an unknown circuit era). Free junk fills only its own lane, and a TEX
+  second leg rides in the verified lane when the hub holds its parent. One
+  proof buys one entry: re-signing it collapses to the held entry, and a proof
+  the network rejected, or already has, is refused for the life of the
+  process. About 9 ms of CPU per migration on the enclave's four cores, three
+  checks at a time. Reported by [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
