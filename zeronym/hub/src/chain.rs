@@ -35,6 +35,7 @@ use futures_util::stream::StreamExt;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use percent_encoding::percent_decode_str;
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -139,6 +140,19 @@ pub enum Publish {
 /// [`classify_publish_failure`]).
 const GRPC_INVALID_ARGUMENT: &str = "3";
 const GRPC_FAILED_PRECONDITION: &str = "9";
+
+/// gRPC INTERNAL, which zaino answers every node rejection with.
+const GRPC_INTERNAL: &str = "13";
+
+/// The code zcashd and zebrad answer `sendrawtransaction` with when the bytes do
+/// not deserialize (`RPC_DESERIALIZATION_ERROR`). lightwalletd relays it as the
+/// `SendResponse` code.
+const NODE_DESERIALIZATION_ERROR: i32 = -22;
+
+/// What zaino puts in a gRPC INTERNAL message when its node answered
+/// [`NODE_DESERIALIZATION_ERROR`]: the `Display` of its `Malformed` rejection
+/// (`zaino-source/src/send_raw_transaction.rs`).
+const ZAINO_MALFORMED: &str = "malformed transaction:";
 
 /// A client over one or more indexer endpoints.
 pub struct ChainClient {
@@ -454,12 +468,15 @@ where
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_owned())
         .or(header_status);
+    // Percent-encoded on the wire, so a space arrives as `%20`. Decoded here so
+    // the publish classifier reads the indexer's words.
     let message = trailers
         .as_ref()
         .and_then(|map| map.get("grpc-message"))
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_owned())
-        .or(header_message);
+        .or(header_message)
+        .map(|value| percent_decode_str(&value).decode_utf8_lossy().into_owned());
 
     match status.as_deref() {
         // Absent is tolerated: some servers omit it on a successful unary reply.
@@ -505,12 +522,23 @@ fn unframe<M: Message + Default>(body: &[u8]) -> Result<M, BoxError> {
 ///
 /// lightwalletd's convention, which zaino follows: `error_code == 0` means
 /// success and `error_message` carries the txid. A non-zero code carries the
-/// node's rejection text, which is matched conservatively so anything
-/// unrecognised counts as a rejection rather than a silent success.
+/// node's rejection, read by [`classify_publish_error`].
+///
+/// A node that could not deserialize the bytes has judged them: the bytes stay
+/// unreadable at every later flush. Retrying that answer let one burst of junk,
+/// which has no expiry, hold the queue's entry cap for `MAX_REQUEUE_ATTEMPTS`
+/// more flushes and reach every indexer that many more times. A node too old to
+/// read a new transaction version answers the same, and a few more flushes do
+/// not upgrade it.
 fn classify_send_response(resp: &SendResponse) -> Publish {
     if resp.error_code == 0 {
         return Publish::Accepted {
             txid: resp.error_message.clone(),
+        };
+    }
+    if resp.error_code == NODE_DESERIALIZATION_ERROR {
+        return Publish::Rejected {
+            reason: resp.error_message.clone(),
         };
     }
     classify_publish_error(&resp.error_message)
@@ -550,21 +578,32 @@ fn best_of(outcomes: Vec<Publish>) -> Publish {
 ///
 /// This is the seam between "the indexer judged the transaction" and "the
 /// indexer was never really asked", and the batcher's requeue depends on it
-/// being drawn honestly. Only INVALID_ARGUMENT and FAILED_PRECONDITION are
-/// verdicts here: they are what a gRPC service returns when it read the request
-/// and refuses its content. Everything else, a refused or reset connection, a
-/// TLS failure, any of the three timeouts, UNAVAILABLE, DEADLINE_EXCEEDED,
+/// being drawn honestly. INVALID_ARGUMENT and FAILED_PRECONDITION are verdicts
+/// here: they are what a gRPC service returns when it read the request and
+/// refuses its content. So is an INTERNAL carrying zaino's `Malformed`
+/// rejection, its relay of the node's deserialization failure (see
+/// [`classify_send_response`]). Everything else, a refused or reset connection,
+/// a TLS failure, any of the three timeouts, UNAVAILABLE, DEADLINE_EXCEEDED,
 /// RESOURCE_EXHAUSTED, an unframeable reply, is a failure to obtain a verdict,
 /// and is classed retryable on purpose even where it might be permanent (an
 /// UNIMPLEMENTED or UNAUTHENTICATED endpoint): re-offering an entry costs one
-/// call per flush and stops at its expiry, while dropping a valid migration on
-/// a misread error is unrecoverable, because the shim has already told the
-/// wallet it was sent.
+/// call per flush until its expiry or `MAX_REQUEUE_ATTEMPTS`, while dropping a
+/// valid migration on a misread error is unrecoverable, because the shim has
+/// already told the wallet it was sent.
 fn classify_publish_failure(err: &BoxError) -> Publish {
     let reason = err.to_string();
     match err.downcast_ref::<GrpcStatusError>() {
         Some(status)
             if status.code == GRPC_INVALID_ARGUMENT || status.code == GRPC_FAILED_PRECONDITION =>
+        {
+            Publish::Rejected { reason }
+        }
+        Some(status)
+            if status.code == GRPC_INTERNAL
+                && status
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(ZAINO_MALFORMED)) =>
         {
             Publish::Rejected { reason }
         }
@@ -576,8 +615,8 @@ fn classify_publish_failure(err: &BoxError) -> Publish {
 ///
 /// Matched on text because the error codes for these cases are not consistent
 /// between zebrad and zcashd, nor through an indexer that relays them. Kept in
-/// one place and deliberately conservative: anything unrecognised is a
-/// rejection, never a silent success. Note that a rejection here is a VERDICT
+/// one place; anything unrecognised is retryable, never a silent success, and
+/// never a rejection. Note that a rejection here is a VERDICT
 /// and is dropped by the batcher, not retried: the indexer answered OK with a
 /// non-zero code, which is exactly how lightwalletd and zaino relay the node
 /// saying no, and offering the same bytes again would buy the same answer every
@@ -671,7 +710,8 @@ fn classify_publish_error(message: &str) -> Publish {
         // drops the migration for good -- the shim has already told the wallet
         // it was sent and keeps no copy, so nothing anywhere retries it. A
         // permanent error misread as retryable costs one indexer call per flush
-        // and stops at the entry's expiry.
+        // for up to `MAX_REQUEUE_ATTEMPTS` flushes. Expiry rarely ends it first:
+        // a ZIP 318 migration expires a month or more out.
         //
         // It also makes the verdict independent of WHICH INDEXER answered, which
         // it never was: lightwalletd relays zebra's transient errors as
@@ -867,6 +907,64 @@ mod tests {
             classify_publish_failure(&status),
             Publish::Retryable { .. }
         ));
+    }
+
+    #[test]
+    fn a_node_that_cannot_parse_the_bytes_has_rejected_them() {
+        // zebrad and zcashd, each through lightwalletd, which relays the node's
+        // own code.
+        for message in [
+            "parse error: bad tx header",
+            "io error: failed to fill whole buffer",
+            "TX decode failed",
+        ] {
+            match classify_send_response(&SendResponse {
+                error_code: NODE_DESERIALIZATION_ERROR,
+                error_message: message.into(),
+            }) {
+                Publish::Rejected { .. } => {}
+                other => panic!("{message:?} must be a rejection, got {other:?}"),
+            }
+        }
+
+        // zaino names the same answer as its own `Malformed` rejection, inside
+        // an INTERNAL.
+        let status: BoxError = Box::new(GrpcStatusError {
+            code: GRPC_INTERNAL.into(),
+            message: Some(
+                "InternalServerError: error receiving data from backing node: critical error \
+                 in backing block source: validator rejected the query: malformed transaction: \
+                 parse error: bad tx header"
+                    .into(),
+            ),
+        });
+        assert!(matches!(
+            classify_publish_failure(&status),
+            Publish::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn zainos_other_internal_answers_stay_retryable() {
+        for message in [
+            // Its own transport failure.
+            "IO error: connection reset by peer",
+            "InternalServerError: error receiving data from backing node: critical error in \
+             backing block source: validator unreachable: connection refused",
+            // A node verdict the hub does not read as permanent.
+            "InternalServerError: error receiving data from backing node: critical error in \
+             backing block source: validator rejected the query: rejected by validator: \
+             transaction did not pass consensus validation",
+        ] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: GRPC_INTERNAL.into(),
+                message: Some(message.into()),
+            });
+            assert!(
+                matches!(classify_publish_failure(&status), Publish::Retryable { .. }),
+                "{message:?} must be retried"
+            );
+        }
     }
 
     #[test]
