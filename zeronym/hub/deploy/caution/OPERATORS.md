@@ -317,10 +317,15 @@ keeps and what it gives up, because it is easy to mistake for "no privacy":
 | Hub sees migration plaintext (it always must; it broadcasts) | ✅ | ✅ |
 | Wallet lookups | 30–90 s from an enclave | sub-second |
 | **Shim ↔ hub link unlinkable** | ✅ | ❌ **the hub sees which shim sent each migration, and when** |
+| **Each divert hidden on the shim host's egress** | ✅ cover traffic | ❌ **a fresh connection and one 64 KiB frame per divert** |
 
-That last row is the mixnet's specific contribution. With one shim and one hub
-the link is trivially known regardless, so today the loss is near zero; it grows
-with the fleet, which is exactly when Nym must return.
+The last two rows are the mixnet's specific contribution. With one shim and one
+hub the shim-to-hub link is trivially known regardless, so today that loss is
+near zero; it grows with the fleet, which is exactly when Nym must return. The
+egress row matters against the shim's cloud provider and the network path to
+the hub. The shim's operator learns each divert from its own indexer in either
+mode, and at batch size one that names the transaction (shim `OPERATORS.md`,
+"What this does and does not hide").
 
 **Why:** every hub inside a Nitro enclave answered lookups in 30–90 s, and a
 debug console showed the cause directly — the nym-sdk's send-rate controller
