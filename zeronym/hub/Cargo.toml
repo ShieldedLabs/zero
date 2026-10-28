@@ -45,6 +45,15 @@ mixnet-localnet = ["mixnet-driver", "dep:nym-topology"]
 # parser the shim used.
 zebra-chain = { path = "../../zebra/zebra-chain" }
 
+# The Halo2 verifier behind admission (src/admission.rs): a submission that
+# touches Orchard must carry proofs that verify, so junk costs its sender one
+# proof per entry. Already in the graph through zebra-chain, with the same
+# `circuit` feature, so this adds no crate to the lockfile. `rand08` is the rand
+# that orchard's batch validator takes; the queue's shuffle keeps using `rand`.
+orchard = "0.15"
+rand08 = { package = "rand", version = "0.8" }
+zcash_protocol = "0.10"
+
 # CompactTxStreamer types for the indexer hop (SendTransaction, GetLightdInfo).
 # default-features = false is REQUIRED, not tidiness: the default "heavy" feature
 # pulls a SECOND zebra-chain from crates.io alongside our vendored path dep, and
@@ -121,6 +130,38 @@ nym-topology = { git = "https://github.com/nymtech/nym", tag = "nym-binaries-v20
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+# Only for tests/proven_fixtures.rs, which builds the V6 transactions with real
+# proofs that the admission tests verify. All already in the lockfile.
+zcash_primitives = "0.30"
+zcash_transparent = "0.10"
+incrementalmerkletree = "0.8"
+
+# The admission tests verify real Halo2 proofs, and building the verifying key
+# alone takes minutes at opt-level 0. The release build is unaffected.
+[profile.dev.package.halo2_proofs]
+opt-level = 3
+
+[profile.dev.package.halo2_gadgets]
+opt-level = 3
+
+[profile.dev.package.pasta_curves]
+opt-level = 3
+
+[profile.dev.package.orchard]
+opt-level = 3
+
+[profile.dev.package.reddsa]
+opt-level = 3
+
+[profile.dev.package.ff]
+opt-level = 3
+
+[profile.dev.package.group]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
+opt-level = 3
 
 # Substitute the vendored slim copy of nym-upgrade-mode-check (see
 # vendor/nym-upgrade-mode-check/Cargo.toml). The real crate's jwt-simple subtree

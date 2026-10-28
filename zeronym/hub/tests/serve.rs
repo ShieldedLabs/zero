@@ -66,12 +66,12 @@ async fn spawn_hub(indexer: SocketAddr) -> Harness {
 
     tokio::spawn(server::serve(
         listener,
-        Hub {
-            queue: queue.clone(),
-            tip: tip.clone(),
-            params: BatchParams::default(),
-            chain: chain.clone(),
-        },
+        Hub::new(
+            queue.clone(),
+            tip.clone(),
+            BatchParams::default(),
+            chain.clone(),
+        ),
         // This file exercises the CLEARNET submit path, which is off by default
         // now that the mixnet carries submissions. Opting in explicitly here
         // keeps these tests honest about which transport they cover.
@@ -255,11 +255,11 @@ async fn already_known_at_the_node_counts_toward_the_achieved_batch_size() {
 
 #[tokio::test]
 async fn a_real_orchard_transaction_is_admitted_and_gets_a_computed_txid() {
-    // Shared corpus with the shim. The txid comes back at ADMISSION, before the
+    // A migration whose proofs verify. The txid comes back at ADMISSION, before the
     // transaction has been anywhere near a node, because the hub computes it
     // from the bytes. That is what lets the shim answer the wallet immediately
     // while publication is still a flush away.
-    let bytes = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+    let bytes = include_bytes!("fixtures/v6_proven_a.bin").to_vec();
     let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let indexer = spawn_mock_indexer(0, "unused", seen.clone()).await;
     let hub = spawn_hub(indexer).await;
@@ -292,21 +292,21 @@ async fn a_no_expiry_transaction_is_admissible_at_any_height() {
     tip.observe(&[u32::MAX - 1000]);
     tokio::spawn(server::serve(
         listener,
-        Hub {
-            queue: queue.clone(),
+        Hub::new(
+            queue.clone(),
             tip,
-            params: BatchParams::default(),
+            BatchParams::default(),
             // Never reached in this test (no flush, no lookup), but the type
             // needs one. Constructed, not connected.
-            chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
-        },
+            Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
+        ),
         ServeOptions {
             http_submit: true,
             ..Default::default()
         },
     ));
 
-    let bytes = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+    let bytes = include_bytes!("fixtures/v6_proven_a.bin").to_vec();
     let v = post_json(&addr, bytes).await;
     assert_eq!(v["disposition"], "accepted");
     assert_eq!(queue.len(), 1);
@@ -326,14 +326,14 @@ async fn a_stale_tip_stops_admission_rather_than_forcing_a_flush() {
     let queue = Arc::new(Queue::new());
     tokio::spawn(server::serve(
         listener,
-        Hub {
-            queue: queue.clone(),
+        Hub::new(
+            queue.clone(),
             tip,
-            params: BatchParams::default(),
+            BatchParams::default(),
             // Never reached in this test (no flush, no lookup), but the type
             // needs one. Constructed, not connected.
-            chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
-        },
+            Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
+        ),
         ServeOptions {
             http_submit: true,
             ..Default::default()
@@ -377,7 +377,7 @@ async fn a_get_is_rejected() {
 
 // ----------------------------------------------------------- lookup (/transaction)
 
-const V6_ORCHARD_ONLY: &[u8] = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin");
+const V6_ORCHARD_ONLY: &[u8] = include_bytes!("fixtures/v6_proven_a.bin");
 
 #[tokio::test]
 async fn a_queued_transaction_is_served_from_the_queue_with_height_zero() {

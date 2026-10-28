@@ -44,12 +44,12 @@ async fn spawn_with_indexer(options: ServeOptions, indexer: std::net::SocketAddr
     tip.observe(&[100]);
     tokio::spawn(server::serve(
         listener,
-        Hub {
-            queue: Arc::new(Queue::new()),
+        Hub::new(
+            Arc::new(Queue::new()),
             tip,
-            params: BatchParams::default(),
-            chain: Arc::new(ChainClient::new(vec![indexer], None).unwrap()),
-        },
+            BatchParams::default(),
+            Arc::new(ChainClient::new(vec![indexer], None).unwrap()),
+        ),
         options,
     ));
     addr
@@ -77,13 +77,13 @@ async fn spawn(options: ServeOptions) -> String {
     tip.observe(&[100]);
     tokio::spawn(server::serve(
         listener,
-        Hub {
-            queue: Arc::new(Queue::new()),
+        Hub::new(
+            Arc::new(Queue::new()),
             tip,
-            params: BatchParams::default(),
+            BatchParams::default(),
             // No test here reaches an indexer: constructed, never connected.
-            chain: Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
-        },
+            Arc::new(ChainClient::new(vec!["127.0.0.1:9".parse().unwrap()], None).unwrap()),
+        ),
         options,
     ));
     addr
@@ -178,7 +178,7 @@ async fn the_read_only_endpoints_reveal_nothing_about_the_queue() {
 #[tokio::test]
 async fn clearnet_submit_is_closed_by_default() {
     let addr = spawn(ServeOptions::default()).await;
-    let tx = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+    let tx = include_bytes!("fixtures/v6_proven_a.bin").to_vec();
 
     assert_eq!(post(&addr, "/", tx).await, StatusCode::NOT_FOUND);
     assert_eq!(
@@ -197,7 +197,7 @@ async fn clearnet_submit_works_when_explicitly_enabled() {
         ..Default::default()
     })
     .await;
-    let tx = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+    let tx = include_bytes!("fixtures/v6_proven_a.bin").to_vec();
 
     assert_eq!(post(&addr, "/", tx).await, StatusCode::OK);
 }
@@ -477,7 +477,7 @@ async fn clearnet_submit_takes_a_padded_frame_and_a_bare_transaction_alike() {
         ..Default::default()
     })
     .await;
-    let tx = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+    let tx = include_bytes!("fixtures/v6_proven_a.bin").to_vec();
 
     // Bare: what a shim built before the padding change sends.
     assert_eq!(

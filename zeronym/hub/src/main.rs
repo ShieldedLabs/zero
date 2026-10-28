@@ -10,6 +10,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use zero_indexer_hub::admission;
 use zero_indexer_hub::batcher::{self, BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::config::{Config, Network};
@@ -89,6 +90,18 @@ async fn main() -> Result<(), BoxError> {
         ),
     }
 
+    // The Halo2 verifying key, built before any listener opens so no submission
+    // pays for it. Deterministic, under a second on the enclave's four cores.
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(|| {
+        std::sync::LazyLock::force(&admission::VERIFYING_KEY);
+    })
+    .await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "built the Halo2 verifying key"
+    );
+
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
 
     // Shared with the mixnet driver, which fills it in on every (re)build, and
@@ -150,12 +163,7 @@ async fn main() -> Result<(), BoxError> {
 
     let serving = server::serve(
         listener,
-        Hub {
-            queue: queue.clone(),
-            tip,
-            params,
-            chain,
-        },
+        Hub::new(queue.clone(), tip, params, chain),
         server::ServeOptions {
             nym_address,
             http_submit: config.http_submit,
@@ -248,12 +256,7 @@ fn spawn_nym_listener(
         }
     };
 
-    let hub = Hub {
-        queue: queue.clone(),
-        tip: tip.clone(),
-        params,
-        chain: chain.clone(),
-    };
+    let hub = Hub::new(queue.clone(), tip.clone(), params, chain.clone());
     // The driver holds the opposite end of each channel: it sends inbound
     // requests and its address, and receives replies.
     let (in_tx, in_rx) = mpsc::channel(64);

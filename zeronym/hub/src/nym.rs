@@ -18,8 +18,9 @@
 //! [`crate::server::Hub::lookup`], the exact calls the HTTP serving path uses,
 //! so the two ingress paths cannot drift. Everything REVIEW.md binds on those
 //! calls binds here too: an unparseable transaction is queued and published,
-//! never refused (#5); only counts, reasons, and dispositions are logged, never
-//! a txid, a queried hash, or a body (#157).
+//! never refused (#5), while an Orchard one must carry proofs that verify; only
+//! counts, reasons, and dispositions are logged, never a txid, a queried hash,
+//! or a body (#157).
 //!
 //! Every [`Reply`] carries the instant its request was pulled off the inbound
 //! channel, and [`REPLY_DEADLINE`] says how long after that it is still worth
@@ -119,14 +120,15 @@ impl Reply {
 
 /// Serve requests until the inbound channel closes.
 ///
-/// Admission is handled INLINE: [`build_ack`] is pure queue work with no I/O in
-/// it at all (it is not even `async`), so the loop admits a migration the
-/// moment it pulls the frame, and nothing a lookup does can delay that. The ack
-/// is then offered to the driver without waiting: if the driver's channel is
-/// full, the ack is dropped, because the migration is ALREADY admitted, the
-/// shim never awaits an ack (its submit path is dispatch-only), and an ack
-/// queued behind a full channel of 64 KiB lookup replies would emit minutes
-/// late to no one.
+/// Each admission runs on its own task. [`build_ack`] has no I/O in it, but it
+/// may verify Halo2 proofs, which takes milliseconds of CPU, so admitting
+/// inline would let one submission delay the next and every lookup behind it.
+/// [`Hub::admit`] bounds how many verify at once and refuses past that, so a
+/// task per submission cannot pile up. The ack is then offered to the driver
+/// without waiting: if the driver's channel is full, the ack is dropped,
+/// because the migration is ALREADY admitted, the shim never awaits an ack (its
+/// submit path is dispatch-only), and an ack queued behind a full channel of
+/// 64 KiB lookup replies would emit minutes late to no one.
 ///
 /// A lookup is the arm that can afford to wait and the only one that must be
 /// bounded: it may dial the operator's indexer with a 10 s budget on each of
@@ -195,22 +197,29 @@ pub async fn run_listener(
                 // driver slow to drain is exactly the pressure the bound must feel.
                 drop(permit);
             });
-        } else if let Some(frame) = build_ack(&hub, &received.frame) {
-            let reply = Reply {
-                sender_tag: received.sender_tag,
-                frame: Zeroizing::new(frame),
-                received_at,
-            };
-            match outgoing.try_send(reply) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        "ack dropped: the driver's reply queue is full; the migration is admitted regardless"
-                    );
+        } else {
+            let hub = hub.clone();
+            let outgoing = outgoing.clone();
+            tokio::spawn(async move {
+                let Some(frame) = build_ack(&hub, &received.frame).await else {
+                    return;
+                };
+                let reply = Reply {
+                    sender_tag: received.sender_tag,
+                    frame: Zeroizing::new(frame),
+                    received_at,
+                };
+                match outgoing.try_send(reply) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "ack dropped: the driver's reply queue is full; the migration is admitted regardless"
+                        );
+                    }
+                    // The driver is gone; there is no one to carry the ack.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
-                // The driver is gone; there is no one to carry the ack.
-                Err(mpsc::error::TrySendError::Closed(_)) => {}
-            }
+            });
         }
     }
 }
@@ -310,15 +319,15 @@ async fn build_lookup_reply(
 /// is logged, and the shim falls back to its submit timeout. When the nonce IS
 /// recoverable (the frame was ours but its `tx_len` was wrong) a correlatable
 /// `bad_frame` ack goes back instead.
-fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
+async fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
     match wire::decode_submit(frame) {
         Ok((nonce, tx)) => {
             // A transaction that does not parse is NOT refused here: it is queued
             // and published like any other, because the shim diverted it for the
-            // same reason it could not read it, and the node is the only authority
-            // on validity (REVIEW #5). `admit` handles that; a refusal is only the
-            // typed admission reasons.
-            let kind = match hub.admit(&tx) {
+            // same reason it could not read it (REVIEW #5). `admit` handles that;
+            // a refusal is only the typed admission reasons, a failed proof
+            // among them.
+            let kind = match hub.admit(&tx).await {
                 Ok(_txid) => AckKind::Accepted,
                 Err(refusal) => AckKind::Refused(refusal.into()),
             };
