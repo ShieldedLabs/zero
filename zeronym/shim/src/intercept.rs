@@ -723,6 +723,7 @@ fn log_verdict(inspection: &Inspection, frame: &[u8]) {
                 class,
                 version = %evidence.version,
                 orchard_actions = evidence.orchard_actions,
+                transparent_only = evidence.transparent_only,
                 orchard_vb = %format!("{:+}", evidence.orchard_vb),
                 ironwood_vb = %format!("{:+}", evidence.ironwood_vb),
                 sapling_vb = %format!("{:+}", evidence.sapling_vb),
@@ -818,6 +819,10 @@ mod tests {
     /// the new pool, and the pass-through case at this layer.
     const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_ironwood_only.bin");
 
+    /// V6 with transparent parts only, spending one prevout: the second leg of a
+    /// TEX payment.
+    const V6_TRANSPARENT_ONLY: &[u8] = include_bytes!("../tests/fixtures/v6_transparent_only.bin");
+
     /// Wrap transaction bytes in a `RawTransaction` inside a gRPC length prefix,
     /// the way a wallet's gRPC client does.
     fn framed(tx: &[u8]) -> Vec<u8> {
@@ -856,6 +861,13 @@ mod tests {
         let (inspection, _) = inspect(&HeaderMap::new(), &framed(V6_IRONWOOD_ONLY));
         assert_eq!(classified(&inspection), Class::PassThrough);
         assert!(!inspection.treat_as_migration());
+    }
+
+    #[test]
+    fn a_framed_transparent_only_spend_is_a_migration() {
+        let (inspection, _) = inspect(&HeaderMap::new(), &framed(V6_TRANSPARENT_ONLY));
+        assert_eq!(classified(&inspection), Class::Migration);
+        assert!(inspection.treat_as_migration());
     }
 
     #[test]

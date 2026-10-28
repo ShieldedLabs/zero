@@ -49,12 +49,16 @@ The design, the threat model and the honest limits live in
 raw transaction bytes: no I/O, no state, no config.
 
 ```text
-is_orchard_touching(tx) := tx has at least one Orchard action
+is_orchard_touching(tx)       := tx has at least one Orchard action
+is_transparent_only_spend(tx) := tx spends a transparent output and has
+                                 transparent parts only
+divert(tx) := is_orchard_touching(tx) || is_transparent_only_spend(tx)
 ```
 
-One conjunct. No version guard, no destination check, no amount, no sign. What
-the shim detects is **Orchard activity**: presence. Not an exit, not a direction,
-not a quantity.
+No version guard, no destination check, no amount, no sign. What the first arm
+detects is **Orchard activity**: presence. Not an exit, not a direction, not a
+quantity. The second arm is described under
+[The transparent-only arm](#the-transparent-only-arm).
 
 This is Zooko's ruling on the classifier's scope, in his words: any transaction
 that has any Orchard actions in it is (a) potentially security-sensitive, because
@@ -88,7 +92,30 @@ time-insensitivity half of the rationale does not hold for it. A transaction
 carrying only Ironwood actions reads `orchard_shielded_data() == None` and passes
 through. There is no Ironwood arm in the predicate and none should be added
 (`an_ironwood_only_transaction_is_a_pass_through` pins it, whichever way the
-Ironwood balance points).
+Ironwood balance points). The transparent-only arm keeps this boundary: a
+transaction with an Ironwood bundle is never transparent-only.
+
+**The transparent-only arm.** A ZIP 320 (TEX) payment from shielded funds is two
+transactions. The first spends the wallet's notes into a single-use transparent
+output. The second spends that output to the TEX address and has transparent
+parts only, so the Orchard arm passes it. When the first touches Orchard, the
+shim diverts it, and the second names it: its only input is `(txid(first), 0)`.
+Forwarding the second hands the operator the txid the hub is holding, tied to
+the wallet's connection. That holds whenever the wallet sends or rebroadcasts
+it, before or after the hub publishes, and in broadcast-only mode too. It also
+fails at the operator's node, which has never seen the parent.
+
+Matching "spends an output of a diverted transaction" needs a record of what was
+diverted, and the shim keeps none, so the arm matches the shape instead. Every
+transaction that spends a transparent output and carries no Sprout, Sapling,
+Orchard or Ironwood data is diverted. Every second TEX leg has that shape. The
+price is latency: every transparent-only send waits for a hub batch, a TEX
+payment funded from Ironwood included. A transparent spend that also carries a
+shielded bundle, such as auto-shielding into Ironwood, still passes through, and
+`ENDPOINTS.md` lists what that leaves. Both arms log the same `migration` label
+at INFO, so the log never tells the parent host which kind was diverted
+(`the_second_leg_of_a_tex_payment_is_a_migration`,
+`a_transparent_spend_with_a_shielded_bundle_is_a_pass_through`).
 
 **What the widening closed.** A transaction must pay a fee, and unless the fee
 comes from another pool it comes out of Orchard, so most internal shuffling
@@ -130,11 +157,12 @@ went; neither may become part of the predicate.
 The diverted class is still spelled `Class::Migration`, and the routing helper is
 still `treat_as_migration()`. That name is imprecise now, and kept deliberately:
 an Orchard-to-transparent deshield is not literally a migration into Ironwood,
-and a net-zero internal shuffle moves nothing anywhere. Post-NU6.3 all Orchard
-activity is legacy-fund activity, so batching all of it is the right behaviour
-and only the label lags. Read "migration" in the log lines and the operator docs
-as the legacy name for the class; `is_orchard_touching` is the accurate name for
-the predicate behind it.
+a net-zero internal shuffle moves nothing anywhere, and a transparent-only spend
+may have no Orchard history at all. Post-NU6.3 all Orchard activity is
+legacy-fund activity, so batching all of it is the right behaviour and only the
+label lags. Read "migration" in the log lines and the operator docs as the
+legacy name for the class; `is_orchard_touching` and `is_transparent_only_spend`
+are the accurate names for the predicates behind it.
 
 A false negative is a privacy leak, so anything the shim cannot read cleanly
 (unparseable bytes, a compressed gRPC frame, a truncated message, a protobuf
@@ -286,8 +314,9 @@ bundle (`ironwood_vb=-240000`). Ironwood is the new pool where ordinary
 time-sensitive commerce lives, so it passes through. The fifth is the other
 realistic pass-through: real mainnet transparent bytes with no Orchard bundle.
 (Those bytes are a coinbase, because that is the mainnet transaction committed in
-this crate; what the classifier reads is the absent Orchard bundle, which any
-ordinary transparent or Sapling payment shares.)
+this crate. A coinbase input spends nothing, so the transparent-only arm passes
+it too. An ordinary transparent payment spends a prevout and is diverted by that
+arm; a Sapling payment passes.)
 
 (The demo turns `zis::proxy=debug` on explicitly. The shipped binary does not.)
 
@@ -348,9 +377,11 @@ wallet broadcast. Three carry Orchard bundles and are all `Migration`
 and kept only as a directionality probe). `v6_orchard_zero.bin` is the net-zero
 Orchard shuffle the widening added, and `v6_ironwood_only.bin` is the
 Ironwood-only pass-through that keeps the rule from swallowing ordinary commerce.
+`v6_transparent_only.bin` spends one prevout to one P2PKH output, the shape of
+the second TEX leg, and is `Migration` by the transparent-only arm.
 The only real mainnet bytes in the crate are the V4 transparent vector, which is
 the realistic pass-through. `regenerate_fixtures` in `classify_generated.rs`
-rewrites all five; it is `#[ignore]`d because it writes into the source tree.
+rewrites all six; it is `#[ignore]`d because it writes into the source tree.
 
 **This is the largest outstanding gap in the evidence**, and the vector to close
 it already exists: the regtest end-to-end test at
@@ -450,13 +481,16 @@ keeping legible rather than deleting.**
   movement to be slow, and a false positive is a wasted diversion where a false
   negative is a privacy leak.
 
-Two cases exhaust the space, and the axis is the action count, not the balance:
+Three cases exhaust the space, and the axes are the action count and the
+transparent-only shape, not the balance:
 
-| `orchard_actions` | Verdict | `orchard_vb` (evidence only) |
-| --- | --- | --- |
-| `> 0` | `Migration` | Any value. `> 0` is an exit, `== 0` is the net-zero shuffle the widening added, `< 0` is consensus-invalid post-NU6.3 and kept only as a directionality probe in the tests. All three divert. |
-| `== 0` | `PassThrough` | Always `0`: no Orchard bundle, so nothing to report. Transparent, Sapling and Ironwood-only transactions land here. |
+| `orchard_actions` | `transparent_only` | Verdict | `orchard_vb` (evidence only) |
+| --- | --- | --- | --- |
+| `> 0` | `false` | `Migration` | Any value. `> 0` is an exit, `== 0` is the net-zero shuffle the widening added, `< 0` is consensus-invalid post-NU6.3 and kept only as a directionality probe in the tests. All three divert. |
+| `== 0` | `true` | `Migration` | Always `0`: transparent parts only, spending a prevout. The second leg of a TEX payment. |
+| `== 0` | `false` | `PassThrough` | Always `0`: no Orchard bundle, so nothing to report. Sapling and Ironwood transactions land here, with or without transparent parts, and so does a coinbase. |
 
 So the batched set is not "migrations" in the literal sense. It is every
 transaction that touches Orchard, which post-NU6.3 is legacy-fund activity
-whatever its balance and whatever its destination.
+whatever its balance and whatever its destination, plus every transparent-only
+spend.

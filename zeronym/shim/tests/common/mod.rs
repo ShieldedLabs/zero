@@ -37,6 +37,10 @@ pub const V6_MIGRATION: &[u8] = include_bytes!("../fixtures/v6_migration.bin");
 /// V6 with an Ironwood bundle and no Orchard bundle: the pass-through case.
 pub const V6_IRONWOOD_ONLY: &[u8] = include_bytes!("../fixtures/v6_ironwood_only.bin");
 
+/// V6 with transparent parts only, spending one prevout: the shape of the
+/// second transaction of a TEX payment, which is diverted.
+pub const V6_TRANSPARENT_ONLY: &[u8] = include_bytes!("../fixtures/v6_transparent_only.bin");
+
 /// The display-order txid of a fixture, computed from the bytes with zebra-chain,
 /// derived independently of the shim's own code path rather than read back from
 /// it.

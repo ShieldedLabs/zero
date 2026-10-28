@@ -1,7 +1,9 @@
 //! The turnstile classifier: a pure function from raw transaction bytes to a verdict.
 //!
 //! What it detects is ORCHARD ACTIVITY: a transaction that carries any Orchard
-//! actions at all. Not an exit, not a direction, not an amount. Presence.
+//! actions at all. Not an exit, not a direction, not an amount. Presence. A
+//! second arm, below, catches the transparent-only spend that follows an
+//! Orchard-funded TEX payment.
 //!
 //! This is Zooko's ruling on the classifier's scope, in his words: any
 //! transaction that has any Orchard actions in it is (a) potentially
@@ -37,6 +39,24 @@
 //! leaves `orchard_value_balance == 0` with Orchard actions still present. That
 //! transaction used to be handed to the operator's indexer in the clear.
 //!
+//! THE SECOND ARM: TRANSPARENT-ONLY SPENDS. A ZIP 320 (TEX) payment from
+//! shielded funds is two transactions. The first spends the wallet's notes into
+//! a single-use transparent output. The second spends that output to the TEX
+//! address and has transparent parts only. When the first touches Orchard it is
+//! diverted, and the second names it: its only input is `(txid(first), 0)`.
+//! Forwarding the second hands the operator the txid the hub is holding, tied to
+//! the wallet's connection, whenever the wallet sends or rebroadcasts it
+//! (external report, 2026-10-27).
+//!
+//! Matching "spends an output of a diverted transaction" would need a record of
+//! what was diverted, and the shim keeps none. So the arm diverts every
+//! transaction that spends a transparent output and has transparent parts only:
+//! no Sprout, Sapling, Orchard or Ironwood data. Every second TEX leg has that
+//! shape, and the verdict stays a function of the bytes. The price is latency:
+//! every transparent-only send waits for a hub batch, a TEX payment funded from
+//! Ironwood included (decided 2026-10-27). A transparent spend that also carries
+//! a shielded bundle, such as auto-shielding into Ironwood, still passes through.
+//!
 //! This is the highest-stakes code in the shim. A false negative (a transaction
 //! carrying Orchard actions classified as `PassThrough`) is a privacy leak,
 //! because the transaction is then broadcast through the operator's own indexer,
@@ -68,22 +88,26 @@ use zebra_chain::{serialization::ZcashDeserialize, transaction::Transaction};
 /// The verdict for one `SendTransaction` body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// The transaction TOUCHES ORCHARD: it carries at least one Orchard action.
-    /// Privacy-critical: must not be broadcast through the operator's indexer.
+    /// The transaction TOUCHES ORCHARD (it carries at least one Orchard action),
+    /// or it is a TRANSPARENT-ONLY SPEND. Privacy-critical: must not be
+    /// broadcast through the operator's indexer.
     ///
     /// A note on the name. Post-NU6.3 any Orchard activity is legacy-fund
     /// activity, so batching all of it is the right behaviour, but "Migration"
     /// is imprecise for the class as a whole: an Orchard-to-transparent deshield
-    /// is not literally a migration into Ironwood, and a net-zero internal
-    /// shuffle moves nothing anywhere. The variant keeps its name because it is
-    /// what the log lines, the routing helper and the operator docs already call
-    /// the diverted class; [`is_orchard_touching`] is the accurate name for the
-    /// predicate behind it.
+    /// is not literally a migration into Ironwood, a net-zero internal shuffle
+    /// moves nothing anywhere, and a transparent-only spend may have no Orchard
+    /// history at all. The variant keeps its name because it is what the log
+    /// lines, the routing helper and the operator docs already call the diverted
+    /// class; [`is_orchard_touching`] and [`is_transparent_only_spend`] are the
+    /// accurate names for the predicates behind it. Both arms log the same
+    /// label, so an INFO line never says which kind of transaction was diverted.
     Migration,
-    /// A transaction that carries NO Orchard actions: no Orchard bundle at all.
-    /// Transparent, Sapling, and Ironwood-only transactions land here, which is
-    /// the point. Ironwood is the new pool where ordinary time-sensitive
-    /// commerce lives, and it is forwarded to the backing indexer.
+    /// A transaction with no Orchard bundle that is not a transparent-only
+    /// spend. Sapling and Ironwood transactions land here, with or without
+    /// transparent parts, which is the point. Ironwood is the new pool where
+    /// ordinary time-sensitive commerce lives, and it is forwarded to the
+    /// backing indexer.
     PassThrough,
     /// The bytes did not parse as a Zcash transaction. The caller treats this
     /// as a migration (fail-safe for privacy), never as a pass-through.
@@ -121,12 +145,15 @@ impl std::fmt::Display for Class {
 pub struct Evidence {
     /// `"V1".."V6"`, or `"unparseable"`.
     pub version: String,
-    /// How many Orchard actions the transaction carries. **This is the deciding
-    /// fact**: zero is a `PassThrough`, anything else is a `Migration`. An
-    /// Orchard bundle is guaranteed non-empty by the wire format
+    /// How many Orchard actions the transaction carries. **The deciding fact
+    /// for the Orchard arm**: anything above zero is a `Migration`. An Orchard
+    /// bundle is guaranteed non-empty by the wire format
     /// (`orchard::ShieldedData.actions` is an `AtLeastOne`), so this is zero
     /// exactly when there is no Orchard bundle.
     pub orchard_actions: usize,
+    /// [`is_transparent_only_spend`]. **The deciding fact for the second arm**:
+    /// `true` is a `Migration` whatever `orchard_actions` says.
+    pub transparent_only: bool,
     /// Orchard value balance in zatoshis. Positive means value LEAVING Orchard.
     ///
     /// **Evidence only, not the predicate.** It was the predicate until Zooko's
@@ -192,6 +219,7 @@ impl Evidence {
         Evidence {
             version: "unparseable".to_string(),
             orchard_actions: 0,
+            transparent_only: false,
             orchard_vb: 0,
             ironwood_vb: 0,
             sapling_vb: 0,
@@ -208,11 +236,11 @@ impl Evidence {
 /// The turnstile predicate.
 ///
 /// ```text
-/// is_orchard_touching(tx) := tx has at least one Orchard action
+/// divert(tx) := is_orchard_touching(tx) || is_transparent_only_spend(tx)
 /// ```
 ///
-/// One conjunct, no version guard, no destination check, no amount, no sign. See
-/// the module docs for Zooko's rationale.
+/// No version guard, no destination check, no amount, no sign. See the module
+/// docs for Zooko's rationale and for the second arm.
 ///
 /// Pure: no I/O, no state.
 pub fn classify(raw: &[u8]) -> Class {
@@ -245,6 +273,25 @@ pub fn classify(raw: &[u8]) -> Class {
 /// Zooko's time-insensitivity rationale does not extend to it.
 pub fn is_orchard_touching(tx: &Transaction) -> bool {
     tx.orchard_shielded_data().is_some()
+}
+
+/// The second arm: the transaction spends a transparent output and has
+/// transparent parts only.
+///
+/// This is the shape of the second transaction of a ZIP 320 (TEX) payment from
+/// shielded funds, which names the first by its only prevout. See the module
+/// docs for why the arm matches the shape rather than the parent.
+///
+/// A coinbase input is not a spend, so a coinbase transaction reads `false`.
+/// Each pool is tested for presence, like [`is_orchard_touching`], rather than
+/// through zebra's `has_shielded_data`, which also reads the bundle flags: a
+/// bundle with both flags off is still a bundle.
+pub fn is_transparent_only_spend(tx: &Transaction) -> bool {
+    tx.spent_outpoints().next().is_some()
+        && tx.joinsplit_count() == 0
+        && !tx.has_sapling_shielded_data()
+        && tx.orchard_shielded_data().is_none()
+        && !tx.has_ironwood_shielded_data()
 }
 
 /// How many Orchard actions the transaction carries. Zero means no Orchard
@@ -282,8 +329,9 @@ pub fn classify_with_evidence(raw: &[u8]) -> Evidence {
         );
     }
 
-    // The predicate. Presence of an Orchard bundle, nothing else.
-    let class = if is_orchard_touching(&tx) {
+    // The predicate. Presence of an Orchard bundle, or a transparent-only spend.
+    let transparent_only = is_transparent_only_spend(&tx);
+    let class = if is_orchard_touching(&tx) || transparent_only {
         Class::Migration
     } else {
         Class::PassThrough
@@ -309,13 +357,14 @@ pub fn classify_with_evidence(raw: &[u8]) -> Evidence {
     // CI rather than silently passing a bundle through.
     debug_assert_eq!(
         class == Class::Migration,
-        orchard_actions > 0,
+        orchard_actions > 0 || transparent_only,
         "an Orchard bundle must carry at least one action"
     );
 
     Evidence {
         version: format!("V{}", tx.version()),
         orchard_actions,
+        transparent_only,
         orchard_vb,
         ironwood_vb,
         sapling_vb,

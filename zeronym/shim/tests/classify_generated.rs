@@ -25,9 +25,11 @@ use zebra_chain::{
     parameters::NetworkUpgrade,
     serialization::ZcashSerialize,
     transaction::{
+        self,
         arbitrary::{fake_v6_orchard_shielded_data, fake_v6_transaction},
         LockTime, Transaction,
     },
+    transparent,
 };
 use zero_indexer_shim::classify::{classify, classify_with_evidence, Class};
 
@@ -113,6 +115,61 @@ fn v5_orchard_bytes(orchard_zats: i64) -> Vec<u8> {
     }
     .zcash_serialize_to_vec()
     .expect("v5 transaction serializes")
+}
+
+/// A transparent input spending output 0 of another transaction: how the second
+/// leg of a TEX payment spends the first leg's single-use output.
+fn prevout() -> transparent::Input {
+    transparent::Input::PrevOut {
+        outpoint: transparent::OutPoint {
+            hash: transaction::Hash::from([7; 32]),
+            index: 0,
+        },
+        unlock_script: transparent::Script::new(&[0x51]),
+        sequence: u32::MAX,
+    }
+}
+
+/// A P2PKH output, which is what a TEX address pays on chain.
+fn p2pkh_output() -> transparent::Output {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[9; 20]);
+    script.extend_from_slice(&[0x88, 0xac]);
+    transparent::Output {
+        value: 100_000.try_into().expect("valid amount"),
+        lock_script: transparent::Script::new(&script),
+    }
+}
+
+/// Real V6 wire bytes with one P2PKH output, the given transparent inputs, and
+/// optionally an Ironwood bundle. No Orchard or Sapling bundle.
+fn v6_transparent_bytes(inputs: Vec<transparent::Input>, ironwood_zats: Option<i64>) -> Vec<u8> {
+    Transaction::V6 {
+        network_upgrade: NetworkUpgrade::Nu6_3,
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        inputs,
+        outputs: vec![p2pkh_output()],
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+        ironwood_shielded_data: ironwood_zats.map(ironwood_bundle),
+    }
+    .zcash_serialize_to_vec()
+    .expect("v6 transaction serializes")
+}
+
+/// Real V4 wire bytes spending one prevout to one P2PKH output.
+fn v4_transparent_bytes() -> Vec<u8> {
+    Transaction::V4 {
+        inputs: vec![prevout()],
+        outputs: vec![p2pkh_output()],
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        joinsplit_data: None,
+        sapling_shielded_data: None,
+    }
+    .zcash_serialize_to_vec()
+    .expect("v4 transaction serializes")
 }
 
 #[test]
@@ -241,6 +298,76 @@ fn an_ironwood_only_transaction_is_a_pass_through() {
 }
 
 #[test]
+fn the_second_leg_of_a_tex_payment_is_a_migration() {
+    // ZIP 320: the second leg spends the first leg's single-use output and has
+    // transparent parts only. Its prevout names the first leg, so forwarding it
+    // names a diverted transaction to the operator.
+    let evidence = classify_with_evidence(&v6_transparent_bytes(vec![prevout()], None));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::Migration);
+    assert!(evidence.transparent_only, "the deciding fact for this arm");
+    assert_eq!(evidence.orchard_actions, 0, "no Orchard bundle at all");
+    assert_eq!(evidence.inputs, 1);
+
+    // The shape decides, not the version.
+    let v4 = classify_with_evidence(&v4_transparent_bytes());
+    assert_eq!(v4.class, Class::Migration);
+    assert_eq!(v4.version, "V4");
+    assert!(v4.transparent_only);
+}
+
+#[test]
+fn a_transparent_spend_with_a_shielded_bundle_is_a_pass_through() {
+    // Auto-shielding into Ironwood: a transparent input and value entering
+    // Ironwood. Ironwood keeps its boundary.
+    let evidence = classify_with_evidence(&v6_transparent_bytes(vec![prevout()], Some(-90_000)));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::PassThrough);
+    assert!(!evidence.transparent_only);
+}
+
+#[test]
+fn an_ironwood_funded_first_leg_is_a_pass_through() {
+    // The first leg of a TEX payment funded from Ironwood: an Ironwood spend
+    // into a transparent output, with no transparent input to name a parent.
+    let evidence = classify_with_evidence(&v6_transparent_bytes(Vec::new(), Some(110_000)));
+    println!("{evidence:?}");
+
+    assert_eq!(evidence.class, Class::PassThrough);
+    assert!(!evidence.transparent_only);
+    assert_eq!(evidence.inputs, 0);
+}
+
+#[test]
+fn orchard_actions_with_a_transparent_input_take_the_orchard_arm() {
+    let mut tx = fake_v6_transaction(
+        NetworkUpgrade::Nu6_3,
+        Some(ShieldedDataV6::new(fake_v6_orchard_shielded_data(
+            Flags::ENABLE_SPENDS | Flags::ENABLE_OUTPUTS,
+            Amount::<NegativeAllowed>::try_from(250_000).expect("valid amount"),
+            1,
+        ))),
+        None,
+    );
+    if let Transaction::V6 { inputs, .. } = &mut tx {
+        inputs.push(prevout());
+    }
+    let evidence = classify_with_evidence(
+        &tx.zcash_serialize_to_vec()
+            .expect("v6 transaction serializes"),
+    );
+
+    assert_eq!(evidence.class, Class::Migration);
+    assert_eq!(evidence.orchard_actions, 1);
+    assert!(
+        !evidence.transparent_only,
+        "an Orchard bundle is not transparent"
+    );
+}
+
+#[test]
 fn generated_bytes_survive_the_full_consumption_check() {
     // A freshly serialized transaction must consume its bytes exactly, or the
     // classifier's trailing-bytes guard would reject every real transaction.
@@ -249,6 +376,12 @@ fn generated_bytes_survive_the_full_consumption_check() {
 
     let ironwood_only = v6_ironwood_only_bytes(-240_000);
     assert!(classify_with_evidence(&ironwood_only).error.is_none());
+
+    let transparent_only = v6_transparent_bytes(vec![prevout()], None);
+    assert!(classify_with_evidence(&transparent_only).error.is_none());
+    assert!(classify_with_evidence(&v4_transparent_bytes())
+        .error
+        .is_none());
 }
 
 /// Rewrite the committed fixtures in `tests/fixtures/`. Ignored by default.
@@ -271,6 +404,10 @@ fn regenerate_fixtures() {
         ("v6_orchard_only", v6_bytes(250_000, None)),
         ("v6_orchard_zero", v6_bytes(0, Some(-240_000))),
         ("v6_ironwood_only", v6_ironwood_only_bytes(-240_000)),
+        (
+            "v6_transparent_only",
+            v6_transparent_bytes(vec![prevout()], None),
+        ),
     ] {
         std::fs::write(dir.join(format!("{name}.bin")), &bytes).expect("fixture written");
         println!("{name}: {} bytes", bytes.len());

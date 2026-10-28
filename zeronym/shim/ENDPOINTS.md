@@ -18,8 +18,11 @@ vindicated without bloating the enclave.
 A method is a leak in one of two fundamentally different ways:
 
 - **By argument** - the request *names* the migration: its txid, an address it
-  touches, or its confirmation height. The operator reads the reference directly.
-  These the shim recognises and routes away from the operator.
+  touches, its confirmation height, or a prevout that spends one of its outputs.
+  The operator reads the reference directly. These the shim recognises and routes
+  away from the operator. A `SendTransaction` that spends a migration's output is
+  the case the shim cannot recognise without state, so it diverts by shape: see
+  the transparent-only arm below.
 - **By timing/pattern** - the request names nothing, but *when* or *how* the
   wallet calls it, while a migration is pending, correlates. These the shim cannot
   fix by inspecting one request; they are closed only by routing whole method
@@ -104,7 +107,7 @@ from hub `Confirmed`).
 
 | method | predicate |
 |---|---|
-| `SendTransaction` | **Content-conditional, not txid-conditional.** Strip the 5-byte gRPC frame, decode `RawTransaction`, run the pure `classify()` (`shim/src/classify.rs`). Divert iff `is_orchard_touching(tx)` (`orchard_shielded_data().is_some()`, a bundle with >=1 action). Everything else (transparent, Sapling-only, **Ironwood-only**) forwards. Ironwood is deliberately not a divert arm: new pool, time-sensitive commerce. **Fail safe toward divert**, never forward: unparseable body, gRPC compression flag set, `grpc-encoding != identity`, frame shorter than 5 bytes, length over/under-running the body. A single false negative here defeats the whole system. |
+| `SendTransaction` | **Content-conditional, not txid-conditional.** Strip the 5-byte gRPC frame, decode `RawTransaction`, run the pure `classify()` (`shim/src/classify.rs`). Divert iff `is_orchard_touching(tx)` (`orchard_shielded_data().is_some()`, a bundle with >=1 action) or `is_transparent_only_spend(tx)` (spends a prevout, transparent parts only: the second leg of a ZIP 320 TEX payment, whose prevout names the first). Everything else (Sapling, **Ironwood**, with or without transparent parts, and coinbase) forwards. Ironwood is deliberately not a divert arm: new pool, time-sensitive commerce. **Fail safe toward divert**, never forward: unparseable body, gRPC compression flag set, `grpc-encoding != identity`, frame shorter than 5 bytes, length over/under-running the body. A single false negative here defeats the whole system. |
 
 The divert arm is also where the shim's interception state is seeded: it buffers
 the exact raw migration bytes, computes the txid, and records the tx's transparent
@@ -202,6 +205,13 @@ is timing, wallet behaviour, the new trust shift, and batch size.
   identical for everyone. Routing them to the Zeronym indexer during the pending
   window removes them from the operator; the residual is then only whether to do
   that always (see open decisions).
+- **A shielded transaction that spends a migration's transparent output.** The
+  transparent-only arm diverts every second TEX leg, but a transaction that
+  spends a migration's output and also carries a Sapling or Ironwood bundle still
+  forwards, and its prevout names the migration. Example: a wallet deshields
+  Orchard to its own t-address, then auto-shields that output into Ironwood.
+  Catching it needs the parent, which the stateless shim does not hold. It sits
+  with the conceded transparent-pool leak in `zeronym/README.md`.
 - **Fresh-address pre-announcement.** A wallet that queries a brand-new deshield
   destination *before* the migration confirms leaks the address and near-real
   submission time. Wallet-behaviour requirement (do not pre-announce), not a shim
