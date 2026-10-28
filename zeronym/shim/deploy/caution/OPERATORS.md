@@ -30,7 +30,9 @@ for what is proven and what is not.
 
 > **Read "What this does and does not hide" before you tell anyone what this
 > gives them.** At today's volumes the anonymity set is one transaction. Content
-> privacy and IP unlinking are real; batching anonymity is not yet.
+> privacy is real, and so is IP unlinking against the hub and the network. IP
+> unlinking against you is batching anonymity, and it needs a batch larger than
+> one.
 
 ## Why an attested enclave
 
@@ -287,8 +289,12 @@ nothing today, so do not treat a narrow list as containment. Forward-only stays 
 indexer never seeing the migration, and attestation. Clearnet mode loses
 shim↔hub *unlinkability*: the hub sees which shim sent each migration and when.
 With one shim that link is trivially known regardless; it matters as the fleet
-grows, which is exactly when Nym returns. Full table in the hub's operator
-guide, "Clearnet mode".
+grows, which is exactly when Nym returns. Clearnet mode also drops the cover
+traffic. Each divert is a fresh connection to the hub carrying one 64 KiB frame,
+inside the wallet's open request, so your host's egress timestamps every divert
+for your cloud provider and anyone on the path to the hub. You learn the same
+event from your indexer in either mode (see "What this does and does not
+hide"). Full table in the hub's operator guide, "Clearnet mode".
 
 `--nym-gateway <identity>` pins the entry gateway (and lets you narrow the
 `0.0.0.0/0:9000` rule to a `/32`). It **works** — verified against four public
@@ -319,26 +325,29 @@ system stands on, and overclaiming is worse than the limit itself:
 
 > Given a verified attestation, the code holding your migration in plaintext is
 > the published code: it broadcasts the transaction and retains nothing
-> identifying. It does **not** hide from the hub's host that a migration was
-> submitted at a given time, and at current volumes that timing is linkable to
-> the resulting on-chain transaction. **The anonymity set is the batch, and the
-> batch is currently size one.** For an Orchard **deshield**, the amount remains
-> recoverable by the operator through address-level queries the shim does not
-> intercept.
+> identifying. The hub's host sees that a migration was submitted at a given
+> time. The shim's host sees which wallet IP submitted it, from the upload and
+> from the `SendTransaction` missing at its indexer. At current volumes that
+> timing is linkable to the resulting on-chain transaction. **The anonymity set
+> is the batch, and the batch is currently size one.** For an Orchard
+> **deshield**, the amount remains recoverable by the operator through
+> address-level queries the shim does not intercept.
 
-So: content privacy and IP unlinking are real today. **Batching anonymity is
-not** — it only becomes true above an adoption threshold, because the anonymity
-set is the cross-operator batch and is worth exactly as many operators as are
-running diversion.
+So: content privacy is real today, and so is IP unlinking against the hub and
+the network. **IP unlinking against you is batching anonymity.** It becomes true
+above an adoption threshold, because the anonymity set is the cross-operator
+batch and is worth exactly as many operators as are running diversion.
 
 ### What it costs to run
 
 The shim holds a **persistent, shaped Nym client**. It emits cover traffic
-continuously — **order of gigabytes per day, per shim** — whether or not anyone
-diverts anything. That is not waste: uniform traffic is what hides *that* a
-divert happened. The knobs that would reduce it
-(`disable_loop_cover_traffic_stream`, `--no-cover`, `--fastmode`) are
-**forbidden**, because each one forfeits the shaping.
+continuously, **order of gigabytes per day, per shim**, whether or not anyone
+diverts anything. That is not waste: uniform traffic hides *that* a divert
+happened from anyone watching the shim's egress. You still see each divert as
+the `SendTransaction` missing at your indexer, so the batch-of-one link above
+stands in both modes. Clearnet mode runs without cover traffic. The knobs that
+would reduce it (`disable_loop_cover_traffic_stream`, `--no-cover`,
+`--fastmode`) are **forbidden**, because each one forfeits the shaping.
 
 Budget for it, and know that Nym's free tier meters **volume** (currently
 250 GB / 30 days). See "Known failure modes" for what happens when it runs out.
