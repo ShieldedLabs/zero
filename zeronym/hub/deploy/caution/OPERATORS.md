@@ -396,11 +396,12 @@ before the anchor.
 ## Known failure modes
 
 **1. A restart changes your address and silently breaks every shim.** The identity
-lives in RAM. A client *reconnect* keeps it — that was fixed deliberately, and
-matters because the SDK reconnects often — but a **process restart** mints a new
-one. Every shim then fails its diverts closed until re-pointed, and nothing tells
-them. After 60 consecutive failed rebuilds the hub also deliberately takes a fresh
-identity to get back onto the mixnet at all, logging loudly.
+lives in RAM. A client *reconnect* keeps it (fixed deliberately, because the SDK
+reconnects often), but a **process restart** mints a new one. Every shim keeps
+sending to the old address and keeps answering its wallets with success, so each
+migration is silently lost until that shim is re-pointed. After 60 consecutive
+failed rebuilds the hub also deliberately takes a fresh identity to get back onto
+the mixnet at all, logging loudly.
 
 - **Detect:** poll `/nym-address` and alert on change.
 - **Recover:** send the new address to every shim operator; each re-assembles and
@@ -417,8 +418,30 @@ confirms.** Resends are safe — the queue deduplicates on payload hash.
 emits continuous cover traffic. When it runs out, reception stops. No ticketbook
 (paid credential) mechanism is wired up yet.
 
-**4. Anyone who knows your address can submit.** There is no submitter ACL. The
-64 MiB queue budget is the only thing bounding an abusive submitter.
+**4. Anyone can fill your queue for free, for one flush window.** Submission is
+open to all. Three doors reach the queue: the mixnet address you publish at
+`/nym-address`, clearnet `POST /` when `ZIH_HTTP_SUBMIT=true`, and the wallet port
+of every shim, which diverts unparseable bytes on purpose. The queue holds 64 MiB
+or 1024 entries (`MAX_QUEUE_ENTRIES`), whichever fills first, and the entry cap
+binds first: 1024 junk payloads of 64 bytes fill it. Junk costs its sender
+nothing. Forged parseable bytes work as well as unparseable ones, because the node
+is the only judge of validity. Until the next flush, every honest submission is
+refused `queue_full`:
+
+- A clearnet shim tells its wallet (`error_code -1`).
+- Over the mixnet the wallet was already told success, so the migration is lost
+  silently. A ZIP 318 migration expires 30 to 60 days out, and the wallet keeps
+  its notes locked until then.
+
+The flush that publishes the junk ends the burst: your indexers reject each junk
+entry once, and admission opens again. To hold the queue shut, a sender must
+repeat the burst every window.
+
+- **Detect:** `submission refused at admission` with `reason=queue_full`, and a
+  `flush published` line with `flush_size` near 1024 and `achieved_batch_size`
+  near zero.
+- **Recover:** the next flush clears it. A check of proofs and signatures at
+  admission, so that each junk entry costs a real proof, is future work.
 
 ## If the hub goes down: the single-hub recovery runbook
 
