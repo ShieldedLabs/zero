@@ -30,9 +30,9 @@ for what is proven and what is not.
 
 > **Read "What this does and does not hide" before you tell anyone what this
 > gives them.** At today's volumes the anonymity set is one transaction. Content
-> privacy is real, and so is IP unlinking against the hub and the network. IP
-> unlinking against you is batching anonymity, and it needs a batch larger than
-> one.
+> privacy is real, and so is IP unlinking against the hub and the peer-to-peer
+> network. IP unlinking against you and the wallet's ISP is batching anonymity,
+> and it needs a batch larger than one.
 
 ## Why an attested enclave
 
@@ -334,9 +334,10 @@ system stands on, and overclaiming is worse than the limit itself:
 > address-level queries the shim does not intercept.
 
 So: content privacy is real today, and so is IP unlinking against the hub and
-the network. **IP unlinking against you is batching anonymity.** It becomes true
-above an adoption threshold, because the anonymity set is the cross-operator
-batch and is worth exactly as many operators as are running diversion.
+the peer-to-peer network. **IP unlinking against you and the wallet's ISP is
+batching anonymity.** It becomes true above an adoption threshold, because the
+anonymity set is the matching transactions in the cross-operator batch, and the
+batch is worth exactly as many operators as are running diversion.
 
 ### What it costs to run
 
