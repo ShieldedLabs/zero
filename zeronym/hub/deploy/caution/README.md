@@ -35,6 +35,9 @@ caution verify --attestation-url https://<domain>/attestation
 ```
 
 Run it from a FRESH CLONE of the public repo, never from a deploying tree.
+This is step 2 of the [auditor procedure](../../../README.md#usage). A PASS
+proves the enclave runs the tree its operator published; steps 3 to 5 tie that
+tree to `ShieldedLabs/zero`, check its parameters, and check the network path.
 Require **all three PCRs and the TLS binding**. Do not accept a PCR2 match alone:
 hub and shim, two entirely different binaries, produce byte-identical PCR2
 (`21b9efbc...`), so PCR2 identifies the platform, not the code.
@@ -68,12 +71,16 @@ hub.
 ```sh
 sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name zeronym-hub-1 \
-  --indexers 66.42.124.202:443 \
-  --indexer-tls lwd.shieldedinfra.net \
+  --indexers 203.0.113.10:443 \
+  --indexer-tls indexer.example.org \
   --network mainnet \
   --tls-domain hub.example.org \
   [--debug]
 ```
+
+An operator other than the one behind every diverting shim's `--backend` must
+run these indexers. On a queue miss the hub looks the txid up there, so a hub
+pointed at a shim's own backend hands that backend every such txid.
 
 Then, from the assembled directory:
 
@@ -89,13 +96,9 @@ verifies the enclave's in-enclave certificate.
 
 ## Verify the attestation
 
-`caution verify` (from the assembled directory; or `POST /attestation`) returns
-the measurement bound to the running EIF. Confirm it against a local reproduce:
-
-```sh
-git checkout <the PROVENANCE commit>
-sh zeronym/hub/deploy/reproduce.sh   # must print the hash in ../EXPECTED_SHA256
-```
+Run the [auditor procedure](../../../README.md#usage) against the hub's
+domain. Its step 4 also covers each shim that diverts here: the shim's
+`ZIS_HUB` must be this hub's address.
 
 ## Cutover note (incremental mainnet)
 

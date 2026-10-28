@@ -130,7 +130,9 @@ This takes a nonce, fetches a fresh attestation, rebuilds the image from the
 published `app_sources` repo, and compares measurements. It is what turns "they
 say this is the code" into something checkable. Third parties can run
 `caution verify --attestation-url https://<domain>/attestation` with no Caution
-account and no checkout.
+account and no checkout. That is step 2 of the
+[auditor procedure](../../../README.md#usage). Steps 3 to 5 tie the published
+tree to `ShieldedLabs/zero`, check its parameters, and check the network path.
 
 **Require all three PCRs to reproduce, plus the TLS certificate binding. Do NOT
 accept a PCR2 match alone.** Measured 2026-08-14, the attested hub and the

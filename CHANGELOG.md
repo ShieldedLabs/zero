@@ -50,6 +50,20 @@ date) before dispatching the release.
   funded from Ironwood. A transparent spend that also carries a Sapling or
   Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
   by [@ouicate](https://github.com/ouicate).
+- zero-indexer: the auditor procedure left the hub hop unchecked. A clearnet
+  shim authenticates its hub by the certificate name alone, so an auditor must
+  tie the shim's measured hub address to an attested hub, and the four
+  component guides stopped at `caution verify`. `zeronym/README.md` now holds
+  the full procedure in five steps, with a new parameter check (hub address,
+  Nym addresses, hub indexers, `ZIS_DIAG`), and every guide links to it. The
+  README now says the attestation covers an auditor's own connection while
+  wallets check certificates against the public CAs only, names Caution's
+  in-enclave Caddy as trusted, and notes that Nym mode encrypts each frame to
+  the hub's in-enclave key. The hub deploy guide used one indexer as both a
+  shim backend and the hub's lookup indexer, which hands that indexer every
+  txid that misses the hub's queue. Guard M14 now compares addresses and
+  certificate names across `deploy.env.example` and every assemble example in
+  the docs. Reported by [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
