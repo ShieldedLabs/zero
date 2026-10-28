@@ -7,13 +7,13 @@ module indexerTest {
   import indexer.* from "../indexer"
 
   pure def orchard(id: str, txid: TxId, expiry: Option[Height]): Payload =
-    { id: id, txid: Some(txid), created: 1, expiry: expiry, class: OrchardTouching, oversize: false }
+    { id: id, txid: Some(txid), created: 1, expiry: expiry, class: OrchardTouching, spends: Set(), oversize: false }
 
   pure val pA = orchard("a", "ta", Some(9))
   pure val pATwin = orchard("a-twin", "ta", Some(9))
   pure val pB = orchard("b", "tb", None)
   pure val pOld = orchard("old", "told", Some(4))
-  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
+  pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
 
   pure val UNIVERSE = Set(pA, pATwin, pB, pOld, pJunk)
 

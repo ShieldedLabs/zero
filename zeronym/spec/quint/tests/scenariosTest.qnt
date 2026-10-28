@@ -23,6 +23,7 @@ module scenariosTest {
     initBaseline
       .then(initByzHub)
       .then(initByzIndexer)
+      .then(initShieldedSpend)
 
   // ------------------------------------------------------------------------
   // Every component honest (`baseline`)
@@ -51,6 +52,20 @@ module scenariosTest {
       .expect(wPending and wTxInMempool and wTxMined)
       .expect(operatorBlind and queuedBytesConfidential and txidAuthenticity and lookupValidityPerHub)
       .expect(statusNeverRegresses)
+
+  /// A TEX payment from Orchard funds: both legs go to the hub and are
+  /// published together. The second leg's prevout names the first, and the
+  /// operator sees neither (#94).
+  run texSecondLegIsDivertedTest =
+    initBaseline
+      .then(submitTo(0, early))
+      .then(submitTo(1, tex))
+      .expect(lastEvent == Sent({ input: Clean(tex), obs: SentOk }))
+      .expect(s.hub.queue == Set(early, tex) and s.operator == Set())
+      .expect(vForwardedSpendsNoDiverted and forwardedSpendsNoDiverted)
+      .then(flush([early, tex], Accepted))
+      .expect(s.onChain("early") == InMempool and s.onChain("tex") == InMempool)
+      .expect(operatorBlind and forwardedSpendsNoDiverted)
 
   /// A pass-through transaction goes to the operator and nowhere else.
   run passThroughIsForwardedTest =
@@ -210,4 +225,24 @@ module scenariosTest {
         Got({ query: "early", obs: NotFound, via: Some(2) }),
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
+
+  // ------------------------------------------------------------------------
+  // K10. A shielded spend of a diverted transaction is forwarded
+  // ------------------------------------------------------------------------
+
+  /// K10. The wallet deshields `late` to its own address, then auto-shields
+  /// that output into Ironwood. The second transaction carries a shielded
+  /// bundle, so neither arm diverts it. The operator gets it, and its prevout
+  /// names `late`, which the hub holds. G1 holds throughout: the operator
+  /// sees no migration's contents, only its txid.
+  run shieldedSpendOfDivertedIsForwardedTest =
+    initShieldedSpend
+      .then(submitTo(0, late))
+      .then(sendToHub(autoShield))
+      .expect(lastEvent == Sent({ input: Clean(autoShield), obs: SentToOperator }))
+      .expect(s.operator == Set(autoShield) and s.hub.queue == Set(late))
+      .expect(not(forwardedSpendsNoDiverted) and operatorBlind)
+      // Publishing `late` changes nothing: the link is already made.
+      .then(flush([late], Accepted))
+      .expect(s.onChain("late") == InMempool and not(forwardedSpendsNoDiverted))
 }

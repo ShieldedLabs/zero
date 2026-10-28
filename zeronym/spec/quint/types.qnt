@@ -17,9 +17,17 @@ module types {
   // Transactions
   // ------------------------------------------------------------------------
 
-  /// How the shim classifies a `SendTransaction` body. `Unparseable` is the
-  /// shim's own parser giving up; it is treated as a migration, never forwarded.
-  type Class = OrchardTouching | PassThrough | Unparseable
+  /// What the shim's parser reads of a `SendTransaction` body's pools. The
+  /// shim's routing rule over it is `treatAsMigration` in `shim.qnt`.
+  ///
+  /// - `OrchardTouching`: at least one Orchard action.
+  /// - `TransparentOnly`: transparent parts only, with no Sprout, Sapling,
+  ///   Orchard or Ironwood data.
+  /// - `OtherShielded`: a Sprout, Sapling or Ironwood bundle, and no Orchard
+  ///   action.
+  /// - `Unparseable`: the shim's own parser gives up. It is treated as a
+  ///   migration, never forwarded.
+  type Class = OrchardTouching | TransparentOnly | OtherShielded | Unparseable
 
   /// A transaction's bytes, abstracted to what a party can compute from them.
   ///
@@ -31,8 +39,13 @@ module types {
   /// - `created` is the chain height the wallet built the transaction at.
   /// - `expiry` is `nExpiryHeight`, absent when the transaction never expires
   ///   or does not parse.
-  /// - `class` is the shim's classification. It is independent of `txid`: the
-  ///   shim rejects trailing bytes that the hub's parser accepts.
+  /// - `class` is what the shim's parser reads of the pools. It is independent
+  ///   of `txid`: the shim rejects trailing bytes that the hub's parser
+  ///   accepts.
+  /// - `spends` holds the txids whose transparent outputs the transaction
+  ///   spends: its prevouts, without the output index. It is empty for a
+  ///   coinbase and for a transaction with no transparent inputs. A node
+  ///   that accepts the bytes reads it, and so does the operator.
   /// - `oversize`: the bytes do not fit the fixed hub frame.
   type Payload = {
     id: str,
@@ -40,6 +53,7 @@ module types {
     created: Height,
     expiry: Option[Height],
     class: Class,
+    spends: Set[TxId],
     oversize: bool,
   }
 

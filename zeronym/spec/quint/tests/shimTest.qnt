@@ -8,17 +8,24 @@ module shimTest {
   import shim.* from "../shim"
 
   pure def payload(id: str, class: Class): Payload =
-    { id: id, txid: Some(id), created: 1, expiry: Some(9), class: class, oversize: false }
+    { id: id, txid: Some(id), created: 1, expiry: Some(9), class: class, spends: Set(), oversize: false }
 
   pure val pOrchard = payload("orchard", OrchardTouching)
-  pure val pPlain = payload("plain", PassThrough)
+  pure val pPlain = payload("plain", OtherShielded)
   pure val pJunk = { ...payload("junk", Unparseable), txid: None, expiry: None }
   /// Trailing bytes: the shim's parser gives up, the hub's computes a txid.
   pure val pTrailing = { ...payload("trailing", Unparseable), expiry: None }
   pure val pBig = { ...payload("big", OrchardTouching), oversize: true }
-  pure val pBigPlain = { ...payload("big-plain", PassThrough), oversize: true }
+  pure val pBigPlain = { ...payload("big-plain", OtherShielded), oversize: true }
+  /// The second leg of a TEX payment: transparent parts only, spending an
+  /// output of `pOrchard`.
+  pure val pTex = { ...payload("tex", TransparentOnly), spends: Set("orchard") }
+  /// Transparent parts only, spending nothing: a coinbase.
+  pure val pCoinbase = payload("coinbase", TransparentOnly)
+  /// A shielded transaction that spends an output of `pOrchard`.
+  pure val pShieldedSpend = { ...payload("shielded-spend", OtherShielded), spends: Set("orchard") }
 
-  pure val PAYLOADS = Set(pOrchard, pPlain, pJunk, pBig, pBigPlain)
+  pure val PAYLOADS = Set(pOrchard, pPlain, pJunk, pBig, pBigPlain, pTex, pCoinbase, pShieldedSpend)
   pure val SEND_INPUTS = PAYLOADS.map(p => Clean(p)).union(Set(Unreadable, EmptyBody))
 
   pure def after(state: ShimState, input: ShimInput): ShimState = shim(state, input).state
@@ -61,12 +68,20 @@ module shimTest {
   // SendTransaction
   // ------------------------------------------------------------------------
 
-  /// Only a cleanly read pass-through transaction is forwarded. Every
-  /// other input is diverted or fails closed, in every state.
+  /// Only a cleanly read transaction with a Sprout, Sapling or Ironwood
+  /// bundle, or a coinbase, is forwarded. Every other input is diverted or
+  /// fails closed, in every state.
   run onlyPassThroughIsForwardedTest = all {
     assert(tuples(STATES, SEND_INPUTS, Set(true, false)).forall(((state, input, handedOver)) =>
       match outputOf(state, send(input, handedOver)) {
-        | ForwardOutput(forwarded) => input == Clean(forwarded) and forwarded.class == PassThrough
+        | ForwardOutput(forwarded) =>
+          and {
+            input == Clean(forwarded),
+            or {
+              forwarded.class == OtherShielded,
+              forwarded.class == TransparentOnly and forwarded.spends == Set(),
+            },
+          }
         | _ => true
       })),
     assert(outputOf(initialShim, send(Clean(pPlain), true)) == ForwardOutput(pPlain)),
@@ -81,6 +96,21 @@ module shimTest {
     // decides.
     assert(outputOf(initialShim, send(Clean(pTrailing), true))
       == DivertedOutput({ payload: pTrailing, frame: Submit({ nonce: 0, payload: pTrailing }), told: SentOk })),
+  }
+
+  /// The two arms of the classifier (#94), and what each leaves forwarded.
+  run classifierArmsTest = all {
+    // The transparent-only arm: the second leg of a TEX payment is diverted.
+    assert(outputOf(initialShim, send(Clean(pTex), true))
+      == DivertedOutput({ payload: pTex, frame: Submit({ nonce: 0, payload: pTex }), told: SentOk })),
+    // The arm needs a spend: a coinbase is forwarded.
+    assert(outputOf(initialShim, send(Clean(pCoinbase), true)) == ForwardOutput(pCoinbase)),
+    // A spend that carries a shielded bundle is forwarded, whatever it
+    // spends. The shim reads the shape alone (K10).
+    assert(outputOf(initialShim, send(Clean(pShieldedSpend), true)) == ForwardOutput(pShieldedSpend)),
+    // Diverted: either arm, or bytes the shim cannot parse.
+    assert(Set(pOrchard, pTex, pJunk).forall(p => treatAsMigration(p))),
+    assert(Set(pPlain, pCoinbase, pShieldedSpend).forall(p => not(treatAsMigration(p)))),
   }
 
   run failClosedTest = all {

@@ -57,19 +57,31 @@ module protocol {
   // protocol does not read them.
 
   pure def orchard(id: str, created: Height, expiry: Height): Payload =
-    { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, oversize: false }
+    { id: id, txid: Some(id), created: created, expiry: Some(expiry), class: OrchardTouching, spends: Set(), oversize: false }
 
-  /// Two migrations from supported wallets, built at heights 2 and 4.
+  /// Two migrations from supported wallets, built at heights 2 and 4. Each
+  /// pays a single-use transparent output: `early` is the first leg of a TEX
+  /// payment, and `late` deshields to the wallet's own address.
   pure val early = orchard("early", 2, 9)
   pure val late = orchard("late", 4, 11)
   /// A migration whose wallet set its expiry tighter than the supported floor.
   pure val tight = orchard("tight", 2, 5)
   /// Bytes the shim cannot parse and neither can a hub: no txid, no expiry.
   pure val junk: Payload =
-    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, oversize: false }
-  /// A transaction that is not a migration.
+    { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
+  /// A Sapling payment with no transparent inputs. The shim forwards it.
   pure val plain: Payload =
-    { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: PassThrough, oversize: false }
+    { id: "plain", txid: Some("plain"), created: 1, expiry: Some(9), class: OtherShielded, spends: Set(), oversize: false }
+  /// The second leg of the TEX payment `early` starts: transparent parts only,
+  /// and its one prevout is `early`'s single-use output. The shim diverts it
+  /// by its shape (#94).
+  pure val tex: Payload =
+    { id: "tex", txid: Some("tex"), created: 2, expiry: Some(9), class: TransparentOnly, spends: Set("early"), oversize: false }
+  /// An auto-shield of `late`'s output into Ironwood: a transparent spend
+  /// with a shielded bundle. The shim forwards it, and its prevout names
+  /// `late` (K10).
+  pure val autoShield: Payload =
+    { id: "autoShield", txid: Some("autoShield"), created: 4, expiry: Some(11), class: OtherShielded, spends: Set("late"), oversize: false }
 
   // ------------------------------------------------------------------------
   // Configurations
@@ -79,7 +91,7 @@ module protocol {
 
   /// One hub, the mixnet transport, every component honest.
   pure val baseline: Config = {
-    payloads: Set(early, late, tight, junk, plain),
+    payloads: Set(early, late, tight, junk, plain, tex),
     maxRequests: 3,
     roles: allHonest,
   }
@@ -87,6 +99,10 @@ module protocol {
   // One Byzantine component at a time.
   pure val byzHub = { ...baseline, roles: { ...allHonest, hub: Byzantine } }
   pure val byzIndexer = { ...baseline, roles: { ...allHonest, indexer: Byzantine } }
+
+  /// The baseline, and a shielded spend of a diverted transaction's output:
+  /// the residual #94 leaves (K10).
+  pure val shieldedSpend = { ...baseline, payloads: baseline.payloads.union(Set(autoShield)) }
 
   // ========================================================================
   // The system
@@ -237,6 +253,11 @@ module protocol {
         | _ => None
       })
 
+  /// The payloads the shim has diverted: the bodies of its submissions to the
+  /// hub. The network keeps every frame, so this set only grows.
+  pure def diverted(s: System): Set[Payload] =
+    s.toHub(ShimAddr).filterMap(msg => match msg { | Submit(submit) => Some(submit.payload) | _ => None })
+
   // ------------------------------------------------------------------------
   // Putting outputs where they go
   // ------------------------------------------------------------------------
@@ -368,18 +389,19 @@ module protocol {
   // ------------------------------------------------------------------------
 
   /// G1. The operator sees no migration: everything the shim hands it is a
-  /// pass-through transaction.
+  /// transaction `treatAsMigration` passes, a Sprout, Sapling or Ironwood
+  /// transaction or a coinbase.
   pure def operatorBlindIn(s: System): bool =
-    s.operator.forall(payload => payload.class == PassThrough)
+    s.operator.forall(payload => not(treatAsMigration(payload)))
 
   /// G2. A transaction's bytes do not reach a third party before the chain has
   /// published them. Everything the third party has learned is on the chain,
-  /// or was a pass-through transaction the operator was given.
+  /// or was a transaction the classifier passes and the operator was given.
   pure def queuedBytesConfidentialIn(s: System): bool =
     s.tpLearned().forall(payload =>
       or {
         s.indexer.published().contains(payload),
-        s.operator.contains(payload) and payload.class == PassThrough,
+        s.operator.contains(payload) and not(treatAsMigration(payload)),
       })
 
   /// G3. A transaction served to the wallet has the txid the wallet asked for.
@@ -431,6 +453,18 @@ module protocol {
             }
         | _ => true
       })
+
+  /// G9. The operator is handed no transaction that spends an output of one
+  /// the shim diverted. Such a transaction names the diverted txid in its
+  /// prevout, and the operator sees it arrive on the wallet's connection.
+  /// The parent may be diverted before or after the child is forwarded, and
+  /// may be published already: each order links the wallet to the parent.
+  ///
+  /// It holds while every transaction that spends a diverted one has
+  /// transparent parts only. A spend with a shielded bundle forwards (K10).
+  pure def forwardedSpendsNoDivertedIn(s: System): bool =
+    val hidden = txidsOf(s.diverted())
+    s.operator.forall(payload => payload.spends.intersect(hidden) == Set())
 
   // ------------------------------------------------------------------------
   // Known gaps
@@ -556,6 +590,12 @@ module protocol {
       s.wasGiven(obs => obs == NotFound),
     }
 
+  /// The wallet has handed the shim a transaction that spends one the shim
+  /// diverted.
+  pure def vForwardedSpendsNoDivertedIn(s: System): bool =
+    val hidden = txidsOf(s.diverted())
+    s.sentByWallet().exists(payload => payload.spends.intersect(hidden) != Set())
+
   // ========================================================================
   // The machine
   // ========================================================================
@@ -618,6 +658,7 @@ module protocol {
   action initBaseline = all { payloadsWellFormed(baseline), initWith(baseline) }
   action initByzHub = all { payloadsWellFormed(byzHub), aForeignTransactionExists(byzHub), initWith(byzHub) }
   action initByzIndexer = all { payloadsWellFormed(byzIndexer), aForeignTransactionExists(byzIndexer), initWith(byzIndexer) }
+  action initShieldedSpend = all { payloadsWellFormed(shieldedSpend), initWith(shieldedSpend) }
 
   // ------------------------------------------------------------------------
   // Roles
@@ -986,6 +1027,7 @@ module protocol {
   val txidAuthenticity = txidAuthenticityIn(s)
   val lookupValidityPerHub = lookupValidityPerHubIn(s, audit)
   val pendingOnlyFromQueue = pendingOnlyFromQueueIn(s, audit)
+  val forwardedSpendsNoDiverted = forwardedSpendsNoDivertedIn(s)
 
   // ------------------------------------------------------------------------
   // Known gaps: invariants that do not hold
@@ -1009,6 +1051,7 @@ module protocol {
   val vQueuedBytesConfidential = vQueuedBytesConfidentialIn(s)
   val vTxidAuthenticity = vTxidAuthenticityIn(s)
   val vLookupValidityPerHub = vLookupValidityPerHubIn(s)
+  val vForwardedSpendsNoDiverted = vForwardedSpendsNoDivertedIn(s)
 
   // ------------------------------------------------------------------------
   // Run vocabulary
