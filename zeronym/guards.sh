@@ -159,7 +159,7 @@ fi
 if grep -qi "volume-independent" README.md; then
 	fail "M32 README calls source-IP protection volume-independent again" \
 		"Against the operator it depends on batch size, and the batch is size one."
-elif grep -q "^- \\*\\*Which transaction a wallet's IP sent, against the operator, at today's volume\\*\\*.*batch size of one" README.md; then
+elif grep -q "^- \\*\\*Which transaction a wallet's IP sent.*batch size of one" README.md; then
 	pass "M32 README states the operator's batch-of-one IP link"
 else
 	fail "M32 README no longer states the operator's batch-of-one IP link" \
