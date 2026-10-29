@@ -188,6 +188,51 @@ pub async fn spawn_hanging_indexer_counting(accepted: Arc<AtomicUsize>) -> Socke
     addr
 }
 
+/// A mock indexer that records every broadcast and answers it with a
+/// trailers-only gRPC status: zaino's shape for a node rejection. `message` goes
+/// on the wire as given, so a test passes it percent-encoded, as tonic sends it.
+pub async fn spawn_status_indexer(
+    status: &'static str,
+    message: &'static str,
+    seen: Arc<Mutex<Vec<Vec<u8>>>>,
+) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let _ = http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |req: Request<Incoming>| {
+                            let seen = seen.clone();
+                            async move {
+                                let body = req.into_body().collect().await.unwrap().to_bytes();
+                                if let Ok(raw) =
+                                    RawTransaction::decode(body.get(5..).unwrap_or(&[]))
+                                {
+                                    seen.lock().unwrap().push(raw.data.to_vec());
+                                }
+                                Ok::<_, Infallible>(
+                                    Response::builder()
+                                        .status(200)
+                                        .header("content-type", "application/grpc")
+                                        .header("grpc-status", status)
+                                        .header("grpc-message", message)
+                                        .body(Full::new(Bytes::new()).boxed())
+                                        .unwrap(),
+                                )
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
 /// A trailers-only gRPC NOT_FOUND (status in the headers, empty body), the shape
 /// lightwalletd returns for an unknown txid.
 fn grpc_not_found() -> Response<BoxBody<Bytes, Infallible>> {
