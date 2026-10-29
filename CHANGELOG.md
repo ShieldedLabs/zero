@@ -115,6 +115,13 @@ date) before dispatching the release.
   `regtest`). Mainnet turns on the tip guard and refuses to start with a clock
   before the compiled anchor. `assemble-caution.sh` takes `--network`, and
   `deploy.sh` reads `NETWORK`.
+- The hub's `OPERATORS.md` and `zeronym/README.md` document a known gap: any
+  submitter can fill the hub's queue for free for one flush window, since 1024
+  junk payloads of 64 bytes fill its entry cap, and over the mixnet each refusal
+  in that window is silent. `OPERATORS.md` also corrects two stale claims: a hub
+  restart makes every shim lose its diverts silently, and the 1024-entry cap
+  binds before the 64 MiB byte budget. Reported by
+  [@ouicate](https://github.com/ouicate).
 
 ## v29 - 2026-09-07
 
