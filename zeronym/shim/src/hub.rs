@@ -45,6 +45,14 @@ const TRANSACTION_PATH: &str = "/transaction";
 /// Header carrying the transaction height on a `200` lookup reply.
 const TX_HEIGHT_HEADER: &str = "x-tx-height";
 
+/// The body of the hub's "no such transaction" `404`. Every hub with a lookup
+/// route has sent exactly these bytes since the route was added (#28). A `404`
+/// with any other body is an error: a hub with its clearnet lookup path closed,
+/// a proxy, or a server at the hub's address answers `404` for a path it
+/// lacks, and a wallet told "not found" there would treat a mined transaction
+/// as gone.
+const NOT_FOUND_BODY: &[u8] = b"transaction not found";
+
 /// Ceiling on a lookup: above the hub's own 10 s indexer timeout, so the hub's
 /// 404/502 verdict usually arrives before this fires.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -217,8 +225,9 @@ impl HubClient {
     /// carry `application/octet-stream` and a parseable `x-tx-height`, or it is an
     /// error: that is the tripwire against an old hub (which would answer a lookup
     /// POST with a submission's JSON), so a wallet never receives JSON framed as a
-    /// transaction. A `404` is `NotFound`; anything else is an error, and the
-    /// caller fails closed rather than falling back to the operator.
+    /// transaction. A `404` carrying [`NOT_FOUND_BODY`] is `NotFound`; anything
+    /// else, another `404` included, is an error, and the caller fails closed
+    /// rather than falling back to the operator.
     pub async fn get_transaction(&self, wire_hash: &[u8]) -> Result<Lookup, BoxError> {
         let attempt = async {
             let stream = TcpStream::connect(self.addr).await?;
@@ -263,7 +272,10 @@ impl HubClient {
                     _ => Err("hub lookup: 200 without the expected transaction shape".into()),
                 }
             }
-            StatusCode::NOT_FOUND => Ok(Lookup::NotFound),
+            StatusCode::NOT_FOUND if body[..] == *NOT_FOUND_BODY => Ok(Lookup::NotFound),
+            StatusCode::NOT_FOUND => Err(
+                "hub lookup: 404 without the hub's not-found body (closed or unknown path)".into(),
+            ),
             other => Err(format!("hub lookup: unexpected status {other}").into()),
         }
     }
