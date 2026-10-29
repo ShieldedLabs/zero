@@ -47,6 +47,10 @@ enum HubLookup {
     Found { data: Vec<u8>, height: u64 },
     /// `404`, the "no such transaction" answer.
     NotFound,
+    /// `404 unknown path`: what a hub answers with its clearnet lookup path
+    /// closed (`ZIH_HTTP_SUBMIT=false`), and what any server lacking the path
+    /// sends. The shim must fail closed rather than report the txid missing.
+    PathNotFound,
     /// `200` carrying a submission's JSON and NO `x-tx-height`: what an OLD hub
     /// (which treats every POST as a submission) would return. The shim must fail
     /// closed rather than frame this as a transaction.
@@ -133,6 +137,10 @@ fn hub_lookup_reply(lookup: &HubLookup) -> Response<Full<Bytes>> {
         HubLookup::NotFound => Response::builder()
             .status(404)
             .body(Full::new(Bytes::from("transaction not found")))
+            .unwrap(),
+        HubLookup::PathNotFound => Response::builder()
+            .status(404)
+            .body(Full::new(Bytes::from("unknown path")))
             .unwrap(),
         HubLookup::OldHubJson => Response::builder()
             .status(200)
@@ -558,6 +566,29 @@ async fn an_old_hub_shaped_reply_fails_closed() {
     let reply = get_transaction(&mut sender, shim, &[0x44u8; 32]).await;
 
     assert_eq!(reply.status, 14, "an unrecognised 200 fails closed");
+    assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_404_from_a_closed_lookup_path_fails_closed() {
+    // A hub whose clearnet lookup path is closed answers `404 unknown path`. As
+    // NOT_FOUND it would tell the wallet that every txid, mined ones included,
+    // does not exist. Only the hub's own not-found body means absence.
+    let hub = spawn_mock_hub_full(
+        "unused",
+        HubLookup::PathNotFound,
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let backend_conns = Arc::new(AtomicUsize::new(0));
+    let backend = spawn_counting_backend(backend_conns.clone()).await;
+    let shim = spawn_diverting_shim(backend, hub).await;
+
+    let mut sender = connect_h2(shim).await;
+    let reply = get_transaction(&mut sender, shim, &[0x66u8; 32]).await;
+
+    assert_eq!(reply.status, 14, "a path 404 fails closed as UNAVAILABLE");
     assert_eq!(backend_conns.load(Ordering::SeqCst), 0);
 }
 

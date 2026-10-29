@@ -71,6 +71,13 @@ date) before dispatching the release.
   now percent-decodes `grpc-message`). A burst now lasts one flush window. Any
   submitter can still fill the cap for that window. Reported by
   [@ouicate](https://github.com/ouicate).
+- zero-indexer: a clearnet shim read every `404` from the hub's lookup path as
+  "no such transaction" and told the wallet gRPC `NOT_FOUND`. A hub with that
+  path closed, a proxy, or any other server at the hub's address answers `404`
+  for a path it lacks, so the wallet heard that every txid, mined ones
+  included, was gone. Only a `404` with the hub's `transaction not found` body
+  now means absence; any other `404` fails closed as `UNAVAILABLE`, as the
+  mixnet path already did.
 
 ### Changed
 
