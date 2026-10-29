@@ -88,6 +88,9 @@ pub struct Inspected {
     pub lane: Lane,
     /// One per Orchard-protocol bundle, for a [`Lane::Proven`] candidate only.
     pub bundle_keys: Vec<[u8; 32]>,
+    /// The Orchard bundle's nullifiers, for a [`Lane::Proven`] candidate only:
+    /// what [`crate::spent`] checks against the chain.
+    pub orchard_nullifiers: Vec<[u8; 32]>,
     /// The outpoints a [`Lane::Transparent`] spend consumes.
     pub spends: Vec<OutPoint>,
     /// How many transparent outputs the transaction has: how many second legs
@@ -142,6 +145,7 @@ pub fn inspect(tx_bytes: &[u8]) -> Inspected {
         expiry: None,
         lane: Lane::Unverified,
         bundle_keys: Vec::new(),
+        orchard_nullifiers: Vec::new(),
         spends: Vec::new(),
         transparent_outputs: 0,
         pending: None,
@@ -168,6 +172,18 @@ pub fn inspect(tx_bytes: &[u8]) -> Inspected {
     if tx.orchard_shielded_data().is_some() {
         if let Some(pending) = prove_candidate(&tx) {
             inspected.bundle_keys = pending.bundles.iter().map(bundle_key).collect();
+            // The Orchard bundle comes first, and is present: this arm needs it.
+            inspected.orchard_nullifiers = pending
+                .bundles
+                .first()
+                .map(|bundle| {
+                    bundle
+                        .actions()
+                        .iter()
+                        .map(|action| action.nullifier().to_bytes())
+                        .collect()
+                })
+                .unwrap_or_default();
             inspected.lane = Lane::Proven;
             inspected.pending = Some(pending);
         }
@@ -262,6 +278,22 @@ mod tests {
         assert_eq!(inspected.transparent_outputs, 1);
         assert!(inspected.txid.is_some());
         assert!(inspected.verify());
+    }
+
+    #[test]
+    fn the_orchard_nullifiers_are_read_from_the_orchard_bundle_alone() {
+        // One spend padded to two actions; the Ironwood bundle's are not here.
+        let inspected = inspect(PROVEN_A);
+        assert_eq!(inspected.orchard_nullifiers.len(), 2);
+        assert_eq!(
+            inspected.orchard_nullifiers,
+            inspect(PROVEN_A_RESIGNED).orchard_nullifiers
+        );
+        let b = inspect(PROVEN_B).orchard_nullifiers;
+        assert!(inspected
+            .orchard_nullifiers
+            .iter()
+            .all(|nf| !b.contains(nf)));
     }
 
     #[test]
