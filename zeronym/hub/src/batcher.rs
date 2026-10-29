@@ -52,6 +52,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::admission::Lane;
 use crate::chain::{ChainClient, Publish};
 use crate::queue::Queue;
 use crate::tip_guard;
@@ -576,10 +577,23 @@ pub async fn flush(
     let mut rejected = 0usize;
     let mut sample_failure: Option<String> = None;
     let mut unplaced = Vec::new();
+    // Judged entries whose proofs this hub will refuse from now on: rejected,
+    // or already known (mined, or published by another route). See
+    // `Queue::burn` for why an accepted entry stays unburned.
+    let mut judged = Vec::new();
+    let proven = batch.iter().filter(|e| e.lane == Lane::Proven).count();
+    let transparent = batch.iter().filter(|e| e.lane == Lane::Transparent).count();
     for (i, entry) in batch.into_iter().enumerate() {
         match outcomes.get(i) {
-            Some(Publish::Accepted { .. }) | Some(Publish::AlreadyKnown) => achieved += 1,
-            Some(Publish::Rejected { .. }) => rejected += 1,
+            Some(Publish::Accepted { .. }) => achieved += 1,
+            Some(Publish::AlreadyKnown) => {
+                achieved += 1;
+                judged.push(entry);
+            }
+            Some(Publish::Rejected { .. }) => {
+                rejected += 1;
+                judged.push(entry);
+            }
             Some(Publish::Retryable { reason }) => {
                 sample_failure.get_or_insert_with(|| reason.clone());
                 unplaced.push(entry);
@@ -590,6 +604,7 @@ pub async fn flush(
             None => unplaced.push(entry),
         }
     }
+    queue.burn(&judged);
 
     // A transport failure goes back into the queue for the next cadence. This is
     // the only place such a failure can be recovered: the shim answered the
@@ -620,6 +635,9 @@ pub async fn flush(
     // reason names an endpoint and an error, not an entry.
     tracing::info!(
         flush_size = size,
+        proven,
+        transparent,
+        unverified = size - proven - transparent,
         achieved_batch_size = achieved,
         rejected,
         requeued = requeued.held,
@@ -1327,6 +1345,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_flush_burns_the_proofs_the_network_judged_and_spares_the_ones_it_took() {
+        // A migration whose proofs verify (tests/proven_fixtures.rs).
+        const PROVEN: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
+        for (answer, burned) in [
+            // Accepted: if it later drops out of every mempool, the wallet's
+            // resend must get through.
+            (Answer::Send(0, "txid"), false),
+            (Answer::Send(-26, "16: bad-txns-orchard-anchor"), true),
+            // Mined, or published by another route: a copy off the chain buys
+            // one window at most.
+            (
+                Answer::Send(-27, "transaction already in block chain"),
+                true,
+            ),
+        ] {
+            let mock = spawn_mock_indexer(vec![answer], Duration::ZERO).await;
+            let queue = queue_holding(&[PROVEN.to_vec()]);
+            let _ = flush(
+                &queue,
+                &client(mock.addr),
+                &test_tip(),
+                BatchParams::default(),
+            )
+            .await;
+            let again = queue.admit(PROVEN, TIP, N, MARGIN);
+            assert_eq!(
+                again == crate::queue::Admission::Refused(crate::queue::Refusal::Rejected),
+                burned,
+                "after this verdict the proofs are burned: {burned}, got {again:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_transport_flavoured_grpc_status_is_held_but_invalid_argument_is_not() {
         // The same wire (a non-OK gRPC status) carries both kinds of failure;
         // the split is by status code and this pins where it falls.
@@ -1460,10 +1512,12 @@ mod tests {
     /// A committed fixture with its `nExpiryHeight` field overwritten, because
     /// every committed fixture has no expiry and a refusal needs one. The field
     /// is the fifth little-endian word of the header (after the version, the
-    /// version group id, the branch id and the lock time). Nothing here checks
-    /// a signature, so the bytes still parse.
+    /// version group id, the branch id and the lock time). A transparent-only
+    /// spend, because nothing checks its signatures, so the bytes still parse
+    /// and are admitted.
     fn fixture_expiring_at(expiry: u32) -> Vec<u8> {
-        let mut bytes = include_bytes!("../../shim/tests/fixtures/v6_orchard_only.bin").to_vec();
+        let mut bytes =
+            include_bytes!("../../shim/tests/fixtures/v6_transparent_only.bin").to_vec();
         bytes[16..20].copy_from_slice(&expiry.to_le_bytes());
         bytes
     }
@@ -1493,12 +1547,12 @@ mod tests {
         mock.height.store(u64::from(TIP - 1), Ordering::SeqCst);
         wait_until("the regression", || tip.observed_height() == TIP - 1).await;
 
-        let hub = crate::server::Hub {
-            queue: queue.clone(),
-            tip: tip.clone(),
-            params: BatchParams::default(),
-            chain: client(mock.addr),
-        };
+        let hub = crate::server::Hub::new(
+            queue.clone(),
+            tip.clone(),
+            BatchParams::default(),
+            client(mock.addr),
+        );
         let tx = fixture_expiring_at(TIP + MARGIN + 6);
         assert!(
             matches!(
@@ -1508,7 +1562,10 @@ mod tests {
             "precondition: the fixture parses, and judged at the observed tip it is accepted"
         );
         assert!(
-            matches!(hub.admit(&tx), Err(crate::queue::Refusal::ExpiryTooTight)),
+            matches!(
+                hub.admit(&tx).await,
+                Err(crate::queue::Refusal::ExpiryTooTight)
+            ),
             "the hub accepted an expiry counting on the flush at {TIP}, which is spent"
         );
 
@@ -1552,6 +1609,10 @@ mod tests {
                 tx_bytes: zeroize::Zeroizing::new(junk(7)),
                 attempts: 0,
                 received_height: TIP - 5,
+                lane: Lane::Unverified,
+                bundle_keys: Vec::new(),
+                transparent_outputs: 0,
+                has_child: false,
             }],
             TIP - 5,
             N,
@@ -1585,15 +1646,15 @@ mod tests {
 
         mock.height.store(u64::from(TIP - 2), Ordering::SeqCst);
         wait_until("the tip to return", || tip.observed_height() == TIP - 2).await;
-        let hub = crate::server::Hub {
-            queue: queue.clone(),
-            tip: tip.clone(),
-            params: BatchParams::default(),
-            chain: client(mock.addr),
-        };
+        let hub = crate::server::Hub::new(
+            queue.clone(),
+            tip.clone(),
+            BatchParams::default(),
+            client(mock.addr),
+        );
         assert!(
             matches!(
-                hub.admit(&fixture_expiring_at(TIP + MARGIN + 6)),
+                hub.admit(&fixture_expiring_at(TIP + MARGIN + 6)).await,
                 Err(crate::queue::Refusal::ExpiryTooTight)
             ),
             "the hub accepted an expiry counting on the flush at {TIP}, which is spent"

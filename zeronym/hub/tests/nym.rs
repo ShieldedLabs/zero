@@ -27,8 +27,8 @@ use zero_indexer_hub::wire::{
 mod common;
 use common::{spawn_hanging_indexer, spawn_mock_indexer_full, GetTx};
 
-/// A real V6 carrying Orchard actions, the same corpus the shim uses.
-const V6_MIGRATION: &[u8] = include_bytes!("../../shim/tests/fixtures/v6_migration.bin");
+/// A real V6 carrying Orchard actions whose proofs verify (tests/proven_fixtures.rs).
+const V6_MIGRATION: &[u8] = include_bytes!("fixtures/v6_proven_a.bin");
 
 /// A height any fixture expiry clears, so these tests exercise the listener, not
 /// expiry arithmetic (that has its own unit tests).
@@ -50,12 +50,7 @@ fn test_hub_with_indexer(observed_tip: Option<u32>, indexer: SocketAddr) -> Hub 
         tip.observe(&[height]);
     }
     let chain = Arc::new(ChainClient::new(vec![indexer], None).unwrap());
-    Hub {
-        queue,
-        tip,
-        params: BatchParams::default(),
-        chain,
-    }
+    Hub::new(queue, tip, BatchParams::default(), chain)
 }
 
 fn test_hub(observed_tip: Option<u32>) -> Hub {
@@ -254,7 +249,11 @@ async fn a_lookup_hits_the_queue_first_at_the_mempool_sentinel() {
     // The indexer is unreachable on purpose: a queue hit must be answered
     // before the chain is ever consulted, or this reply would be `error`.
     let hub = test_hub(Some(TIP));
-    let txid = hub.admit(V6_MIGRATION).unwrap().expect("fixture parses");
+    let txid = hub
+        .admit(V6_MIGRATION)
+        .await
+        .unwrap()
+        .expect("fixture parses");
     let wire_hash = hex::decode(&txid).unwrap();
     let frame = encode_lookup(&nonce(20), &wire_hash).unwrap().to_vec();
 
@@ -485,7 +484,11 @@ async fn submits_and_lookups_interleave_on_one_listener() {
     // spawned task wins the race: the submit becomes a designed-behaviour
     // duplicate, and the lookup is a guaranteed queue hit either way.
     let hub = test_hub(Some(TIP));
-    let txid = hub.admit(V6_MIGRATION).unwrap().expect("fixture parses");
+    let txid = hub
+        .admit(V6_MIGRATION)
+        .await
+        .unwrap()
+        .expect("fixture parses");
     let submitter = SenderTag([0xcc; 16]);
     let poller = SenderTag([0xdd; 16]);
     let submit_frame = encode_submit(&nonce(30), V6_MIGRATION).unwrap().to_vec();
