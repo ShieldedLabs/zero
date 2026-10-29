@@ -52,17 +52,28 @@ wrong shape, not merely an unbuilt one.
   sender who exposed their address instead of sending anonymously, and drops such
   messages rather than queueing them.
 - **Queues** them in RAM, bounded by an explicit byte budget (64 MiB), which is
-  what bounds this enclave's memory against someone who simply keeps submitting.
+  what bounds this enclave's memory against someone who simply keeps submitting,
+  and by 1024 entries split into three lanes: 896 for transactions whose proofs
+  verified, 112 for transparent-only spends, 16 for what it cannot verify.
+- **Reads the Orchard nullifiers** each indexer reports mined
+  (`GetBlockRangeNullifiers`): about a minute from cold on mainnet, inside the
+  tip warm-up, then every 30 seconds. Every indexer must serve that call for
+  the check to work; the log says `nullifier set synced` once it does.
 - **Flushes** the batch on a cadence, broadcasting every member to **every**
   configured indexer — a migration that entered only one mempool is one outage
   away from never being mined.
 - **Answers lookups** so a wallet can see its own just-diverted transaction
   before it is mined.
 
-It deliberately does **not** validate transactions. There is no consensus check,
-no signature or proof verification, no fee or double-spend check: the hub
-broadcasts what it is given and lets the network decide. It also broadcasts
-transactions it could not parse, by design.
+It checks what a junk submission must pay for, and leaves the rest to the
+network. A submission that touches Orchard must carry Halo2 proofs that verify,
+and signatures that verify when it has no transparent inputs, so each junk entry
+costs its sender a proof (about 2.6 core-seconds). A copy of a transaction every
+indexer reports mined is refused, and so is a proof this hub already published
+to a verdict. Anchors, fees and mempool double spends need chain state the
+enclave does not hold: the hub broadcasts what passes and lets the network
+decide. It also queues and broadcasts transactions it could not parse, by
+design, in their own small lane.
 
 The queue is deliberately **not persisted**. An enclave is diskless, and
 persisting it would mean writing plaintext migrations somewhere the host could

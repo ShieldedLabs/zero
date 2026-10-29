@@ -16,6 +16,7 @@ use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::config::{Config, Network};
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub};
+use zero_indexer_hub::spent;
 use zero_indexer_hub::tip_guard;
 use zero_indexer_hub::BoxError;
 
@@ -64,7 +65,8 @@ async fn main() -> Result<(), BoxError> {
         Network::Mainnet => TipGuard::Mainnet,
         Network::Testnet | Network::Regtest => TipGuard::Unguarded,
     };
-    let queue = Arc::new(Queue::new());
+    let revealed = Arc::new(spent::ChainNullifiers::new(chain.endpoint_count()));
+    let queue = Arc::new(Queue::watching(revealed.clone()));
     let tip = Arc::new(TipTracker::new(guard));
 
     tracing::info!(
@@ -127,6 +129,15 @@ async fn main() -> Result<(), BoxError> {
             begin_drain(&queue, &drain_tx);
         });
     }
+
+    // The Orchard nullifiers the chain has revealed, read on the hub's own
+    // clock. Its first full read finishes inside the mainnet tip warm-up.
+    tokio::spawn(spent::run(
+        revealed,
+        chain.clone(),
+        tip.clone(),
+        config.network,
+    ));
 
     let cadence = tokio::spawn(batcher::run(
         queue.clone(),
