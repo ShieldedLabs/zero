@@ -72,6 +72,15 @@ date) before dispatching the release.
   the network rejected, or already has, is refused for the life of the
   process. About 9 ms of CPU per migration on the enclave's four cores, three
   checks at a time. Reported by [@ouicate](https://github.com/ouicate).
+- zero-indexer: a copy of a mined Orchard transaction filled the hub's queue for
+  free, because its proofs verify. About 1,740 such transactions were still
+  unexpired at the tip on 2026-10-28, since a ZIP 318 migration expires 30 to 60
+  days out. The hub now reads the Orchard nullifiers each indexer reports mined
+  since NU6.3 (`GetBlockRangeNullifiers`, 251,421 on 2026-10-29, about a minute
+  from cold), keeps them current every 30 seconds, and refuses a transaction
+  whose nullifier every indexer reports. Unanimity, so one lying indexer cannot
+  block a wallet's resend; an indexer that is down lets copies through to the
+  burn set. Reported by [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
