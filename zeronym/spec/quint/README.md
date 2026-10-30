@@ -232,7 +232,7 @@ Behaviours that are accepted or only recorded:
 
 > Where the model disagrees with what the code or its comments assume.
 
-Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by #92, and finding 12 by #94. Finding 13 is fixed in part by #100, which is still open. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
+Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by #92, and finding 12 by #94. Finding 13 is fixed in part by #100. Nothing else here has been fixed. "Code read" means the cited lines were read and match the model; nothing was run against the Rust. The severity beside a code bug is a judgement from that reading, not from a reproduction: HIGH, one in-scope adversary degrades batching or availability for every user of the hub; MEDIUM, one wallet loses a transaction or is misled about one; LOW, a transient wrong status or a wrong operator signal. Only code bugs carry a severity, so a row without one is not thereby minor: finding 5 is by design and may matter more than any MEDIUM bug.
 
 | # | Finding | Kind | Shown by | Against the Rust |
 |---|---|---|---|---|
