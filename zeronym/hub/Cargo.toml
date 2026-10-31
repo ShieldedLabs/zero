@@ -65,6 +65,9 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
+# An indexer's grpc-message trailer is percent-encoded; the publish classifier
+# reads it decoded. Already in the tree through hyper's stack.
+percent-encoding = "2"
 
 # Chain connection out (JSON-RPC to zebrad/zcashd) and the inbound serving path
 # in. hyper rather than a JSON-RPC or web framework because the surface is tiny
