@@ -84,12 +84,12 @@ pub const MAX_QUEUE_ENTRIES: usize = MAX_QUEUE_BYTES / MAX_TX_BYTES;
 
 /// How many flushes may fail to place one entry before it is given up on.
 ///
-/// Expiry is the PRIMARY bound and covers almost everything: an entry is
-/// admitted only if it survives its scheduled flush, so a few failed flushes put
-/// it past the point of being minable and it goes. This is the backstop for the
-/// one case expiry cannot bound at all: a payload that does not deserialize has
-/// no expiry, correctly treated here as "never expires", so without a count it
-/// would be re-offered to the network for the life of the process.
+/// For most entries this, not expiry, is the bound that ends the retries: a
+/// ZIP 318 migration expires a month or more out, and a payload that does not
+/// deserialize has no expiry at all, correctly treated here as "never expires".
+/// Without a count either would be re-offered to the network for the life of
+/// the process. Only an entry the node never judged gets here: a node that
+/// cannot parse a payload has rejected it, and it leaves at that flush.
 ///
 /// Eight flushes is a few hours at the production cadence -- long enough to ride
 /// out an indexer outage, far short of forever.
@@ -194,7 +194,7 @@ pub struct Requeued {
     pub held: usize,
     /// Dropped: cannot survive the flush that would publish it.
     pub dropped_expired: usize,
-    /// Dropped: out of attempts. Only reachable for a payload with no expiry.
+    /// Dropped: out of attempts, before the entry's expiry arrived.
     pub dropped_exhausted: usize,
 }
 
@@ -405,8 +405,9 @@ impl Queue {
             // process, and each re-offer is another emission on a throttled lane
             // and another timing signal about one transaction.
             //
-            // Expiry is the real bound. The attempt count catches only what
-            // expiry cannot -- a payload that does not parse has no expiry.
+            // Expiry ends a tight one. The attempt count ends the rest: a ZIP 318
+            // migration expires a month or more out, and a payload that does not
+            // parse has no expiry.
             if !survives_next_flush(entry.expiry, tip, flush_interval, mining_margin) {
                 out.dropped_expired += 1;
                 continue;

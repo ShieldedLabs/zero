@@ -50,6 +50,27 @@ date) before dispatching the release.
   funded from Ironwood. A transparent spend that also carries a Sapling or
   Ironwood bundle still forwards; `ENDPOINTS.md` lists that residual. Reported
   by [@ouicate](https://github.com/ouicate).
+- zero-indexer: the README listed source-IP protection as volume-independent.
+  That holds against the hub and the peer-to-peer network. Against the
+  operator and the wallet's ISP it is batching anonymity: both see each
+  wallet's upload, the operator also sees the `SendTransaction` missing from
+  its indexer, and on the clearnet hop the shim's fresh 64 KiB dial to the hub
+  inside the wallet's request. At today's batch size of one, the next flush
+  names the transaction. In a larger flush the set is the transactions that
+  match in size, shape, anchor and expiry. The README and both operator guides
+  now state this link and which marker Nym's cover traffic removes, and
+  `guards.sh` keeps the claim from returning. Reported by
+  [@ouicate](https://github.com/ouicate).
+- zero-indexer: one free burst of junk held the hub's queue for hours.
+  Unparseable bytes enter the queue with no expiry, and 1024 of them (64 KiB)
+  fill its entry cap. A node answers such bytes with `-22`, the deserialization
+  error, and the hub retried that answer, so each junk entry went back into the
+  queue for 8 more flushes (about 3.3 hours) and reached every indexer 9 times.
+  The hub now reads that answer as a rejection: the `-22` lightwalletd relays,
+  and zaino's `malformed transaction` rejection inside a gRPC INTERNAL (the hub
+  now percent-decodes `grpc-message`). A burst now lasts one flush window. Any
+  submitter can still fill the cap for that window. Reported by
+  [@ouicate](https://github.com/ouicate).
 - zero-indexer: the auditor procedure left the hub hop unchecked. A clearnet
   shim authenticates its hub by the certificate name alone, so an auditor must
   tie the shim's measured hub address to an attested hub, and the four
