@@ -189,8 +189,8 @@ async fn clearnet_submit_is_closed_by_default() {
     );
 }
 
-/// Turning it on restores the transitional hop, and does not disturb the
-/// lookup path, which was never gated.
+/// Turning it on restores the transitional hop, and opens the lookup path with
+/// it.
 #[tokio::test]
 async fn clearnet_submit_works_when_explicitly_enabled() {
     let addr = spawn(ServeOptions {
