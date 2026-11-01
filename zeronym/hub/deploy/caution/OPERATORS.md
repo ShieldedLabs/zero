@@ -449,9 +449,13 @@ How long a burst lasts depends on the junk:
   near zero.
 - **Recover:** wait it out. The next flush clears unparseable junk. Forged
   parseable junk clears at the flush where `dropped_exhausted` is near 1024;
-  until then each `flush published` line shows `requeued` near 1024. A check of
-  proofs and signatures at admission, so that each junk entry costs a real
-  proof, is future work.
+  until then each `flush published` line shows `requeued` near 1024. That flush
+  also logs `gave up on migrations that could not be placed; they exist nowhere
+  else`. Read its `reason` field, a sample failure from that flush: a
+  verification error means the junk is leaving, and a transport failure means an
+  outage dropped honest migrations. A small count is still lost migrations. A
+  check of proofs and signatures at admission, so that each junk entry costs a
+  real proof, is future work.
 
 ## If the hub goes down: the single-hub recovery runbook
 
