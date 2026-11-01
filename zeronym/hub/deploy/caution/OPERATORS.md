@@ -447,8 +447,11 @@ How long a burst lasts depends on the junk:
 - **Detect:** `submission refused at admission` with `reason=queue_full`, and a
   `flush published` line with `flush_size` near 1024 and `achieved_batch_size`
   near zero.
-- **Recover:** the next flush clears it. A check of proofs and signatures at
-  admission, so that each junk entry costs a real proof, is future work.
+- **Recover:** wait it out. The next flush clears unparseable junk. Forged
+  parseable junk clears at the flush where `dropped_exhausted` is near 1024;
+  until then each `flush published` line shows `requeued` near 1024. A check of
+  proofs and signatures at admission, so that each junk entry costs a real
+  proof, is future work.
 
 ## If the hub goes down: the single-hub recovery runbook
 
