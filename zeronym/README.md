@@ -77,7 +77,7 @@ Four audiences, four different answers.
      - Diversion: `ZIS_REQUIRE_DIVERSION=true`, and exactly one hub transport after blank `ZIS_HUB_NYM` entries are dropped: a `ZIS_HUB` socket address, or one or more Nym addresses. The flag makes a shim with no hub refuse to start.
      - Clearnet hub: `ZIS_HUB` must be the address the hub's domain resolves to through `<app-id>.apps.caution.sh`, and `ZIS_HUB_TLS` must be that domain. The shim dials that address and checks the certificate name.
      - Nym hub: every `ZIS_HUB_NYM` entry must equal the `/nym-address` of a hub you verified. Each entry is offered every migration and under backpressure the tail of the list can miss it.
-     - Hub indexers: an operator other than the one behind every diverting shim's `ZIS_BACKEND` must run each `ZIH_INDEXERS` endpoint and hold its `ZIH_INDEXER_TLS` name. The hub looks a txid up there on a queue miss.
+     - Hub indexers: this shim's `ZIS_BACKEND` operator must differ from the operator of each `ZIH_INDEXERS` endpoint and `ZIH_INDEXER_TLS` name of every hub it lists. The evidence for operator identity is out of band. The hub looks a txid up there on a queue miss.
      - `ZIS_DIAG` unset, and `debug.enabled = false`.
   5. **Resolve the domain** and confirm it points at the Caution-managed target for the app id in the published artefacts. One `dig` turns an invisible layer-4 interposition into an observable one, because every other check on this list passes through a plain TCP forwarder. In BYOC the operator runs the host behind that target, so this step proves less there.
 

@@ -131,8 +131,8 @@ Notes that apply to both:
 - `--indexers` are literal IPv4 addresses. The enclave resolves **no DNS** for
   them (there is no port 53 rule for that path), so a poisoned answer has nothing
   to poison.
-- **An operator other than the one behind every diverting shim's `--backend`
-  must run the `--indexers`.** On a queue miss the hub looks the txid up there,
+- **Each diverting shim's `--backend` operator must differ from the operator of
+  the `--indexers`.** On a queue miss the hub looks the txid up there,
   so a hub pointed at a shim's own backend hands that backend every such txid.
   Compare operators, beyond IPs and names: one operator can serve two addresses
   under two names.
@@ -532,7 +532,7 @@ expensive and rare.
 | env var | meaning | you point it at |
 |---|---|---|
 | `ZIH_LISTEN` | listen address inside the enclave | `0.0.0.0:8083` (the port Caution's proxy forwards to) |
-| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast and look up through | indexers run by an operator other than every diverting shim's backend; every batch member goes to all of them |
+| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast and look up through | indexers whose operator differs from each diverting shim's backend operator; every batch member goes to all of them |
 | `ZIH_INDEXER_TLS` | DNS name the indexer certificates must carry | **required in practice** — without it the hop is plaintext |
 | `ZIH_NETWORK` | the network the indexers serve: `mainnet`, `testnet` or `regtest` | **required**; `mainnet` bounds every tip the indexers report (see "Tip guard") |
 | `ZIH_NYM` | receive submissions over the mixnet | `true` |

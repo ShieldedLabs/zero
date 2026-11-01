@@ -78,8 +78,8 @@ sh zeronym/hub/deploy/caution/assemble-caution.sh \
   [--debug]
 ```
 
-An operator other than the one behind every diverting shim's `--backend` must
-run these indexers. On a queue miss the hub looks the txid up there, so a hub
+Each diverting shim's `--backend` operator must differ from the operator of
+these indexers. On a queue miss the hub looks the txid up there, so a hub
 pointed at a shim's own backend hands that backend every such txid.
 
 Then, from the assembled directory:
