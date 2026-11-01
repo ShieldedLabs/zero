@@ -71,6 +71,27 @@ date) before dispatching the release.
   now percent-decodes `grpc-message`). A burst now lasts one flush window. Any
   submitter can still fill the cap for that window. Reported by
   [@ouicate](https://github.com/ouicate).
+- zero-indexer: the auditor procedure left the hub hop unchecked. A clearnet
+  shim authenticates its hub by the certificate name alone, so an auditor must
+  tie the shim's measured hub address to an attested hub, and the four
+  component guides stopped at `caution verify`. `zeronym/README.md` now holds
+  the full procedure in five steps, with a new parameter check (hub address,
+  Nym addresses, hub indexers, `ZIS_DIAG`), and every guide links to it. The
+  README now says the attestation covers an auditor's own connection while
+  wallets check certificates against the public CAs only, names Caution's
+  in-enclave Caddy as trusted, and notes that Nym mode encrypts each frame to
+  the hub's in-enclave key. The hub deploy guide used one indexer as both a
+  shim backend and the hub's lookup indexer, which hands that indexer every
+  txid that misses the hub's queue. Guard M14 now compares addresses and
+  certificate names across `deploy.env.example` and every assemble example in
+  the docs. Reported by [@ouicate](https://github.com/ouicate).
+- zero-indexer: a clearnet shim read every `404` from the hub's lookup path as
+  "no such transaction" and told the wallet gRPC `NOT_FOUND`. A hub with that
+  path closed, a proxy, or any other server at the hub's address answers `404`
+  for a path it lacks, so the wallet heard that every txid, mined ones
+  included, was gone. Only a `404` with the hub's `transaction not found` body
+  now means absence; any other `404` fails closed as `UNAVAILABLE`, as the
+  mixnet path already did.
 - zero-indexer: every hub served its clearnet lookup route, `POST /transaction`,
   to anyone, so anyone holding a candidate txid could ask whether it sat in the
   queue. A Nym shim looks up over the mixnet, so on a Nym hub the route served
@@ -122,6 +143,14 @@ date) before dispatching the release.
   `regtest`). Mainnet turns on the tip guard and refuses to start with a clock
   before the compiled anchor. `assemble-caution.sh` takes `--network`, and
   `deploy.sh` reads `NETWORK`.
+- The hub's `OPERATORS.md` and `zeronym/README.md` document a known gap: any
+  submitter can fill the hub's queue for free, since 1024 junk payloads of 64
+  bytes fill its entry cap, and over the mixnet each refusal while it is full is
+  silent. Unparseable junk holds the queue for one flush window; forged parseable
+  junk is retried and holds it for up to nine. `OPERATORS.md` also corrects two stale claims: a hub
+  restart makes every shim lose its diverts silently, and the 1024-entry cap
+  binds before the 64 MiB byte budget. Reported by
+  [@ouicate](https://github.com/ouicate).
 
 ## v29 - 2026-09-07
 
