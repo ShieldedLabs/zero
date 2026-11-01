@@ -131,6 +131,11 @@ Notes that apply to both:
 - `--indexers` are literal IPv4 addresses. The enclave resolves **no DNS** for
   them (there is no port 53 rule for that path), so a poisoned answer has nothing
   to poison.
+- **Each diverting shim's `--backend` operator must differ from the operator of
+  the `--indexers`.** On a queue miss the hub looks the txid up there,
+  so a hub pointed at a shim's own backend hands that backend every such txid.
+  Compare operators, beyond IPs and names: one operator can serve two addresses
+  under two names.
 - **`--indexer-tls` is not optional in practice.** Without it the broadcast hop
   is plaintext and the enclave's parent host reads every batch in the clear
   moments before it is public — which would undo most of the reason this runs in
@@ -196,6 +201,10 @@ force-push, and it must land BEFORE the enclave push: a verifier who arrives in
 the gap gets a PCR mismatch indistinguishable from a compromised enclave. This
 step was skipped by hand once (2026-08-17) and caught only by checking; put it in
 the same script as the enclave push, or use `deploy.sh`, which does it.
+
+A PASS proves the enclave runs the tree in `zero-hub`. Steps 3 to 5 of the
+[auditor procedure](../../../README.md#usage) tie that tree to
+`ShieldedLabs/zero`, check its parameters, and check the network path.
 
 **Measured, 2026-08-17, from fresh public clones with the build cache cleared:**
 hub-6 (`zero-hub` @ `a1e703a8`) and shim-9 (`zero-shim` @ `cc70e9af`) both
@@ -401,11 +410,12 @@ before the anchor.
 ## Known failure modes
 
 **1. A restart changes your address and silently breaks every shim.** The identity
-lives in RAM. A client *reconnect* keeps it — that was fixed deliberately, and
-matters because the SDK reconnects often — but a **process restart** mints a new
-one. Every shim then fails its diverts closed until re-pointed, and nothing tells
-them. After 60 consecutive failed rebuilds the hub also deliberately takes a fresh
-identity to get back onto the mixnet at all, logging loudly.
+lives in RAM. A client *reconnect* keeps it (fixed deliberately, because the SDK
+reconnects often), but a **process restart** mints a new one. Every shim keeps
+sending to the old address and keeps answering its wallets with success, so each
+migration is silently lost until that shim is re-pointed. After 60 consecutive
+failed rebuilds the hub also deliberately takes a fresh identity to get back onto
+the mixnet at all, logging loudly.
 
 - **Detect:** poll `/nym-address` and alert on change.
 - **Recover:** send the new address to every shim operator; each re-assembles and
@@ -422,8 +432,44 @@ confirms.** Resends are safe — the queue deduplicates on payload hash.
 emits continuous cover traffic. When it runs out, reception stops. No ticketbook
 (paid credential) mechanism is wired up yet.
 
-**4. Anyone who knows your address can submit.** There is no submitter ACL. The
-64 MiB queue budget is the only thing bounding an abusive submitter.
+**4. Anyone can fill your queue for free, for one to nine flush windows.**
+Submission is open to all. Three doors reach the queue: the mixnet address you
+publish at `/nym-address`, clearnet `POST /` when `ZIH_HTTP_SUBMIT=true`, and the wallet port
+of every shim, which diverts unparseable bytes on purpose. The queue holds 64 MiB
+or 1024 entries (`MAX_QUEUE_ENTRIES`), whichever fills first, and the entry cap
+binds first: 1024 junk payloads of 64 bytes fill it. Junk costs its sender
+nothing. Forged parseable bytes work as well as unparseable ones, because the node
+is the only judge of validity. While the junk is queued, every honest submission
+is refused `queue_full`:
+
+- A clearnet shim tells its wallet (`error_code -1`).
+- Over the mixnet the wallet was already told success, so the migration is lost
+  silently. A ZIP 318 migration expires 30 to 60 days out, and the wallet keeps
+  its notes locked until then.
+
+How long a burst lasts depends on the junk:
+
+- **Unparseable junk** leaves at the flush that publishes it. Your indexers
+  reject each entry once, and admission opens again. To hold the queue shut, a
+  sender must repeat the burst every window.
+- **Forged parseable junk** stays longer. The node answers with a verification
+  error, which the hub reads as `Retryable`, so each entry goes back on the queue.
+  An entry with no expiry (`nExpiryHeight == 0`) or a far expiry leaves only when
+  its attempts pass `MAX_REQUEUE_ATTEMPTS` (8). That is nine publications, so one
+  burst holds the queue for up to nine flush windows, about 3 to 4 hours.
+
+- **Detect:** `submission refused at admission` with `reason=queue_full`, and a
+  `flush published` line with `flush_size` near 1024 and `achieved_batch_size`
+  near zero.
+- **Recover:** wait it out. The next flush clears unparseable junk. Forged
+  parseable junk clears at the flush where `dropped_exhausted` is near 1024;
+  until then each `flush published` line shows `requeued` near 1024. That flush
+  also logs `gave up on migrations that could not be placed; they exist nowhere
+  else`. Read its `reason` field, a sample failure from that flush: a
+  verification error means the junk is leaving, and a transport failure means an
+  outage dropped honest migrations. A small count is still lost migrations. A
+  check of proofs and signatures at admission, so that each junk entry costs a
+  real proof, is future work.
 
 ## If the hub goes down: the single-hub recovery runbook
 
@@ -523,7 +569,7 @@ expensive and rare.
 | env var | meaning | you point it at |
 |---|---|---|
 | `ZIH_LISTEN` | listen address inside the enclave | `0.0.0.0:8083` (the port Caution's proxy forwards to) |
-| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast through | your indexers; every batch member goes to all of them |
+| `ZIH_INDEXERS` | comma-separated literal `IPv4:port` list to broadcast and look up through | indexers whose operator differs from each diverting shim's backend operator; every batch member goes to all of them |
 | `ZIH_INDEXER_TLS` | DNS name the indexer certificates must carry | **required in practice** — without it the hop is plaintext |
 | `ZIH_NETWORK` | the network the indexers serve: `mainnet`, `testnet` or `regtest` | **required**; `mainnet` bounds every tip the indexers report (see "Tip guard") |
 | `ZIH_NYM` | receive submissions over the mixnet | `true` |

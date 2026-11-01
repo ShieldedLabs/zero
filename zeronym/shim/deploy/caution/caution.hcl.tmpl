@@ -5,17 +5,14 @@
 # in enclave RAM. This one ships a single 4.4 MB static binary that holds no
 # state at all, so it is cheap enough to run continuously.
 #
-# WHAT IT PROVES, which is the entire reason to deploy it. The Zeronym trust
-# model asks an auditor to rebuild the shim from source, reach the published
-# hash, and check that hash against the one bound into the enclave attestation.
-# Reproducibility alone proves only that source and binary agree; attestation
-# alone proves only that SOME binary runs in a genuine enclave. Together they
-# say: the code you read is the code that is running, and the operator cannot
-# see the traffic. Neither half is worth much without the other, and until this
-# deploy exists the attestation half has never been demonstrated for the shim.
-#
-# The binary under audit is the one recorded in deploy/EXPECTED_SHA256, built
-# from the same commit this deploy repo was assembled from.
+# WHAT IT PROVES, which is the entire reason to deploy it. The chain has two
+# halves. deploy/EXPECTED_SHA256 proves the build is deterministic: this commit
+# yields this binary on any machine. The attestation binds the enclave to a
+# rebuild of the app-source repo named below, which `caution verify` checks on
+# PCR0, PCR1, PCR2 and the TLS binding. The attestation carries no binary hash.
+# Re-assembling from ShieldedLabs/zero and diffing against the app-source repo
+# ties the two halves together; the auditor procedure in zeronym/README.md
+# (Usage, Auditors) lists every step.
 
 enclave "__ENCLAVE_NAME__" {
   build {
