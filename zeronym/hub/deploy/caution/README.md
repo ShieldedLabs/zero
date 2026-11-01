@@ -35,6 +35,9 @@ caution verify --attestation-url https://<domain>/attestation
 ```
 
 Run it from a FRESH CLONE of the public repo, never from a deploying tree.
+This is step 2 of the [auditor procedure](../../../README.md#usage). A PASS
+proves the enclave runs the tree its operator published; steps 3 to 5 tie that
+tree to `ShieldedLabs/zero`, check its parameters, and check the network path.
 Require **all three PCRs and the TLS binding**. Do not accept a PCR2 match alone:
 hub and shim, two entirely different binaries, produce byte-identical PCR2
 (`21b9efbc...`), so PCR2 identifies the platform, not the code.
@@ -68,12 +71,16 @@ hub.
 ```sh
 sh zeronym/hub/deploy/caution/assemble-caution.sh \
   --name zeronym-hub-1 \
-  --indexers 66.42.124.202:443 \
-  --indexer-tls lwd.shieldedinfra.net \
+  --indexers 203.0.113.10:443 \
+  --indexer-tls indexer.example.org \
   --network mainnet \
   --tls-domain hub.example.org \
   [--debug]
 ```
+
+Each diverting shim's `--backend` operator must differ from the operator of
+these indexers. On a queue miss the hub looks the txid up there, so a hub
+pointed at a shim's own backend hands that backend every such txid.
 
 Then, from the assembled directory:
 
@@ -83,19 +90,17 @@ caution apps create      # no --name: auto-names the app, adds the 'caution' rem
 git push caution main    # builds and boots the enclave; prints its IP
 ```
 
-Point the hub's DNS name at the enclave IP the deploy prints, and set the shim's
-`ZIS_HUB` to that address and `ZIS_HUB_TLS` to `--tls-domain` so the shim
-verifies the enclave's in-enclave certificate.
+Point the hub's DNS name at `<app-id>.apps.caution.sh` with a CNAME. Set the
+shim's `ZIS_HUB` to the address that name resolves to, with port `:443`, and
+`ZIS_HUB_TLS` to `--tls-domain`. The shim checks the certificate name only.
+Step 4 of the auditor procedure checks the address against the attested hub at
+audit time.
 
 ## Verify the attestation
 
-`caution verify` (from the assembled directory; or `POST /attestation`) returns
-the measurement bound to the running EIF. Confirm it against a local reproduce:
-
-```sh
-git checkout <the PROVENANCE commit>
-sh zeronym/hub/deploy/reproduce.sh   # must print the hash in ../EXPECTED_SHA256
-```
+Run the [auditor procedure](../../../README.md#usage) against the hub's
+domain. Its step 4 also covers each shim that diverts here: the shim's
+`ZIS_HUB` must be this hub's address.
 
 ## Cutover note (incremental mainnet)
 
