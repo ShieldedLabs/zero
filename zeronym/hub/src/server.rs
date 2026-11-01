@@ -69,7 +69,10 @@ const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// reachable by explicit config for tests and local demos (NYM_PLAN M7).
 const SUBMIT_PATH: &str = "/";
 
-/// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
+/// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body. Gated
+/// with [`SUBMIT_PATH`] on [`ServeOptions::http_submit`]: a clearnet shim uses
+/// both, and a Nym shim looks up over the mixnet. Open, it tells anyone whether
+/// a txid sits in the queue.
 const TRANSACTION_PATH: &str = "/transaction";
 
 /// How many clearnet lookups may be in flight at once.
@@ -287,10 +290,11 @@ impl NymAddress {
 pub struct ServeOptions {
     /// The hub's Nym address, published at [`NYM_ADDRESS_PATH`].
     pub nym_address: NymAddress,
-    /// Accept clearnet submissions at [`SUBMIT_PATH`]. **Off by default**: the
-    /// mixnet is the submit path now, and an open unauthenticated `POST /` on a
-    /// `0.0.0.0/0` ingress is attack surface with no legitimate user. Turn it on
-    /// only for a transitional clearnet shim, a local demo, or a test.
+    /// Serve the clearnet hop: submissions at [`SUBMIT_PATH`] and lookups at
+    /// [`TRANSACTION_PATH`]. **Off by default**: the mixnet is the submit path
+    /// now, and an open unauthenticated `POST /` on a `0.0.0.0/0` ingress is
+    /// attack surface with no legitimate user. Turn it on only for a
+    /// transitional clearnet shim, a local demo, or a test.
     pub http_submit: bool,
 }
 
@@ -419,12 +423,12 @@ impl Hub {
             // This used to return the queued transaction's raw bytes to whoever
             // asked. The lookup is unauthenticated on both transports by design
             // -- the mixnet address is published at `/nym-address` and clearnet
-            // `POST /transaction` is served unconditionally -- so those bytes
-            // were available to anyone, for a migration that has not been
-            // broadcast anywhere yet. A third party could take them and publish
-            // first, which destroys the batching this hub exists to provide, and
-            // does it before the batch that was supposed to hide the transaction
-            // ever forms (Hornby review, 2026-08-19).
+            // `POST /transaction` answers anyone while `http_submit` is on --
+            // so those bytes were available to anyone, for a migration that has
+            // not been broadcast anywhere yet. A third party could take them and
+            // publish first, which destroys the batching this hub exists to
+            // provide, and does it before the batch that was supposed to hide
+            // the transaction ever forms (Hornby review, 2026-08-19).
             //
             // What the design actually needs from this path is preserved. The
             // shim is stateless BECAUSE the hub can answer "yes, height 0" for a
@@ -438,7 +442,9 @@ impl Hub {
             // still discloses that a given txid is queued here. Closing that too
             // means answering NotFound, which costs a wallet the ability to tell
             // "pending" from "never seen". That is a product decision, not a
-            // code one, and it is left open deliberately.
+            // code one, and it is left open deliberately. A Nym hub answers it
+            // on the mixnet only: the clearnet lookup path closes with the
+            // clearnet submit path (external report, @ouicate).
             tracing::debug!(source = "queue", "transaction lookup answered");
             return LookupOutcome::Found {
                 data: Zeroizing::new(Vec::new()),
@@ -569,10 +575,10 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
 /// old hub treated EVERY POST as a submission, so a path typo (or a shim posting
 /// a lookup to the wrong URL) silently queued garbage.
 ///
-/// `SUBMIT_PATH` falls through to that `404` arm unless
-/// [`ServeOptions::http_submit`] is set — so a disabled submit path is
+/// `SUBMIT_PATH` and `TRANSACTION_PATH` fall through to that `404` arm unless
+/// [`ServeOptions::http_submit`] is set, so a disabled clearnet hop is
 /// indistinguishable from one that never existed, and a scanner learns nothing
-/// about whether this hub could have accepted a submission.
+/// about whether this hub could have accepted a submission or a lookup.
 async fn handle(
     req: Request<Incoming>,
     hub: Hub,
@@ -587,7 +593,7 @@ async fn handle(
             Method::POST => submit(req, hub).await,
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
-        TRANSACTION_PATH => match method {
+        TRANSACTION_PATH if options.http_submit => match method {
             // REFUSED, not queued, when every slot is held. Parking it would
             // rebuild the unbounded pile the bound exists to prevent -- the same
             // reasoning the mixnet arm records. 503 is the honest answer: the

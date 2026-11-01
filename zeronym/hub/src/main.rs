@@ -143,7 +143,8 @@ async fn main() -> Result<(), BoxError> {
     // from a 404.
     if config.http_submit {
         tracing::warn!(
-            "--http-submit: accepting UNAUTHENTICATED clearnet submissions on POST /. \
+            "--http-submit: accepting UNAUTHENTICATED clearnet submissions on POST / \
+             and lookups on POST /transaction. \
              Intended for a transitional shim or a local demo, not a mixnet deployment"
         );
     }

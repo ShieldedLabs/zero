@@ -92,6 +92,15 @@ date) before dispatching the release.
   included, was gone. Only a `404` with the hub's `transaction not found` body
   now means absence; any other `404` fails closed as `UNAVAILABLE`, as the
   mixnet path already did.
+- zero-indexer: every hub served its clearnet lookup route, `POST /transaction`,
+  to anyone, so anyone holding a candidate txid could ask whether it sat in the
+  queue. A Nym shim looks up over the mixnet, so on a Nym hub the route served
+  only strangers. It now closes with the clearnet submit path, behind
+  `ZIH_HTTP_SUBMIT`. A clearnet pair keeps it, and the mixnet lookup still
+  answers the same question; `zeronym/README.md` lists that residual. Deploy
+  clearnet shims with the strict lookup `404` (above) before this hub: an older
+  shim reads the closed route's `404` as "no such transaction". Reported by
+  [@ouicate](https://github.com/ouicate).
 
 ### Changed
 
