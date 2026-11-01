@@ -90,9 +90,11 @@ caution apps create      # no --name: auto-names the app, adds the 'caution' rem
 git push caution main    # builds and boots the enclave; prints its IP
 ```
 
-Point the hub's DNS name at the enclave IP the deploy prints, and set the shim's
-`ZIS_HUB` to that address and `ZIS_HUB_TLS` to `--tls-domain` so the shim
-verifies the enclave's in-enclave certificate.
+Point the hub's DNS name at `<app-id>.apps.caution.sh` with a CNAME. Set the
+shim's `ZIS_HUB` to the address that name resolves to, with port `:443`, and
+`ZIS_HUB_TLS` to `--tls-domain`. The shim checks the certificate name only.
+Step 4 of the auditor procedure checks the address against the attested hub at
+audit time.
 
 ## Verify the attestation
 
