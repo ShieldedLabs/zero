@@ -202,7 +202,8 @@ pub enum Admission {
     /// These exact bytes, or another signing of the same proofs, are already
     /// queued. Idempotent by construction: honest resends and cross-hub
     /// duplicates collapse, because identical bytes hash identically, and a
-    /// re-signing collapses on its bundle keys.
+    /// re-signing collapses on its bundle keys. `txid` is the held entry's,
+    /// which is what the hub will publish and a lookup will find.
     Duplicate {
         txid: Option<String>,
     },
@@ -315,17 +316,22 @@ impl Inner {
         len: usize,
         max_bytes: usize,
     ) -> Result<(Lane, Option<[u8; 32]>), Admission> {
-        let duplicate = || Admission::Duplicate {
-            txid: inspected.txid.clone(),
-        };
         if self.entries.contains_key(key) {
-            return Err(duplicate());
+            return Err(Admission::Duplicate {
+                txid: inspected.txid.clone(),
+            });
         }
         // Another signing of proofs already held. Collapsed like identical
         // bytes: only one of them can be mined, and the held one will be
-        // published.
-        if self.holds_any(&inspected.bundle_keys) {
-            return Err(duplicate());
+        // published, so its txid is the answer.
+        if let Some(held) = inspected
+            .bundle_keys
+            .iter()
+            .find_map(|bundle_key| self.bundle_keys.get(bundle_key))
+        {
+            return Err(Admission::Duplicate {
+                txid: self.entries.get(held).and_then(|entry| entry.txid.clone()),
+            });
         }
         if inspected
             .bundle_keys
@@ -933,6 +939,32 @@ mod tests {
         ));
         assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
         assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn a_collapsed_signing_answers_with_the_held_txid() {
+        // Same proofs, different effects, so a different txid. The answer must
+        // name what the hub holds and will publish.
+        let q = Queue::new();
+        let held = admission::inspect(V6_ORCHARD_ONLY);
+        q.lock().insert(Entry {
+            key: [7; 32],
+            txid: Some("held".into()),
+            expiry: None,
+            tx_bytes: Zeroizing::new(vec![0; 8]),
+            attempts: 0,
+            received_height: 100,
+            lane: Lane::Proven,
+            bundle_keys: held.bundle_keys,
+            transparent_outputs: 0,
+            has_child: false,
+        });
+        assert_eq!(
+            q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN),
+            Admission::Duplicate {
+                txid: Some("held".into())
+            }
+        );
     }
 
     #[test]
