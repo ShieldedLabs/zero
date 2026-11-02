@@ -135,6 +135,16 @@ impl Default for View {
 }
 
 impl View {
+    /// Current at `tip`: within [`RESYNC_DEPTH`] of it, last read
+    /// successfully, and not full.
+    fn is_current(&self, tip: u32) -> bool {
+        self.fresh
+            && !self.full
+            && self
+                .synced_to
+                .is_some_and(|synced| synced >= tip.saturating_sub(RESYNC_DEPTH))
+    }
+
     /// Replace everything held from `start` up with `blocks`, read for
     /// `start..=end`. Reads run upward, so anything above `end` is a block a
     /// reorg took back, or one the next read in this round brings back.
@@ -202,14 +212,19 @@ impl ChainNullifiers {
     /// nullifier a reorg took back, so until all are current this refuses
     /// nothing (the module's fail-open).
     pub fn any_revealed(&self, nullifiers: &[[u8; 32]], tip: u32) -> bool {
-        if self.views.is_empty() || self.current(tip) < self.views.len() {
+        if self.views.is_empty() {
             return false;
         }
         let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
         for endpoint in 0..self.views.len() {
+            // Freshness and membership under one hold of the view's lock, so a
+            // view marked stale between them cannot refuse.
             let Some(view) = self.view(endpoint) else {
                 return false;
             };
+            if !view.is_current(tip) {
+                return false;
+            }
             candidates.retain(|nullifier| view.nullifiers.contains(nullifier));
             if candidates.is_empty() {
                 return false;
@@ -223,13 +238,8 @@ impl ChainNullifiers {
     fn current(&self, tip: u32) -> usize {
         (0..self.views.len())
             .filter(|endpoint| {
-                self.view(*endpoint).is_some_and(|view| {
-                    view.fresh
-                        && !view.full
-                        && view
-                            .synced_to
-                            .is_some_and(|synced| synced >= tip.saturating_sub(RESYNC_DEPTH))
-                })
+                self.view(*endpoint)
+                    .is_some_and(|view| view.is_current(tip))
             })
             .count()
     }
