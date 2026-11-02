@@ -614,8 +614,7 @@ impl Queue {
     /// Remember the proofs of entries the network has judged, so the same
     /// proofs are refused from now on.
     ///
-    /// Called for an entry rejected or already mined at a flush, and by
-    /// [`Self::requeue`] for one out of attempts. An entry a node accepted, or
+    /// Called for an entry rejected or already mined at a flush. An entry a node accepted, or
     /// one a mempool already holds (likely published by the other hub), stays
     /// unburned, so if it drops out of every mempool, its wallet's resend gets
     /// through. Burning an already-mined entry is what stops a mined
@@ -682,12 +681,11 @@ impl Queue {
                 continue;
             }
             if entry.attempts > MAX_REQUEUE_ATTEMPTS {
-                // Out of attempts is a verdict too: behind an indexer that
-                // relays every node rejection as retryable, a proof the network
-                // refuses ends here, and is burned so it stays out.
-                for bundle_key in &entry.bundle_keys {
-                    inner.burned.insert(*bundle_key);
-                }
+                // Dropped, never burned: the attempts count every transport
+                // failure, so running out says the indexer was unreachable as
+                // often as it says the network refused. A wallet's resend then
+                // starts clean. A verdict the indexer did return is burned in
+                // the flush.
                 out.dropped_exhausted += 1;
                 continue;
             }
@@ -1058,9 +1056,9 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_out_of_attempts_is_burned_too() {
-        // Behind an indexer that relays a node's refusal as retryable, running
-        // out of attempts is the only verdict a refused proof ever gets.
+    fn a_proof_out_of_attempts_is_dropped_and_its_resend_admitted() {
+        // Attempts count transport failures too: an indexer down for every
+        // attempt says nothing about the proofs.
         let q = Queue::new();
         assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
         let mut last = Requeued::default();
@@ -1068,10 +1066,7 @@ mod tests {
             last = q.requeue(q.drain_shuffled(), 100, N, MARGIN);
         }
         assert_eq!(last.dropped_exhausted, 1);
-        assert_eq!(
-            q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN),
-            Admission::Refused(Refusal::Rejected)
-        );
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
     }
 
     #[test]
