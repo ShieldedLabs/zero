@@ -60,6 +60,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::admission::{self, Inspected, Lane};
+use zebra_chain::transparent::OutPoint;
 
 /// Per-entry ceiling, matching the fixed frame the batching design pads to.
 ///
@@ -253,6 +254,9 @@ pub struct Entry {
     pub transparent_outputs: usize,
     /// Whether a second leg already rides on this entry's proofs.
     pub has_child: bool,
+    /// The outpoints a transparent-only spend consumes, so a parent that
+    /// arrives or returns after it knows a leg already spends it.
+    pub spends: Vec<OutPoint>,
 }
 
 struct Inner {
@@ -266,7 +270,19 @@ struct Inner {
 }
 
 impl Inner {
-    fn insert(&mut self, entry: Entry) {
+    fn insert(&mut self, mut entry: Entry) {
+        // One leg per parent, in whatever order they arrive: a leg held before
+        // its parent (admitted first, or while the parent was out in a flush)
+        // already spends it.
+        if !entry.bundle_keys.is_empty() && !entry.has_child {
+            entry.has_child = entry.txid.as_deref().is_some_and(|txid| {
+                self.entries.values().any(|held| {
+                    held.spends
+                        .iter()
+                        .any(|spend| spend.hash.to_string() == txid)
+                })
+            });
+        }
         self.bytes = self.bytes.saturating_add(entry.tx_bytes.len());
         self.lanes[lane_index(entry.lane)] += 1;
         for bundle_key in &entry.bundle_keys {
@@ -572,6 +588,7 @@ impl Queue {
             bundle_keys: inspected.bundle_keys,
             transparent_outputs: inspected.transparent_outputs,
             has_child: false,
+            spends: inspected.spends,
         });
 
         Admission::Admitted { txid }
@@ -1000,6 +1017,7 @@ mod tests {
             bundle_keys: held.bundle_keys,
             transparent_outputs: 0,
             has_child: false,
+            spends: Vec::new(),
         });
         assert_eq!(
             q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN),
@@ -1113,6 +1131,40 @@ mod tests {
         assert!(admitted(q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN)));
         assert_eq!(q.requeue(batch, 100, N, MARGIN).held, 0);
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn a_leg_held_before_its_parent_counts_as_its_one_leg() {
+        // Admitted first, or while the parent was out in a flush: either way
+        // the parent's proofs then pay for no further leg.
+        let first = second_leg(V6_ORCHARD_ONLY, 1000);
+        let other = second_leg(V6_ORCHARD_ONLY, 2000);
+
+        let q = Queue::new();
+        assert!(admitted(q.admit(&first, 100, N, MARGIN)));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(&other, 100, N, MARGIN)));
+        let lanes: Vec<Lane> = q
+            .drain_shuffled()
+            .iter()
+            .filter(|entry| entry.bundle_keys.is_empty())
+            .map(|entry| entry.lane)
+            .collect();
+        assert_eq!(lanes, [Lane::Transparent; 2]);
+
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let out = q.drain_shuffled();
+        assert!(admitted(q.admit(&first, 100, N, MARGIN)));
+        assert_eq!(q.requeue(out, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(&other, 100, N, MARGIN)));
+        let lanes: Vec<Lane> = q
+            .drain_shuffled()
+            .iter()
+            .filter(|entry| entry.bundle_keys.is_empty())
+            .map(|entry| entry.lane)
+            .collect();
+        assert_eq!(lanes, [Lane::Transparent; 2]);
     }
 
     #[test]
@@ -1608,6 +1660,7 @@ mod tests {
             bundle_keys: Vec::new(),
             transparent_outputs: 0,
             has_child: false,
+            spends: Vec::new(),
         };
 
         // Tip 200 is past the entry's expiry of 150, so no future flush can

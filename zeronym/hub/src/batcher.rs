@@ -1627,6 +1627,7 @@ mod tests {
                 bundle_keys: Vec::new(),
                 transparent_outputs: 0,
                 has_child: false,
+                spends: Vec::new(),
             }],
             TIP - 5,
             N,
