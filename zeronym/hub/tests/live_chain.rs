@@ -64,7 +64,7 @@ async fn syncs_the_orchard_nullifiers_since_nu6_3_from_a_real_indexer() {
     let revealed = ChainNullifiers::new(1);
     let started = std::time::Instant::now();
     let mut rounds = 1;
-    while sync_once(&revealed, &client, sync_from(Network::Mainnet)).await == 0 {
+    while sync_once(&revealed, &client, sync_from(Network::Mainnet), u32::MAX).await == 0 {
         assert!(rounds < 5, "the read never reached the tip");
         rounds += 1;
     }

@@ -164,7 +164,7 @@ async fn a_copy_of_a_transaction_every_indexer_reports_mined_is_refused() {
     let queue = Queue::watching(revealed.clone());
 
     assert_eq!(
-        sync_once(&revealed, &chain, FROM).await,
+        sync_once(&revealed, &chain, FROM, TIP).await,
         2,
         "both views current"
     );
@@ -190,7 +190,7 @@ async fn one_indexer_alone_blocks_nothing() {
     let revealed = Arc::new(ChainNullifiers::new(2));
     let queue = Queue::watching(revealed.clone());
 
-    sync_once(&revealed, &chain, FROM).await;
+    sync_once(&revealed, &chain, FROM, TIP).await;
     assert!(matches!(
         admit(&queue, PROVEN_A),
         Admission::Admitted { .. }
@@ -203,8 +203,8 @@ async fn a_sync_reads_in_chunks_and_resumes_inside_the_reorg_window() {
     let chain = ChainClient::new(vec![indexer.addr], None).unwrap();
     let revealed = ChainNullifiers::new(1);
 
-    sync_once(&revealed, &chain, FROM).await;
-    sync_once(&revealed, &chain, FROM).await;
+    sync_once(&revealed, &chain, FROM, TIP).await;
+    sync_once(&revealed, &chain, FROM, TIP).await;
     let resume = u64::from(TIP - RESYNC_DEPTH + 1);
     assert_eq!(
         *indexer.ranges.lock().unwrap(),
@@ -229,7 +229,7 @@ async fn a_chunk_too_dense_to_read_shrinks_until_it_passes() {
     let revealed = ChainNullifiers::new(1);
 
     let mut rounds = 0;
-    while sync_once(&revealed, &chain, FROM).await == 0 {
+    while sync_once(&revealed, &chain, FROM, TIP).await == 0 {
         rounds += 1;
         assert!(rounds < 20, "the read never reached the tip");
     }
@@ -237,5 +237,20 @@ async fn a_chunk_too_dense_to_read_shrinks_until_it_passes() {
     assert_eq!(
         revealed.held(),
         vec![admission::inspect(PROVEN_A).orchard_nullifiers.len()]
+    );
+}
+
+#[tokio::test]
+async fn a_read_stops_at_the_cap_above_the_tracked_tip() {
+    // The indexer reports TIP; the hub's tracked tip allows no more than 1,200.
+    let indexer = spawn_indexer(BTreeMap::new()).await;
+    let chain = ChainClient::new(vec![indexer.addr], None).unwrap();
+    let revealed = ChainNullifiers::new(1);
+
+    sync_once(&revealed, &chain, FROM, 1200).await;
+    assert_eq!(revealed.synced_to(), vec![Some(1200)]);
+    assert_eq!(
+        *indexer.ranges.lock().unwrap(),
+        vec![(1, 1000), (1001, 1200)]
     );
 }

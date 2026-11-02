@@ -18,7 +18,12 @@
 //! older proof verifies under the hub's key) to that indexer's tip, about a
 //! minute of reads on mainnet, inside the 5-minute tip warm-up. Then every
 //! [`SYNC_INTERVAL`] it re-reads from [`RESYNC_DEPTH`] blocks back, so a reorg
-//! inside the tip tracker's allowance replaces what it saw.
+//! inside the tip tracker's allowance replaces what it saw. Each indexer runs
+//! on its own task, and reads no higher than the tracked tip plus
+//! [`RESYNC_DEPTH`].
+//!
+//! Admission does not wait for the first read. Until every view is current the
+//! check passes copies, and the hub logs which state it is in on each change.
 //!
 //! **Unanimity.** A nullifier refuses admission only when EVERY configured
 //! indexer reports it. An indexer sees every transaction the hub publishes, so
@@ -47,8 +52,13 @@ use crate::config::Network;
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How many blocks below what it last read each sync reads again. The tip
-/// tracker allows a 10-block reorg; this matches it.
+/// tracker allows a 10-block reorg; this matches it. Also how far an indexer's
+/// tip may run above the tracked tip, and how far a view may lag it and still
+/// count as current.
 pub const RESYNC_DEPTH: u32 = 10;
+
+/// How often an indexer's task looks for the tracked tip before its first read.
+const FIRST_TIP_POLL: Duration = Duration::from_secs(1);
 
 /// The most blocks per `GetBlockRangeNullifiers` call. Measured 2026-10-28
 /// against a public lightwalletd: 0.6 s and about 100 KB for 1 000 mainnet
@@ -186,13 +196,32 @@ impl ChainNullifiers {
         if self.views.is_empty() {
             return false;
         }
-        nullifiers.iter().any(|nullifier| {
-            let nullifier = held(nullifier);
-            (0..self.views.len()).all(|endpoint| {
-                self.view(endpoint)
-                    .is_some_and(|view| view.nullifiers.contains(&nullifier))
+        let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
+        for endpoint in 0..self.views.len() {
+            let Some(view) = self.view(endpoint) else {
+                return false;
+            };
+            candidates.retain(|nullifier| view.nullifiers.contains(nullifier));
+            if candidates.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// How many views are current at `tip`: within [`RESYNC_DEPTH`] of it, and
+    /// not full.
+    fn current(&self, tip: u32) -> usize {
+        (0..self.views.len())
+            .filter(|endpoint| {
+                self.view(*endpoint).is_some_and(|view| {
+                    !view.full
+                        && view
+                            .synced_to
+                            .is_some_and(|synced| synced >= tip.saturating_sub(RESYNC_DEPTH))
+                })
             })
-        })
+            .count()
     }
 
     /// Record what `endpoint` reported for `start..=end`, replacing whatever it
@@ -239,6 +268,9 @@ impl ChainNullifiers {
             .collect()
     }
 
+    /// Where `endpoint`'s next read starts. If its tip fell more than
+    /// [`RESYNC_DEPTH`] below `synced_to`, entries above the new tip stay until
+    /// the chain grows back over them; unanimity keeps that harmless.
     fn resume_from(&self, endpoint: usize, from: u32) -> u32 {
         self.view(endpoint)
             .and_then(|view| view.synced_to)
@@ -251,29 +283,37 @@ impl ChainNullifiers {
     }
 }
 
-/// Bring every indexer's view up to its own tip, concurrently. Returns how many
-/// views ended the round current.
-///
-/// An indexer that fails keeps what it had and is retried next round. Logged at
-/// warn, by endpoint and reason, never by anything a submission carried.
-pub async fn sync_once(spent: &ChainNullifiers, chain: &ChainClient, from: u32) -> usize {
+/// Bring every indexer's view up to its own tip, capped at `max_tip`, all at
+/// once. Returns how many views ended the round current. [`run`] reads each
+/// indexer on its own task instead; this is one round of all of them.
+pub async fn sync_once(
+    spent: &ChainNullifiers,
+    chain: &ChainClient,
+    from: u32,
+    max_tip: u32,
+) -> usize {
     let rounds = chain
         .endpoints()
         .iter()
         .enumerate()
-        .map(|(endpoint, addr)| sync_endpoint(spent, chain, endpoint, *addr, from));
+        .map(|(endpoint, addr)| sync_endpoint(spent, chain, endpoint, *addr, from, max_tip));
     join_all(rounds).await.into_iter().filter(|ok| *ok).count()
 }
 
+/// Bring one indexer's view up to its tip, capped at `max_tip`.
+///
+/// An indexer that fails keeps what it had and is retried next round. Logged at
+/// warn, by endpoint and reason, never by anything a submission carried.
 async fn sync_endpoint(
     spent: &ChainNullifiers,
     chain: &ChainClient,
     endpoint: usize,
     addr: SocketAddr,
     from: u32,
+    max_tip: u32,
 ) -> bool {
     let tip = match chain.tip_height_of(addr).await {
-        Ok(tip) => tip,
+        Ok(tip) => tip.min(max_tip),
         Err(err) => {
             tracing::warn!(%addr, reason = %err, "nullifier sync: no tip from this indexer");
             return false;
@@ -316,10 +356,8 @@ async fn sync_endpoint(
     true
 }
 
-/// Keep the set current for the life of the process.
-///
-/// Waits for the tip tracker's first answer, because the indexers' tips are
-/// what bound each read and a hub that knows no height admits nothing yet.
+/// Keep the set current for the life of the process: one task per indexer,
+/// and this one logging whether the check is on, at each change.
 pub async fn run(
     spent: Arc<ChainNullifiers>,
     chain: Arc<ChainClient>,
@@ -327,22 +365,68 @@ pub async fn run(
     network: Network,
 ) {
     let from = sync_from(network);
-    let mut caught_up = false;
+    for (endpoint, addr) in chain.endpoints().iter().copied().enumerate() {
+        tokio::spawn(sync_forever(
+            spent.clone(),
+            chain.clone(),
+            tip.clone(),
+            endpoint,
+            addr,
+            from,
+        ));
+    }
+
+    let started = Instant::now();
+    let mut on: Option<bool> = None;
     loop {
-        if tip.observed_height() > 0 {
-            let started = Instant::now();
-            let current = sync_once(&spent, &chain, from).await;
-            if !caught_up && current == chain.endpoints().len() {
-                caught_up = true;
-                tracing::info!(
-                    from,
-                    synced_to = ?spent.synced_to(),
-                    held = ?spent.held(),
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "nullifier set synced; copies of mined Orchard transactions are refused"
-                );
+        let observed = tip.observed_height();
+        if observed > 0 {
+            let current = spent.current(observed);
+            let now_on = current == spent.views.len();
+            if on != Some(now_on) {
+                on = Some(now_on);
+                if now_on {
+                    tracing::info!(
+                        synced_to = ?spent.synced_to(),
+                        held = ?spent.held(),
+                        elapsed_s = started.elapsed().as_secs(),
+                        "nullifier set synced; copies of mined Orchard transactions are refused"
+                    );
+                } else {
+                    tracing::warn!(
+                        current,
+                        indexers = spent.views.len(),
+                        tip = observed,
+                        synced_to = ?spent.synced_to(),
+                        held = ?spent.held(),
+                        "nullifier set not current at every indexer; copies of mined Orchard \
+                         transactions pass"
+                    );
+                }
             }
         }
+        tokio::time::sleep(SYNC_INTERVAL).await;
+    }
+}
+
+/// One indexer's reads, for the life of the process. Waits for the tip
+/// tracker's first answer, which caps each read.
+async fn sync_forever(
+    spent: Arc<ChainNullifiers>,
+    chain: Arc<ChainClient>,
+    tip: Arc<TipTracker>,
+    endpoint: usize,
+    addr: SocketAddr,
+    from: u32,
+) {
+    loop {
+        let observed = tip.observed_height();
+        if observed == 0 {
+            tokio::time::sleep(FIRST_TIP_POLL).await;
+            continue;
+        }
+        let max_tip = observed.saturating_add(RESYNC_DEPTH);
+        sync_endpoint(&spent, &chain, endpoint, addr, from, max_tip).await;
         tokio::time::sleep(SYNC_INTERVAL).await;
     }
 }
@@ -459,6 +543,16 @@ mod tests {
             set.adapt_chunk(0, true);
         }
         assert_eq!(set.chunk(0), SYNC_CHUNK_BLOCKS);
+    }
+
+    #[test]
+    fn a_view_is_current_within_the_reorg_window_and_not_full() {
+        let set = ChainNullifiers::new(2);
+        set.record(0, 1, 100, Vec::new());
+        set.record(1, 1, 80, Vec::new());
+        assert_eq!(set.current(100 + RESYNC_DEPTH), 1);
+        set.view(0).unwrap().full = true;
+        assert_eq!(set.current(100), 0);
     }
 
     #[test]

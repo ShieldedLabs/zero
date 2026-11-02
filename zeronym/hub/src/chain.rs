@@ -23,7 +23,7 @@
 //! is one outage away from never being mined.
 //!
 //! gRPC is spoken directly over hyper rather than through tonic. The surface is
-//! two unary calls, and the enclave constraint (dial a literal address, verify a
+//! three unary calls and one server-streaming read, and the enclave constraint (dial a literal address, verify a
 //! DNS NAME, resolve nothing) is awkward to express through a tonic channel but
 //! trivial here.
 
@@ -78,10 +78,12 @@ const GET_BLOCK_RANGE_NULLIFIERS: &str =
 /// refused before it can grow the nullifier set.
 const MAX_ORCHARD_ACTIONS_PER_BLOCK: usize = 4096;
 
-/// Ceiling on an indexer response body. The three unary calls this client makes
-/// are `GetLightdInfo`, a `SendResponse`, and a `RawTransaction` -- a mined
-/// transaction is at most ~2 MB and the other two are tiny, so nothing
-/// legitimate approaches this. Without it a ~100-byte unauthenticated lookup
+/// Ceiling on an indexer response body, unary or streamed. The three unary
+/// calls this client makes are `GetLightdInfo`, a `SendResponse`, and a
+/// `RawTransaction` -- a mined transaction is at most ~2 MB and the other two
+/// are tiny, so nothing legitimate approaches this. The streamed
+/// `GetBlockRangeNullifiers` read shrinks its range until it fits (see
+/// [`crate::spent::SYNC_CHUNK_BLOCKS`]). Without it a ~100-byte unauthenticated lookup
 /// buys an unbounded allocation in a fixed-size enclave, because the response
 /// was collected with no limit at all. Same value and same reasoning as the
 /// shim's `MAX_HUB_RESPONSE_BYTES`, which bounds the mirror-image hop.
@@ -605,10 +607,11 @@ fn unframe_all<M: Message + Default>(mut body: &[u8]) -> Result<Vec<M>, BoxError
 
 /// The Orchard nullifiers of `blocks`, checked against the range they answer.
 ///
-/// Refused whole on any block outside `start..=end`, out of height order, with
-/// a nullifier that is not 32 bytes, or with more actions than a block can hold:
-/// every one of those is an indexer that cannot be read, and recording part of
-/// its answer would be guessing.
+/// Refused whole unless it holds exactly one block per height of `start..=end`,
+/// in order, each with 32-byte nullifiers and at most the actions a block can
+/// hold. lightwalletd and zaino send every block of the range, empty ones too,
+/// and fail a range above their tip. Recording part of an answer would be
+/// guessing, and a later read resumes above `end`.
 fn orchard_nullifiers_of(
     blocks: &[CompactBlock],
     start: u32,
@@ -626,8 +629,9 @@ fn orchard_nullifiers_of(
                 )
                 .into()
             })?;
-        if out.last().is_some_and(|(last, _)| *last >= height) {
-            return Err("indexer returned blocks out of height order".into());
+        let expected = out.last().map_or(start, |(last, _)| last.saturating_add(1));
+        if height != expected {
+            return Err(format!("indexer returned block {height} where {expected} was due").into());
         }
         let actions = block.vtx.iter().flat_map(|tx| &tx.actions);
         if actions.clone().count() > MAX_ORCHARD_ACTIONS_PER_BLOCK {
@@ -640,6 +644,9 @@ fn orchard_nullifiers_of(
             })
             .collect::<Result<Vec<_>, _>>()?;
         out.push((height, nullifiers));
+    }
+    if out.last().map(|(last, _)| *last) != Some(end) {
+        return Err(format!("indexer reply stopped short of {end}").into());
     }
     Ok(out)
 }
@@ -1284,8 +1291,17 @@ mod tests {
         assert!(orchard_nullifiers_of(&backwards, 10, 11).is_err());
         let mut short = block(10, &[[1; 32]], &[]);
         short.vtx[0].actions[0].nullifier.pop();
-        assert!(orchard_nullifiers_of(&[short], 10, 11).is_err());
+        assert!(orchard_nullifiers_of(&[short], 10, 10).is_err());
         let flood = vec![[1; 32]; MAX_ORCHARD_ACTIONS_PER_BLOCK + 1];
-        assert!(orchard_nullifiers_of(&[block(10, &flood, &[])], 10, 11).is_err());
+        assert!(orchard_nullifiers_of(&[block(10, &flood, &[])], 10, 10).is_err());
+    }
+
+    #[test]
+    fn a_reply_must_cover_every_height_of_the_range() {
+        let stops_early = [block(10, &[], &[])];
+        assert!(orchard_nullifiers_of(&stops_early, 10, 11).is_err());
+        let gap = [block(10, &[], &[]), block(12, &[], &[])];
+        assert!(orchard_nullifiers_of(&gap, 10, 12).is_err());
+        assert!(orchard_nullifiers_of(&[], 10, 10).is_err());
     }
 }
