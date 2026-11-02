@@ -1022,6 +1022,20 @@ mod tests {
     }
 
     #[test]
+    fn a_held_transparent_input_variant_leaves_the_bundle_free() {
+        // Held in the unverified lane, it claims no bundle key, so the bytes
+        // that do verify are still admitted to the proven lane.
+        let q = Queue::new();
+        let variant = admission::tests::with_transparent_input(V6_ORCHARD_ONLY);
+        assert!(admitted(q.admit(&variant, 100, N, MARGIN)));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert_eq!(q.len(), 2);
+        let mut lanes: Vec<Lane> = q.drain_shuffled().iter().map(|entry| entry.lane).collect();
+        lanes.sort_by_key(|lane| *lane as u8);
+        assert_eq!(lanes, [Lane::Proven, Lane::Unverified]);
+    }
+
+    #[test]
     fn a_proof_published_to_a_verdict_is_refused_for_good() {
         // One proof buys one window: after the flush that judged it, no signing
         // of it is admitted again.

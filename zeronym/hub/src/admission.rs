@@ -7,19 +7,22 @@
 //! every submission into one of three **lanes**, each with its own share of the
 //! cap in [`crate::queue`]:
 //!
-//! * [`Lane::Proven`]: the transaction carries an Orchard bundle, and every
-//!   Orchard and Ironwood proof in it verifies under the post-NU6.3 key. The
-//!   signatures are checked too when the sighash needs no chain state, which is
-//!   when the transaction has no transparent inputs (ZIP 244 commits the
-//!   shielded sighash to every prevout's amount and script). The signatures add
-//!   no cost to an attacker, who holds the keys of their own bundle; the proof
-//!   is the cost. A proof that fails is a refusal.
+//! * [`Lane::Proven`]: the transaction carries an Orchard bundle and no
+//!   transparent inputs, and every Orchard and Ironwood proof and signature in
+//!   it verifies under the post-NU6.3 key. The signatures bind the proofs to
+//!   this transaction: a proof alone vouches only for its own public inputs,
+//!   which a bundle copied into another transaction still satisfies. The
+//!   signatures add no cost to the bundle's owner; the proof is the cost. A
+//!   proof or signature that fails is a refusal.
 //! * [`Lane::Transparent`]: a transparent-only spend, the shape of a TEX
 //!   payment's second leg, which the shim diverts and which carries no proof.
 //!   The queue promotes one into the proven lane when its parent is held there.
 //! * [`Lane::Unverified`]: everything the hub cannot price. Bytes that do not
 //!   parse (REVIEW #5 still queues them), a transaction from a circuit era this
-//!   build has no key for, and a class an honest shim never sends.
+//!   build has no key for, an Orchard transaction with transparent inputs
+//!   (ZIP 244 commits its shielded sighash to every prevout's amount and
+//!   script, which only the chain knows), and a class an honest shim never
+//!   sends.
 //!
 //! The anchor is the one public input left unchecked: whether the tree root the
 //! proof names is a root the chain ever had. That needs chain state and stays the
@@ -74,9 +77,7 @@ type OrchardBundle = orchard::bundle::Bundle<orchard::bundle::Authorized, ZatBal
 /// The bundles of a [`Lane::Proven`] candidate, held until [`Inspected::verify`].
 struct Pending {
     bundles: Vec<OrchardBundle>,
-    /// `None` when the transaction has transparent inputs: the proofs are then
-    /// verified alone.
-    sighash: Option<[u8; 32]>,
+    sighash: [u8; 32],
 }
 
 /// One submission, read.
@@ -102,32 +103,23 @@ impl Inspected {
         self.pending.is_some()
     }
 
-    /// Verify every proof, and every signature when the sighash is known. About
-    /// 9 ms for a two-bundle migration on four cores, 30 ms on one. `true` when
-    /// there is nothing to verify.
+    /// Verify every signature and every proof. About 9 ms for a two-bundle
+    /// migration on four cores, 30 ms on one. `true` when there is nothing to
+    /// verify.
     pub fn verify(&self) -> bool {
         let Some(pending) = &self.pending else {
             return true;
         };
-        let vk = &*VERIFYING_KEY;
-        match pending.sighash {
-            Some(sighash) => {
-                // Signatures first and proofs second, inside one validator: a
-                // bad signature costs 0.4 ms, and both bundles share the proof
-                // batch's final multi-exponentiation.
-                let mut batch = BatchValidator::new(vk);
-                for bundle in &pending.bundles {
-                    if batch.add_bundle(bundle, sighash).is_err() {
-                        return false;
-                    }
-                }
-                batch.validate(rand08::rngs::OsRng)
+        // Signatures first and proofs second, inside one validator: a bad
+        // signature costs 0.4 ms, and both bundles share the proof batch's
+        // final multi-exponentiation.
+        let mut batch = BatchValidator::new(&VERIFYING_KEY);
+        for bundle in &pending.bundles {
+            if batch.add_bundle(bundle, pending.sighash).is_err() {
+                return false;
             }
-            None => pending
-                .bundles
-                .iter()
-                .all(|bundle| bundle.verify_proof(vk).is_ok()),
         }
+        batch.validate(rand08::rngs::OsRng)
     }
 }
 
@@ -202,13 +194,14 @@ fn prove_candidate(tx: &Transaction) -> Option<Pending> {
         #[cfg(zcash_unstable = "zfuture")]
         ZFuture => {}
     }
-    // Prevouts are only read by the sighash, which is skipped below whenever
-    // the transaction has transparent inputs.
+    // A transparent input commits the shielded sighash to its prevout, which
+    // only the chain knows. Without the sighash nothing binds the proofs to
+    // this transaction, so such a transaction gets no proven slot.
+    if !tx.inputs().is_empty() {
+        return None;
+    }
     let sighasher = tx.sighasher(nu, Arc::new(Vec::new())).ok()?;
-    let sighash = tx
-        .inputs()
-        .is_empty()
-        .then(|| sighasher.sighash(HashType::ALL, None).0);
+    let sighash = sighasher.sighash(HashType::ALL, None).0;
     let bundles: Vec<_> = sighasher
         .orchard_bundle()
         .into_iter()
@@ -248,7 +241,7 @@ fn is_transparent_only_spend(tx: &Transaction) -> bool {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const PROVEN_A: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
@@ -315,6 +308,36 @@ mod tests {
         assert_eq!(transparent.lane, Lane::Transparent);
         assert_eq!(transparent.spends.len(), 1);
         assert!(!transparent.needs_proof() && transparent.verify());
+    }
+
+    /// `tx` with one transparent input added, its Orchard data untouched.
+    pub(crate) fn with_transparent_input(tx: &[u8]) -> Vec<u8> {
+        use zebra_chain::serialization::ZcashSerialize;
+        use zebra_chain::transparent::{Input, Script};
+
+        let mut tx = Transaction::zcash_deserialize(tx).expect("a fixture parses");
+        let Transaction::V6 { inputs, .. } = &mut tx else {
+            panic!("a V6 fixture");
+        };
+        inputs.push(Input::PrevOut {
+            outpoint: OutPoint {
+                hash: zebra_chain::transaction::Hash([1; 32]),
+                index: 0,
+            },
+            unlock_script: Script::new(&[]),
+            sequence: u32::MAX,
+        });
+        tx.zcash_serialize_to_vec().expect("serializes")
+    }
+
+    #[test]
+    fn a_transparent_input_keeps_a_valid_bundle_out_of_the_proven_lane() {
+        // The sighash would need the prevout, so the signatures cannot be
+        // checked, and the proofs alone do not bind the bundle to these bytes.
+        let inspected = inspect(&with_transparent_input(PROVEN_A));
+        assert_eq!(inspected.lane, Lane::Unverified);
+        assert!(inspected.bundle_keys.is_empty());
+        assert!(!inspected.needs_proof());
     }
 
     #[test]

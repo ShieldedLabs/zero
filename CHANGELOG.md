@@ -102,12 +102,12 @@ date) before dispatching the release.
   shim reads the closed route's `404` as "no such transaction". Reported by
   [@ouicate](https://github.com/ouicate).
 - zero-indexer: junk now costs a Halo2 proof to put in front of a migration.
-  The hub verifies the Orchard and Ironwood proofs of every submission that
-  touches Orchard (and its signatures, when it has no transparent inputs),
-  against the NU6.3 key it builds at boot, and refuses one that fails. The
-  entry cap splits into lanes: 896 entries for verified transactions, 112 for
-  transparent-only spends, 16 for what the hub cannot verify (unparseable
-  bytes, an unknown circuit era). Free junk fills only its own lane, and a TEX
+  The hub verifies the Orchard and Ironwood proofs and signatures of every
+  submission that touches Orchard, against the NU6.3 key it builds at boot,
+  and refuses one that fails. The entry cap splits into lanes: 896 entries for
+  verified transactions, 112 for transparent-only spends, 16 for what the hub
+  cannot verify (unparseable bytes, an unknown circuit era, an Orchard
+  transaction with transparent inputs). Free junk fills only its own lane, and a TEX
   second leg rides in the verified lane when the hub holds its parent. One
   proof buys one entry: re-signing it collapses to the held entry, and a proof
   the network rejected, or already mined, is refused for the life of the
