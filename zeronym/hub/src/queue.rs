@@ -496,6 +496,12 @@ impl Queue {
         // Second look, under the lock that inserts: the queue moved while the
         // proofs were checked.
         let mut inner = self.lock();
+        // Draining may have begun during the check. Read under the lock the
+        // final drain also takes: either that drain sees this entry, or this
+        // sees the flag.
+        if self.is_draining() {
+            return Admission::Refused(Refusal::Draining);
+        }
         let (lane, parent) = match inner.screen(&key, &inspected, tx_bytes.len(), self.max_bytes) {
             Ok(placed) => placed,
             Err(decided) => return decided,
@@ -1362,6 +1368,34 @@ mod tests {
             2,
             "draining must not discard what was promised"
         );
+    }
+
+    #[test]
+    fn an_admission_verifying_across_the_final_drain_is_not_left_behind() {
+        // Shutdown flags the drain, then takes the final batch. An admission
+        // whose proof check spans both must land in that batch or be refused:
+        // anything still resident afterwards was acked and is never published.
+        // Timing-dependent: the start offset sweeps across the proof check.
+        for offset_us in (0..12_000).step_by(500) {
+            let q = Queue::new();
+            let (admission, batch) = std::thread::scope(|s| {
+                let admitting = s.spawn(|| q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN));
+                std::thread::sleep(std::time::Duration::from_micros(offset_us));
+                q.begin_draining();
+                let batch = q.drain_shuffled();
+                (admitting.join().expect("admission thread"), batch)
+            });
+            assert!(
+                matches!(admission, Admission::Refused(Refusal::Draining)) || batch.len() == 1,
+                "at {offset_us} us: {admission:?}, final batch of {}",
+                batch.len()
+            );
+            assert_eq!(
+                q.len(),
+                0,
+                "at {offset_us} us: an entry outlived the final drain"
+            );
+        }
     }
 
     #[test]
