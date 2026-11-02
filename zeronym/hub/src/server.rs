@@ -312,7 +312,19 @@ pub struct Hub {
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
     pub chain: Arc<ChainClient>,
+    /// Admissions in flight across both ingress paths, at most
+    /// [`MAX_PENDING_ADMISSIONS`]. See [`Hub::admit`].
+    pending: Arc<tokio::sync::Semaphore>,
 }
+
+/// How many admissions may be in flight at once, each holding a copy of its
+/// bytes and a blocking task.
+///
+/// The Nym listener already holds itself to a few at a time. An HTTP
+/// connection serves one request at a time, but connections are unbounded, so
+/// this caps what they can hold between them. Past it a submission is refused
+/// `Full` at once, and the HTTP caller is still there to retry.
+pub const MAX_PENDING_ADMISSIONS: usize = 64;
 
 /// The outcome of the transport-independent lookup core, rendered by each
 /// transport in its own wire shape (HTTP status plus header, or a
@@ -345,6 +357,7 @@ impl Hub {
             tip,
             params,
             chain,
+            pending: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_ADMISSIONS)),
         }
     }
 
@@ -368,6 +381,14 @@ impl Hub {
             return Err(Refusal::TipStale);
         }
 
+        let Ok(pending) = self.pending.clone().try_acquire_owned() else {
+            tracing::warn!(
+                pending = MAX_PENDING_ADMISSIONS,
+                "submission refused at admission: too many admissions in flight"
+            );
+            return Err(Refusal::Full);
+        };
+
         // The queue may verify proofs, which blocks, so it runs on the blocking
         // pool. The queue bounds how many verify at once ([`VERIFY_SLOTS`]).
         let queue = self.queue.clone();
@@ -375,6 +396,7 @@ impl Hub {
         let height = self.tip.admission_height();
         let params = self.params;
         let admitted = tokio::task::spawn_blocking(move || {
+            let _pending = pending;
             queue.admit(&bytes, height, params.flush_interval, params.mining_margin)
         })
         .await;
@@ -820,4 +842,29 @@ fn json(code: StatusCode, value: &serde_json::Value) -> Response<Full<Bytes>> {
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batcher::TipGuard;
+
+    #[tokio::test]
+    async fn past_the_pending_cap_a_submission_is_refused_full() {
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+        tip.observe(&[100]);
+        let chain = match ChainClient::new(vec!["127.0.0.1:1".parse().expect("addr")], None) {
+            Ok(chain) => Arc::new(chain),
+            Err(err) => panic!("chain client: {err}"),
+        };
+        let hub = Hub::new(Arc::new(Queue::new()), tip, BatchParams::default(), chain);
+        let held = hub
+            .pending
+            .clone()
+            .try_acquire_many_owned(MAX_PENDING_ADMISSIONS as u32)
+            .expect("every permit is free");
+        assert_eq!(hub.admit(&[0; 64]).await, Err(Refusal::Full));
+        drop(held);
+        assert!(hub.admit(&[0; 64]).await.is_ok());
+    }
 }
