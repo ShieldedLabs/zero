@@ -247,6 +247,19 @@ impl ChainNullifiers {
             .is_some_and(|mut view| view.replace(start, end, blocks))
     }
 
+    /// Whether `endpoint`'s tip fell more than [`RESYNC_DEPTH`] below what its
+    /// view already read, so no read can replace the blocks it lost. The view
+    /// is then marked stale, and stays so until the chain grows back to where
+    /// a read reaches it.
+    fn retreated(&self, endpoint: usize, from: u32, tip: u32) -> bool {
+        let synced = self.view(endpoint).and_then(|view| view.synced_to);
+        let retreated = synced.is_some() && self.resume_from(endpoint, from) > tip;
+        if retreated {
+            self.mark_stale(endpoint);
+        }
+        retreated
+    }
+
     /// Mark `endpoint`'s view not current until its next successful read.
     fn mark_stale(&self, endpoint: usize) {
         if let Some(mut view) = self.view(endpoint) {
@@ -285,9 +298,7 @@ impl ChainNullifiers {
             .collect()
     }
 
-    /// Where `endpoint`'s next read starts. If its tip fell more than
-    /// [`RESYNC_DEPTH`] below `synced_to`, entries above the new tip stay until
-    /// the chain grows back over them; unanimity keeps that harmless.
+    /// Where `endpoint`'s next read starts.
     fn resume_from(&self, endpoint: usize, from: u32) -> u32 {
         self.view(endpoint)
             .and_then(|view| view.synced_to)
@@ -337,6 +348,16 @@ async fn sync_endpoint(
             return false;
         }
     };
+    if spent.retreated(endpoint, from, tip) {
+        tracing::warn!(
+            %addr,
+            tip,
+            synced_to = ?spent.synced_to().get(endpoint).copied().flatten(),
+            "nullifier sync: this indexer's tip fell below its view; it refuses nothing \
+             until the chain grows back"
+        );
+        return false;
+    }
     let mut start = spent.resume_from(endpoint, from);
     while start <= tip {
         let end = start
@@ -517,6 +538,21 @@ mod tests {
         assert!(!set.any_revealed(&[nf(1)], 110));
         set.record(1, 101, 110, vec![(105, vec![nf(1)])]);
         assert!(set.any_revealed(&[nf(1)], 110));
+    }
+
+    #[test]
+    fn a_tip_that_falls_past_the_reorg_window_makes_the_view_stale() {
+        let set = ChainNullifiers::new(1);
+        set.record(0, 900, 1000, vec![(950, vec![nf(1)])]);
+        assert!(set.any_revealed(&[nf(1)], 1000));
+
+        // Inside the window a read replaces the blocks the indexer lost.
+        assert!(!set.retreated(0, 900, 1000 - RESYNC_DEPTH + 1));
+        assert!(set.any_revealed(&[nf(1)], 1000));
+
+        // Past it, nothing can, so the view refuses nothing.
+        assert!(set.retreated(0, 900, 900));
+        assert!(!set.any_revealed(&[nf(1)], 1000));
     }
 
     #[test]
