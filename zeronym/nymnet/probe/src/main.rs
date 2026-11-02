@@ -477,7 +477,7 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     use std::sync::Arc;
 
     use nym_sdk::mixnet::AnonymousSenderTag;
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::queue::Queue;
@@ -494,8 +494,8 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let hub_addr = *hub_client.nym_address();
     let hub_sender = hub_client.split_sender();
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     // Unreachable on purpose: assertion 2 must be answered by the queue alone,
     // and assertion 3 must fail closed.
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
@@ -714,7 +714,7 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
 
     use tokio::sync::mpsc;
 
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::nym_driver as hub_driver;
@@ -730,8 +730,8 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     // builds its own client from the localnet topology and reports its address.
     println!("[hub] starting shipped driver...");
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     // Unreachable on purpose: assertion 2 is answered by the queue alone, and
     // assertion 3 must fail closed.
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
@@ -989,15 +989,15 @@ async fn cmd_hub_address_across_rebuild(network: &Path, expect_same: bool) -> Re
 
     use tokio::sync::mpsc;
 
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::nym_driver as hub_driver;
     use zero_indexer_hub::queue::Queue;
     use zero_indexer_hub::server::Hub;
 
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     let hub = Hub::new(
         Arc::new(Queue::new()),
         tip,
