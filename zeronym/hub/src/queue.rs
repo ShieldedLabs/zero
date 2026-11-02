@@ -33,7 +33,7 @@
 //! * **One entry per proof, and one publish per proof.** Entries are keyed on
 //!   their payload hash AND on their bundle keys, so re-signing one proof
 //!   collapses into the held entry. A bundle key this hub has published to a verdict (rejected, or
-//!   already known) is burned and refused, so one proof buys one window.
+//!   already mined) is burned and refused, so one proof buys one window.
 //! * **Bytes are the budget, not entries.** Real Orchard migrations are 2 to
 //!   16 KB, so fixed-size slots would waste most of the budget and hand an
 //!   attacker a cheaper occupancy attack than the memory attack.
@@ -61,6 +61,7 @@ use zeroize::Zeroizing;
 
 use crate::admission::{self, Inspected, Lane};
 use crate::spent::ChainNullifiers;
+use zebra_chain::transparent::OutPoint;
 
 /// Per-entry ceiling, matching the fixed frame the batching design pads to.
 ///
@@ -115,6 +116,17 @@ pub const UNVERIFIED_LANE_ENTRIES: usize = 16;
 /// core-days. Honest traffic, two keys per migration, takes years to cycle it.
 /// About 100 MB at the cap. Lost on restart, like everything in the enclave.
 pub const MAX_BURNED_KEYS: usize = 1 << 20;
+
+/// How many admissions may verify proofs at once.
+///
+/// Three on the four-vCPU enclave, leaving a core for the mixnet driver and the
+/// flush. A proof check costs the hub about 30 ms of one core, and a sender
+/// with valid signatures over a garbage proof pays close to nothing for it, so
+/// the check must be bounded: past this many in flight a submission is refused
+/// `Full` at once, the same choice `MAX_CONCURRENT_LOOKUPS` makes for lookups.
+/// A slot covers the proof check alone, so a refusal that needs no proof never
+/// waits on one.
+pub const VERIFY_SLOTS: usize = 3;
 
 /// A lane's share of [`MAX_QUEUE_ENTRIES`].
 pub fn lane_cap(lane: Lane) -> usize {
@@ -203,7 +215,8 @@ pub enum Admission {
     /// These exact bytes, or another signing of the same proofs, are already
     /// queued. Idempotent by construction: honest resends and cross-hub
     /// duplicates collapse, because identical bytes hash identically, and a
-    /// re-signing collapses on its bundle keys.
+    /// re-signing collapses on its bundle keys. `txid` is the held entry's,
+    /// which is what the hub will publish and a lookup will find.
     Duplicate {
         txid: Option<String>,
     },
@@ -242,6 +255,9 @@ pub struct Entry {
     pub transparent_outputs: usize,
     /// Whether a second leg already rides on this entry's proofs.
     pub has_child: bool,
+    /// The outpoints a transparent-only spend consumes, so a parent that
+    /// arrives or returns after it knows a leg already spends it.
+    pub spends: Vec<OutPoint>,
 }
 
 struct Inner {
@@ -254,8 +270,40 @@ struct Inner {
     burned: Burned,
 }
 
+/// Whether `spends` is a TEX second leg of `parent_txid`: exactly one input,
+/// spending one of the parent's `outputs` transparent outputs. The shape
+/// [`Inner::parent_of`] promotes, and the only one that counts as a leg.
+fn is_leg_of(spends: &[OutPoint], parent_txid: &str, outputs: usize) -> bool {
+    let [spend] = spends else {
+        return false;
+    };
+    spend.hash.to_string() == parent_txid
+        && usize::try_from(spend.index).is_ok_and(|index| index < outputs)
+}
+
 impl Inner {
-    fn insert(&mut self, entry: Entry) {
+    fn insert(&mut self, mut entry: Entry) {
+        // One leg per parent, in whatever order they arrive, so `has_child`
+        // is read off the legs held now, never carried: a leg held before its
+        // parent (admitted first, or while the parent was out in a flush)
+        // already spends it, and a leg that left with a verdict no longer does.
+        if !entry.bundle_keys.is_empty() {
+            entry.has_child = entry.txid.as_deref().is_some_and(|txid| {
+                self.entries
+                    .values()
+                    .any(|held| is_leg_of(&held.spends, txid, entry.transparent_outputs))
+            });
+        }
+        if let [spend] = entry.spends.as_slice() {
+            let parent_txid = spend.hash.to_string();
+            if let Some(parent) = self.entries.values_mut().find(|held| {
+                !held.bundle_keys.is_empty()
+                    && held.txid.as_deref() == Some(parent_txid.as_str())
+                    && is_leg_of(&entry.spends, &parent_txid, held.transparent_outputs)
+            }) {
+                parent.has_child = true;
+            }
+        }
         self.bytes = self.bytes.saturating_add(entry.tx_bytes.len());
         self.lanes[lane_index(entry.lane)] += 1;
         for bundle_key in &entry.bundle_keys {
@@ -264,8 +312,18 @@ impl Inner {
         self.entries.insert(entry.key, entry);
     }
 
-    /// The bundle keys already held, or burned: either way these proofs buy no
-    /// new entry.
+    /// Undo [`Self::insert`].
+    fn remove(&mut self, key: &[u8; 32]) -> Option<Entry> {
+        let entry = self.entries.remove(key)?;
+        self.bytes = self.bytes.saturating_sub(entry.tx_bytes.len());
+        self.lanes[lane_index(entry.lane)] = self.lanes[lane_index(entry.lane)].saturating_sub(1);
+        for bundle_key in &entry.bundle_keys {
+            self.bundle_keys.remove(bundle_key);
+        }
+        Some(entry)
+    }
+
+    /// Whether any of these bundle keys is already held.
     fn holds_any(&self, bundle_keys: &[[u8; 32]]) -> bool {
         bundle_keys
             .iter()
@@ -305,17 +363,22 @@ impl Inner {
         len: usize,
         max_bytes: usize,
     ) -> Result<(Lane, Option<[u8; 32]>), Admission> {
-        let duplicate = || Admission::Duplicate {
-            txid: inspected.txid.clone(),
-        };
         if self.entries.contains_key(key) {
-            return Err(duplicate());
+            return Err(Admission::Duplicate {
+                txid: inspected.txid.clone(),
+            });
         }
         // Another signing of proofs already held. Collapsed like identical
         // bytes: only one of them can be mined, and the held one will be
-        // published.
-        if self.holds_any(&inspected.bundle_keys) {
-            return Err(duplicate());
+        // published, so its txid is the answer.
+        if let Some(held) = inspected
+            .bundle_keys
+            .iter()
+            .find_map(|bundle_key| self.bundle_keys.get(bundle_key))
+        {
+            return Err(Admission::Duplicate {
+                txid: self.entries.get(held).and_then(|entry| entry.txid.clone()),
+            });
         }
         if inspected
             .bundle_keys
@@ -396,6 +459,12 @@ pub struct Queue {
     /// Set once, at shutdown, before the final flush runs. See
     /// [`Queue::begin_draining`].
     draining: std::sync::atomic::AtomicBool,
+    /// Proof checks in flight, at most [`VERIFY_SLOTS`]. See [`Queue::admit`].
+    verify_slots: tokio::sync::Semaphore,
+    /// Runs in [`Queue::admit`] between the proof check and the lock that
+    /// inserts, so a test can act inside that window.
+    #[cfg(test)]
+    after_verify: Option<Box<dyn Fn() + Send + Sync>>,
     /// The Orchard nullifiers the chain has revealed. `None` admits without
     /// that check, which is what a queue built by `new` does.
     revealed: Option<Arc<ChainNullifiers>>,
@@ -427,6 +496,9 @@ impl Queue {
             }),
             max_bytes,
             draining: std::sync::atomic::AtomicBool::new(false),
+            verify_slots: tokio::sync::Semaphore::new(VERIFY_SLOTS),
+            #[cfg(test)]
+            after_verify: None,
             revealed: None,
         }
     }
@@ -465,6 +537,8 @@ impl Queue {
     /// Blocking: a submission that touches Orchard has its proofs verified here,
     /// about 9 ms on four cores and 30 ms on one. Every refusal that costs less
     /// runs first, and the queue's lock is never held across the proof check.
+    /// The check takes one of [`VERIFY_SLOTS`], and is refused `Full` when none
+    /// is free.
     pub fn admit(
         &self,
         tx_bytes: &[u8],
@@ -514,13 +588,32 @@ impl Queue {
             return decided;
         }
 
-        if !inspected.verify() {
-            return Admission::Refused(Refusal::Rejected);
+        if inspected.needs_proof() {
+            let Ok(_slot) = self.verify_slots.try_acquire() else {
+                tracing::warn!(
+                    slots = VERIFY_SLOTS,
+                    "submission refused at admission: every verification slot is busy"
+                );
+                return Admission::Refused(Refusal::Full);
+            };
+            if !inspected.verify() {
+                return Admission::Refused(Refusal::Rejected);
+            }
+        }
+        #[cfg(test)]
+        if let Some(hook) = &self.after_verify {
+            hook();
         }
 
         // Second look, under the lock that inserts: the queue moved while the
         // proofs were checked.
         let mut inner = self.lock();
+        // Draining may have begun during the check. Read under the lock the
+        // final drain also takes: either that drain sees this entry, or this
+        // sees the flag.
+        if self.is_draining() {
+            return Admission::Refused(Refusal::Draining);
+        }
         let (lane, parent) = match inner.screen(&key, &inspected, tx_bytes.len(), self.max_bytes) {
             Ok(placed) => placed,
             Err(decided) => return decided,
@@ -540,6 +633,7 @@ impl Queue {
             bundle_keys: inspected.bundle_keys,
             transparent_outputs: inspected.transparent_outputs,
             has_child: false,
+            spends: inspected.spends,
         });
 
         Admission::Admitted { txid }
@@ -581,16 +675,22 @@ impl Queue {
     /// Remember the proofs of entries the network has judged, so the same
     /// proofs are refused from now on.
     ///
-    /// Called for an entry rejected or already known at a flush, and by
-    /// [`Self::requeue`] for one out of attempts. An entry a node accepted stays
+    /// Called for an entry rejected or already mined at a flush. An entry a node accepted, or
+    /// one a mempool already holds (likely published by the other hub), stays
     /// unburned, so if it drops out of every mempool, its wallet's resend gets
-    /// through. Burning an already-known entry is what stops a mined
+    /// through. Burning an already-mined entry is what stops a mined
     /// transaction, copied off the chain, from filling the queue every window.
+    ///
+    /// A resend admitted while the batch was out holds the same proofs, and
+    /// the next flush would offer it again; it is dropped here with them.
     pub fn burn<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>) {
         let mut inner = self.lock();
         for entry in entries {
             for bundle_key in &entry.bundle_keys {
                 inner.burned.insert(*bundle_key);
+                if let Some(resident) = inner.bundle_keys.get(bundle_key).copied() {
+                    inner.remove(&resident);
+                }
             }
         }
     }
@@ -624,6 +724,15 @@ impl Queue {
             if inner.entries.contains_key(&entry.key) || inner.holds_any(&entry.bundle_keys) {
                 continue;
             }
+            // Burned while this entry was out, through another signing judged
+            // in the same window: the burn set refuses these proofs.
+            if entry
+                .bundle_keys
+                .iter()
+                .any(|bundle_key| inner.burned.contains(bundle_key))
+            {
+                continue;
+            }
 
             entry.attempts = entry.attempts.saturating_add(1);
 
@@ -642,12 +751,11 @@ impl Queue {
                 continue;
             }
             if entry.attempts > MAX_REQUEUE_ATTEMPTS {
-                // Out of attempts is a verdict too: behind an indexer that
-                // relays every node rejection as retryable, a proof the network
-                // refuses ends here, and is burned so it stays out.
-                for bundle_key in &entry.bundle_keys {
-                    inner.burned.insert(*bundle_key);
-                }
+                // Dropped, never burned: the attempts count every transport
+                // failure, so running out says the indexer was unreachable as
+                // often as it says the network refused. A wallet's resend then
+                // starts clean. A verdict the indexer did return is burned in
+                // the flush.
                 out.dropped_exhausted += 1;
                 continue;
             }
@@ -873,6 +981,10 @@ mod tests {
     /// A transparent-only spend of `(txid(parent), 0)`, the second leg of a TEX
     /// payment. `value` tells two such legs apart.
     fn second_leg(parent: &[u8], value: u64) -> Vec<u8> {
+        second_leg_at(parent, 0, value)
+    }
+
+    fn second_leg_at(parent: &[u8], index: u32, value: u64) -> Vec<u8> {
         use zebra_chain::serialization::{ZcashDeserialize, ZcashSerialize};
         use zebra_chain::{block, parameters::NetworkUpgrade, transaction, transparent};
 
@@ -884,7 +996,7 @@ mod tests {
             inputs: vec![transparent::Input::PrevOut {
                 outpoint: transparent::OutPoint {
                     hash: parent.hash(),
-                    index: 0,
+                    index,
                 },
                 unlock_script: transparent::Script::new(&[0x51]),
                 sequence: u32::MAX,
@@ -938,6 +1050,67 @@ mod tests {
     }
 
     #[test]
+    fn a_collapsed_signing_answers_with_the_held_txid() {
+        // Same proofs, different effects, so a different txid. The answer must
+        // name what the hub holds and will publish.
+        let q = Queue::new();
+        let held = admission::inspect(V6_ORCHARD_ONLY);
+        q.lock().insert(Entry {
+            key: [7; 32],
+            txid: Some("held".into()),
+            expiry: None,
+            tx_bytes: Zeroizing::new(vec![0; 8]),
+            attempts: 0,
+            received_height: 100,
+            lane: Lane::Proven,
+            bundle_keys: held.bundle_keys,
+            transparent_outputs: 0,
+            has_child: false,
+            spends: Vec::new(),
+        });
+        assert_eq!(
+            q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN),
+            Admission::Duplicate {
+                txid: Some("held".into())
+            }
+        );
+    }
+
+    #[test]
+    fn a_verify_slot_is_held_for_the_proof_check_alone() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let _held = q
+            .verify_slots
+            .try_acquire_many(VERIFY_SLOTS as u32)
+            .expect("every slot is free");
+        // With every slot busy, only a new proof waits on one.
+        assert_eq!(
+            q.admit(PROVEN_B, 100, N, MARGIN),
+            Admission::Refused(Refusal::Full)
+        );
+        assert!(matches!(
+            q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN),
+            Admission::Duplicate { .. }
+        ));
+        assert!(admitted(q.admit(&junk(1), 100, N, MARGIN)));
+    }
+
+    #[test]
+    fn a_held_transparent_input_variant_leaves_the_bundle_free() {
+        // Held in the unverified lane, it claims no bundle key, so the bytes
+        // that do verify are still admitted to the proven lane.
+        let q = Queue::new();
+        let variant = admission::tests::with_transparent_input(V6_ORCHARD_ONLY);
+        assert!(admitted(q.admit(&variant, 100, N, MARGIN)));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert_eq!(q.len(), 2);
+        let mut lanes: Vec<Lane> = q.drain_shuffled().iter().map(|entry| entry.lane).collect();
+        lanes.sort_by_key(|lane| *lane as u8);
+        assert_eq!(lanes, [Lane::Proven, Lane::Unverified]);
+    }
+
+    #[test]
     fn a_proof_published_to_a_verdict_is_refused_for_good() {
         // One proof buys one window: after the flush that judged it, no signing
         // of it is admitted again.
@@ -977,9 +1150,38 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_out_of_attempts_is_burned_too() {
-        // Behind an indexer that relays a node's refusal as retryable, running
-        // out of attempts is the only verdict a refused proof ever gets.
+    fn a_burn_drops_a_resend_admitted_while_the_batch_was_out() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let judged = q.drain_shuffled();
+        // The drain released the proofs, so a resend is admitted mid-flush.
+        assert!(admitted(q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN)));
+        q.burn(&judged);
+        assert!(
+            q.drain_shuffled().is_empty(),
+            "the burned proofs must not be offered again"
+        );
+        // The lane and the bundle keys were released with it.
+        assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn a_requeue_drops_an_entry_whose_proofs_were_burned_meanwhile() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let out = q.drain_shuffled();
+        // Another signing of the same proofs, judged while the first was out.
+        assert!(admitted(q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN)));
+        q.burn(&q.drain_shuffled());
+        assert_eq!(q.requeue(out, 100, N, MARGIN).held, 0);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_proof_out_of_attempts_is_dropped_and_its_resend_admitted() {
+        // Attempts count transport failures too: an indexer down for every
+        // attempt says nothing about the proofs.
         let q = Queue::new();
         assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
         let mut last = Requeued::default();
@@ -987,10 +1189,7 @@ mod tests {
             last = q.requeue(q.drain_shuffled(), 100, N, MARGIN);
         }
         assert_eq!(last.dropped_exhausted, 1);
-        assert_eq!(
-            q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN),
-            Admission::Refused(Refusal::Rejected)
-        );
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
     }
 
     #[test]
@@ -1006,6 +1205,122 @@ mod tests {
     }
 
     #[test]
+    fn a_leg_held_before_its_parent_counts_as_its_one_leg() {
+        // Admitted first, or while the parent was out in a flush: either way
+        // the parent's proofs then pay for no further leg.
+        let first = second_leg(V6_ORCHARD_ONLY, 1000);
+        let other = second_leg(V6_ORCHARD_ONLY, 2000);
+
+        let q = Queue::new();
+        assert!(admitted(q.admit(&first, 100, N, MARGIN)));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(&other, 100, N, MARGIN)));
+        let lanes: Vec<Lane> = q
+            .drain_shuffled()
+            .iter()
+            .filter(|entry| entry.bundle_keys.is_empty())
+            .map(|entry| entry.lane)
+            .collect();
+        assert_eq!(lanes, [Lane::Transparent; 2]);
+
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let out = q.drain_shuffled();
+        assert!(admitted(q.admit(&first, 100, N, MARGIN)));
+        assert_eq!(q.requeue(out, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(&other, 100, N, MARGIN)));
+        let lanes: Vec<Lane> = q
+            .drain_shuffled()
+            .iter()
+            .filter(|entry| entry.bundle_keys.is_empty())
+            .map(|entry| entry.lane)
+            .collect();
+        assert_eq!(lanes, [Lane::Transparent; 2]);
+    }
+
+    #[test]
+    fn a_parent_reads_its_leg_off_what_is_held_now() {
+        let lanes = |q: &Queue| -> Vec<Lane> {
+            q.drain_shuffled()
+                .iter()
+                .filter(|entry| entry.bundle_keys.is_empty())
+                .map(|entry| entry.lane)
+                .collect()
+        };
+
+        // The parent's leg left with a verdict while both were out: the
+        // returning parent pays for the next leg.
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        let parent: Vec<Entry> = q
+            .drain_shuffled()
+            .into_iter()
+            .filter(|entry| !entry.bundle_keys.is_empty())
+            .collect();
+        assert!(parent[0].has_child);
+        assert_eq!(q.requeue(parent, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        assert_eq!(lanes(&q), [Lane::Proven]);
+
+        // A spend of an output the parent does not have is no leg of it.
+        let q = Queue::new();
+        assert!(admitted(q.admit(
+            &second_leg_at(V6_ORCHARD_ONLY, 9, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        let mut got = lanes(&q);
+        got.sort_by_key(|lane| *lane as u8);
+        assert_eq!(got, [Lane::Proven, Lane::Transparent]);
+
+        // A leg reinserted while its parent is held marks the parent.
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        let (parent, leg): (Vec<Entry>, Vec<Entry>) = q
+            .drain_shuffled()
+            .into_iter()
+            .partition(|entry| !entry.bundle_keys.is_empty());
+        let mut parent = parent;
+        parent[0].has_child = false;
+        assert_eq!(q.requeue(parent, 100, N, MARGIN).held, 1);
+        assert_eq!(q.requeue(leg, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        let mut got = lanes(&q);
+        got.sort_by_key(|lane| *lane as u8);
+        assert_eq!(got, [Lane::Proven, Lane::Transparent]);
+    }
+
+    #[test]
     fn a_second_leg_rides_on_its_held_parent_once() {
         let q = Queue::new();
         assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
@@ -1015,8 +1330,8 @@ mod tests {
             N,
             MARGIN
         )));
-        // A second leg of the same parent is a conflicting spend; the parent's
-        // proofs pay for one.
+        // Another leg of the same parent is admitted, in the transparent lane:
+        // the parent's proofs pay for one leg only.
         assert!(admitted(q.admit(
             &second_leg(V6_ORCHARD_ONLY, 2000),
             100,
@@ -1024,6 +1339,7 @@ mod tests {
             MARGIN
         )));
         // So is a leg whose parent the queue does not hold.
+        // The lane counts below are the check.
         assert!(admitted(q.admit(
             &second_leg(PROVEN_B, 1000),
             100,
@@ -1412,6 +1728,35 @@ mod tests {
     }
 
     #[test]
+    fn an_admission_verifying_across_the_final_drain_is_not_left_behind() {
+        // Shutdown flags the drain, then takes the final batch. Run both while
+        // an admission sits between its proof check and its insert: it must be
+        // refused, because anything inserted now was acked and is never
+        // published.
+        let verified = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let drained = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut q = Queue::new();
+        q.after_verify = Some(Box::new({
+            let (verified, drained) = (verified.clone(), drained.clone());
+            move || {
+                verified.wait();
+                drained.wait();
+            }
+        }));
+        let (admission, batch) = std::thread::scope(|s| {
+            let admitting = s.spawn(|| q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN));
+            verified.wait();
+            q.begin_draining();
+            let batch = q.drain_shuffled();
+            drained.wait();
+            (admitting.join().expect("admission thread"), batch)
+        });
+        assert_eq!(admission, Admission::Refused(Refusal::Draining));
+        assert!(batch.is_empty());
+        assert_eq!(q.len(), 0, "an entry outlived the final drain");
+    }
+
+    #[test]
     fn draining_is_checked_before_every_other_refusal() {
         // Ordering inside `admit` matters for the operator reading the log. A
         // shutting-down hub that reports `too_large` or `expiry_too_tight` sends
@@ -1468,6 +1813,7 @@ mod tests {
             bundle_keys: Vec::new(),
             transparent_outputs: 0,
             has_child: false,
+            spends: Vec::new(),
         };
 
         // Tip 200 is past the entry's expiry of 150, so no future flush can

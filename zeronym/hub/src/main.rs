@@ -147,11 +147,14 @@ async fn main() -> Result<(), BoxError> {
         drained(drain_rx.clone()),
     ));
 
-    // Optionally also accept submissions over the Nym mixnet (M5), sharing the
-    // same queue, tip and chain as the clearnet serving path below, so the two
-    // ingress paths admit into one queue and cannot drift.
+    // One `Hub` for both ingress paths: they admit into one queue, and share
+    // one set of verification slots, so the CPU bound holds for the process.
+    let hub = Hub::new(queue.clone(), tip, params, chain);
+
+    // Optionally also accept submissions over the Nym mixnet (M5), through the
+    // same `Hub` as the clearnet serving path below.
     #[cfg(feature = "mixnet-driver")]
-    spawn_nym_listener(&config, &queue, &tip, params, &chain, &nym_address)?;
+    spawn_nym_listener(&config, &hub, &nym_address)?;
     #[cfg(not(feature = "mixnet-driver"))]
     if config.nym || config.nym_topology.is_some() {
         return Err(
@@ -167,14 +170,15 @@ async fn main() -> Result<(), BoxError> {
     // from a 404.
     if config.http_submit {
         tracing::warn!(
-            "--http-submit: accepting UNAUTHENTICATED clearnet submissions on POST /. \
+            "--http-submit: accepting UNAUTHENTICATED clearnet submissions on POST / \
+             and lookups on POST /transaction. \
              Intended for a transitional shim or a local demo, not a mixnet deployment"
         );
     }
 
     let serving = server::serve(
         listener,
-        Hub::new(queue.clone(), tip, params, chain),
+        hub,
         server::ServeOptions {
             nym_address,
             http_submit: config.http_submit,
@@ -235,10 +239,7 @@ async fn drained(mut rx: tokio::sync::watch::Receiver<bool>) {
 #[cfg(feature = "mixnet-driver")]
 fn spawn_nym_listener(
     config: &Config,
-    queue: &Arc<Queue>,
-    tip: &Arc<TipTracker>,
-    params: BatchParams,
-    chain: &Arc<ChainClient>,
+    hub: &Hub,
     nym_address: &server::NymAddress,
 ) -> Result<(), BoxError> {
     use tokio::sync::mpsc;
@@ -267,7 +268,7 @@ fn spawn_nym_listener(
         }
     };
 
-    let hub = Hub::new(queue.clone(), tip.clone(), params, chain.clone());
+    let hub = hub.clone();
     // The driver holds the opposite end of each channel: it sends inbound
     // requests and its address, and receives replies.
     let (in_tx, in_rx) = mpsc::channel(64);

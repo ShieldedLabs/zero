@@ -124,9 +124,9 @@ impl std::error::Error for GrpcStatusError {}
 
 /// The outcome of publishing one transaction.
 ///
-/// `AlreadyKnown` is a success, and saying so explicitly is load-bearing. Every
-/// shim submits every migration to every hub, so the second hub's publish is a
-/// duplicate by construction. Treating that as an error would make normal
+/// `AlreadyMined` and `AlreadyKnown` are successes, and saying so explicitly is
+/// load-bearing. Every shim submits every migration to every hub, so the second
+/// hub's publish is a duplicate by construction. Treating that as an error would make normal
 /// operation look like a fault and could drive a re-submission loop, and
 /// re-submissions are a fresh timing signal tied to one transaction.
 ///
@@ -138,9 +138,16 @@ impl std::error::Error for GrpcStatusError {}
 /// call timed out, the endpoint said it was unavailable or overloaded, or it
 /// answered something this client could not read. Those are the failures a
 /// later flush can recover from, and the batcher holds the entry for one.
+///
+/// The two successes differ in what a later resend can do. `AlreadyMined` is
+/// final: the transaction is in a block. `AlreadyKnown` covers a mempool that
+/// holds it and every reply that does not say which: the transaction can
+/// still drop out of every mempool, and its wallet's resend must then get
+/// through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Publish {
     Accepted { txid: String },
+    AlreadyMined,
     AlreadyKnown,
     Rejected { reason: String },
     Retryable { reason: String },
@@ -678,7 +685,8 @@ fn classify_send_response(resp: &SendResponse) -> Publish {
 fn best_of(outcomes: Vec<Publish>) -> Publish {
     fn rank(outcome: &Publish) -> u8 {
         match outcome {
-            Publish::Accepted { .. } => 3,
+            Publish::Accepted { .. } => 4,
+            Publish::AlreadyMined => 3,
             Publish::AlreadyKnown => 2,
             Publish::Rejected { .. } => 1,
             Publish::Retryable { .. } => 0,
@@ -767,6 +775,16 @@ const PERMANENT_REJECTIONS: &[&str] = &[
     // The inputs are gone. A retry re-offers bytes that can never be valid.
     "conflict",
     "already spent",
+    // An unknown anchor: zebra's spelling, which lacks the `bad txns` prefix
+    // zcashd's `bad-txns-orchard-unknown-anchor` carries. The one entry here a
+    // waiting node could change, for a recent root at a node behind the tip.
+    // Listed on purpose: admission leaves the anchor unchecked, so a proof
+    // against an anchor the chain never had fails the same way at every node,
+    // and retried it would hold a proven slot for every attempt.
+    "unknown sprout anchor",
+    "unknown sapling anchor",
+    "unknown orchard anchor",
+    "unknown ironwood anchor",
 ];
 
 fn classify_publish_error(message: &str) -> Publish {
@@ -795,7 +813,11 @@ fn classify_publish_error(message: &str) -> Publish {
             reason: message.to_string(),
         }
     } else if m.contains("already in block chain")
-        || m.contains("already known")
+        || m.contains("committed to the best chain")
+        || m.contains("already in state")
+    {
+        Publish::AlreadyMined
+    } else if m.contains("already known")
         || m.contains("already in mempool")
         || m.contains("duplicate")
         // ZEBRA'S VOCABULARY, which shares none of zcashd's spellings. Note in
@@ -814,8 +836,6 @@ fn classify_publish_error(message: &str) -> Publish {
         // and an error-level report of loss that never happened.
         || m.contains("already exists in mempool")
         || m.contains("already queued for download")
-        || m.contains("committed to the best chain")
-        || m.contains("already in state")
     {
         Publish::AlreadyKnown
     } else {
@@ -880,7 +900,7 @@ mod tests {
         assert_eq!(classify_send_response(&resp), Publish::AlreadyKnown);
         assert_eq!(
             classify_publish_error("transaction already in block chain"),
-            Publish::AlreadyKnown
+            Publish::AlreadyMined
         );
         assert_eq!(
             classify_publish_error("txn-already-in-mempool"),
@@ -900,15 +920,21 @@ mod tests {
         // transaction was re-broadcast on every flush until the attempt cap and
         // then reported as lost -- the review's "converts silent destruction
         // into permanent republication", bounded but not avoided.
-        for message in [
-            "transaction already exists in mempool",
-            "already queued for download",
-            "transaction committed to the best chain",
-            "already in state",
+        for (message, known) in [
+            (
+                "transaction already exists in mempool",
+                Publish::AlreadyKnown,
+            ),
+            ("already queued for download", Publish::AlreadyKnown),
+            (
+                "transaction committed to the best chain",
+                Publish::AlreadyMined,
+            ),
+            ("already in state", Publish::AlreadyMined),
         ] {
             assert_eq!(
                 classify_publish_error(message),
-                Publish::AlreadyKnown,
+                known,
                 "zebra reports success as {message:?}; treating it as anything else                  republishes a transaction that is already published"
             );
         }
@@ -967,6 +993,21 @@ mod tests {
                 Publish::Rejected { .. } => {}
                 other => panic!("{permanent:?} must be a rejection, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_unknown_anchor_is_a_rejection_in_both_vocabularies() {
+        for message in [
+            "16: bad-txns-orchard-unknown-anchor",
+            "unknown Orchard anchor: Root(..)",
+            "consensus validation: unknown Orchard anchor: Root(..)",
+            "unknown Ironwood anchor: Root(..)",
+        ] {
+            assert!(
+                matches!(classify_publish_error(message), Publish::Rejected { .. }),
+                "{message:?}"
+            );
         }
     }
 

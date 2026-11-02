@@ -20,14 +20,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use zeroize::Zeroizing;
-use nym_sdk::mixnet::{
-    IncludedSurbs, MixnetClient, MixnetClientBuilder, MixnetMessageSender,
-};
+use nym_sdk::mixnet::{IncludedSurbs, MixnetClient, MixnetClientBuilder, MixnetMessageSender};
 use nym_topology::{
     CachedEpochRewardedSet, EntryDetails, HardcodedTopologyProvider, NymTopology,
     NymTopologyMetadata, RoutingNode, SupportedRoles,
 };
+use zeroize::Zeroizing;
 
 /// Matches FRAME_BYTES in the shim/hub wire modules.
 const FRAME_BYTES: usize = 65536;
@@ -53,7 +51,10 @@ async fn main() -> Result<()> {
             cmd_smoke(&network).await
         }
         Some("lookup") => {
-            let network = PathBuf::from(args.get(2).context("usage: lookup <network.json> <surbs>")?);
+            let network = PathBuf::from(
+                args.get(2)
+                    .context("usage: lookup <network.json> <surbs>")?,
+            );
             let surbs: u32 = args
                 .get(3)
                 .context("usage: lookup <network.json> <surbs>")?
@@ -61,8 +62,14 @@ async fn main() -> Result<()> {
             cmd_lookup(&network, surbs).await
         }
         Some("wire") => {
-            let network = PathBuf::from(args.get(2).context("usage: wire <network.json> <vectors.bin>")?);
-            let vectors = PathBuf::from(args.get(3).context("usage: wire <network.json> <vectors.bin>")?);
+            let network = PathBuf::from(
+                args.get(2)
+                    .context("usage: wire <network.json> <vectors.bin>")?,
+            );
+            let vectors = PathBuf::from(
+                args.get(3)
+                    .context("usage: wire <network.json> <vectors.bin>")?,
+            );
             cmd_wire(&network, &vectors).await
         }
         Some("e2e") => {
@@ -70,8 +77,7 @@ async fn main() -> Result<()> {
             cmd_e2e(&network).await
         }
         Some("e2e-driver") => {
-            let network =
-                PathBuf::from(args.get(2).context("usage: e2e-driver <network.json>")?);
+            let network = PathBuf::from(args.get(2).context("usage: e2e-driver <network.json>")?);
             cmd_e2e_driver(&network).await
         }
         Some("hub-address-across-rebuild") => {
@@ -278,7 +284,11 @@ async fn cmd_smoke(network: &Path) -> Result<()> {
         sizes.push(len);
         tags.push(tag);
     }
-    anyhow::ensure!(sizes.len() == total, "hub saw {} submits, expected {total}", sizes.len());
+    anyhow::ensure!(
+        sizes.len() == total,
+        "hub saw {} submits, expected {total}",
+        sizes.len()
+    );
     anyhow::ensure!(
         sizes.iter().all(|&s| s == FRAME_BYTES),
         "hub saw non-frame-sized submits: {sizes:?}"
@@ -300,7 +310,10 @@ async fn cmd_smoke(network: &Path) -> Result<()> {
 
     println!();
     println!("smoke: PASS");
-    println!("  - {SAME_SESSION_SUBMITS} submits from one session all carried sender tag {}", session_tags[0]);
+    println!(
+        "  - {SAME_SESSION_SUBMITS} submits from one session all carried sender tag {}",
+        session_tags[0]
+    );
     println!("  - rebuilt client presented fresh tag {rebuilt_tag}");
     println!("  - every submit was anonymous (tag present, no exposed self-address path)");
     println!("  - every ack was {ACK_BYTES} bytes and correlated");
@@ -320,8 +333,7 @@ async fn cmd_smoke(network: &Path) -> Result<()> {
 async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
     const ACKS: usize = 6;
     const REPLIES: usize = 4;
-    let data = std::fs::read(vectors)
-        .with_context(|| format!("reading {}", vectors.display()))?;
+    let data = std::fs::read(vectors).with_context(|| format!("reading {}", vectors.display()))?;
     let expect_len = FRAME_BYTES + ACKS * ACK_BYTES + LOOKUP_BYTES + REPLIES * FRAME_BYTES;
     anyhow::ensure!(
         data.len() == expect_len,
@@ -397,13 +409,19 @@ async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
     anyhow::ensure!(&ack[0..4] == b"ZNA1" && ack[4..20] == submit[4..20]);
     anyhow::ensure!(ack[20] == 0 && ack[21] == 0);
     anyhow::ensure!(ack[22..].iter().all(|&b| b == 0), "ack padding not zero");
-    println!("[shim] SubmitV1 -> byte-identical accepted AckV1 in {:.2?}", t0.elapsed());
+    println!(
+        "[shim] SubmitV1 -> byte-identical accepted AckV1 in {:.2?}",
+        t0.elapsed()
+    );
 
     let t1 = Instant::now();
     shim.send_message(hub_addr, lookup.clone(), IncludedSurbs::new(60))
         .await?;
     let reply = wait_nonempty(&mut shim, Duration::from_secs(300)).await?;
-    anyhow::ensure!(reply == reply_found, "LookupReplyV1 bytes were altered in transit");
+    anyhow::ensure!(
+        reply == reply_found,
+        "LookupReplyV1 bytes were altered in transit"
+    );
     // Independent offset-level decode: magic, echoed nonce, found at the
     // canonical height, the canonical 64-byte transaction, zero padding.
     anyhow::ensure!(&reply[0..4] == b"ZNR1" && reply[4..20] == lookup[4..20]);
@@ -417,8 +435,14 @@ async fn cmd_wire(network: &Path, vectors: &Path) -> Result<()> {
         .enumerate()
         .all(|(i, &b)| b == i as u8);
     anyhow::ensure!(tx_ok, "transaction bytes do not match the canonical vector");
-    anyhow::ensure!(reply[33 + 64..].iter().all(|&b| b == 0), "reply padding not zero");
-    println!("[shim] LookupV1 -> byte-identical found LookupReplyV1 in {:.2?}", t1.elapsed());
+    anyhow::ensure!(
+        reply[33 + 64..].iter().all(|&b| b == 0),
+        "reply padding not zero"
+    );
+    println!(
+        "[shim] LookupV1 -> byte-identical found LookupReplyV1 in {:.2?}",
+        t1.elapsed()
+    );
 
     shim.disconnect().await;
     let _ = stop_tx.send(());
@@ -453,7 +477,7 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     use std::sync::Arc;
 
     use nym_sdk::mixnet::AnonymousSenderTag;
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::queue::Queue;
@@ -461,7 +485,8 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     use zero_indexer_shim::hub::{HubTransport, Lookup, Submit};
     use zero_indexer_shim::nym as shim_nym;
 
-    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+    // Real proofs: the hub verifies them at admission.
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../hub/tests/fixtures/v6_proven_a.bin");
 
     // ---- The hub half: a real listener over the real cores, driven by a glue
     // task that is the M5 hub driver in miniature.
@@ -470,17 +495,12 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     let hub_addr = *hub_client.nym_address();
     let hub_sender = hub_client.split_sender();
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     // Unreachable on purpose: assertion 2 must be answered by the queue alone,
     // and assertion 3 must fail closed.
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
-    let hub = Hub {
-        queue: queue.clone(),
-        tip,
-        params: BatchParams::default(),
-        chain,
-    };
+    let hub = Hub::new(queue.clone(), tip, BatchParams::default(), chain);
     let (hub_in_tx, hub_in_rx) = tokio::sync::mpsc::channel(64);
     let (hub_out_tx, mut hub_out_rx) = tokio::sync::mpsc::channel::<hub_nym::Reply>(64);
     tokio::spawn(hub_nym::run_listener(hub_in_rx, hub_out_tx, hub));
@@ -643,7 +663,10 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
         }
         other => bail!("expected found, got {other:?}"),
     }
-    println!("[e2e] lookup answered from the queue in {:.2?}", t1.elapsed());
+    println!(
+        "[e2e] lookup answered from the queue in {:.2?}",
+        t1.elapsed()
+    );
 
     // 3) An unknown hash fails closed: the indexer is unreachable, so the only
     // honest answer is an error the wallet sees as UNAVAILABLE. Never a
@@ -692,7 +715,7 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
 
     use tokio::sync::mpsc;
 
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::nym_driver as hub_driver;
@@ -702,23 +725,19 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     use zero_indexer_shim::nym as shim_nym;
     use zero_indexer_shim::nym_driver as shim_driver;
 
-    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+    // Real proofs: the hub verifies them at admission.
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../hub/tests/fixtures/v6_proven_a.bin");
 
     // ---- Hub: the real listener and cores, fed by the SHIPPED hub driver, which
     // builds its own client from the localnet topology and reports its address.
     println!("[hub] starting shipped driver...");
     let queue = Arc::new(Queue::new());
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
     // Unreachable on purpose: assertion 2 is answered by the queue alone, and
     // assertion 3 must fail closed.
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
-    let hub = Hub {
-        queue: queue.clone(),
-        tip,
-        params: BatchParams::default(),
-        chain,
-    };
+    let hub = Hub::new(queue.clone(), tip, BatchParams::default(), chain);
     let (hub_in_tx, hub_in_rx) = mpsc::channel::<hub_nym::Received>(64);
     let (hub_out_tx, hub_out_rx) = mpsc::channel::<hub_nym::Reply>(64);
     let (hub_addr_tx, mut hub_addr_rx) = mpsc::channel(4);
@@ -754,7 +773,12 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     let (evt_tx, evt_rx) = mpsc::channel(8);
     let (shim_stop_tx, shim_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(shim_nym::run_transport(req_rx, out_tx, in_rx, inflight.clone()));
+    tokio::spawn(shim_nym::run_transport(
+        req_rx,
+        out_tx,
+        in_rx,
+        inflight.clone(),
+    ));
     tokio::spawn(shim_nym::run_supervisor(
         shim_nym::RotationPolicy::never(),
         evt_rx,
@@ -846,7 +870,10 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
         }
         other => bail!("expected found, got {other:?}"),
     }
-    println!("[e2e] lookup answered from the queue in {:.2?}", t1.elapsed());
+    println!(
+        "[e2e] lookup answered from the queue in {:.2?}",
+        t1.elapsed()
+    );
 
     let t2 = Instant::now();
     let unknown = transport.get_transaction(&[0xEE; 32]).await;
@@ -964,22 +991,22 @@ async fn cmd_hub_address_across_rebuild(network: &Path, expect_same: bool) -> Re
 
     use tokio::sync::mpsc;
 
-    use zero_indexer_hub::batcher::{BatchParams, TipTracker};
+    use zero_indexer_hub::batcher::{BatchParams, TipGuard, TipTracker};
     use zero_indexer_hub::chain::ChainClient;
     use zero_indexer_hub::nym as hub_nym;
     use zero_indexer_hub::nym_driver as hub_driver;
     use zero_indexer_hub::queue::Queue;
     use zero_indexer_hub::server::Hub;
 
-    let tip = Arc::new(TipTracker::new());
-    tip.observe(100);
-    let hub = Hub {
-        queue: Arc::new(Queue::new()),
+    let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+    tip.observe(&[100]);
+    let hub = Hub::new(
+        Arc::new(Queue::new()),
         tip,
-        params: BatchParams::default(),
+        BatchParams::default(),
         // Never dialled here: nothing in this probe admits or looks up.
-        chain: Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap()),
-    };
+        Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap()),
+    );
     let (hub_in_tx, hub_in_rx) = mpsc::channel::<hub_nym::Received>(64);
     let (hub_out_tx, hub_out_rx) = mpsc::channel::<hub_nym::Reply>(64);
     let (hub_addr_tx, mut hub_addr_rx) = mpsc::channel(4);

@@ -527,8 +527,11 @@ async fn an_unknown_txid_is_404() {
     let indexer = spawn_mock_indexer(0, "unused", seen).await; // GetTransaction -> NOT_FOUND
     let hub = spawn_hub(indexer).await;
 
-    let (status, _, _) = lookup(&hub.addr, vec![0x55; 32]).await;
+    let (status, _, body) = lookup(&hub.addr, vec![0x55; 32]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // The shim reads absence from these exact bytes and treats any other 404,
+    // such as a closed lookup path's "unknown path", as a failure.
+    assert_eq!(body, b"transaction not found");
     assert_eq!(hub.queue.len(), 0, "a lookup never mutates the queue");
 }
 

@@ -7,14 +7,13 @@
 # needs attestation: it is the single point that sees what the whole system
 # exists to hide.
 #
-# WHAT IT PROVES. The Zeronym trust model asks an auditor to rebuild the hub from
-# source, reach the published hash, and check that hash against the one bound
-# into the enclave attestation. Reproducibility alone proves only that source and
-# binary agree; attestation alone proves only that SOME binary runs in a genuine
-# enclave. Together they say: the code you read is the code that is holding your
-# migration in plaintext, and it does nothing with it but broadcast it. The
-# binary under audit is the one recorded in deploy/EXPECTED_SHA256, built from the
-# same commit this deploy repo was assembled from.
+# WHAT IT PROVES. The chain has two halves. deploy/EXPECTED_SHA256 proves the
+# build is deterministic: this commit yields this binary on any machine. The
+# attestation binds the enclave to a rebuild of the app-source repo named below,
+# which `caution verify` checks on PCR0, PCR1, PCR2 and the TLS binding. The
+# attestation carries no binary hash. Re-assembling from ShieldedLabs/zero and
+# diffing against the app-source repo ties the two halves together; the auditor
+# procedure in zeronym/README.md (Usage, Auditors) lists every step.
 
 enclave "__ENCLAVE_NAME__" {
   build {

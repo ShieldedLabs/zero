@@ -578,15 +578,15 @@ pub async fn flush(
     let mut sample_failure: Option<String> = None;
     let mut unplaced = Vec::new();
     // Judged entries whose proofs this hub will refuse from now on: rejected,
-    // or already known (mined, or published by another route). See
-    // `Queue::burn` for why an accepted entry stays unburned.
+    // or already mined. See `Queue::burn` for why an accepted entry, and one
+    // a mempool already holds, stay unburned.
     let mut judged = Vec::new();
     let proven = batch.iter().filter(|e| e.lane == Lane::Proven).count();
     let transparent = batch.iter().filter(|e| e.lane == Lane::Transparent).count();
     for (i, entry) in batch.into_iter().enumerate() {
         match outcomes.get(i) {
-            Some(Publish::Accepted { .. }) => achieved += 1,
-            Some(Publish::AlreadyKnown) => {
+            Some(Publish::Accepted { .. }) | Some(Publish::AlreadyKnown) => achieved += 1,
+            Some(Publish::AlreadyMined) => {
                 achieved += 1;
                 judged.push(entry);
             }
@@ -1352,12 +1352,26 @@ mod tests {
             // Accepted: if it later drops out of every mempool, the wallet's
             // resend must get through.
             (Answer::Send(0, "txid"), false),
-            (Answer::Send(-26, "16: bad-txns-orchard-anchor"), true),
-            // Mined, or published by another route: a copy off the chain buys
-            // one window at most.
+            (
+                Answer::Send(-26, "16: bad-txns-orchard-binding-signature-invalid"),
+                true,
+            ),
+            // The hub leaves anchors unchecked, so an unknown anchor burns too.
+            (
+                Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor"),
+                true,
+            ),
+            // Mined: a copy off the chain buys one window at most.
             (
                 Answer::Send(-27, "transaction already in block chain"),
                 true,
+            ),
+            // In a mempool, likely published by the other hub. It can still
+            // drop out, and the wallet's resend must then get through.
+            (Answer::Send(-26, "txn-already-in-mempool"), false),
+            (
+                Answer::Send(-26, "transaction already exists in mempool"),
+                false,
             ),
         ] {
             let mock = spawn_mock_indexer(vec![answer], Duration::ZERO).await;
@@ -1613,6 +1627,7 @@ mod tests {
                 bundle_keys: Vec::new(),
                 transparent_outputs: 0,
                 has_child: false,
+                spends: Vec::new(),
             }],
             TIP - 5,
             N,

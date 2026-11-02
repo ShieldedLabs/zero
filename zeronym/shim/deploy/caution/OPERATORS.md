@@ -30,7 +30,9 @@ for what is proven and what is not.
 
 > **Read "What this does and does not hide" before you tell anyone what this
 > gives them.** At today's volumes the anonymity set is one transaction. Content
-> privacy and IP unlinking are real; batching anonymity is not yet.
+> privacy is real, and so is IP unlinking against the hub and the peer-to-peer
+> network. IP unlinking against you and the wallet's ISP is batching anonymity,
+> and it needs a batch larger than one.
 
 ## Why an attested enclave
 
@@ -194,6 +196,11 @@ caution verify --attestation-url https://<tls-domain>/attestation
 The same command is what anyone else uses, with no Caution account and no
 checkout of yours.
 
+`caution verify` is step 2 of the [auditor procedure](../../../README.md#usage).
+A PASS proves the enclave runs the tree in your app-source repo. Steps 3 to 5
+tie that tree to `ShieldedLabs/zero`, check its parameters (the hub it diverts
+to included), and check the network path.
+
 Caveats:
 
 - Without `app_sources` in the manifest (the `--app-source` flag), verify cannot
@@ -287,8 +294,12 @@ nothing today, so do not treat a narrow list as containment. Forward-only stays 
 indexer never seeing the migration, and attestation. Clearnet mode loses
 shim↔hub *unlinkability*: the hub sees which shim sent each migration and when.
 With one shim that link is trivially known regardless; it matters as the fleet
-grows, which is exactly when Nym returns. Full table in the hub's operator
-guide, "Clearnet mode".
+grows, which is exactly when Nym returns. Clearnet mode also drops the cover
+traffic. Each divert is a fresh connection to the hub carrying one 64 KiB frame,
+inside the wallet's open request, so your host's egress timestamps every divert
+for your cloud provider and anyone on the path to the hub. You learn the same
+event from your indexer in either mode (see "What this does and does not
+hide"). Full table in the hub's operator guide, "Clearnet mode".
 
 `--nym-gateway <identity>` pins the entry gateway (and lets you narrow the
 `0.0.0.0/0:9000` rule to a `/32`). It **works** — verified against four public
@@ -319,26 +330,30 @@ system stands on, and overclaiming is worse than the limit itself:
 
 > Given a verified attestation, the code holding your migration in plaintext is
 > the published code: it broadcasts the transaction and retains nothing
-> identifying. It does **not** hide from the hub's host that a migration was
-> submitted at a given time, and at current volumes that timing is linkable to
-> the resulting on-chain transaction. **The anonymity set is the batch, and the
-> batch is currently size one.** For an Orchard **deshield**, the amount remains
-> recoverable by the operator through address-level queries the shim does not
-> intercept.
+> identifying. The hub's host sees that a migration was submitted at a given
+> time. The shim's host sees which wallet IP submitted it, from the upload and
+> from the `SendTransaction` missing at its indexer. At current volumes that
+> timing is linkable to the resulting on-chain transaction. **The anonymity set
+> is the batch, and the batch is currently size one.** For an Orchard
+> **deshield**, the amount remains recoverable by the operator through
+> address-level queries the shim does not intercept.
 
-So: content privacy and IP unlinking are real today. **Batching anonymity is
-not** — it only becomes true above an adoption threshold, because the anonymity
-set is the cross-operator batch and is worth exactly as many operators as are
-running diversion.
+So: content privacy is real today, and so is IP unlinking against the hub and
+the peer-to-peer network. **IP unlinking against you and the wallet's ISP is
+batching anonymity.** It becomes true above an adoption threshold, because the
+anonymity set is the matching transactions in the cross-operator batch, and the
+batch is worth exactly as many operators as are running diversion.
 
 ### What it costs to run
 
 The shim holds a **persistent, shaped Nym client**. It emits cover traffic
-continuously — **order of gigabytes per day, per shim** — whether or not anyone
-diverts anything. That is not waste: uniform traffic is what hides *that* a
-divert happened. The knobs that would reduce it
-(`disable_loop_cover_traffic_stream`, `--no-cover`, `--fastmode`) are
-**forbidden**, because each one forfeits the shaping.
+continuously, **order of gigabytes per day, per shim**, whether or not anyone
+diverts anything. That is not waste: uniform traffic hides *that* a divert
+happened from anyone watching the shim's egress. You still see each divert as
+the `SendTransaction` missing at your indexer, so the batch-of-one link above
+stands in both modes. Clearnet mode runs without cover traffic. The knobs that
+would reduce it (`disable_loop_cover_traffic_stream`, `--no-cover`,
+`--fastmode`) are **forbidden**, because each one forfeits the shaping.
 
 Budget for it, and know that Nym's free tier meters **volume** (currently
 250 GB / 30 days). See "Known failure modes" for what happens when it runs out.
@@ -361,7 +376,7 @@ understanding what they mean.
 | `ZIS_CAUTION_ATTESTATION` | let the shim answer Caution's own `/attestation` and health paths | **`true` on managed Caution** (the default). Under h2c the platform routes these to the app, and a shim that proxied them to your indexer would fail its health check and never boot |
 | `ZIS_LOOKUP_TIMEOUT_SECS` | how long a `GetTransaction` waits for the hub before failing closed | default **90 s** (raised from 25 s against measurement). Tuning it changes the enclave config, not the binary, so your `EXPECTED_SHA256` and reproducibility trail stay put. It **multiplies** by the number of `--hub-nym` addresses |
 | `ZIS_BROADCAST_ONLY` | relay only `SendTransaction` and `GetTransaction`; every other gRPC method answers `UNIMPLEMENTED` | default `false`. `assemble-caution.sh` has no switch for it: add `ZIS_BROADCAST_ONLY = "true"` by hand to `unit.env` in the generated manifest. Setting it changes PCR0/PCR1 |
-| `ZIS_HUB` / `ZIS_HUB_TLS` | **legacy** clearnet hop | unset — the current hub refuses clearnet submissions |
+| `ZIS_HUB` / `ZIS_HUB_TLS` | clearnet hub: a literal `IPv4:port`, and the name its certificate must carry | the hub's Caution-managed address and its domain. The shim dials this address and checks the name, so an auditor checks the address against the hub's domain (auditor procedure, step 4) |
 
 `ZIS_BACKEND_TLS` does double duty: the name the backend's certificate must
 present, and the request `:authority` your ingress routes on. Hence the one

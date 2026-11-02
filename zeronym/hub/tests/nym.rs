@@ -147,6 +147,49 @@ async fn a_duplicate_frame_is_acked_accepted_and_does_not_inflate_the_queue() {
 }
 
 #[tokio::test]
+async fn a_burst_on_one_tag_is_admitted_in_full() {
+    // One tag is a whole shim, whose submit returns once the mixnet takes the
+    // frame, so a burst on one tag is honest. It waits its turn, and none of it
+    // is lost.
+    let hub = test_hub(Some(TIP));
+    let burst = (0..8)
+        .map(|seed| {
+            msg(
+                TAG,
+                encode_submit(&nonce(seed), V6_MIGRATION).unwrap().to_vec(),
+            )
+        })
+        .collect();
+
+    let replies = run_round(hub.clone(), burst).await;
+
+    assert_eq!(replies.len(), 8);
+    assert!(replies.iter().all(|reply| ack(reply) == AckKind::Accepted));
+    assert_eq!(hub.queue.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_waiting_submission_is_admitted_across_many_tags() {
+    // Sixteen tags with four submissions each, served on several threads:
+    // every one waits its turn and is acked.
+    let hub = test_hub(Some(TIP));
+    let submissions = (0..64u8)
+        .map(|i| {
+            let payload = vec![i; 64];
+            msg(
+                SenderTag([i % 16; 16]),
+                encode_submit(&nonce(i), &payload).unwrap().to_vec(),
+            )
+        })
+        .collect();
+
+    let replies = run_round(hub.clone(), submissions).await;
+
+    assert_eq!(replies.len(), 64);
+    assert_eq!(hub.queue.len(), 16, "the unverified lane is full");
+}
+
+#[tokio::test]
 async fn an_unparseable_payload_is_admitted_not_refused() {
     // REVIEW #5: the shim diverts what it could not read, so refusing an
     // unparseable payload here would invert its fail-safe into a leak. It is

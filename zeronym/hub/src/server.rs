@@ -37,7 +37,6 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::batcher::{BatchParams, TipTracker};
@@ -71,7 +70,10 @@ const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// reachable by explicit config for tests and local demos (NYM_PLAN M7).
 const SUBMIT_PATH: &str = "/";
 
-/// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body.
+/// The lookup path: `POST /transaction` with a raw `TxFilter.hash` body. Gated
+/// with [`SUBMIT_PATH`] on [`ServeOptions::http_submit`]: a clearnet shim uses
+/// both, and a Nym shim looks up over the mixnet. Open, it tells anyone whether
+/// a txid sits in the queue.
 const TRANSACTION_PATH: &str = "/transaction";
 
 /// How many clearnet lookups may be in flight at once.
@@ -289,10 +291,11 @@ impl NymAddress {
 pub struct ServeOptions {
     /// The hub's Nym address, published at [`NYM_ADDRESS_PATH`].
     pub nym_address: NymAddress,
-    /// Accept clearnet submissions at [`SUBMIT_PATH`]. **Off by default**: the
-    /// mixnet is the submit path now, and an open unauthenticated `POST /` on a
-    /// `0.0.0.0/0` ingress is attack surface with no legitimate user. Turn it on
-    /// only for a transitional clearnet shim, a local demo, or a test.
+    /// Serve the clearnet hop: submissions at [`SUBMIT_PATH`] and lookups at
+    /// [`TRANSACTION_PATH`]. **Off by default**: the mixnet is the submit path
+    /// now, and an open unauthenticated `POST /` on a `0.0.0.0/0` ingress is
+    /// attack surface with no legitimate user. Turn it on only for a
+    /// transitional clearnet shim, a local demo, or a test.
     pub http_submit: bool,
 }
 
@@ -309,18 +312,20 @@ pub struct Hub {
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
     pub chain: Arc<ChainClient>,
-    /// Admissions in flight, at most [`VERIFY_SLOTS`]. See [`Hub::admit`].
-    verify_slots: Arc<Semaphore>,
+    /// HTTP submissions in flight, at most [`MAX_HTTP_ADMISSIONS`]. See
+    /// [`Hub::http_slot`].
+    http_slots: Arc<tokio::sync::Semaphore>,
 }
 
-/// How many admissions may verify proofs at once.
+/// How many HTTP submissions may be in flight at once, from the body read to
+/// the answer, each holding its body and possibly a blocking task.
 ///
-/// Three on the four-vCPU enclave, leaving a core for the mixnet driver and the
-/// flush. A proof check costs the hub about 30 ms of one core, and a sender
-/// with valid signatures over a garbage proof pays close to nothing for it, so
-/// the check must be bounded: past this many in flight a submission is refused
-/// `Full` at once, the same choice `MAX_CONCURRENT_LOOKUPS` makes for lookups.
-pub const VERIFY_SLOTS: usize = 3;
+/// An HTTP connection serves one request at a time, but connections are
+/// unbounded, so this caps what they can hold between them. Past it a
+/// submission is refused `Full` before its body is read, and the caller is
+/// still there to retry. The Nym listener bounds itself and never takes one of
+/// these, so HTTP load cannot refuse a mixnet submission.
+pub const MAX_HTTP_ADMISSIONS: usize = 64;
 
 /// The outcome of the transport-independent lookup core, rendered by each
 /// transport in its own wire shape (HTTP status plus header, or a
@@ -353,7 +358,7 @@ impl Hub {
             tip,
             params,
             chain,
-            verify_slots: Arc::new(Semaphore::new(VERIFY_SLOTS)),
+            http_slots: Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_ADMISSIONS)),
         }
     }
 
@@ -369,6 +374,12 @@ impl Hub {
     /// the caller renders in its own wire shape, `Rejected` among them when a
     /// proof fails. It must never be answered by handing the migration to the
     /// operator.
+    /// One of [`MAX_HTTP_ADMISSIONS`], held by an HTTP submission until it is
+    /// answered, or `None` when every one is held.
+    pub fn http_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.http_slots.clone().try_acquire_owned().ok()
+    }
+
     pub async fn admit(&self, tx_bytes: &[u8]) -> Result<Option<String>, Refusal> {
         // A stale tip means neither the flush schedule nor the expiry check can
         // be trusted, so admission stops. Fail-closed: the shim holds and
@@ -378,20 +389,12 @@ impl Hub {
         }
 
         // The queue may verify proofs, which blocks, so it runs on the blocking
-        // pool, and only [`VERIFY_SLOTS`] at a time.
-        let Ok(slot) = self.verify_slots.clone().try_acquire_owned() else {
-            tracing::warn!(
-                slots = VERIFY_SLOTS,
-                "submission refused at admission: every verification slot is busy"
-            );
-            return Err(Refusal::Full);
-        };
+        // pool. The queue bounds how many verify at once ([`VERIFY_SLOTS`]).
         let queue = self.queue.clone();
         let bytes = Zeroizing::new(tx_bytes.to_vec());
         let height = self.tip.admission_height();
         let params = self.params;
         let admitted = tokio::task::spawn_blocking(move || {
-            let _slot = slot;
             queue.admit(&bytes, height, params.flush_interval, params.mining_margin)
         })
         .await;
@@ -471,12 +474,12 @@ impl Hub {
             // This used to return the queued transaction's raw bytes to whoever
             // asked. The lookup is unauthenticated on both transports by design
             // -- the mixnet address is published at `/nym-address` and clearnet
-            // `POST /transaction` is served unconditionally -- so those bytes
-            // were available to anyone, for a migration that has not been
-            // broadcast anywhere yet. A third party could take them and publish
-            // first, which destroys the batching this hub exists to provide, and
-            // does it before the batch that was supposed to hide the transaction
-            // ever forms (Hornby review, 2026-08-19).
+            // `POST /transaction` answers anyone while `http_submit` is on --
+            // so those bytes were available to anyone, for a migration that has
+            // not been broadcast anywhere yet. A third party could take them and
+            // publish first, which destroys the batching this hub exists to
+            // provide, and does it before the batch that was supposed to hide
+            // the transaction ever forms (Hornby review, 2026-08-19).
             //
             // What the design actually needs from this path is preserved. The
             // shim is stateless BECAUSE the hub can answer "yes, height 0" for a
@@ -490,7 +493,9 @@ impl Hub {
             // still discloses that a given txid is queued here. Closing that too
             // means answering NotFound, which costs a wallet the ability to tell
             // "pending" from "never seen". That is a product decision, not a
-            // code one, and it is left open deliberately.
+            // code one, and it is left open deliberately. A Nym hub answers it
+            // on the mixnet only: the clearnet lookup path closes with the
+            // clearnet submit path (external report, @ouicate).
             tracing::debug!(source = "queue", "transaction lookup answered");
             return LookupOutcome::Found {
                 data: Zeroizing::new(Vec::new()),
@@ -621,10 +626,10 @@ pub async fn serve(listener: TcpListener, hub: Hub, options: ServeOptions) -> Re
 /// old hub treated EVERY POST as a submission, so a path typo (or a shim posting
 /// a lookup to the wrong URL) silently queued garbage.
 ///
-/// `SUBMIT_PATH` falls through to that `404` arm unless
-/// [`ServeOptions::http_submit`] is set — so a disabled submit path is
+/// `SUBMIT_PATH` and `TRANSACTION_PATH` fall through to that `404` arm unless
+/// [`ServeOptions::http_submit`] is set, so a disabled clearnet hop is
 /// indistinguishable from one that never existed, and a scanner learns nothing
-/// about whether this hub could have accepted a submission.
+/// about whether this hub could have accepted a submission or a lookup.
 async fn handle(
     req: Request<Incoming>,
     hub: Hub,
@@ -639,7 +644,7 @@ async fn handle(
             Method::POST => submit(req, hub).await,
             _ => Ok(text(StatusCode::METHOD_NOT_ALLOWED, "POST only")),
         },
-        TRANSACTION_PATH => match method {
+        TRANSACTION_PATH if options.http_submit => match method {
             // REFUSED, not queued, when every slot is held. Parking it would
             // rebuild the unbounded pile the bound exists to prevent -- the same
             // reasoning the mixnet arm records. 503 is the honest answer: the
@@ -744,6 +749,16 @@ fn found(tx_bytes: &[u8], height: u64) -> Response<Full<Bytes>> {
 /// Admit one transaction into the batch. Never returns `Err`: a bad request is a
 /// response, not a connection fault.
 async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Held until this returns. Taken before the body is read, so a flood of
+    // connections holds at most `MAX_HTTP_ADMISSIONS` bodies.
+    let Some(_slot) = hub.http_slot() else {
+        tracing::warn!(
+            in_flight = MAX_HTTP_ADMISSIONS,
+            "submission refused at admission: every HTTP admission slot is held"
+        );
+        return Ok(refused(Refusal::Full));
+    };
+
     // Buffer the body under a hard cap, refused strictly before anything else.
     let read = Limited::new(req.into_body(), MAX_TX_BYTES).collect();
     let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
@@ -835,4 +850,29 @@ fn json(code: StatusCode, value: &serde_json::Value) -> Response<Full<Bytes>> {
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batcher::TipGuard;
+
+    #[tokio::test]
+    async fn http_slots_run_out_without_refusing_the_mixnet_path() {
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+        tip.observe(&[100]);
+        let chain = match ChainClient::new(vec!["127.0.0.1:1".parse().expect("addr")], None) {
+            Ok(chain) => Arc::new(chain),
+            Err(err) => panic!("chain client: {err}"),
+        };
+        let hub = Hub::new(Arc::new(Queue::new()), tip, BatchParams::default(), chain);
+        let held: Vec<_> = (0..MAX_HTTP_ADMISSIONS)
+            .map(|_| hub.http_slot().expect("a free slot"))
+            .collect();
+        assert!(hub.http_slot().is_none(), "past the cap HTTP is refused");
+        // The Nym listener admits through `admit` alone.
+        assert!(hub.admit(&[0; 64]).await.is_ok());
+        drop(held);
+        assert!(hub.http_slot().is_some());
+    }
 }
