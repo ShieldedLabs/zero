@@ -656,6 +656,16 @@ const PERMANENT_REJECTIONS: &[&str] = &[
     // The inputs are gone. A retry re-offers bytes that can never be valid.
     "conflict",
     "already spent",
+    // An unknown anchor: zebra's spelling, which lacks the `bad txns` prefix
+    // zcashd's `bad-txns-orchard-unknown-anchor` carries. The one entry here a
+    // waiting node could change, for a recent root at a node behind the tip.
+    // Listed on purpose: admission leaves the anchor unchecked, so a proof
+    // against an anchor the chain never had fails the same way at every node,
+    // and retried it would hold a proven slot for every attempt.
+    "unknown sprout anchor",
+    "unknown sapling anchor",
+    "unknown orchard anchor",
+    "unknown ironwood anchor",
 ];
 
 fn classify_publish_error(message: &str) -> Publish {
@@ -864,6 +874,21 @@ mod tests {
                 Publish::Rejected { .. } => {}
                 other => panic!("{permanent:?} must be a rejection, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_unknown_anchor_is_a_rejection_in_both_vocabularies() {
+        for message in [
+            "16: bad-txns-orchard-unknown-anchor",
+            "unknown Orchard anchor: Root(..)",
+            "consensus validation: unknown Orchard anchor: Root(..)",
+            "unknown Ironwood anchor: Root(..)",
+        ] {
+            assert!(
+                matches!(classify_publish_error(message), Publish::Rejected { .. }),
+                "{message:?}"
+            );
         }
     }
 

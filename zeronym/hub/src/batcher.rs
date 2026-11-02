@@ -1352,7 +1352,15 @@ mod tests {
             // Accepted: if it later drops out of every mempool, the wallet's
             // resend must get through.
             (Answer::Send(0, "txid"), false),
-            (Answer::Send(-26, "16: bad-txns-orchard-anchor"), true),
+            (
+                Answer::Send(-26, "16: bad-txns-orchard-binding-signature-invalid"),
+                true,
+            ),
+            // The hub leaves anchors unchecked, so an unknown anchor burns too.
+            (
+                Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor"),
+                true,
+            ),
             // Mined: a copy off the chain buys one window at most.
             (
                 Answer::Send(-27, "transaction already in block chain"),
