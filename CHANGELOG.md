@@ -110,7 +110,7 @@ date) before dispatching the release.
   bytes, an unknown circuit era). Free junk fills only its own lane, and a TEX
   second leg rides in the verified lane when the hub holds its parent. One
   proof buys one entry: re-signing it collapses to the held entry, and a proof
-  the network rejected, or already has, is refused for the life of the
+  the network rejected, or already mined, is refused for the life of the
   process. About 9 ms of CPU per migration on the enclave's four cores, three
   checks at a time. Reported by [@ouicate](https://github.com/ouicate).
 
