@@ -1091,8 +1091,8 @@ mod tests {
             N,
             MARGIN
         )));
-        // A second leg of the same parent is a conflicting spend; the parent's
-        // proofs pay for one.
+        // Another leg of the same parent is admitted, in the transparent lane:
+        // the parent's proofs pay for one leg only.
         assert!(admitted(q.admit(
             &second_leg(V6_ORCHARD_ONLY, 2000),
             100,
@@ -1100,6 +1100,7 @@ mod tests {
             MARGIN
         )));
         // So is a leg whose parent the queue does not hold.
+        // The lane counts below are the check.
         assert!(admitted(q.admit(
             &second_leg(PROVEN_B, 1000),
             100,
