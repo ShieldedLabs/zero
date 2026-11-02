@@ -1,8 +1,10 @@
 //! The hub's connection to the Zcash network, through an indexer.
 //!
-//! Two calls and nothing else: `GetLightdInfo` gives the height that drives
-//! flush scheduling and expiry admission, and `SendTransaction` publishes each
-//! member of a flushed batch. The hub deliberately does NOT run a validator
+//! `GetLightdInfo` gives the height that drives flush scheduling and expiry
+//! admission, `SendTransaction` publishes each member of a flushed batch,
+//! `GetTransaction` answers a lookup that missed the queue, and
+//! `GetBlockRangeNullifiers` feeds the set of Orchard nullifiers the chain has
+//! revealed ([`crate::spent`]). The hub deliberately does NOT run a validator
 //! in-enclave: mainnet state is hundreds of gigabytes and an enclave is
 //! diskless, so it speaks to infrastructure that already exists.
 //!
@@ -21,7 +23,7 @@
 //! is one outage away from never being mined.
 //!
 //! gRPC is spoken directly over hyper rather than through tonic. The surface is
-//! two unary calls, and the enclave constraint (dial a literal address, verify a
+//! three unary calls and one server-streaming read, and the enclave constraint (dial a literal address, verify a
 //! DNS NAME, resolve nothing) is awkward to express through a tonic channel but
 //! trivial here.
 
@@ -39,7 +41,10 @@ use percent_encoding::percent_decode_str;
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use zaino_proto::proto::service::{Empty, LightdInfo, RawTransaction, SendResponse, TxFilter};
+use zaino_proto::proto::compact_formats::CompactBlock;
+use zaino_proto::proto::service::{
+    BlockId, BlockRange, Empty, LightdInfo, PoolType, RawTransaction, SendResponse, TxFilter,
+};
 
 use crate::tls::IndexerTls;
 use crate::BoxError;
@@ -65,11 +70,20 @@ const GRPC_PREFIX_LEN: usize = 5;
 const SEND_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction";
 const GET_LIGHTD_INFO: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo";
 const GET_TRANSACTION: &str = "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetTransaction";
+const GET_BLOCK_RANGE_NULLIFIERS: &str =
+    "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetBlockRangeNullifiers";
 
-/// Ceiling on an indexer response body. The three unary calls this client makes
-/// are `GetLightdInfo`, a `SendResponse`, and a `RawTransaction` -- a mined
-/// transaction is at most ~2 MB and the other two are tiny, so nothing
-/// legitimate approaches this. Without it a ~100-byte unauthenticated lookup
+/// Orchard actions one block can hold: a 2 MB block over the ~820 bytes of one
+/// action is about 2 500. A reply past this is malformed or hostile, and is
+/// refused before it can grow the nullifier set.
+const MAX_ORCHARD_ACTIONS_PER_BLOCK: usize = 4096;
+
+/// Ceiling on an indexer response body, unary or streamed. The three unary
+/// calls this client makes are `GetLightdInfo`, a `SendResponse`, and a
+/// `RawTransaction` -- a mined transaction is at most ~2 MB and the other two
+/// are tiny, so nothing legitimate approaches this. The streamed
+/// `GetBlockRangeNullifiers` read shrinks its range until it fits (see
+/// [`crate::spent::SYNC_CHUNK_BLOCKS`]). Without it a ~100-byte unauthenticated lookup
 /// buys an unbounded allocation in a fixed-size enclave, because the response
 /// was collected with no limit at all. Same value and same reasoning as the
 /// shim's `MAX_HUB_RESPONSE_BYTES`, which bounds the mirror-image hop.
@@ -228,6 +242,49 @@ impl ChainClient {
         Ok(heights)
     }
 
+    /// The configured endpoints, in order, for a caller that reads each one on
+    /// its own ([`crate::spent`]).
+    pub fn endpoints(&self) -> &[SocketAddr] {
+        &self.endpoints
+    }
+
+    /// One endpoint's best-chain height.
+    pub async fn tip_height_of(&self, addr: SocketAddr) -> Result<u32, BoxError> {
+        let info: LightdInfo = self.unary(addr, GET_LIGHTD_INFO, Empty {}).await?;
+        u32::try_from(info.block_height).map_err(|_| -> BoxError {
+            format!("indexer reported height {} beyond u32", info.block_height).into()
+        })
+    }
+
+    /// The Orchard nullifiers of blocks `start..=end` as one endpoint reports
+    /// them, one entry per block it returned, in height order.
+    ///
+    /// Orchard only: a transaction admitted to the proven lane carries an
+    /// Orchard bundle, so its Orchard nullifiers alone say whether the chain
+    /// already has it. The request filters to the Orchard pool; a server that
+    /// ignores the filter still returns the Orchard actions, and the rest is
+    /// skipped.
+    pub async fn orchard_nullifiers(
+        &self,
+        addr: SocketAddr,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<(u32, Vec<[u8; 32]>)>, BoxError> {
+        let range = BlockRange {
+            start: Some(BlockId {
+                height: u64::from(start),
+                hash: Vec::new(),
+            }),
+            end: Some(BlockId {
+                height: u64::from(end),
+                hash: Vec::new(),
+            }),
+            pool_types: vec![PoolType::Orchard as i32],
+        };
+        let body = self.call(addr, GET_BLOCK_RANGE_NULLIFIERS, range).await?;
+        orchard_nullifiers_of(&unframe_all::<CompactBlock>(&body)?, start, end)
+    }
+
     /// Publish one raw transaction to every configured endpoint.
     pub async fn broadcast(&self, tx_bytes: &[u8]) -> Publish {
         // Concurrent, not sequential. A flush publishes k transactions across n
@@ -365,6 +422,17 @@ impl ChainClient {
         Req: Message,
         Resp: Message + Default,
     {
+        unframe(&self.call(addr, path, message).await?)
+    }
+
+    /// One gRPC call, unary or server-streaming, returning the response body
+    /// with its frames still on.
+    async fn call<Req: Message>(
+        &self,
+        addr: SocketAddr,
+        path: &str,
+        message: Req,
+    ) -> Result<Bytes, BoxError> {
         // ONE deadline over the whole call -- connect, TLS handshake, h2
         // handshake, request, and body -- not a timer on the connect alone.
         // Before this only TcpStream::connect was inside RPC_TIMEOUT; the TLS
@@ -377,25 +445,21 @@ impl ChainClient {
         // requeue-on-transport-failure change: a hung flush never returns, so
         // nothing requeues either. The whole call now fails closed inside the
         // budget, which is what "per-call budget" was always meant to mean.
-        tokio::time::timeout(RPC_TIMEOUT, self.unary_inner(addr, path, message))
+        tokio::time::timeout(RPC_TIMEOUT, self.call_inner(addr, path, message))
             .await
             .map_err(|_| -> BoxError {
                 format!("{path} to {addr} exceeded the {RPC_TIMEOUT:?} call budget").into()
             })?
     }
 
-    /// The body of [`Self::unary`], without the deadline; kept separate so the
+    /// The body of [`Self::call`], without the deadline; kept separate so the
     /// deadline wraps EVERY await below, including the handshakes.
-    async fn unary_inner<Req, Resp>(
+    async fn call_inner<Req: Message>(
         &self,
         addr: SocketAddr,
         path: &str,
         message: Req,
-    ) -> Result<Resp, BoxError>
-    where
-        Req: Message,
-        Resp: Message + Default,
-    {
+    ) -> Result<Bytes, BoxError> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
 
@@ -414,15 +478,13 @@ impl ChainClient {
             .header("te", "trailers")
             .body(Full::new(frame(&message)))?;
 
-        let response = match &self.tls {
+        match &self.tls {
             Some(tls) => {
                 let stream = tls.connect(addr, stream).await?;
-                round_trip(stream, request).await?
+                round_trip(stream, request).await
             }
-            None => round_trip(stream, request).await?,
-        };
-
-        unframe(&response)
+            None => round_trip(stream, request).await,
+        }
     }
 }
 
@@ -523,6 +585,70 @@ fn unframe<M: Message + Default>(body: &[u8]) -> Result<M, BoxError> {
         .and_then(|end| body.get(GRPC_PREFIX_LEN..end))
         .ok_or_else(|| -> BoxError { "gRPC frame length overruns the body".into() })?;
     Ok(M::decode(message)?)
+}
+
+/// Every message of a server-streaming response body, in order.
+fn unframe_all<M: Message + Default>(mut body: &[u8]) -> Result<Vec<M>, BoxError> {
+    let mut messages = Vec::new();
+    while !body.is_empty() {
+        if body.len() < GRPC_PREFIX_LEN {
+            return Err("gRPC response ends inside a frame header".into());
+        }
+        let declared = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        let end = GRPC_PREFIX_LEN
+            .checked_add(declared)
+            .filter(|end| *end <= body.len())
+            .ok_or_else(|| -> BoxError { "gRPC frame length overruns the body".into() })?;
+        messages.push(unframe(&body[..end])?);
+        body = &body[end..];
+    }
+    Ok(messages)
+}
+
+/// The Orchard nullifiers of `blocks`, checked against the range they answer.
+///
+/// Refused whole unless it holds exactly one block per height of `start..=end`,
+/// in order, each with 32-byte nullifiers and at most the actions a block can
+/// hold. lightwalletd and zaino send every block of the range, empty ones too,
+/// and fail a range above their tip. Recording part of an answer would be
+/// guessing, and a later read resumes above `end`.
+fn orchard_nullifiers_of(
+    blocks: &[CompactBlock],
+    start: u32,
+    end: u32,
+) -> Result<Vec<(u32, Vec<[u8; 32]>)>, BoxError> {
+    let mut out: Vec<(u32, Vec<[u8; 32]>)> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let height = u32::try_from(block.height)
+            .ok()
+            .filter(|height| (start..=end).contains(height))
+            .ok_or_else(|| -> BoxError {
+                format!(
+                    "indexer returned block {} for {start}..={end}",
+                    block.height
+                )
+                .into()
+            })?;
+        let expected = out.last().map_or(start, |(last, _)| last.saturating_add(1));
+        if height != expected {
+            return Err(format!("indexer returned block {height} where {expected} was due").into());
+        }
+        let actions = block.vtx.iter().flat_map(|tx| &tx.actions);
+        if actions.clone().count() > MAX_ORCHARD_ACTIONS_PER_BLOCK {
+            return Err(format!("indexer returned too many Orchard actions at {height}").into());
+        }
+        let nullifiers = actions
+            .map(|action| {
+                <[u8; 32]>::try_from(action.nullifier.as_slice())
+                    .map_err(|_| -> BoxError { "an Orchard nullifier is not 32 bytes".into() })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        out.push((height, nullifiers));
+    }
+    if out.last().map(|(last, _)| *last) != Some(end) {
+        return Err(format!("indexer reply stopped short of {end}").into());
+    }
+    Ok(out)
 }
 
 /// Map a `SendResponse` onto [`Publish`].
@@ -1102,5 +1228,80 @@ mod tests {
         assert!(unframe::<SendResponse>(&[0, 0, 0, 0, 99]).is_err());
         // Compression flag set.
         assert!(unframe::<SendResponse>(&[1, 0, 0, 0, 0]).is_err());
+    }
+
+    fn block(height: u64, orchard: &[[u8; 32]], ironwood: &[[u8; 32]]) -> CompactBlock {
+        use zaino_proto::proto::compact_formats::{CompactOrchardAction, CompactTx};
+        let actions = |nullifiers: &[[u8; 32]]| {
+            nullifiers
+                .iter()
+                .map(|nf| CompactOrchardAction {
+                    nullifier: nf.to_vec(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        CompactBlock {
+            height,
+            vtx: vec![CompactTx {
+                actions: actions(orchard),
+                ironwood_actions: actions(ironwood),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_streamed_reply_unframes_every_message_in_order() {
+        let mut body = Vec::new();
+        for height in [7, 8, 9] {
+            body.extend_from_slice(&frame(&block(height, &[], &[])));
+        }
+        let blocks = unframe_all::<CompactBlock>(&body).unwrap();
+        assert_eq!(
+            blocks.iter().map(|b| b.height).collect::<Vec<_>>(),
+            [7, 8, 9]
+        );
+        assert!(unframe_all::<CompactBlock>(&[]).unwrap().is_empty());
+        body.extend_from_slice(&[0, 0, 0]);
+        assert!(
+            unframe_all::<CompactBlock>(&body).is_err(),
+            "a cut-off frame"
+        );
+    }
+
+    #[test]
+    fn only_orchard_nullifiers_are_read() {
+        let blocks = [
+            block(10, &[[1; 32]], &[[2; 32]]),
+            block(11, &[], &[[3; 32]]),
+        ];
+        assert_eq!(
+            orchard_nullifiers_of(&blocks, 10, 11).unwrap(),
+            vec![(10, vec![[1; 32]]), (11, vec![])]
+        );
+    }
+
+    #[test]
+    fn a_reply_that_does_not_answer_the_range_is_refused_whole() {
+        let outside = [block(9, &[[1; 32]], &[])];
+        assert!(orchard_nullifiers_of(&outside, 10, 11).is_err());
+        let backwards = [block(11, &[], &[]), block(10, &[], &[])];
+        assert!(orchard_nullifiers_of(&backwards, 10, 11).is_err());
+        let mut short = block(10, &[[1; 32]], &[]);
+        short.vtx[0].actions[0].nullifier.pop();
+        assert!(orchard_nullifiers_of(&[short], 10, 10).is_err());
+        let flood = vec![[1; 32]; MAX_ORCHARD_ACTIONS_PER_BLOCK + 1];
+        assert!(orchard_nullifiers_of(&[block(10, &flood, &[])], 10, 10).is_err());
+    }
+
+    #[test]
+    fn a_reply_must_cover_every_height_of_the_range() {
+        let stops_early = [block(10, &[], &[])];
+        assert!(orchard_nullifiers_of(&stops_early, 10, 11).is_err());
+        let gap = [block(10, &[], &[]), block(12, &[], &[])];
+        assert!(orchard_nullifiers_of(&gap, 10, 12).is_err());
+        assert!(orchard_nullifiers_of(&[], 10, 10).is_err());
     }
 }

@@ -53,13 +53,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::admission::{self, Inspected, Lane};
+use crate::spent::ChainNullifiers;
 use zebra_chain::transparent::OutPoint;
 
 /// Per-entry ceiling, matching the fixed frame the batching design pads to.
@@ -182,8 +183,8 @@ pub enum Refusal {
     /// tell the wallet), and minting a new code would make an older shim answer
     /// `UnknownRefusal` for the length of any rolling deploy.
     Draining,
-    /// A proof or signature did not verify, or this hub already published these
-    /// proofs to a verdict. Over HTTP the reason is `rejected`; on the wire it
+    /// A proof or signature did not verify, this hub already published these
+    /// proofs to a verdict, or the chain already holds the transaction. Over HTTP the reason is `rejected`; on the wire it
     /// shares `Full`'s code for the reason [`Refusal::Draining`] gives.
     Rejected,
 }
@@ -464,11 +465,24 @@ pub struct Queue {
     /// inserts, so a test can act inside that window.
     #[cfg(test)]
     after_verify: Option<Box<dyn Fn() + Send + Sync>>,
+    /// The Orchard nullifiers the chain has revealed. `None` admits without
+    /// that check, which is what a queue built by `new` does.
+    revealed: Option<Arc<ChainNullifiers>>,
 }
 
 impl Queue {
     pub fn new() -> Self {
         Self::with_capacity(MAX_QUEUE_BYTES)
+    }
+
+    /// A queue that refuses a transaction whose Orchard nullifier the chain
+    /// already holds: a copy of a mined transaction, which can never be mined
+    /// again. [`crate::spent::run`] keeps `revealed` current.
+    pub fn watching(revealed: Arc<ChainNullifiers>) -> Self {
+        Self {
+            revealed: Some(revealed),
+            ..Self::new()
+        }
     }
 
     pub fn with_capacity(max_bytes: usize) -> Self {
@@ -485,6 +499,7 @@ impl Queue {
             verify_slots: tokio::sync::Semaphore::new(VERIFY_SLOTS),
             #[cfg(test)]
             after_verify: None,
+            revealed: None,
         }
     }
 
@@ -550,6 +565,16 @@ impl Queue {
         // unreachable rather than merely rate-limited (REVIEW #2).
         if !survives_next_flush(inspected.expiry, tip, flush_interval, mining_margin) {
             return Admission::Refused(Refusal::ExpiryTooTight);
+        }
+
+        // A copy of a mined transaction: its proofs verify, and it can never be
+        // mined again. Checked before the queue's lock, and before any proof.
+        if self
+            .revealed
+            .as_ref()
+            .is_some_and(|revealed| revealed.any_revealed(&inspected.orchard_nullifiers))
+        {
+            return Admission::Refused(Refusal::Rejected);
         }
 
         let key: [u8; 32] = Sha256::digest(tx_bytes).into();
@@ -1096,6 +1121,28 @@ mod tests {
         for burned in [V6_ORCHARD_ONLY, PROVEN_A_RESIGNED] {
             assert_eq!(
                 q.admit(burned, 100, N, MARGIN),
+                Admission::Refused(Refusal::Rejected)
+            );
+        }
+        assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
+    }
+
+    #[test]
+    fn a_copy_of_a_mined_transaction_is_refused_once_every_indexer_has_it() {
+        let revealed = Arc::new(ChainNullifiers::new(2));
+        let mined = admission::inspect(V6_ORCHARD_ONLY).orchard_nullifiers;
+        let q = Queue::watching(revealed.clone());
+
+        // One indexer alone decides nothing: it sees every published migration,
+        // and could otherwise block any wallet's resend.
+        revealed.record(0, 1, 1, vec![(1, mined.clone())]);
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let _ = q.drain_shuffled();
+
+        revealed.record(1, 1, 1, vec![(1, mined)]);
+        for copy in [V6_ORCHARD_ONLY, PROVEN_A_RESIGNED] {
+            assert_eq!(
+                q.admit(copy, 100, N, MARGIN),
                 Admission::Refused(Refusal::Rejected)
             );
         }

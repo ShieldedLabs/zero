@@ -52,17 +52,30 @@ wrong shape, not merely an unbuilt one.
   sender who exposed their address instead of sending anonymously, and drops such
   messages rather than queueing them.
 - **Queues** them in RAM, bounded by an explicit byte budget (64 MiB), which is
-  what bounds this enclave's memory against someone who simply keeps submitting.
+  what bounds this enclave's memory against someone who simply keeps submitting,
+  and by 1024 entries split into three lanes: 896 for transactions whose proofs
+  verified, 112 for transparent-only spends, 16 for what it cannot verify.
+- **Reads the Orchard nullifiers** each indexer reports mined
+  (`GetBlockRangeNullifiers`): about a minute from cold on mainnet (measured
+  2026-10-29), then every 30 seconds. Admission does not wait for it. Every
+  indexer must serve that call and be current for the check to work. The log
+  says `nullifier set synced` when it is on, and `nullifier set not current`
+  when copies pass.
 - **Flushes** the batch on a cadence, broadcasting every member to **every**
   configured indexer — a migration that entered only one mempool is one outage
   away from never being mined.
 - **Answers lookups** so a wallet can see its own just-diverted transaction
   before it is mined.
 
-It deliberately does **not** validate transactions. There is no consensus check,
-no signature or proof verification, no fee or double-spend check: the hub
-broadcasts what it is given and lets the network decide. It also broadcasts
-transactions it could not parse, by design.
+It checks what a junk submission must pay for, and leaves the rest to the
+network. A submission that touches Orchard must carry Halo2 proofs that verify,
+and signatures that verify when it has no transparent inputs, so each junk entry
+costs its sender a proof (about 2.6 core-seconds). A copy of a transaction every
+indexer reports mined is refused, and so is a proof this hub already published
+to a verdict. Anchors, fees and mempool double spends need chain state the
+enclave does not hold: the hub broadcasts what passes and lets the network
+decide. It also queues and broadcasts transactions it could not parse, by
+design, in their own small lane.
 
 The queue is deliberately **not persisted**. An enclave is diskless, and
 persisting it would mean writing plaintext migrations somewhere the host could
@@ -432,44 +445,57 @@ confirms.** Resends are safe — the queue deduplicates on payload hash.
 emits continuous cover traffic. When it runs out, reception stops. No ticketbook
 (paid credential) mechanism is wired up yet.
 
-**4. Anyone can fill your queue for free, for one to nine flush windows.**
+**4. Anyone can fill your queue's free lanes, and the proven lane for a proof per entry.**
 Submission is open to all. Three doors reach the queue: the mixnet address you
 publish at `/nym-address`, clearnet `POST /` when `ZIH_HTTP_SUBMIT=true`, and the wallet port
 of every shim, which diverts unparseable bytes on purpose. The queue holds 64 MiB
-or 1024 entries (`MAX_QUEUE_ENTRIES`), whichever fills first, and the entry cap
-binds first: 1024 junk payloads of 64 bytes fill it. Junk costs its sender
-nothing. Forged parseable bytes work as well as unparseable ones, because the node
-is the only judge of validity. While the junk is queued, every honest submission
-is refused `queue_full`:
+or 1024 entries (`MAX_QUEUE_ENTRIES`), split into three lanes:
+
+- **Proven** (896 entries): Orchard transactions with no transparent inputs whose
+  proofs and signatures verify. Honest migrations land here. Each junk entry
+  costs its sender a real Halo2 proof, about 2.6 core-seconds, so a sustained
+  fill costs about 1 to 2 cores. The hub refuses a copy of a transaction every
+  indexer reports mined, and a proof it already published to a verdict.
+- **Transparent** (112 entries): transparent-only spends, such as a TEX
+  payment's second leg whose parent the queue does not hold. Free to fill.
+- **Unverified** (16 entries): unparseable bytes, a circuit era this build has
+  no key for, and an Orchard transaction with transparent inputs. Free to fill.
+
+A full lane refuses its own submissions `queue_full`, and the other lanes stay
+open. While a lane is full:
 
 - A clearnet shim tells its wallet (`error_code -1`).
-- Over the mixnet the wallet was already told success, so the migration is lost
-  silently. A ZIP 318 migration expires 30 to 60 days out, and the wallet keeps
-  its notes locked until then.
+- Over the mixnet the wallet was already told success, so the transaction is
+  lost silently. A ZIP 318 migration expires 30 to 60 days out, and the wallet
+  keeps its notes locked until then.
 
 How long a burst lasts depends on the junk:
 
 - **Unparseable junk** leaves at the flush that publishes it. Your indexers
-  reject each entry once, and admission opens again. To hold the queue shut, a
+  reject each entry once, and admission opens again. To hold the lane shut, a
   sender must repeat the burst every window.
-- **Forged parseable junk** stays longer. The node answers with a verification
-  error, which the hub reads as `Retryable`, so each entry goes back on the queue.
-  An entry with no expiry (`nExpiryHeight == 0`) or a far expiry leaves only when
-  its attempts pass `MAX_REQUEUE_ATTEMPTS` (8). That is nine publications, so one
-  burst holds the queue for up to nine flush windows, about 3 to 4 hours.
+- **Forged parseable junk** in the transparent or unverified lane stays longer.
+  The node answers with a verification error, which the hub reads as
+  `Retryable`, so each entry goes back on the queue. An entry with no expiry
+  (`nExpiryHeight == 0`) or a far expiry leaves only when its attempts pass
+  `MAX_REQUEUE_ATTEMPTS` (8). That is nine publications, so one burst holds the
+  lane for up to nine flush windows, about 3 to 4 hours.
+- **Proven-lane junk** proves against the sender's own tree, so the node
+  refuses its anchor. The hub burns those proofs and drops the entry at that
+  flush. Behind an indexer that relays the refusal as retryable, the entry
+  stays up to nine flush windows, as forged parseable junk does.
 
 - **Detect:** `submission refused at admission` with `reason=queue_full`, and a
-  `flush published` line with `flush_size` near 1024 and `achieved_batch_size`
-  near zero.
-- **Recover:** wait it out. The next flush clears unparseable junk. Forged
-  parseable junk clears at the flush where `dropped_exhausted` is near 1024;
-  until then each `flush published` line shows `requeued` near 1024. That flush
-  also logs `gave up on migrations that could not be placed; they exist nowhere
-  else`. Read its `reason` field, a sample failure from that flush: a
-  verification error means the junk is leaving, and a transport failure means an
-  outage dropped honest migrations. A small count is still lost migrations. A
-  check of proofs and signatures at admission, so that each junk entry costs a
-  real proof, is future work.
+  `flush published` line with `flush_size` near a lane's size and
+  `achieved_batch_size` near zero.
+- **Recover:** wait it out. The next flush clears unparseable junk and burned
+  proven-lane junk. Forged parseable junk clears at the flush where
+  `dropped_exhausted` is near its lane's size; until then each `flush published`
+  line shows `requeued` near that size. That flush also logs `gave up on
+  migrations that could not be placed; they exist nowhere else`. Read its
+  `reason` field, a sample failure from that flush: a verification error means
+  the junk is leaving, and a transport failure means an outage dropped honest
+  migrations. A small count is still lost migrations.
 
 ## If the hub goes down: the single-hub recovery runbook
 
