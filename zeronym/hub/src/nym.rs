@@ -317,11 +317,24 @@ impl Admitter {
     }
 
     /// Start as many waiting submissions as there are free slots.
+    ///
+    /// A slot is taken only under the turns lock with a submission ready, and
+    /// that submission is taken in the same hold. Taken first and released on
+    /// an empty queue, a slot could make a concurrent offer's `pump` miss it
+    /// while this one missed the offer, stranding the submission.
     fn pump(self: &Arc<Self>) {
-        while let Ok(slot) = self.slots.clone().try_acquire_owned() {
-            let Some((received, received_at)) = self.turns().next() else {
+        loop {
+            let mut turns = self.turns();
+            if turns.ready.is_empty() {
+                return;
+            }
+            let Ok(slot) = self.slots.clone().try_acquire_owned() else {
                 return;
             };
+            let Some((received, received_at)) = turns.next() else {
+                return;
+            };
+            drop(turns);
             let turn = Turn {
                 admitter: self.clone(),
                 tag: received.sender_tag,
