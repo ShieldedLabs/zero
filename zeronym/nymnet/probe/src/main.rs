@@ -485,7 +485,8 @@ async fn cmd_e2e(network: &Path) -> Result<()> {
     use zero_indexer_shim::hub::{HubTransport, Lookup, Submit};
     use zero_indexer_shim::nym as shim_nym;
 
-    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+    // Real proofs: the hub verifies them at admission.
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../hub/tests/fixtures/v6_proven_a.bin");
 
     // ---- The hub half: a real listener over the real cores, driven by a glue
     // task that is the M5 hub driver in miniature.
@@ -724,7 +725,8 @@ async fn cmd_e2e_driver(network: &Path) -> Result<()> {
     use zero_indexer_shim::nym as shim_nym;
     use zero_indexer_shim::nym_driver as shim_driver;
 
-    const V6_MIGRATION: &[u8] = include_bytes!("../../../shim/tests/fixtures/v6_migration.bin");
+    // Real proofs: the hub verifies them at admission.
+    const V6_MIGRATION: &[u8] = include_bytes!("../../../hub/tests/fixtures/v6_proven_a.bin");
 
     // ---- Hub: the real listener and cores, fed by the SHIPPED hub driver, which
     // builds its own client from the localnet topology and reports its address.
