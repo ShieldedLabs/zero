@@ -312,19 +312,20 @@ pub struct Hub {
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
     pub chain: Arc<ChainClient>,
-    /// Admissions in flight across both ingress paths, at most
-    /// [`MAX_PENDING_ADMISSIONS`]. See [`Hub::admit`].
-    pending: Arc<tokio::sync::Semaphore>,
+    /// HTTP submissions in flight, at most [`MAX_HTTP_ADMISSIONS`]. See
+    /// [`Hub::http_slot`].
+    http_slots: Arc<tokio::sync::Semaphore>,
 }
 
-/// How many admissions may be in flight at once, each holding a copy of its
-/// bytes and a blocking task.
+/// How many HTTP submissions may be in flight at once, from the body read to
+/// the answer, each holding its body and possibly a blocking task.
 ///
-/// The Nym listener already holds itself to a few at a time. An HTTP
-/// connection serves one request at a time, but connections are unbounded, so
-/// this caps what they can hold between them. Past it a submission is refused
-/// `Full` at once, and the HTTP caller is still there to retry.
-pub const MAX_PENDING_ADMISSIONS: usize = 64;
+/// An HTTP connection serves one request at a time, but connections are
+/// unbounded, so this caps what they can hold between them. Past it a
+/// submission is refused `Full` before its body is read, and the caller is
+/// still there to retry. The Nym listener bounds itself and never takes one of
+/// these, so HTTP load cannot refuse a mixnet submission.
+pub const MAX_HTTP_ADMISSIONS: usize = 64;
 
 /// The outcome of the transport-independent lookup core, rendered by each
 /// transport in its own wire shape (HTTP status plus header, or a
@@ -357,7 +358,7 @@ impl Hub {
             tip,
             params,
             chain,
-            pending: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_ADMISSIONS)),
+            http_slots: Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_ADMISSIONS)),
         }
     }
 
@@ -373,6 +374,12 @@ impl Hub {
     /// the caller renders in its own wire shape, `Rejected` among them when a
     /// proof fails. It must never be answered by handing the migration to the
     /// operator.
+    /// One of [`MAX_HTTP_ADMISSIONS`], held by an HTTP submission until it is
+    /// answered, or `None` when every one is held.
+    pub fn http_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.http_slots.clone().try_acquire_owned().ok()
+    }
+
     pub async fn admit(&self, tx_bytes: &[u8]) -> Result<Option<String>, Refusal> {
         // A stale tip means neither the flush schedule nor the expiry check can
         // be trusted, so admission stops. Fail-closed: the shim holds and
@@ -381,14 +388,6 @@ impl Hub {
             return Err(Refusal::TipStale);
         }
 
-        let Ok(pending) = self.pending.clone().try_acquire_owned() else {
-            tracing::warn!(
-                pending = MAX_PENDING_ADMISSIONS,
-                "submission refused at admission: too many admissions in flight"
-            );
-            return Err(Refusal::Full);
-        };
-
         // The queue may verify proofs, which blocks, so it runs on the blocking
         // pool. The queue bounds how many verify at once ([`VERIFY_SLOTS`]).
         let queue = self.queue.clone();
@@ -396,7 +395,6 @@ impl Hub {
         let height = self.tip.admission_height();
         let params = self.params;
         let admitted = tokio::task::spawn_blocking(move || {
-            let _pending = pending;
             queue.admit(&bytes, height, params.flush_interval, params.mining_margin)
         })
         .await;
@@ -751,6 +749,16 @@ fn found(tx_bytes: &[u8], height: u64) -> Response<Full<Bytes>> {
 /// Admit one transaction into the batch. Never returns `Err`: a bad request is a
 /// response, not a connection fault.
 async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Held until this returns. Taken before the body is read, so a flood of
+    // connections holds at most `MAX_HTTP_ADMISSIONS` bodies.
+    let Some(_slot) = hub.http_slot() else {
+        tracing::warn!(
+            in_flight = MAX_HTTP_ADMISSIONS,
+            "submission refused at admission: every HTTP admission slot is held"
+        );
+        return Ok(refused(Refusal::Full));
+    };
+
     // Buffer the body under a hard cap, refused strictly before anything else.
     let read = Limited::new(req.into_body(), MAX_TX_BYTES).collect();
     let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
@@ -850,7 +858,7 @@ mod tests {
     use crate::batcher::TipGuard;
 
     #[tokio::test]
-    async fn past_the_pending_cap_a_submission_is_refused_full() {
+    async fn http_slots_run_out_without_refusing_the_mixnet_path() {
         let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
         tip.observe(&[100]);
         let chain = match ChainClient::new(vec!["127.0.0.1:1".parse().expect("addr")], None) {
@@ -858,13 +866,13 @@ mod tests {
             Err(err) => panic!("chain client: {err}"),
         };
         let hub = Hub::new(Arc::new(Queue::new()), tip, BatchParams::default(), chain);
-        let held = hub
-            .pending
-            .clone()
-            .try_acquire_many_owned(MAX_PENDING_ADMISSIONS as u32)
-            .expect("every permit is free");
-        assert_eq!(hub.admit(&[0; 64]).await, Err(Refusal::Full));
-        drop(held);
+        let held: Vec<_> = (0..MAX_HTTP_ADMISSIONS)
+            .map(|_| hub.http_slot().expect("a free slot"))
+            .collect();
+        assert!(hub.http_slot().is_none(), "past the cap HTTP is refused");
+        // The Nym listener admits through `admit` alone.
         assert!(hub.admit(&[0; 64]).await.is_ok());
+        drop(held);
+        assert!(hub.http_slot().is_some());
     }
 }
