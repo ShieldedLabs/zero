@@ -412,6 +412,10 @@ pub struct Queue {
     /// Set once, at shutdown, before the final flush runs. See
     /// [`Queue::begin_draining`].
     draining: std::sync::atomic::AtomicBool,
+    /// Runs in [`Queue::admit`] between the proof check and the lock that
+    /// inserts, so a test can act inside that window.
+    #[cfg(test)]
+    after_verify: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Queue {
@@ -430,6 +434,8 @@ impl Queue {
             }),
             max_bytes,
             draining: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            after_verify: None,
         }
     }
 
@@ -508,6 +514,10 @@ impl Queue {
 
         if !inspected.verify() {
             return Admission::Refused(Refusal::Rejected);
+        }
+        #[cfg(test)]
+        if let Some(hook) = &self.after_verify {
+            hook();
         }
 
         // Second look, under the lock that inserts: the queue moved while the
@@ -1438,30 +1448,31 @@ mod tests {
 
     #[test]
     fn an_admission_verifying_across_the_final_drain_is_not_left_behind() {
-        // Shutdown flags the drain, then takes the final batch. An admission
-        // whose proof check spans both must land in that batch or be refused:
-        // anything still resident afterwards was acked and is never published.
-        // Timing-dependent: the start offset sweeps across the proof check.
-        for offset_us in (0..12_000).step_by(500) {
-            let q = Queue::new();
-            let (admission, batch) = std::thread::scope(|s| {
-                let admitting = s.spawn(|| q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN));
-                std::thread::sleep(std::time::Duration::from_micros(offset_us));
-                q.begin_draining();
-                let batch = q.drain_shuffled();
-                (admitting.join().expect("admission thread"), batch)
-            });
-            assert!(
-                matches!(admission, Admission::Refused(Refusal::Draining)) || batch.len() == 1,
-                "at {offset_us} us: {admission:?}, final batch of {}",
-                batch.len()
-            );
-            assert_eq!(
-                q.len(),
-                0,
-                "at {offset_us} us: an entry outlived the final drain"
-            );
-        }
+        // Shutdown flags the drain, then takes the final batch. Run both while
+        // an admission sits between its proof check and its insert: it must be
+        // refused, because anything inserted now was acked and is never
+        // published.
+        let verified = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let drained = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut q = Queue::new();
+        q.after_verify = Some(Box::new({
+            let (verified, drained) = (verified.clone(), drained.clone());
+            move || {
+                verified.wait();
+                drained.wait();
+            }
+        }));
+        let (admission, batch) = std::thread::scope(|s| {
+            let admitting = s.spawn(|| q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN));
+            verified.wait();
+            q.begin_draining();
+            let batch = q.drain_shuffled();
+            drained.wait();
+            (admitting.join().expect("admission thread"), batch)
+        });
+        assert_eq!(admission, Admission::Refused(Refusal::Draining));
+        assert!(batch.is_empty());
+        assert_eq!(q.len(), 0, "an entry outlived the final drain");
     }
 
     #[test]
