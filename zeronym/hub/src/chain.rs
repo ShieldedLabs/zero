@@ -822,6 +822,16 @@ fn classify_publish_error(message: &str) -> Publish {
         Publish::Rejected {
             reason: message.to_string(),
         }
+    } else if m.contains("duplicate nullifier") && !m.contains("in finalized state: false") {
+        // Zebra's spelling of a spent note (`orchard double-spend: duplicate
+        // nullifier: ...`), which lacks the `bad txns` prefix and would
+        // otherwise match the already-known pattern "duplicate". Spent in a
+        // block, or twice in these bytes: permanent. A conflict with a
+        // mempool transaction (`in finalized state: false`) can clear, and a
+        // missing prevout (`possible double-spend`) stays retryable.
+        Publish::Rejected {
+            reason: message.to_string(),
+        }
     } else if m.contains("already in block chain")
         || m.contains("committed to the best chain")
         || m.contains("already in state")
@@ -973,6 +983,38 @@ mod tests {
                 "zebra reports success as {message:?}; treating it as anything else                  republishes a transaction that is already published"
             );
         }
+    }
+
+    #[test]
+    fn zebras_double_spend_is_a_rejection_not_already_known() {
+        // zebra-consensus's spellings, bare and as the mempool wraps them.
+        for message in [
+            "orchard double-spend: duplicate nullifier: Nullifier(..)",
+            "ironwood double-spend: duplicate nullifier: Nullifier(..)",
+            "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: true",
+        ] {
+            assert!(
+                matches!(classify_publish_error(message), Publish::Rejected { .. }),
+                "{message:?}"
+            );
+        }
+        // A conflict with a mempool transaction can clear, and a missing
+        // prevout is a parent that has not arrived yet.
+        for message in [
+            "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: false",
+            "missing transparent output: possible double-spend of OutPoint(..)",
+        ] {
+            assert!(
+                !matches!(classify_publish_error(message), Publish::Rejected { .. }),
+                "{message:?}"
+            );
+        }
+        assert!(matches!(
+            classify_publish_error(
+                "missing transparent output: possible double-spend of OutPoint(..)"
+            ),
+            Publish::Retryable { .. }
+        ));
     }
 
     #[test]
