@@ -39,6 +39,11 @@ mixnet-driver = ["dep:nym-sdk"]
 # enclave build.
 mixnet-localnet = ["mixnet-driver", "dep:nym-topology"]
 
+# `src/admission.rs` matches zebra's upgrades exhaustively, including the
+# variant zebra gates behind this cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zcash_unstable, values("zfuture"))'] }
+
 [dependencies]
 # The real Zcash parser, vendored, same as the shim. The hub re-parses every
 # migration it receives rather than trusting the shim, so it needs exactly the

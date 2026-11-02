@@ -185,12 +185,23 @@ pub fn inspect(tx_bytes: &[u8]) -> Inspected {
 /// this build has no key for goes to the unverified lane. Over the mixnet a
 /// refusal is silent, so a hub that lags an upgrade must degrade to the old
 /// free admission and keep queueing every migration.
+///
+/// The match mirrors `zebra-consensus`'s `orchard_v5_verifier_for` and is
+/// exhaustive for the same reason: a new upgrade fails this build until it is
+/// bound to a key.
 fn prove_candidate(tx: &Transaction) -> Option<Pending> {
-    match tx.network_upgrade()? {
-        NetworkUpgrade::Nu6_3 | NetworkUpgrade::Nu7 => {}
-        _ => return None,
-    }
+    use NetworkUpgrade::*;
+
     let nu = tx.network_upgrade()?;
+    match nu {
+        // Before NU6.3: other circuits, which this build has no key for.
+        Genesis | BeforeOverwinter | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5
+        | Nu6 | Nu6_1 | Nu6_2 => return None,
+        // The NU6.3 circuit, which `VERIFYING_KEY` is built for.
+        Nu6_3 | Nu7 => {}
+        #[cfg(zcash_unstable = "zfuture")]
+        ZFuture => {}
+    }
     // Prevouts are only read by the sighash, which is skipped below whenever
     // the transaction has transparent inputs.
     let sighasher = tx.sighasher(nu, Arc::new(Vec::new())).ok()?;
