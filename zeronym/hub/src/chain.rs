@@ -174,6 +174,11 @@ const NODE_DESERIALIZATION_ERROR: i32 = -22;
 /// (`zaino-source/src/send_raw_transaction.rs`).
 const ZAINO_MALFORMED: &str = "malformed transaction:";
 
+/// What zaino puts in a gRPC INTERNAL message before its node's own rejection
+/// text: the `Display` of its `Rejected` variant (same file). The text after
+/// it is read like a lightwalletd `SendResponse` message.
+const ZAINO_REJECTED: &str = "rejected by validator:";
+
 /// A client over one or more indexer endpoints.
 pub struct ChainClient {
     endpoints: Vec<SocketAddr>,
@@ -744,6 +749,14 @@ fn classify_publish_failure(err: &BoxError) -> Publish {
         {
             Publish::Rejected { reason }
         }
+        Some(status) if status.code == GRPC_INTERNAL => match status
+            .message
+            .as_deref()
+            .and_then(|message| message.split_once(ZAINO_REJECTED))
+        {
+            Some((_, node_says)) => classify_publish_error(node_says.trim()),
+            None => Publish::Retryable { reason },
+        },
         _ => Publish::Retryable { reason },
     }
 }
@@ -1179,6 +1192,36 @@ mod tests {
             classify_publish_failure(&status),
             Publish::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn zaino_relays_the_nodes_verdict_and_it_is_read_like_any_other() {
+        for (node_says, burned) in [
+            ("bad-txns-orchard-binding-signature-invalid", true),
+            (
+                "orchard double-spend: duplicate nullifier: Nullifier(..)",
+                true,
+            ),
+            ("transaction already exists in mempool", false),
+        ] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: GRPC_INTERNAL.into(),
+                message: Some(format!(
+                    "InternalServerError: error receiving data from backing node: critical \
+                     error in backing block source: validator rejected the query: rejected \
+                     by validator: {node_says}"
+                )),
+            });
+            let verdict = classify_publish_failure(&status);
+            assert_eq!(
+                matches!(verdict, Publish::Rejected { .. }),
+                burned,
+                "{node_says:?}: {verdict:?}"
+            );
+            if !burned {
+                assert_eq!(verdict, Publish::AlreadyKnown);
+            }
+        }
     }
 
     #[test]
