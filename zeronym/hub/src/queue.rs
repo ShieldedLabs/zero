@@ -115,6 +115,17 @@ pub const UNVERIFIED_LANE_ENTRIES: usize = 16;
 /// About 100 MB at the cap. Lost on restart, like everything in the enclave.
 pub const MAX_BURNED_KEYS: usize = 1 << 20;
 
+/// How many admissions may verify proofs at once.
+///
+/// Three on the four-vCPU enclave, leaving a core for the mixnet driver and the
+/// flush. A proof check costs the hub about 30 ms of one core, and a sender
+/// with valid signatures over a garbage proof pays close to nothing for it, so
+/// the check must be bounded: past this many in flight a submission is refused
+/// `Full` at once, the same choice `MAX_CONCURRENT_LOOKUPS` makes for lookups.
+/// A slot covers the proof check alone, so a refusal that needs no proof never
+/// waits on one.
+pub const VERIFY_SLOTS: usize = 3;
+
 /// A lane's share of [`MAX_QUEUE_ENTRIES`].
 pub fn lane_cap(lane: Lane) -> usize {
     match lane {
@@ -412,6 +423,8 @@ pub struct Queue {
     /// Set once, at shutdown, before the final flush runs. See
     /// [`Queue::begin_draining`].
     draining: std::sync::atomic::AtomicBool,
+    /// Proof checks in flight, at most [`VERIFY_SLOTS`]. See [`Queue::admit`].
+    verify_slots: tokio::sync::Semaphore,
     /// Runs in [`Queue::admit`] between the proof check and the lock that
     /// inserts, so a test can act inside that window.
     #[cfg(test)]
@@ -434,6 +447,7 @@ impl Queue {
             }),
             max_bytes,
             draining: std::sync::atomic::AtomicBool::new(false),
+            verify_slots: tokio::sync::Semaphore::new(VERIFY_SLOTS),
             #[cfg(test)]
             after_verify: None,
         }
@@ -473,6 +487,8 @@ impl Queue {
     /// Blocking: a submission that touches Orchard has its proofs verified here,
     /// about 9 ms on four cores and 30 ms on one. Every refusal that costs less
     /// runs first, and the queue's lock is never held across the proof check.
+    /// The check takes one of [`VERIFY_SLOTS`], and is refused `Full` when none
+    /// is free.
     pub fn admit(
         &self,
         tx_bytes: &[u8],
@@ -512,8 +528,17 @@ impl Queue {
             return decided;
         }
 
-        if !inspected.verify() {
-            return Admission::Refused(Refusal::Rejected);
+        if inspected.needs_proof() {
+            let Ok(_slot) = self.verify_slots.try_acquire() else {
+                tracing::warn!(
+                    slots = VERIFY_SLOTS,
+                    "submission refused at admission: every verification slot is busy"
+                );
+                return Admission::Refused(Refusal::Full);
+            };
+            if !inspected.verify() {
+                return Admission::Refused(Refusal::Rejected);
+            }
         }
         #[cfg(test)]
         if let Some(hook) = &self.after_verify {
@@ -975,6 +1000,26 @@ mod tests {
                 txid: Some("held".into())
             }
         );
+    }
+
+    #[test]
+    fn a_verify_slot_is_held_for_the_proof_check_alone() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let _held = q
+            .verify_slots
+            .try_acquire_many(VERIFY_SLOTS as u32)
+            .expect("every slot is free");
+        // With every slot busy, only a new proof waits on one.
+        assert_eq!(
+            q.admit(PROVEN_B, 100, N, MARGIN),
+            Admission::Refused(Refusal::Full)
+        );
+        assert!(matches!(
+            q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN),
+            Admission::Duplicate { .. }
+        ));
+        assert!(admitted(q.admit(&junk(1), 100, N, MARGIN)));
     }
 
     #[test]

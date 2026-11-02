@@ -37,7 +37,6 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::batcher::{BatchParams, TipTracker};
@@ -313,18 +312,7 @@ pub struct Hub {
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
     pub chain: Arc<ChainClient>,
-    /// Admissions in flight, at most [`VERIFY_SLOTS`]. See [`Hub::admit`].
-    verify_slots: Arc<Semaphore>,
 }
-
-/// How many admissions may verify proofs at once.
-///
-/// Three on the four-vCPU enclave, leaving a core for the mixnet driver and the
-/// flush. A proof check costs the hub about 30 ms of one core, and a sender
-/// with valid signatures over a garbage proof pays close to nothing for it, so
-/// the check must be bounded: past this many in flight a submission is refused
-/// `Full` at once, the same choice `MAX_CONCURRENT_LOOKUPS` makes for lookups.
-pub const VERIFY_SLOTS: usize = 3;
 
 /// The outcome of the transport-independent lookup core, rendered by each
 /// transport in its own wire shape (HTTP status plus header, or a
@@ -357,7 +345,6 @@ impl Hub {
             tip,
             params,
             chain,
-            verify_slots: Arc::new(Semaphore::new(VERIFY_SLOTS)),
         }
     }
 
@@ -382,20 +369,12 @@ impl Hub {
         }
 
         // The queue may verify proofs, which blocks, so it runs on the blocking
-        // pool, and only [`VERIFY_SLOTS`] at a time.
-        let Ok(slot) = self.verify_slots.clone().try_acquire_owned() else {
-            tracing::warn!(
-                slots = VERIFY_SLOTS,
-                "submission refused at admission: every verification slot is busy"
-            );
-            return Err(Refusal::Full);
-        };
+        // pool. The queue bounds how many verify at once ([`VERIFY_SLOTS`]).
         let queue = self.queue.clone();
         let bytes = Zeroizing::new(tx_bytes.to_vec());
         let height = self.tip.admission_height();
         let params = self.params;
         let admitted = tokio::task::spawn_blocking(move || {
-            let _slot = slot;
             queue.admit(&bytes, height, params.flush_interval, params.mining_margin)
         })
         .await;

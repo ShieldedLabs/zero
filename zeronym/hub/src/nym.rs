@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use crate::server::{Hub, LookupOutcome, VERIFY_SLOTS};
+use crate::queue::VERIFY_SLOTS;
+use crate::server::{Hub, LookupOutcome};
 use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
 /// How many lookups may be in flight at once: dialling the operator's indexer,
@@ -56,8 +57,8 @@ const MAX_CONCURRENT_LOOKUPS: usize = 64;
 /// How many admissions may be in flight at once, from the frame's pull until
 /// its ack is offered to the driver.
 ///
-/// [`Hub::admit`] verifies at most [`VERIFY_SLOTS`] at a time and refuses the
-/// rest, so a task past that bound has no work to do but still holds its whole
+/// The queue verifies at most [`VERIFY_SLOTS`] at a time and refuses the rest,
+/// so a task past that bound has little work to do but still holds its whole
 /// frame. Taking the slot before the spawn keeps a flood from piling up those
 /// tasks. A submission past the bound is dropped with no ack. [`Hub::admit`]
 /// would have acked it `full`, and the shim never awaits the ack, so the shim
