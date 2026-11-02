@@ -248,14 +248,21 @@ impl ChainNullifiers {
     }
 
     /// Whether `endpoint`'s tip fell more than [`RESYNC_DEPTH`] below what its
-    /// view already read, so no read can replace the blocks it lost. The view
-    /// is then marked stale, and stays so until the chain grows back to where
-    /// a read reaches it.
+    /// view already read. Blocks that deep have left `by_height`, so no read
+    /// can replace them, and their nullifiers may be a reorg's orphans. The
+    /// view is then emptied, and the next round re-reads it from `from`;
+    /// until that read is current it refuses nothing.
     fn retreated(&self, endpoint: usize, from: u32, tip: u32) -> bool {
         let synced = self.view(endpoint).and_then(|view| view.synced_to);
         let retreated = synced.is_some() && self.resume_from(endpoint, from) > tip;
         if retreated {
-            self.mark_stale(endpoint);
+            if let Some(mut view) = self.view(endpoint) {
+                let chunk = view.chunk;
+                *view = View {
+                    chunk,
+                    ..View::default()
+                };
+            }
         }
         retreated
     }
@@ -352,9 +359,8 @@ async fn sync_endpoint(
         tracing::warn!(
             %addr,
             tip,
-            synced_to = ?spent.synced_to().get(endpoint).copied().flatten(),
-            "nullifier sync: this indexer's tip fell below its view; it refuses nothing \
-             until the chain grows back"
+            "nullifier sync: this indexer's tip fell past the reorg window; its view is \
+             emptied and re-read from the start"
         );
         return false;
     }
@@ -550,9 +556,13 @@ mod tests {
         assert!(!set.retreated(0, 900, 1000 - RESYNC_DEPTH + 1));
         assert!(set.any_revealed(&[nf(1)], 1000));
 
-        // Past it, nothing can, so the view refuses nothing.
+        // Past it, nothing can: the view starts over from `from`, and
+        // refuses nothing until that read is current.
         assert!(set.retreated(0, 900, 900));
-        assert!(!set.any_revealed(&[nf(1)], 1000));
+        assert!(!set.any_revealed(&[nf(1)], 900));
+        assert_eq!(set.synced_to(), vec![None]);
+        assert_eq!(set.held(), vec![0]);
+        assert_eq!(set.resume_from(0, 900), 900);
     }
 
     #[test]
