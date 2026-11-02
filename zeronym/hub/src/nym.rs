@@ -33,16 +33,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use crate::server::{Hub, LookupOutcome};
+use crate::server::{Hub, LookupOutcome, VERIFY_SLOTS};
 use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
 /// How many lookups may be in flight at once: dialling the operator's indexer,
 /// framing the reply, or waiting to hand it to the driver.
 ///
-/// Bounds the lookup arm and ONLY the lookup arm. Admission never waits on
-/// this: it does no I/O, so a ceiling on it would buy nothing and cost the one
-/// property this listener must hold, that a migration is admitted while
-/// lookups are stuck. Generous enough that honest polling never queues behind
+/// Bounds the lookup arm only. Admission never waits on this, which keeps the
+/// one property this listener must hold, that a migration is admitted while
+/// lookups are stuck; it has its own bound, [`MAX_CONCURRENT_ADMISSIONS`]. Generous enough that honest polling never queues behind
 /// it, small enough that a flood cannot open unbounded connections or park an
 /// unbounded pile of 64 KiB reply frames behind a slow driver.
 ///
@@ -53,6 +52,16 @@ use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 /// on the driver, which is exactly the queue that then emitted dead answers
 /// for minutes while fresh lookups waited behind them.
 const MAX_CONCURRENT_LOOKUPS: usize = 64;
+
+/// How many admissions may be in flight at once, from the frame's pull until
+/// its ack is offered to the driver.
+///
+/// [`Hub::admit`] verifies at most [`VERIFY_SLOTS`] at a time and refuses the
+/// rest, so a task past that bound has no work to do but still holds its whole
+/// frame. Taking the slot before the spawn keeps a flood from piling up those
+/// tasks. A submission past the bound is dropped with no ack, the same
+/// disposition [`Hub::admit`] would give it: the shim never awaits the ack.
+const MAX_CONCURRENT_ADMISSIONS: usize = VERIFY_SLOTS;
 
 /// How long after a request is received its reply is still worth emitting.
 ///
@@ -123,15 +132,14 @@ impl Reply {
 /// Each admission runs on its own task. [`build_ack`] has no I/O in it, but it
 /// may verify Halo2 proofs, which takes milliseconds of CPU, so admitting
 /// inline would let one submission delay the next and every lookup behind it.
-/// [`Hub::admit`] bounds how many verify at once and refuses past that, so a
-/// task per submission cannot pile up. The ack is then offered to the driver
+/// Each takes a slot from [`MAX_CONCURRENT_ADMISSIONS`] before it is spawned,
+/// so a task per submission cannot pile up. The ack is then offered to the driver
 /// without waiting: if the driver's channel is full, the ack is dropped,
 /// because the migration is ALREADY admitted, the shim never awaits an ack (its
 /// submit path is dispatch-only), and an ack queued behind a full channel of
 /// 64 KiB lookup replies would emit minutes late to no one.
 ///
-/// A lookup is the arm that can afford to wait and the only one that must be
-/// bounded: it may dial the operator's indexer with a 10 s budget on each of
+/// A lookup is the arm that can afford to wait: it may dial the operator's indexer with a 10 s budget on each of
 /// connect, request and body, and its reply is a full 64 KiB frame that the
 /// driver emits at the mixnet's throttled rate. Each runs on its own task so a
 /// slow indexer cannot head-of-line block the next admission, and each takes a
@@ -153,6 +161,7 @@ pub async fn run_listener(
     hub: Hub,
 ) {
     let lookups = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_LOOKUPS));
+    let admissions = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ADMISSIONS));
 
     while let Some(received) = incoming.recv().await {
         // Empty inbound messages are the SDK's SURB-replenishment artifacts, not
@@ -198,9 +207,18 @@ pub async fn run_listener(
                 drop(permit);
             });
         } else {
+            let Ok(permit) = admissions.clone().try_acquire_owned() else {
+                // Count only, no tag (#157).
+                tracing::warn!(
+                    in_flight = MAX_CONCURRENT_ADMISSIONS,
+                    "submission dropped: every admission slot is held"
+                );
+                continue;
+            };
             let hub = hub.clone();
             let outgoing = outgoing.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let Some(frame) = build_ack(&hub, &received.frame).await else {
                     return;
                 };
