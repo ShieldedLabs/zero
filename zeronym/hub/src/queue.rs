@@ -269,19 +269,39 @@ struct Inner {
     burned: Burned,
 }
 
+/// Whether `spends` is a TEX second leg of `parent_txid`: exactly one input,
+/// spending one of the parent's `outputs` transparent outputs. The shape
+/// [`Inner::parent_of`] promotes, and the only one that counts as a leg.
+fn is_leg_of(spends: &[OutPoint], parent_txid: &str, outputs: usize) -> bool {
+    let [spend] = spends else {
+        return false;
+    };
+    spend.hash.to_string() == parent_txid
+        && usize::try_from(spend.index).is_ok_and(|index| index < outputs)
+}
+
 impl Inner {
     fn insert(&mut self, mut entry: Entry) {
-        // One leg per parent, in whatever order they arrive: a leg held before
-        // its parent (admitted first, or while the parent was out in a flush)
-        // already spends it.
-        if !entry.bundle_keys.is_empty() && !entry.has_child {
+        // One leg per parent, in whatever order they arrive, so `has_child`
+        // is read off the legs held now, never carried: a leg held before its
+        // parent (admitted first, or while the parent was out in a flush)
+        // already spends it, and a leg that left with a verdict no longer does.
+        if !entry.bundle_keys.is_empty() {
             entry.has_child = entry.txid.as_deref().is_some_and(|txid| {
-                self.entries.values().any(|held| {
-                    held.spends
-                        .iter()
-                        .any(|spend| spend.hash.to_string() == txid)
-                })
+                self.entries
+                    .values()
+                    .any(|held| is_leg_of(&held.spends, txid, entry.transparent_outputs))
             });
+        }
+        if let [spend] = entry.spends.as_slice() {
+            let parent_txid = spend.hash.to_string();
+            if let Some(parent) = self.entries.values_mut().find(|held| {
+                !held.bundle_keys.is_empty()
+                    && held.txid.as_deref() == Some(parent_txid.as_str())
+                    && is_leg_of(&entry.spends, &parent_txid, held.transparent_outputs)
+            }) {
+                parent.has_child = true;
+            }
         }
         self.bytes = self.bytes.saturating_add(entry.tx_bytes.len());
         self.lanes[lane_index(entry.lane)] += 1;
@@ -936,6 +956,10 @@ mod tests {
     /// A transparent-only spend of `(txid(parent), 0)`, the second leg of a TEX
     /// payment. `value` tells two such legs apart.
     fn second_leg(parent: &[u8], value: u64) -> Vec<u8> {
+        second_leg_at(parent, 0, value)
+    }
+
+    fn second_leg_at(parent: &[u8], index: u32, value: u64) -> Vec<u8> {
         use zebra_chain::serialization::{ZcashDeserialize, ZcashSerialize};
         use zebra_chain::{block, parameters::NetworkUpgrade, transaction, transparent};
 
@@ -947,7 +971,7 @@ mod tests {
             inputs: vec![transparent::Input::PrevOut {
                 outpoint: transparent::OutPoint {
                     hash: parent.hash(),
-                    index: 0,
+                    index,
                 },
                 unlock_script: transparent::Script::new(&[0x51]),
                 sequence: u32::MAX,
@@ -1165,6 +1189,88 @@ mod tests {
             .map(|entry| entry.lane)
             .collect();
         assert_eq!(lanes, [Lane::Transparent; 2]);
+    }
+
+    #[test]
+    fn a_parent_reads_its_leg_off_what_is_held_now() {
+        let lanes = |q: &Queue| -> Vec<Lane> {
+            q.drain_shuffled()
+                .iter()
+                .filter(|entry| entry.bundle_keys.is_empty())
+                .map(|entry| entry.lane)
+                .collect()
+        };
+
+        // The parent's leg left with a verdict while both were out: the
+        // returning parent pays for the next leg.
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        let parent: Vec<Entry> = q
+            .drain_shuffled()
+            .into_iter()
+            .filter(|entry| !entry.bundle_keys.is_empty())
+            .collect();
+        assert!(parent[0].has_child);
+        assert_eq!(q.requeue(parent, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        assert_eq!(lanes(&q), [Lane::Proven]);
+
+        // A spend of an output the parent does not have is no leg of it.
+        let q = Queue::new();
+        assert!(admitted(q.admit(
+            &second_leg_at(V6_ORCHARD_ONLY, 9, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        let mut got = lanes(&q);
+        got.sort_by_key(|lane| *lane as u8);
+        assert_eq!(got, [Lane::Proven, Lane::Transparent]);
+
+        // A leg reinserted while its parent is held marks the parent.
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 1000),
+            100,
+            N,
+            MARGIN
+        )));
+        let (parent, leg): (Vec<Entry>, Vec<Entry>) = q
+            .drain_shuffled()
+            .into_iter()
+            .partition(|entry| !entry.bundle_keys.is_empty());
+        let mut parent = parent;
+        parent[0].has_child = false;
+        assert_eq!(q.requeue(parent, 100, N, MARGIN).held, 1);
+        assert_eq!(q.requeue(leg, 100, N, MARGIN).held, 1);
+        assert!(admitted(q.admit(
+            &second_leg(V6_ORCHARD_ONLY, 2000),
+            100,
+            N,
+            MARGIN
+        )));
+        let mut got = lanes(&q);
+        got.sort_by_key(|lane| *lane as u8);
+        assert_eq!(got, [Lane::Proven, Lane::Transparent]);
     }
 
     #[test]
