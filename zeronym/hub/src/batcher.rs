@@ -577,9 +577,9 @@ pub async fn flush(
     let mut rejected = 0usize;
     let mut sample_failure: Option<String> = None;
     let mut unplaced = Vec::new();
-    // Judged entries whose proofs this hub will refuse from now on: rejected,
-    // or already mined. See `Queue::burn` for why an accepted entry, and one
-    // a mempool already holds, stay unburned.
+    // Rejected or mined entries, whose proofs this hub will refuse from now
+    // on. See `Queue::burn` for why an accepted or already-known entry stays
+    // unburned.
     let mut judged = Vec::new();
     let proven = batch.iter().filter(|e| e.lane == Lane::Proven).count();
     let transparent = batch.iter().filter(|e| e.lane == Lane::Transparent).count();
@@ -1361,13 +1361,13 @@ mod tests {
                 Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor"),
                 true,
             ),
-            // Mined: a copy off the chain buys one window at most.
+            // Mined: a copy off the chain buys one window.
             (
                 Answer::Send(-27, "transaction already in block chain"),
                 true,
             ),
-            // In a mempool, likely published by the other hub. It can still
-            // drop out, and the wallet's resend must then get through.
+            // In a mempool: it can still drop out, and the wallet's resend
+            // must then get through.
             (Answer::Send(-26, "txn-already-in-mempool"), false),
             (
                 Answer::Send(-26, "transaction already exists in mempool"),

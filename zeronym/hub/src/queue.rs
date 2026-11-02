@@ -32,8 +32,9 @@
 //!   only the lane it can reach, and the proven lane costs a proof per entry.
 //! * **One entry per proof, and one publish per proof.** Entries are keyed on
 //!   their payload hash AND on their bundle keys, so re-signing one proof
-//!   collapses into the held entry. A bundle key this hub has published to a verdict (rejected, or
-//!   already mined) is burned and refused, so one proof buys one window.
+//!   collapses into the held entry. A bundle key this hub has published to a
+//!   rejection, or found mined, is burned and refused, so one proof buys one
+//!   window.
 //! * **Bytes are the budget, not entries.** Real Orchard migrations are 2 to
 //!   16 KB, so fixed-size slots would waste most of the budget and hand an
 //!   attacker a cheaper occupancy attack than the memory attack.
@@ -675,11 +676,12 @@ impl Queue {
     /// Remember the proofs of entries the network has judged, so the same
     /// proofs are refused from now on.
     ///
-    /// Called for an entry rejected or already mined at a flush. An entry a node accepted, or
-    /// one a mempool already holds (likely published by the other hub), stays
-    /// unburned, so if it drops out of every mempool, its wallet's resend gets
-    /// through. Burning an already-mined entry is what stops a mined
-    /// transaction, copied off the chain, from filling the queue every window.
+    /// Called for an entry rejected or mined at a flush, as every endpoint that
+    /// answered said (see `chain::best_of`). An entry a node accepted, or one
+    /// a mempool already holds, stays unburned: a mempool can drop it, and its
+    /// wallet's resend must then get through. A mined copy is also refused at
+    /// admission by the chain nullifier check in [`crate::spent`], while every
+    /// view is current; the burn covers the windows when one is not.
     ///
     /// A resend admitted while the batch was out holds the same proofs, and
     /// the next flush would offer it again; it is dropped here with them.

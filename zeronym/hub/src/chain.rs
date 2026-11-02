@@ -126,8 +126,8 @@ impl std::error::Error for GrpcStatusError {}
 
 /// The outcome of publishing one transaction.
 ///
-/// `AlreadyMined` and `AlreadyKnown` are successes, and saying so explicitly is
-/// load-bearing. Every shim submits every migration to every hub, so the second
+/// `AlreadyKnown` and `AlreadyMined` are successes, and saying so explicitly
+/// is load-bearing. Every shim submits every migration to every hub, so the second
 /// hub's publish is a duplicate by construction. Treating that as an error would make normal
 /// operation look like a fault and could drive a re-submission loop, and
 /// re-submissions are a fresh timing signal tied to one transaction.
@@ -141,16 +141,15 @@ impl std::error::Error for GrpcStatusError {}
 /// answered something this client could not read. Those are the failures a
 /// later flush can recover from, and the batcher holds the entry for one.
 ///
-/// The two successes differ in what a later resend can do. `AlreadyMined` is
-/// final: the transaction is in a block. `AlreadyKnown` covers a mempool that
-/// holds it and every reply that does not say which: the transaction can
-/// still drop out of every mempool, and its wallet's resend must then get
-/// through.
+/// `AlreadyMined` is the reply that names a block: the batcher burns its
+/// proofs, so a copy of a mined transaction buys one window. `AlreadyKnown` is
+/// every other already-known reply, a mempool among them, and leaves the
+/// proofs unburned so a resend can follow an eviction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Publish {
     Accepted { txid: String },
-    AlreadyMined,
     AlreadyKnown,
+    AlreadyMined,
     Rejected { reason: String },
     Retryable { reason: String },
 }
@@ -681,6 +680,10 @@ fn classify_send_response(resp: &SendResponse) -> Publish {
 ///
 /// Any acceptance wins: one endpoint taking it is enough for the transaction to
 /// reach the network. Already-known beats everything else: the network has it.
+/// Already-mined ranks below every other already-known reply, so the batcher
+/// burns on it only when every endpoint that answered says mined or rejected:
+/// one endpoint cannot burn a transaction another just took into its mempool.
+/// An endpoint that did not answer has no vote.
 /// A rejection beats a transport failure, and that ordering is deliberate
 /// rather than a tie-break. The batcher holds a `Retryable` entry for the next
 /// flush, so if an unreachable endpoint could outvote a live one's verdict, a
@@ -693,8 +696,8 @@ fn best_of(outcomes: Vec<Publish>) -> Publish {
     fn rank(outcome: &Publish) -> u8 {
         match outcome {
             Publish::Accepted { .. } => 4,
-            Publish::AlreadyMined => 3,
-            Publish::AlreadyKnown => 2,
+            Publish::AlreadyKnown => 3,
+            Publish::AlreadyMined => 2,
             Publish::Rejected { .. } => 1,
             Publish::Retryable { .. } => 0,
         }
@@ -916,6 +919,28 @@ mod tests {
     }
 
     #[test]
+    fn mined_burns_only_when_every_answering_endpoint_says_mined_or_rejected() {
+        let mined = || Publish::AlreadyMined;
+        let mempool = || Publish::AlreadyKnown;
+        let down = || Publish::Retryable {
+            reason: "connection refused".into(),
+        };
+        let rejected = || Publish::Rejected {
+            reason: "bad-txns-orchard-duplicate-nullifier".into(),
+        };
+        // One endpoint's "mined" cannot outvote another's mempool or accept.
+        assert_eq!(best_of(vec![mined(), mempool()]), Publish::AlreadyKnown);
+        assert!(matches!(
+            best_of(vec![mined(), Publish::Accepted { txid: "t".into() }]),
+            Publish::Accepted { .. }
+        ));
+        // An endpoint that did not answer has no vote.
+        assert_eq!(best_of(vec![mined(), down()]), Publish::AlreadyMined);
+        // Mined and rejected agree: the bytes cannot be accepted.
+        assert_eq!(best_of(vec![mined(), rejected()]), Publish::AlreadyMined);
+    }
+
+    #[test]
     fn zebras_already_known_vocabulary_is_recognised_too() {
         // The two vocabularies share NO spellings, and one pair looks alike
         // while matching differently: "already exists in mempool" does not
@@ -937,7 +962,10 @@ mod tests {
                 "transaction committed to the best chain",
                 Publish::AlreadyMined,
             ),
-            ("already in state", Publish::AlreadyMined),
+            (
+                "failed to validate tx: abc, error: transaction is already in state",
+                Publish::AlreadyMined,
+            ),
         ] {
             assert_eq!(
                 classify_publish_error(message),
