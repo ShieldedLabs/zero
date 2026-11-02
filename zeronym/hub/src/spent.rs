@@ -113,6 +113,10 @@ struct View {
     synced_to: Option<u32>,
     /// Set when the view reached [`MAX_NULLIFIERS_PER_INDEXER`].
     full: bool,
+    /// Whether this indexer's last read succeeded. A view whose indexer
+    /// failed, or fell back, holds what it saw before and may hold a block a
+    /// reorg has since taken back.
+    fresh: bool,
     /// Blocks in this indexer's next read. See [`SYNC_CHUNK_BLOCKS`].
     chunk: u32,
 }
@@ -124,6 +128,7 @@ impl Default for View {
             nullifiers: HashSet::new(),
             synced_to: None,
             full: false,
+            fresh: false,
             chunk: SYNC_CHUNK_BLOCKS,
         }
     }
@@ -161,6 +166,7 @@ impl View {
             self.by_height.insert(height, nullifiers);
         }
         self.synced_to = Some(end);
+        self.fresh = true;
         // A later read starts no lower than `end - RESYNC_DEPTH + 1`.
         self.by_height = self
             .by_height
@@ -191,9 +197,12 @@ impl ChainNullifiers {
         })
     }
 
-    /// Whether every indexer reports one of `nullifiers` as revealed.
-    pub fn any_revealed(&self, nullifiers: &[[u8; 32]]) -> bool {
-        if self.views.is_empty() {
+    /// Whether every indexer reports one of `nullifiers` as revealed, with
+    /// every view current at `tip`. A view that is not current may hold a
+    /// nullifier a reorg took back, so until all are current this refuses
+    /// nothing (the module's fail-open).
+    pub fn any_revealed(&self, nullifiers: &[[u8; 32]], tip: u32) -> bool {
+        if self.views.is_empty() || self.current(tip) < self.views.len() {
             return false;
         }
         let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
@@ -209,13 +218,14 @@ impl ChainNullifiers {
         true
     }
 
-    /// How many views are current at `tip`: within [`RESYNC_DEPTH`] of it, and
-    /// not full.
+    /// How many views are current at `tip`: within [`RESYNC_DEPTH`] of it,
+    /// last read successfully, and not full.
     fn current(&self, tip: u32) -> usize {
         (0..self.views.len())
             .filter(|endpoint| {
                 self.view(*endpoint).is_some_and(|view| {
-                    !view.full
+                    view.fresh
+                        && !view.full
                         && view
                             .synced_to
                             .is_some_and(|synced| synced >= tip.saturating_sub(RESYNC_DEPTH))
@@ -235,6 +245,13 @@ impl ChainNullifiers {
     ) -> bool {
         self.view(endpoint)
             .is_some_and(|mut view| view.replace(start, end, blocks))
+    }
+
+    /// Mark `endpoint`'s view not current until its next successful read.
+    fn mark_stale(&self, endpoint: usize) {
+        if let Some(mut view) = self.view(endpoint) {
+            view.fresh = false;
+        }
     }
 
     fn chunk(&self, endpoint: usize) -> u32 {
@@ -315,6 +332,7 @@ async fn sync_endpoint(
     let tip = match chain.tip_height_of(addr).await {
         Ok(tip) => tip.min(max_tip),
         Err(err) => {
+            spent.mark_stale(endpoint);
             tracing::warn!(%addr, reason = %err, "nullifier sync: no tip from this indexer");
             return false;
         }
@@ -339,6 +357,7 @@ async fn sync_endpoint(
             }
             Err(err) => {
                 // Retried from the same start next round, with half the blocks.
+                spent.mark_stale(endpoint);
                 spent.adapt_chunk(endpoint, false);
                 tracing::warn!(
                     %addr,
@@ -445,42 +464,59 @@ mod tests {
         let set = ChainNullifiers::new(2);
         set.record(0, 100, 101, vec![(100, vec![nf(1), nf(2)])]);
         assert!(
-            !set.any_revealed(&[nf(1)]),
+            !set.any_revealed(&[nf(1)], 101),
             "one indexer alone decides nothing"
         );
 
         set.record(1, 100, 101, vec![(101, vec![nf(1)])]);
         assert!(
-            set.any_revealed(&[nf(9), nf(1)]),
+            set.any_revealed(&[nf(9), nf(1)], 101),
             "any revealed nullifier is enough"
         );
         assert!(
-            !set.any_revealed(&[nf(2)]),
+            !set.any_revealed(&[nf(2)], 101),
             "the second indexer never reported it"
         );
     }
 
     #[test]
     fn no_indexers_reveal_nothing() {
-        assert!(!ChainNullifiers::new(0).any_revealed(&[nf(1)]));
+        assert!(!ChainNullifiers::new(0).any_revealed(&[nf(1)], 100));
     }
 
     #[test]
     fn a_re_read_replaces_what_a_reorg_took_back() {
         let set = ChainNullifiers::new(1);
         set.record(0, 100, 110, vec![(105, vec![nf(1)]), (110, vec![nf(2)])]);
-        assert!(set.any_revealed(&[nf(2)]));
+        assert!(set.any_revealed(&[nf(2)], 110));
 
         // Blocks 101.. re-read after a reorg: 110 now holds a different
         // transaction, and 105 stays as it was.
         set.record(0, 101, 111, vec![(105, vec![nf(1)]), (111, vec![nf(3)])]);
-        assert!(set.any_revealed(&[nf(1)]));
+        assert!(set.any_revealed(&[nf(1)], 111));
         assert!(
-            !set.any_revealed(&[nf(2)]),
+            !set.any_revealed(&[nf(2)], 111),
             "the reorged-out nullifier is gone"
         );
-        assert!(set.any_revealed(&[nf(3)]));
+        assert!(set.any_revealed(&[nf(3)], 111));
         assert_eq!(set.synced_to(), vec![Some(111)]);
+    }
+
+    #[test]
+    fn a_view_that_is_not_current_refuses_nothing() {
+        let set = ChainNullifiers::new(2);
+        set.record(0, 100, 110, vec![(105, vec![nf(1)])]);
+        set.record(1, 100, 110, vec![(105, vec![nf(1)])]);
+        assert!(set.any_revealed(&[nf(1)], 110));
+
+        // Behind the hub's tip by more than the reorg window.
+        assert!(!set.any_revealed(&[nf(1)], 110 + RESYNC_DEPTH + 1));
+
+        // Its last read failed: it may hold a block a reorg took back.
+        set.mark_stale(1);
+        assert!(!set.any_revealed(&[nf(1)], 110));
+        set.record(1, 101, 110, vec![(105, vec![nf(1)])]);
+        assert!(set.any_revealed(&[nf(1)], 110));
     }
 
     #[test]

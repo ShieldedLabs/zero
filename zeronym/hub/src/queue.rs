@@ -572,7 +572,7 @@ impl Queue {
         if self
             .revealed
             .as_ref()
-            .is_some_and(|revealed| revealed.any_revealed(&inspected.orchard_nullifiers))
+            .is_some_and(|revealed| revealed.any_revealed(&inspected.orchard_nullifiers, tip))
         {
             return Admission::Refused(Refusal::Rejected);
         }
@@ -1135,11 +1135,11 @@ mod tests {
 
         // One indexer alone decides nothing: it sees every published migration,
         // and could otherwise block any wallet's resend.
-        revealed.record(0, 1, 1, vec![(1, mined.clone())]);
+        revealed.record(0, 1, 100, vec![(1, mined.clone())]);
         assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
         let _ = q.drain_shuffled();
 
-        revealed.record(1, 1, 1, vec![(1, mined)]);
+        revealed.record(1, 1, 100, vec![(1, mined)]);
         for copy in [V6_ORCHARD_ONLY, PROVEN_A_RESIGNED] {
             assert_eq!(
                 q.admit(copy, 100, N, MARGIN),
