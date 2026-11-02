@@ -151,19 +151,19 @@ pub fn inspect(tx_bytes: &[u8]) -> Inspected {
     let Ok(tx) = Transaction::zcash_deserialize(&mut cursor) else {
         return inspected;
     };
+    // Trailing bytes after a transaction: the node acts on bytes the hub's
+    // parse never read, so nothing here can vouch for them. The shim calls the
+    // same bytes unparseable, and so does this: no txid, no expiry.
+    if usize::try_from(cursor.position()).ok() != Some(tx_bytes.len()) {
+        return inspected;
+    }
+
     inspected.txid = Some(tx.hash().to_string());
     inspected.expiry = tx
         .expiry_height()
         .map(|height| height.0)
         .filter(|height| *height != 0);
     inspected.transparent_outputs = tx.outputs().len();
-
-    // Trailing bytes after a transaction: the node acts on bytes the hub's
-    // parse never read, so nothing here can vouch for them. The shim calls the
-    // same bytes unparseable.
-    if usize::try_from(cursor.position()).ok() != Some(tx_bytes.len()) {
-        return inspected;
-    }
 
     if tx.orchard_shielded_data().is_some() {
         if let Some(pending) = prove_candidate(&tx) {
@@ -313,5 +313,9 @@ mod tests {
         let inspected = inspect(&padded);
         assert_eq!(inspected.lane, Lane::Unverified);
         assert!(inspected.bundle_keys.is_empty());
+        // The prefix's txid names other bytes, and its expiry is not theirs.
+        assert_eq!(inspected.txid, None);
+        assert_eq!(inspected.expiry, None);
+        assert_eq!(inspected.transparent_outputs, 0);
     }
 }
