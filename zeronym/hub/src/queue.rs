@@ -263,6 +263,17 @@ impl Inner {
         self.entries.insert(entry.key, entry);
     }
 
+    /// Undo [`Self::insert`].
+    fn remove(&mut self, key: &[u8; 32]) -> Option<Entry> {
+        let entry = self.entries.remove(key)?;
+        self.bytes = self.bytes.saturating_sub(entry.tx_bytes.len());
+        self.lanes[lane_index(entry.lane)] = self.lanes[lane_index(entry.lane)].saturating_sub(1);
+        for bundle_key in &entry.bundle_keys {
+            self.bundle_keys.remove(bundle_key);
+        }
+        Some(entry)
+    }
+
     /// The bundle keys already held, or burned: either way these proofs buy no
     /// new entry.
     fn holds_any(&self, bundle_keys: &[[u8; 32]]) -> bool {
@@ -567,11 +578,17 @@ impl Queue {
     /// unburned, so if it drops out of every mempool, its wallet's resend gets
     /// through. Burning an already-known entry is what stops a mined
     /// transaction, copied off the chain, from filling the queue every window.
+    ///
+    /// A resend admitted while the batch was out holds the same proofs, and
+    /// the next flush would offer it again; it is dropped here with them.
     pub fn burn<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>) {
         let mut inner = self.lock();
         for entry in entries {
             for bundle_key in &entry.bundle_keys {
                 inner.burned.insert(*bundle_key);
+                if let Some(resident) = inner.bundle_keys.get(bundle_key).copied() {
+                    inner.remove(&resident);
+                }
             }
         }
     }
@@ -933,6 +950,23 @@ mod tests {
             );
         }
         assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
+    }
+
+    #[test]
+    fn a_burn_drops_a_resend_admitted_while_the_batch_was_out() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let judged = q.drain_shuffled();
+        // The drain released the proofs, so a resend is admitted mid-flush.
+        assert!(admitted(q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN)));
+        q.burn(&judged);
+        assert!(
+            q.drain_shuffled().is_empty(),
+            "the burned proofs must not be offered again"
+        );
+        // The lane and the bundle keys were released with it.
+        assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
+        assert_eq!(q.len(), 1);
     }
 
     #[test]
