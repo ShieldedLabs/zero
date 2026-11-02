@@ -50,20 +50,37 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 /// tracker allows a 10-block reorg; this matches it.
 pub const RESYNC_DEPTH: u32 = 10;
 
-/// Blocks per `GetBlockRangeNullifiers` call. Measured 2026-10-28 against a
-/// public lightwalletd: 0.6 s and about 100 KB for 1 000 mainnet blocks
-/// filtered to Orchard, well inside the chain client's 10 s budget and 4 MiB
-/// body limit even from a server that ignores the filter.
+/// The most blocks per `GetBlockRangeNullifiers` call. Measured 2026-10-28
+/// against a public lightwalletd: 0.6 s and about 100 KB for 1 000 mainnet
+/// blocks filtered to Orchard, well inside the chain client's 10 s budget and
+/// 4 MiB body limit.
+///
+/// A failed call halves its indexer's chunk, down to one block (at most 2,440
+/// actions, under 100 KB), and each read that succeeds doubles it again up to
+/// this size.
 pub const SYNC_CHUNK_BLOCKS: u32 = 1000;
 
 /// Nullifiers one indexer's view may hold. Mainnet had revealed 251,421
-/// Orchard nullifiers since NU6.3 on 2026-10-29, read in 67 s from a public
-/// lightwalletd, and adds a few hundred a day, so this is four times that: room
-/// for years, and a bound on what a hostile indexer can make the enclave hold
-/// (about 100 MB at the cap, 30 MB today). A view that reaches it stops
-/// recording, and with it the unanimity, so admission falls back to the burn
-/// set alone.
-pub const MAX_NULLIFIERS_PER_INDEXER: usize = 1 << 20;
+/// Orchard nullifiers since NU6.3 on 2026-10-29 (about 2.35 a block, so about
+/// 2,700 a day), read in 67 s from a public lightwalletd. The cap leaves about
+/// four years at that rate, and bounds what a hostile indexer can make the
+/// enclave hold: about 150 MB at the cap, 9 MB today.
+///
+/// A view that reaches it stops recording, and with it the unanimity for every
+/// newer nullifier, so admission falls back to the burn set for those. The
+/// hub logs that at error, once per view.
+pub const MAX_NULLIFIERS_PER_INDEXER: usize = 1 << 22;
+
+/// A nullifier as a view holds it: its first 16 bytes. Half the memory of the
+/// full 32. A false match needs every indexer to report a chain nullifier that
+/// shares 128 bits with the submitted one, which is about 2^-106 at the cap.
+type Held = u128;
+
+fn held(nullifier: &[u8; 32]) -> Held {
+    let mut prefix = [0; 16];
+    prefix.copy_from_slice(&nullifier[..16]);
+    Held::from_le_bytes(prefix)
+}
 
 /// The first height whose Orchard proofs verify under the hub's key.
 pub fn sync_from(network: Network) -> u32 {
@@ -77,21 +94,39 @@ pub fn sync_from(network: Network) -> u32 {
 }
 
 /// One indexer's account of the chain's Orchard nullifiers.
-#[derive(Default)]
 struct View {
-    by_height: BTreeMap<u32, Vec<[u8; 32]>>,
-    nullifiers: HashSet<[u8; 32]>,
+    /// The blocks a later read can replace: those inside [`RESYNC_DEPTH`] of
+    /// `synced_to`. Older blocks live in `nullifiers` alone.
+    by_height: BTreeMap<u32, Vec<Held>>,
+    nullifiers: HashSet<Held>,
     /// The highest height read so far. `None` before the first read.
     synced_to: Option<u32>,
     /// Set when the view reached [`MAX_NULLIFIERS_PER_INDEXER`].
     full: bool,
+    /// Blocks in this indexer's next read. See [`SYNC_CHUNK_BLOCKS`].
+    chunk: u32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            by_height: BTreeMap::new(),
+            nullifiers: HashSet::new(),
+            synced_to: None,
+            full: false,
+            chunk: SYNC_CHUNK_BLOCKS,
+        }
+    }
 }
 
 impl View {
     /// Replace everything held from `start` up with `blocks`, read for
     /// `start..=end`. Reads run upward, so anything above `end` is a block a
     /// reorg took back, or one the next read in this round brings back.
-    fn replace(&mut self, start: u32, end: u32, blocks: Vec<(u32, Vec<[u8; 32]>)>) {
+    ///
+    /// Returns whether this read made the view full.
+    fn replace(&mut self, start: u32, end: u32, blocks: Vec<(u32, Vec<[u8; 32]>)>) -> bool {
+        let was_full = self.full;
         let stale: Vec<u32> = self.by_height.range(start..).map(|(h, _)| *h).collect();
         for height in stale {
             if let Some(old) = self.by_height.remove(&height) {
@@ -111,10 +146,16 @@ impl View {
                 self.full = true;
                 continue;
             }
+            let nullifiers: Vec<Held> = nullifiers.iter().map(held).collect();
             self.nullifiers.extend(nullifiers.iter().copied());
             self.by_height.insert(height, nullifiers);
         }
         self.synced_to = Some(end);
+        // A later read starts no lower than `end - RESYNC_DEPTH + 1`.
+        self.by_height = self
+            .by_height
+            .split_off(&end.saturating_sub(RESYNC_DEPTH).saturating_add(1));
+        self.full && !was_full
     }
 }
 
@@ -146,18 +187,41 @@ impl ChainNullifiers {
             return false;
         }
         nullifiers.iter().any(|nullifier| {
+            let nullifier = held(nullifier);
             (0..self.views.len()).all(|endpoint| {
                 self.view(endpoint)
-                    .is_some_and(|view| view.nullifiers.contains(nullifier))
+                    .is_some_and(|view| view.nullifiers.contains(&nullifier))
             })
         })
     }
 
     /// Record what `endpoint` reported for `start..=end`, replacing whatever it
-    /// reported there before.
-    pub fn record(&self, endpoint: usize, start: u32, end: u32, blocks: Vec<(u32, Vec<[u8; 32]>)>) {
+    /// reported there before. Returns whether this read made its view full.
+    pub fn record(
+        &self,
+        endpoint: usize,
+        start: u32,
+        end: u32,
+        blocks: Vec<(u32, Vec<[u8; 32]>)>,
+    ) -> bool {
+        self.view(endpoint)
+            .is_some_and(|mut view| view.replace(start, end, blocks))
+    }
+
+    fn chunk(&self, endpoint: usize) -> u32 {
+        self.view(endpoint)
+            .map_or(SYNC_CHUNK_BLOCKS, |view| view.chunk)
+    }
+
+    /// Halve `endpoint`'s chunk after a failed read, or double it after one
+    /// that succeeded, within `1..=SYNC_CHUNK_BLOCKS`.
+    fn adapt_chunk(&self, endpoint: usize, read_ok: bool) {
         if let Some(mut view) = self.view(endpoint) {
-            view.replace(start, end, blocks);
+            view.chunk = if read_ok {
+                view.chunk.saturating_mul(2).min(SYNC_CHUNK_BLOCKS)
+            } else {
+                (view.chunk / 2).max(1)
+            };
         }
     }
 
@@ -217,11 +281,33 @@ async fn sync_endpoint(
     };
     let mut start = spent.resume_from(endpoint, from);
     while start <= tip {
-        let end = start.saturating_add(SYNC_CHUNK_BLOCKS - 1).min(tip);
+        let end = start
+            .saturating_add(spent.chunk(endpoint).saturating_sub(1))
+            .min(tip);
         match chain.orchard_nullifiers(addr, start, end).await {
-            Ok(blocks) => spent.record(endpoint, start, end, blocks),
+            Ok(blocks) => {
+                if spent.record(endpoint, start, end, blocks) {
+                    tracing::error!(
+                        %addr,
+                        cap = MAX_NULLIFIERS_PER_INDEXER,
+                        height = end,
+                        "nullifier set full for this indexer; copies of transactions mined from \
+                         here on are no longer refused"
+                    );
+                }
+                spent.adapt_chunk(endpoint, true);
+            }
             Err(err) => {
-                tracing::warn!(%addr, start, end, reason = %err, "nullifier sync: read failed");
+                // Retried from the same start next round, with half the blocks.
+                spent.adapt_chunk(endpoint, false);
+                tracing::warn!(
+                    %addr,
+                    start,
+                    end,
+                    next_chunk = spent.chunk(endpoint),
+                    reason = %err,
+                    "nullifier sync: read failed"
+                );
                 return false;
             }
         }
@@ -335,13 +421,44 @@ mod tests {
                 nullifier
             })
             .collect();
-        set.record(0, 1, 1, vec![(1, flood)]);
+        assert!(set.record(0, 1, 1, vec![(1, flood)]), "reported once");
+        assert!(
+            !set.record(0, 2, 2, vec![(2, vec![nf(1)])]),
+            "and only once"
+        );
         let view = set.view(0).unwrap();
         assert!(view.full);
         assert!(
             view.nullifiers.is_empty(),
             "the oversized block is refused whole"
         );
+    }
+
+    #[test]
+    fn only_the_reorg_window_is_kept_by_height() {
+        let set = ChainNullifiers::new(1);
+        set.record(0, 1, 1000, vec![(500, vec![nf(1)]), (995, vec![nf(2)])]);
+        let view = set.view(0).unwrap();
+        assert_eq!(
+            view.by_height.keys().copied().collect::<Vec<_>>(),
+            vec![995]
+        );
+        assert_eq!(view.nullifiers.len(), 2, "older blocks stay in the set");
+    }
+
+    #[test]
+    fn a_failed_read_halves_the_chunk_and_a_good_one_doubles_it() {
+        let set = ChainNullifiers::new(1);
+        for _ in 0..20 {
+            set.adapt_chunk(0, false);
+        }
+        assert_eq!(set.chunk(0), 1, "never below one block");
+        set.adapt_chunk(0, true);
+        assert_eq!(set.chunk(0), 2);
+        for _ in 0..20 {
+            set.adapt_chunk(0, true);
+        }
+        assert_eq!(set.chunk(0), SYNC_CHUNK_BLOCKS);
     }
 
     #[test]

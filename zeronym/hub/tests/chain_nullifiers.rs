@@ -40,6 +40,15 @@ struct MockIndexer {
 /// An indexer at `TIP` whose chain carries `orchard` nullifiers at the given
 /// heights, and nothing else.
 async fn spawn_indexer(orchard: BTreeMap<u64, Vec<[u8; 32]>>) -> MockIndexer {
+    spawn_limited_indexer(orchard, u64::MAX).await
+}
+
+/// As [`spawn_indexer`], but a range wider than `max_blocks` fails, as a dense
+/// chunk past the body limit or the call budget does.
+async fn spawn_limited_indexer(
+    orchard: BTreeMap<u64, Vec<[u8; 32]>>,
+    max_blocks: u64,
+) -> MockIndexer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ranges = Arc::new(Mutex::new(Vec::new()));
@@ -62,6 +71,9 @@ async fn spawn_indexer(orchard: BTreeMap<u64, Vec<[u8; 32]>>) -> MockIndexer {
                                     let (start, end) =
                                         (range.start.unwrap().height, range.end.unwrap().height);
                                     seen.lock().unwrap().push((start, end));
+                                    if end - start + 1 > max_blocks {
+                                        return Ok(grpc_status("8"));
+                                    }
                                     (start..=end)
                                         .map(|height| compact_block(height, &orchard))
                                         .collect()
@@ -122,6 +134,16 @@ fn grpc_ok(messages: &[Vec<u8>]) -> Response<BoxBody<Bytes, Infallible>> {
                 .with_trailers(async move { Some(Ok(trailers)) })
                 .boxed(),
         )
+        .unwrap()
+}
+
+/// A trailers-only gRPC error reply.
+fn grpc_status(code: &str) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc")
+        .header("grpc-status", code)
+        .body(Full::new(Bytes::new()).boxed())
         .unwrap()
 }
 
@@ -195,5 +217,25 @@ fn mainnet_starts_where_the_proofs_do() {
     assert_eq!(
         sync_from(zero_indexer_hub::config::Network::Mainnet),
         3_428_143
+    );
+}
+
+#[tokio::test]
+async fn a_chunk_too_dense_to_read_shrinks_until_it_passes() {
+    // Every range over 300 blocks fails. The sync shrinks its chunk until its
+    // reads pass, and reaches the tip.
+    let indexer = spawn_limited_indexer(mined(1500, PROVEN_A), 300).await;
+    let chain = ChainClient::new(vec![indexer.addr], None).unwrap();
+    let revealed = ChainNullifiers::new(1);
+
+    let mut rounds = 0;
+    while sync_once(&revealed, &chain, FROM).await == 0 {
+        rounds += 1;
+        assert!(rounds < 20, "the read never reached the tip");
+    }
+    assert_eq!(revealed.synced_to(), vec![Some(TIP)]);
+    assert_eq!(
+        revealed.held(),
+        vec![admission::inspect(PROVEN_A).orchard_nullifiers.len()]
     );
 }
