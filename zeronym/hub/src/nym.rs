@@ -59,8 +59,9 @@ const MAX_CONCURRENT_LOOKUPS: usize = 64;
 /// [`Hub::admit`] verifies at most [`VERIFY_SLOTS`] at a time and refuses the
 /// rest, so a task past that bound has no work to do but still holds its whole
 /// frame. Taking the slot before the spawn keeps a flood from piling up those
-/// tasks. A submission past the bound is dropped with no ack, the same
-/// disposition [`Hub::admit`] would give it: the shim never awaits the ack.
+/// tasks. A submission past the bound is dropped with no ack. [`Hub::admit`]
+/// would have acked it `full`, and the shim never awaits the ack, so the shim
+/// sees the same outcome.
 const MAX_CONCURRENT_ADMISSIONS: usize = VERIFY_SLOTS;
 
 /// How long after a request is received its reply is still worth emitting.
