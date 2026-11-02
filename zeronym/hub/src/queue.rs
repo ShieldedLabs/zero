@@ -286,8 +286,7 @@ impl Inner {
         Some(entry)
     }
 
-    /// The bundle keys already held, or burned: either way these proofs buy no
-    /// new entry.
+    /// Whether any of these bundle keys is already held.
     fn holds_any(&self, bundle_keys: &[[u8; 32]]) -> bool {
         bundle_keys
             .iter()
@@ -661,6 +660,15 @@ impl Queue {
         let mut out = Requeued::default();
         for mut entry in entries {
             if inner.entries.contains_key(&entry.key) || inner.holds_any(&entry.bundle_keys) {
+                continue;
+            }
+            // Burned while this entry was out, through another signing judged
+            // in the same window: the burn set refuses these proofs.
+            if entry
+                .bundle_keys
+                .iter()
+                .any(|bundle_key| inner.burned.contains(bundle_key))
+            {
                 continue;
             }
 
@@ -1067,6 +1075,18 @@ mod tests {
         // The lane and the bundle keys were released with it.
         assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn a_requeue_drops_an_entry_whose_proofs_were_burned_meanwhile() {
+        let q = Queue::new();
+        assert!(admitted(q.admit(V6_ORCHARD_ONLY, 100, N, MARGIN)));
+        let out = q.drain_shuffled();
+        // Another signing of the same proofs, judged while the first was out.
+        assert!(admitted(q.admit(PROVEN_A_RESIGNED, 100, N, MARGIN)));
+        q.burn(&q.drain_shuffled());
+        assert_eq!(q.requeue(out, 100, N, MARGIN).held, 0);
+        assert!(q.is_empty());
     }
 
     #[test]
