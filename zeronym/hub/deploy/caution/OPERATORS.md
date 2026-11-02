@@ -56,9 +56,11 @@ wrong shape, not merely an unbuilt one.
   and by 1024 entries split into three lanes: 896 for transactions whose proofs
   verified, 112 for transparent-only spends, 16 for what it cannot verify.
 - **Reads the Orchard nullifiers** each indexer reports mined
-  (`GetBlockRangeNullifiers`): about a minute from cold on mainnet, inside the
-  tip warm-up, then every 30 seconds. Every indexer must serve that call for
-  the check to work; the log says `nullifier set synced` once it does.
+  (`GetBlockRangeNullifiers`): about a minute from cold on mainnet (measured
+  2026-10-29), then every 30 seconds. Admission does not wait for it. Every
+  indexer must serve that call and be current for the check to work. The log
+  says `nullifier set synced` when it is on, and `nullifier set not current`
+  when copies pass.
 - **Flushes** the batch on a cadence, broadcasting every member to **every**
   configured indexer — a migration that entered only one mempool is one outage
   away from never being mined.
