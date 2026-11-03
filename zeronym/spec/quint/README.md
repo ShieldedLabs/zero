@@ -66,7 +66,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Observer.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** No reorg of an included transaction and no mempool eviction. The operator's indexer publishes nothing.
-- **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `MAX_DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent.
+- **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `MAX_DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent. The model also has wallets below the floor and submissions later than the delivery lag.
 - **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither (findings 1, 2 and 4).
 - **Time.** There is no clock. A timeout may happen at any moment; the staleness window is counted in blocks.
 
@@ -79,26 +79,19 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 | Item | Reason |
 |---|---|
 | Several hubs | Production replicates: every shim sends every submission to every hub (`zeronym/shim/src/nym.rs:602-647`). Not checked as a result: two hubs disagreeing about one transaction; duplicate publication and a second enclave holding the plaintext, both accepted in production; told ok after a partial send; a lookup moving to the next address on a timeout (finding 9); one Byzantine replica breaking G2 and G4 |
-| Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist. Represented by the roles |
-| Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
+| Attestation, PCRs, TLS, STEVE | No in-protocol messages exist. Represented by the roles |
+| Mixnet internals; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
 | The hub's lookup concurrency bound, reply deadline and dropped acks | Refinements of "the network lost the message" |
-| Wall-clock time | There is no clock: the staleness window is counted in blocks, and a timeout may happen at any moment |
 | Multiple indexer endpoints | One abstract indexer stands for all of a hub's endpoints. The trust matrix says, for each Byzantine-indexer cell, whether one lying endpoint suffices |
 | Wire codecs, byte layout, malformed frames | Pinned by the Rust tests and golden vectors in both crates. The specification works at the level of what a reply means, and does not bind the codec |
-| Reorgs of included transactions, mempool eviction | Assumed away: a transaction's chain status only moves forward |
 | Anonymity-set size, shuffle, simultaneity | Not properties of a single run |
 | Covert channels: extra bytes on the real wire, sizes and timing | Messages are strictly typed. A message can carry only its type's fields, so one with extra data is unrepresentable in the model |
-| The forward-only shim, transparent-pool RPCs, health, address and attestation endpoints, logging | Not part of the divert protocol. A forwarded `SendTransaction` that spends a diverted one is part of it: G9 and K10 |
-| A transaction's inputs and outputs beyond the txids it spends from: output indices, values, scripts, addresses | A payload carries the txids its transparent inputs spend (`spends`) and what the shim's parser reads of its pools (`class`). The classifier and G9 read those two fields. Sprout, Sapling and Ironwood are one class, `OtherShielded`, because the classifier treats them alike |
+| A transaction's inputs and outputs beyond the txids it spends from: output indices, values, scripts, addresses | A payload carries the txids its transparent inputs spend (`spends`) and what the shim's parser reads of its pools (`class`). Sprout, Sapling and Ironwood are one class, `OtherShielded`, because the classifier treats them alike |
 | Transaction dependencies at the node | The indexer judges each transaction on its own. #94 queues both legs of a TEX payment at the hub, and one flush may offer the second leg before the first; what a node answers then is outside the model |
-| The HTTP transport, where the shim waits for the hub's verdict before answering the wallet (`HubTransport::Http`, `--hub`) | The production deployment is the mixnet (`HTTP_SUBMIT=0`). So there is no configuration here in which the shim's ok means the hub has the transaction |
-| A Byzantine shim | The shim runs attested, sees every migration in plaintext and controls what the wallet observes. Every wallet-facing guarantee assumes it honest |
-| What the hub's ack says | Nothing reads an ack: the shim tells the wallet ok without waiting for it. That an accepted ack is only for a queued payload is not a checked property, and a Byzantine hub's ack is modelled as truthful |
+| What the hub's verdict and ack say, and the HTTP transport that waits for the verdict (`HubTransport::Http`, `--hub`) | The deployment is the mixnet (`HTTP_SUBMIT=0`): the shim tells the wallet ok without waiting, and nothing reads an ack. So in every configuration the shim's ok says only that the frame left the shim. That an accepted ack is only for a queued payload is unchecked, and a Byzantine hub's ack is modelled as truthful |
 | The hub's capacity and size refusals, and denial of service generally | Not claimed properties. The shim's own too-large refusal is modelled. A free burst of junk fills the entry cap for a flush window: finding 13 |
 | An observer submitting payloads of its own making | Possible, since the hub's address is public and unauthenticated. The model's observer submits only what it has learned or the chain has published. Finding 13 is what junk of its own making buys |
-| Wallets whose expiry is below the supported floor, and submissions that arrive later than the delivery lag | No schedule guarantee is made for them. Admission's own claim that every admitted entry "provably survives" its scheduled flush (`zeronym/hub/src/queue.rs`) is G8, for entries not requeued; before #85 it did not hold under a tip reported behind the chain (finding 6) |
 | A different transaction with the same txid (a twin) | No configuration contains one. The pure wire test shows the shim would serve it (`servedOnlyOnMatchingTxidTest`): the shim compares the txid and nothing else |
-| A Byzantine hub in the hub specification | It produced no finding, and an adversary's moves are not an implementation to check against the abstract hub. The protocol specification keeps its Byzantine hub, which lies in lookup replies and admits or refuses as it likes |
 | More than one Byzantine component at once | The trust matrix is single-fault |
 | Liveness: that anything eventually happens, such as a submitted migration being published | The network may lose everything, and nobody waits for an ack |
 
@@ -114,14 +107,13 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 | T2 | Someone obtains a queued migration's bytes and publishes it early, breaking the batch | Unauthenticated observer; Byzantine hub or indexer | Answered, if the hub and the indexer are honest |
 | T3 | The wallet is served a different transaction than the one it asked for | Byzantine hub or indexer | Answered for the txid; not for the bytes or the height |
 | T4 | The wallet is told something false about its transaction's status | Byzantine hub or indexer; network reordering | Answered for each answer, if the hub and the indexer are honest; not across answers (T8) |
-| T5 | A supported wallet's migration expires while the hub holds it | Chain timing; a flaky tip; Byzantine hub or indexer | Answered in part: under a timely or regressing tip, not under a stale one |
+| T5 | An admitted migration expires while the hub holds it | Chain timing; a flaky tip; Byzantine hub or indexer | Answered in part for supported wallets: under a timely or regressing tip, not under a stale one. Not checked for late arrivals and unsupported wallets |
 | T6 | The hub silently drops or admits entries outside its rules | Hub implementation error | Answered |
 | T7 | The wallet is told "sent" but the hub never admits it | Network; the hub's own refusals; an observer's burst of junk (finding 13) | Not prevented |
 | T8 | The wallet sees its transaction's status go backwards | Network reordering; resubmission; the flush window (after a flush empties the queue, before the indexer has the batch) | Not prevented |
 | T9 | An acknowledged migration is lost to a crash, a failed final flush, or a requeue drop | None needed | Not prevented |
 | T10 | An observer who knows a txid learns it is queued | Unauthenticated observer | Accepted. A Nym hub answers on the mixnet only; a clearnet hub also answers on `POST /transaction` (#99) |
 | T11 | A lying indexer makes the hub flush early, shrinking the batch, or stop admitting | Byzantine indexer; one endpoint suffices | Bounded on mainnet by #92 (finding 11); possible inside the bound; recorded |
-| T12 | Any admitted transaction, including a late arrival or one from an unsupported wallet, is offered too late | As T5 | Not checked |
 | T13 | The hub acknowledges a migration it never queued | Byzantine hub | Not modelled: nothing reads an ack |
 | T14 | Linking a wallet to its migration by source IP | Observer; operator | Not modelled, except the route through a forwarded transaction (T19). `zeronym/README.md` claims it against the hub and the peer-to-peer network at any volume, and lists the operator's and the wallet's ISP's link at batch size one as not protected (T17) |
 | T15 | Linking by submission size and arrival time | Operator | Not modelled. Listed as not protected in `zeronym/README.md` |
@@ -347,6 +339,7 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 1. **Failing Rust tests for the findings.** Findings 2, 6 and 8 have Rust tests, written with their fixes in #85; the part of finding 2 that #85 leaves has none. The other findings are shown on the model and matched to the code by reading. Finding 1 fits `batcher.rs`'s unit tests as 2 and 6 did. Finding 4 is impractical to reproduce.
 2. **Model-based testing with `quint-connect`.** Depends on 1, and needs driver code in Rust. The specification is shaped for it: every branch of a step is a named action with its choices as named picks; each step gives one input to one component function and applies one output; and those functions map onto the seams in the table under [System][system].
 3. **`quint verify` with Apalache for a subset of the claims.** The compiled specification is too large for the Apalache server today. A subset small enough to pass would give bounded symbolic checking of the protocol guarantees, which are simulated only.
+4. **A Byzantine and a leaky shim.** Privacy properties are __hyperproperties__ and Quint doesn't support them (see the [discussion on the Quint Telegram channel][quint-tg]).
 
 [protocol-spec]: ./protocol.qnt
 [hub-spec]: ./hubMachine.qnt
@@ -365,3 +358,4 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 [configurations]: #configurations
 [wallet-threat-model]: https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html
 [not-modelled]: #not-modelled
+[quint-tg]: https://t.me/quint_lang/1311
