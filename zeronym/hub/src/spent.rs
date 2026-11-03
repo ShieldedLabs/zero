@@ -22,15 +22,17 @@
 //! on its own task, and reads no higher than the tracked tip plus
 //! [`RESYNC_DEPTH`].
 //!
-//! Admission does not wait for the first read. Until every view is current the
-//! check passes copies, and the hub logs which state it is in on each change.
+//! Admission does not wait for the first read. The check is on when at least
+//! `min(2, configured endpoints)` views are not full and every such view is
+//! current. A full view abstains. The hub logs which state it is in on each
+//! change.
 //!
-//! **Unanimity.** A nullifier refuses admission only when EVERY configured
-//! indexer reports it. An indexer sees every transaction the hub publishes, so
-//! one that lies could otherwise invent a published migration's nullifier and
-//! block the wallet's resend. The price is fail-open: an indexer that is down
-//! or behind lets copies through, which is the burn set's behaviour before this
-//! module, and every honest migration stays admissible.
+//! **Unanimity.** A nullifier refuses admission only when at least
+//! `min(2, configured endpoints)` views are not full, every one of those views
+//! is current, and every one of them reports it. A full view abstains. Fewer
+//! non-full views, a view that is not current, or no views, refuses nothing.
+//! One indexer sees every transaction this hub publishes, so a single view
+//! does not refuse when another endpoint is configured.
 
 // A panic in a diskless enclave destroys the queue (see `queue.rs`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -76,15 +78,20 @@ pub const SYNC_CHUNK_BLOCKS: u32 = 1000;
 /// four years at that rate, and bounds what a hostile indexer can make the
 /// enclave hold: about 150 MB at the cap, 9 MB today.
 ///
-/// A view that reaches it stops recording, and with it the unanimity for every
-/// newer nullifier, so admission falls back to the burn set for those. The
-/// hub logs that at error, once per view.
+/// A view that reaches it stops recording and abstains. The check refuses
+/// only while at least `min(2, configured endpoints)` views are not full and
+/// current. The hub logs a full view at error, once.
 pub const MAX_NULLIFIERS_PER_INDEXER: usize = 1 << 22;
 
 /// A nullifier as a view holds it: its first 16 bytes. Half the memory of the
 /// full 32. A false match needs every indexer to report a chain nullifier that
 /// shares 128 bits with the submitted one, which is about 2^-106 at the cap.
 type Held = u128;
+
+/// Views that must be voting before a nullifier can refuse admission.
+fn voters_required(endpoints: usize) -> usize {
+    endpoints.min(2)
+}
 
 fn held(nullifier: &[u8; 32]) -> Held {
     let mut prefix = [0; 16];
@@ -185,6 +192,26 @@ impl View {
     }
 }
 
+/// Whether the nullifier check is refusing copies, and why it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NullifierCheck {
+    On,
+    /// A view that is not full is also not current.
+    Stale,
+    /// Fewer than `min(2, configured endpoints)` views are voting.
+    Quorum,
+}
+
+impl NullifierCheck {
+    fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::On => None,
+            Self::Stale => Some("stale"),
+            Self::Quorum => Some("quorum"),
+        }
+    }
+}
+
 /// The Orchard nullifiers every indexer has seen revealed.
 pub struct ChainNullifiers {
     /// One per endpoint, in [`ChainClient::endpoints`] order.
@@ -207,21 +234,28 @@ impl ChainNullifiers {
         })
     }
 
-    /// Whether every indexer reports one of `nullifiers` as revealed, with
-    /// every view current at `tip`. A view that is not current may hold a
-    /// nullifier a reorg took back, so until all are current this refuses
-    /// nothing (the module's fail-open).
+    /// Whether enough views that are not full report one of `nullifiers` as
+    /// revealed and are current at `tip`.
+    ///
+    /// A full view abstains. At least `min(2, configured endpoints)` views
+    /// must be voting. Every voting view must be current and must contain the
+    /// candidate. Fewer voting views, or no views, returns false.
     pub fn any_revealed(&self, nullifiers: &[[u8; 32]], tip: u32) -> bool {
         if self.views.is_empty() {
             return false;
         }
         let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
+        let mut voting = 0usize;
         for endpoint in 0..self.views.len() {
             // Freshness and membership under one hold of the view's lock, so a
             // view marked stale between them cannot refuse.
             let Some(view) = self.view(endpoint) else {
                 return false;
             };
+            if view.full {
+                continue;
+            }
+            voting += 1;
             if !view.is_current(tip) {
                 return false;
             }
@@ -230,7 +264,33 @@ impl ChainNullifiers {
                 return false;
             }
         }
-        true
+        voting >= voters_required(self.views.len())
+    }
+
+    /// On, or why it is off. A voting view that is not current is `Stale`.
+    /// Fewer than `min(2, configured endpoints)` voting views is `Quorum`.
+    fn nullifier_check(&self, tip: u32) -> NullifierCheck {
+        if self.views.is_empty() {
+            return NullifierCheck::Quorum;
+        }
+        let mut voting = 0usize;
+        for endpoint in 0..self.views.len() {
+            let Some(view) = self.view(endpoint) else {
+                return NullifierCheck::Quorum;
+            };
+            if view.full {
+                continue;
+            }
+            if !view.is_current(tip) {
+                return NullifierCheck::Stale;
+            }
+            voting += 1;
+        }
+        if voting >= voters_required(self.views.len()) {
+            NullifierCheck::On
+        } else {
+            NullifierCheck::Quorum
+        }
     }
 
     /// How many views are current at `tip`: within [`RESYNC_DEPTH`] of it,
@@ -386,8 +446,7 @@ async fn sync_endpoint(
                         %addr,
                         cap = MAX_NULLIFIERS_PER_INDEXER,
                         height = end,
-                        "nullifier set full for this indexer; copies of transactions mined from \
-                         here on are no longer refused"
+                        "nullifier set full for this indexer; this view abstains"
                     );
                 }
                 spent.adapt_chunk(endpoint, true);
@@ -433,30 +492,30 @@ pub async fn run(
     }
 
     let started = Instant::now();
-    let mut on: Option<bool> = None;
+    let mut state: Option<NullifierCheck> = None;
     loop {
         let observed = tip.observed_height();
         if observed > 0 {
             let current = spent.current(observed);
-            let now_on = current == spent.views.len();
-            if on != Some(now_on) {
-                on = Some(now_on);
-                if now_on {
+            let now = spent.nullifier_check(observed);
+            if state != Some(now) {
+                state = Some(now);
+                if now == NullifierCheck::On {
                     tracing::info!(
                         synced_to = ?spent.synced_to(),
                         held = ?spent.held(),
                         elapsed_s = started.elapsed().as_secs(),
                         "nullifier set synced; copies of mined Orchard transactions are refused"
                     );
-                } else {
+                } else if let Some(reason) = now.reason() {
                     tracing::warn!(
                         current,
                         indexers = spent.views.len(),
                         tip = observed,
+                        reason,
                         synced_to = ?spent.synced_to(),
                         held = ?spent.held(),
-                        "nullifier set not current at every indexer; copies of mined Orchard \
-                         transactions pass"
+                        "nullifier check is off; copies of mined Orchard transactions pass"
                     );
                 }
             }
@@ -645,6 +704,88 @@ mod tests {
         assert_eq!(set.current(100 + RESYNC_DEPTH), 1);
         set.view(0).unwrap().full = true;
         assert_eq!(set.current(100), 0);
+    }
+
+    #[test]
+    fn a_full_view_abstains() {
+        let set = ChainNullifiers::new(3);
+        set.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        set.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        set.record(2, 100, 101, vec![(101, vec![nf(1)])]);
+        set.view(0).unwrap().full = true;
+        assert!(
+            set.any_revealed(&[nf(1)], 101),
+            "one full view plus two current views that hold the candidate"
+        );
+
+        let one_voter = ChainNullifiers::new(2);
+        one_voter.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        one_voter.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        one_voter.view(0).unwrap().full = true;
+        assert!(!one_voter.any_revealed(&[nf(1)], 101));
+
+        let missing = ChainNullifiers::new(3);
+        missing.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        missing.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        missing.record(2, 100, 101, vec![(101, vec![nf(2)])]);
+        missing.view(0).unwrap().full = true;
+        assert!(!missing.any_revealed(&[nf(1)], 101));
+
+        let stale = ChainNullifiers::new(3);
+        stale.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        stale.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        stale.record(2, 100, 101, vec![(101, vec![nf(1)])]);
+        stale.view(0).unwrap().full = true;
+        stale.mark_stale(1);
+        assert!(!stale.any_revealed(&[nf(1)], 101));
+
+        let lone = ChainNullifiers::new(1);
+        lone.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        lone.view(0).unwrap().full = true;
+        assert!(!lone.any_revealed(&[nf(1)], 101));
+
+        let only = ChainNullifiers::new(1);
+        only.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        assert!(only.any_revealed(&[nf(1)], 101));
+
+        let two_full = ChainNullifiers::new(3);
+        two_full.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        two_full.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        two_full.record(2, 100, 101, vec![(101, vec![nf(1)])]);
+        two_full.view(0).unwrap().full = true;
+        two_full.view(1).unwrap().full = true;
+        assert!(!two_full.any_revealed(&[nf(1)], 101));
+    }
+
+    #[test]
+    fn nullifier_check_follows_the_quorum() {
+        let unread = ChainNullifiers::new(3);
+        assert_eq!(unread.nullifier_check(101), NullifierCheck::Stale);
+
+        let set = ChainNullifiers::new(3);
+        set.record(0, 100, 101, vec![]);
+        set.record(1, 100, 101, vec![]);
+        set.record(2, 100, 101, vec![]);
+        assert_eq!(set.nullifier_check(101), NullifierCheck::On);
+
+        set.view(0).unwrap().full = true;
+        set.view(1).unwrap().full = true;
+        assert_eq!(set.nullifier_check(101), NullifierCheck::Quorum);
+
+        let stale = ChainNullifiers::new(2);
+        stale.record(0, 100, 101, vec![]);
+        stale.record(1, 100, 101, vec![]);
+        stale.mark_stale(1);
+        assert_eq!(stale.nullifier_check(101), NullifierCheck::Stale);
+
+        let only = ChainNullifiers::new(1);
+        only.record(0, 100, 101, vec![]);
+        assert_eq!(only.nullifier_check(101), NullifierCheck::On);
+
+        assert_eq!(
+            ChainNullifiers::new(0).nullifier_check(101),
+            NullifierCheck::Quorum
+        );
     }
 
     #[test]
