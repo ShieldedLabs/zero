@@ -53,7 +53,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::admission::Lane;
-use crate::chain::{ChainClient, Publish};
+use crate::chain::{ChainClient, Publish, SPLIT_VERDICT};
 use crate::queue::Queue;
 use crate::tip_guard;
 use crate::BoxError;
@@ -543,9 +543,9 @@ async fn run_with_poll_interval(
 /// Publish everything held, all at once, in an unpredictable order.
 ///
 /// Returns the achieved batch size, which is the honest measure of the privacy
-/// the flush actually delivered. Entries the indexer could not be reached for
-/// are back in the queue when this returns; entries the indexer refused are
-/// gone. Public so the cadence is not the only thing that can exercise it: a
+/// the flush actually delivered. A unanimous `AlreadyMined` or `Rejected` is
+/// gone. A split `Rejected` is back in the queue. Public so the cadence is not
+/// the only thing that can exercise it: a
 /// flush is the security-critical operation here and it must be testable
 /// directly.
 pub async fn flush(
@@ -577,9 +577,8 @@ pub async fn flush(
     let mut rejected = 0usize;
     let mut sample_failure: Option<String> = None;
     let mut unplaced = Vec::new();
-    // Rejected or mined entries, whose proofs this hub will refuse from now
-    // on. See `Queue::burn` for why an accepted or already-known entry stays
-    // unburned.
+    // A burn is a unanimous AlreadyMined or Rejected. A split Rejected is put
+    // back. An accepted or already-known entry stays unburned.
     let mut judged = Vec::new();
     let proven = batch.iter().filter(|e| e.lane == Lane::Proven).count();
     let transparent = batch.iter().filter(|e| e.lane == Lane::Transparent).count();
@@ -595,7 +594,9 @@ pub async fn flush(
                 judged.push(entry);
             }
             Some(Publish::Retryable { reason }) => {
-                sample_failure.get_or_insert_with(|| reason.clone());
+                if reason != SPLIT_VERDICT {
+                    sample_failure.get_or_insert_with(|| reason.clone());
+                }
                 unplaced.push(entry);
             }
             // No verdict at all for this position cannot happen (join_all is
@@ -614,8 +615,8 @@ pub async fn flush(
     // the flush window would lose the migration outright while the wallet
     // believes it was sent. The entry keeps its original expiry; when the
     // indexer answers again a stale one gets the node's verdict and leaves. A
-    // Rejected verdict is not put back: the node said no, and re-offering the
-    // same bytes buys the same answer every flush until expiry.
+    // burn is a unanimous AlreadyMined or Rejected. A split Rejected is put
+    // back.
     //
     // `observed_height`, not `admission_height`. On a stale hub the recorded
     // boundary follows the free-running estimate, which runs ahead of a stalled
@@ -632,7 +633,7 @@ pub async fn flush(
     // Aggregates only. Never a txid, never a body, never a per-entry
     // identifier: in a Nitro enclave the tracing output reaches the parent host,
     // which is exactly who this system withholds the txid from. The sample
-    // reason names an endpoint and an error, not an entry.
+    // reason is a transport failure. A split fold is not sampled.
     tracing::info!(
         flush_size = size,
         proven,
@@ -647,11 +648,13 @@ pub async fn flush(
         "flush published"
     );
     if requeued.held > 0 {
-        tracing::warn!(
-            requeued = requeued.held,
-            reason = sample_failure.as_deref().unwrap_or("no verdict"),
-            "indexer could not be reached for part of the batch; held for the next flush"
-        );
+        if let Some(reason) = sample_failure.as_deref() {
+            tracing::warn!(
+                requeued = requeued.held,
+                reason,
+                "indexer could not be reached for part of the batch; held for the next flush"
+            );
+        }
     }
     // A SHAPE WITH NO BENIGN EXPLANATION, when there is only one endpoint.
     //
@@ -683,7 +686,7 @@ pub async fn flush(
         tracing::error!(
             dropped_expired = requeued.dropped_expired,
             dropped_exhausted = requeued.dropped_exhausted,
-            reason = sample_failure.as_deref().unwrap_or("no verdict"),
+            reason = sample_failure.as_deref().unwrap_or(SPLIT_VERDICT),
             "gave up on migrations that could not be placed; they exist nowhere else"
         );
     }
@@ -1390,6 +1393,76 @@ mod tests {
                 "after this verdict the proofs are burned: {burned}, got {again:?}"
             );
         }
+    }
+
+    fn refused_rejected(admission: crate::queue::Admission) -> bool {
+        matches!(
+            admission,
+            crate::queue::Admission::Refused(crate::queue::Refusal::Rejected)
+        )
+    }
+
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn error_log(max: tracing::Level) -> (tracing::subscriber::DefaultGuard, Arc<Mutex<Vec<u8>>>) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(max)
+            .with_ansi(false)
+            .with_writer(move || LogBuf(writer.clone()))
+            .finish();
+        (tracing::subscriber::set_default(subscriber), buf)
+    }
+
+    #[tokio::test]
+    async fn a_split_burn_verdict_requeues_and_a_resend_is_not_rejected() {
+        const PROVEN: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
+        for answer in [
+            Answer::Send(-27, "transaction already in block chain"),
+            Answer::Send(-26, "16: bad-txns-orchard-binding-signature-invalid"),
+        ] {
+            let live = spawn_mock_indexer(vec![answer], Duration::ZERO).await;
+            let chain = Arc::new(
+                ChainClient::new(vec![live.addr, unreachable_addr().await], None).unwrap(),
+            );
+            let queue = queue_holding(&[PROVEN.to_vec()]);
+            let _ = flush(&queue, &chain, &test_tip(), BatchParams::default()).await;
+            assert_eq!(queue.len(), 1);
+            assert!(!refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_split_rejection_does_not_log_the_node_text() {
+        const MARK: &str = "Nullifier(deadbeef)";
+        let live = spawn_mock_indexer(
+            vec![Answer::Send(
+                -26,
+                "orchard double-spend: duplicate nullifier: Nullifier(deadbeef)",
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let chain =
+            Arc::new(ChainClient::new(vec![live.addr, unreachable_addr().await], None).unwrap());
+        let queue = queue_holding(&[junk(4)]);
+        let (_guard, buf) = error_log(tracing::Level::WARN);
+        let _ = flush(&queue, &chain, &test_tip(), BatchParams::default()).await;
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(!text.contains(MARK), "{text}");
     }
 
     #[tokio::test]

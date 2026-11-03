@@ -32,9 +32,8 @@
 //!   only the lane it can reach, and the proven lane costs a proof per entry.
 //! * **One entry per proof, and one publish per proof.** Entries are keyed on
 //!   their payload hash AND on their bundle keys, so re-signing one proof
-//!   collapses into the held entry. A bundle key this hub has published to a
-//!   rejection, or found mined, is burned and refused, so one proof buys one
-//!   window.
+//!   collapses into the held entry. A bundle key is burned on a unanimous
+//!   `AlreadyMined` or `Rejected`. A split answer is put back.
 //! * **Bytes are the budget, not entries.** Real Orchard migrations are 2 to
 //!   16 KB, so fixed-size slots would waste most of the budget and hand an
 //!   attacker a cheaper occupancy attack than the memory attack.
@@ -112,10 +111,7 @@ pub const UNVERIFIED_LANE_ENTRIES: usize = 16;
 
 /// How many bundle keys the hub remembers having published to a verdict.
 ///
-/// Oldest first out. An attacker who wants a burned proof back must push a
-/// million newer keys through first, about a million proofs, roughly 30
-/// core-days. Honest traffic, two keys per migration, takes years to cycle it.
-/// About 100 MB at the cap. Lost on restart, like everything in the enclave.
+/// Oldest first out, about 100 MB at the cap, and lost on restart.
 pub const MAX_BURNED_KEYS: usize = 1 << 20;
 
 /// How many admissions may verify proofs at once.
@@ -146,17 +142,11 @@ fn lane_index(lane: Lane) -> usize {
     }
 }
 
-/// How many flushes may fail to place one entry before it is given up on.
+/// How many flushes may put one entry back before it is given up on.
 ///
-/// For most entries this, not expiry, is the bound that ends the retries: a
-/// ZIP 318 migration expires a month or more out, and a payload that does not
-/// deserialize has no expiry at all, correctly treated here as "never expires".
-/// Without a count either would be re-offered to the network for the life of
-/// the process. Only an entry the node never judged gets here: a node that
-/// cannot parse a payload has rejected it, and it leaves at that flush.
-///
-/// Eight flushes is a few hours at the production cadence -- long enough to ride
-/// out an indexer outage, far short of forever.
+/// A unanimous `AlreadyMined` or `Rejected` is a burn. A split answer is put
+/// back, and this counts those flushes on the entry. A resend starts at zero.
+/// Eight flushes is a few hours at the production cadence.
 pub const MAX_REQUEUE_ATTEMPTS: u32 = 8;
 
 /// Why a submission was not admitted.
@@ -673,18 +663,13 @@ impl Queue {
         batch
     }
 
-    /// Remember the proofs of entries the network has judged, so the same
-    /// proofs are refused from now on.
+    /// Burn bundle keys from a unanimous `AlreadyMined` or `Rejected`.
     ///
-    /// Called for an entry rejected or mined at a flush, as every endpoint that
-    /// answered said (see `chain::best_of`). An entry a node accepted, or one
-    /// a mempool already holds, stays unburned: a mempool can drop it, and its
-    /// wallet's resend must then get through. A mined copy is also refused at
-    /// admission by the chain nullifier check in [`crate::spent`], while every
-    /// view is current; the burn covers the windows when one is not.
+    /// A split `Rejected` is put back, so it is not passed here. An accepted or
+    /// already-known entry is not passed here.
     ///
-    /// A resend admitted while the batch was out holds the same proofs, and
-    /// the next flush would offer it again; it is dropped here with them.
+    /// A resend admitted while the batch was out holds the same proofs, and the
+    /// next flush would offer it again; it is dropped here with them.
     pub fn burn<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>) {
         let mut inner = self.lock();
         for entry in entries {
@@ -753,11 +738,8 @@ impl Queue {
                 continue;
             }
             if entry.attempts > MAX_REQUEUE_ATTEMPTS {
-                // Dropped, never burned: the attempts count every transport
-                // failure, so running out says the indexer was unreachable as
-                // often as it says the network refused. A wallet's resend then
-                // starts clean. A verdict the indexer did return is burned in
-                // the flush.
+                // Dropped, never burned. A burn is a unanimous AlreadyMined or
+                // Rejected. A split Rejected is put back. A resend starts clean.
                 out.dropped_exhausted += 1;
                 continue;
             }
