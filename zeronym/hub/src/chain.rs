@@ -689,6 +689,11 @@ fn classify_send_response(resp: &SendResponse) -> Publish {
 /// Reason on a split [`Publish::Retryable`] that had no transport reason.
 pub(crate) const SPLIT_VERDICT: &str = "split verdict";
 
+/// Reason on a [`Publish::Retryable`] for a node message this client does not
+/// read. A [`Publish::Retryable`] reason is logged, so it is a fixed string or a
+/// gRPC status code, and never text a node or an indexer sent.
+const UNRECOGNISED_NODE_RESPONSE: &str = "unrecognised node response";
+
 /// Fold one verdict per configured endpoint into the verdict for the transaction.
 ///
 /// `broadcast` passes one verdict per endpoint. A failed call is [`Publish::Retryable`].
@@ -792,9 +797,14 @@ fn classify_publish_failure(err: &BoxError) -> Publish {
             .and_then(|message| message.split_once(ZAINO_REJECTED))
         {
             Some((_, node_says)) => classify_publish_error(node_says.trim()),
-            None => Publish::Retryable { reason },
+            None => Publish::Retryable {
+                reason: format!("grpc-status {}", status.code),
+            },
         },
-        _ => Publish::Retryable { reason },
+        Some(status) => Publish::Retryable {
+            reason: format!("grpc-status {}", status.code),
+        },
+        None => Publish::Retryable { reason },
     }
 }
 
@@ -945,7 +955,7 @@ fn classify_publish_error(message: &str) -> Publish {
         // retry, and bounding the retry at the queue, removes the need to tell
         // the two apart at all.
         Publish::Retryable {
-            reason: message.to_string(),
+            reason: UNRECOGNISED_NODE_RESPONSE.into(),
         }
     }
 }
@@ -1364,6 +1374,42 @@ mod tests {
                 "{message:?} must be retried"
             );
         }
+    }
+
+    #[test]
+    fn a_retryable_reason_is_a_fixed_string_or_a_status_code() {
+        let text = "orchard verifier said: Nullifier(0123456789abcdef)";
+        assert_eq!(
+            classify_publish_error(text),
+            Publish::Retryable {
+                reason: UNRECOGNISED_NODE_RESPONSE.into(),
+            }
+        );
+        for message in [
+            format!("rejected by validator: {text}"),
+            format!("validator unreachable: {text}"),
+        ] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: GRPC_INTERNAL.into(),
+                message: Some(message.clone()),
+            });
+            match classify_publish_failure(&status) {
+                Publish::Retryable { reason } => {
+                    assert!(!reason.contains("0123456789abcdef"), "{reason:?}")
+                }
+                other => panic!("{message:?} gave {other:?}"),
+            }
+        }
+        let status: BoxError = Box::new(GrpcStatusError {
+            code: "14".into(),
+            message: Some(text.into()),
+        });
+        assert_eq!(
+            classify_publish_failure(&status),
+            Publish::Retryable {
+                reason: "grpc-status 14".into(),
+            }
+        );
     }
 
     #[test]
