@@ -57,10 +57,11 @@ wrong shape, not merely an unbuilt one.
   verified, 112 for transparent-only spends, 16 for what it cannot verify.
 - **Reads the Orchard nullifiers** each indexer reports mined
   (`GetBlockRangeNullifiers`): about a minute from cold on mainnet (measured
-  2026-10-29), then every 30 seconds. Admission does not wait for it. Every
-  indexer must serve that call and be current for the check to work. The log
-  says `nullifier set synced` when it is on, and `nullifier set not current`
-  when copies pass.
+  2026-10-29), then every 30 seconds. Admission does not wait for it. The check
+  is on when at least two views are current and not full, or the single view
+  is, when only one indexer is configured. A full view abstains. The log says
+  `nullifier set synced` when it is on, and `nullifier check is off` with
+  `reason=stale` or `reason=quorum` when copies pass.
 - **Flushes** the batch on a cadence, broadcasting every member to **every**
   configured indexer — a migration that entered only one mempool is one outage
   away from never being mined.
@@ -70,12 +71,12 @@ wrong shape, not merely an unbuilt one.
 It checks what a junk submission must pay for, and leaves the rest to the
 network. A submission that touches Orchard must carry Halo2 proofs that verify,
 and signatures that verify when it has no transparent inputs, so each junk entry
-costs its sender a proof (about 2.6 core-seconds). A copy of a transaction every
-indexer reports mined is refused, and so is a proof this hub already published
-to a verdict. Anchors, fees and mempool double spends need chain state the
-enclave does not hold: the hub broadcasts what passes and lets the network
-decide. It also queues and broadcasts transactions it could not parse, by
-design, in their own small lane.
+costs its sender a proof (about 2.6 core-seconds). A copy of a mined Orchard
+transaction is refused while that check is on, and so is a proof this hub
+already published to a verdict. Anchors, fees and mempool double spends need
+chain state the enclave does not hold: the hub broadcasts what passes and lets
+the network decide. It also queues and broadcasts transactions it could not
+parse, by design, in their own small lane.
 
 The queue is deliberately **not persisted**. An enclave is diskless, and
 persisting it would mean writing plaintext migrations somewhere the host could
