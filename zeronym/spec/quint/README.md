@@ -26,16 +26,10 @@ Only the mixnet transport is modelled; the HTTP transport is out of scope (see [
 
 There are two specifications, sharing one hub function:
 
-- **The protocol specification** (`protocol.qnt`): wallet, shim, network, hub, indexer and an outside observer. Its hub is abstract: a queue and the entries out with a flush, with no tip, schedule or phases. It is checked by random simulation and scripted runs.
-- **The hub specification** (`hubMachine.qnt`): one hub, the chain, and the two things the hub asks its indexer (the tip, and a verdict on each broadcast). It owns the schedule, expiry, requeue, crash and drain. TLC visits every reachable state of each of its configurations.
+- The [protocol spec][protocol-spec] has every actor, but its hub is abstract: a queue that can flush at any time. Random simulation and scripted runs check this spec.
+- The [hub spec][hub-spec] models one hub concretely along with the chain, and the two things the hub asks its indexer: the tip, and a verdict on each broadcast. It owns everything the abstract hub leaves out: the schedule, expiry, requeue, crash and drain. TLC visits every reachable state of each of its configurations.
 
 Each component is one total function from its state and one input to its next state and one output. An input that is invalid in the current state returns an error output and leaves the state alone. The state machines hold no protocol logic: a step picks an input, calls the function, and puts the output where it goes. `hub.qnt` and `shim.qnt` are the precise statement of what each does.
-
-| Component | Inputs | Outputs | Seam in the implementation |
-|---|---|---|---|
-| `hub` | `SubmitHInput`, `LookupHInput` (with the indexer's answer), `TipHInput(height)`, `StaleHInput(estimate)`, `FlushDueHInput`, `VerdictHInput`, `FlushDoneHInput`, `DrainHInput`, `CrashHInput`, `RestartHInput` | `AckOutput`, `LookupReplyOutput`, `BroadcastOutput`, `RequeuedOutput`, `NoHubOutput`, `HubErrorOutput` | `Hub::admit`, `Hub::lookup` (`hub/src/server.rs`), `run_listener` (`hub/src/nym.rs`), `TipTracker::observe` and `adopt`, `cadence_height`, `flush` (`hub/src/batcher.rs`), `Queue::requeue`, `Queue::begin_draining` (`hub/src/queue.rs`) |
-| `shim` | `SendTxSInput` (with whether the transport took the frame), `GetTxSInput`, `FrameSInput`, `LookupTimeoutSInput` | `ForwardOutput`, `DivertedOutput`, `SendDoneOutput`, `LookupSentOutput`, `LookupDoneOutput`, `NoShimOutput`, `ShimErrorOutput` | `classify` (`shim/src/classify.rs`), `send_transaction`, `divert`, `get_transaction` (`shim/src/intercept.rs`), `NymHandle::submit`, `get_transaction`, `deliver` (`shim/src/nym.rs`) |
-| indexer | `BroadcastIInput`, `LookupIInput`, `AdvanceIInput`, `MineIInput` | `VerdictOutput`, `AnswerOutput`, `NoIndexerOutput` | the mock indexer in `hub/tests/common/mod.rs` |
 
 <details>
 <summary><b>Indexer, network and observer</b></summary>
@@ -60,8 +54,6 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 | Its indexer says "found" with no body, at any height (a fault) | error | Unavailable |
 
 </details>
-
-"Pending" has no reply of its own on the wire: it is a found reply with nothing in it. So the hub's queue hit and an indexer's empty "found" are the same bytes, and neither the shim nor the wallet can tell "queued at the hub" from "an indexer said found and returned nothing". Before #85 one misbehaving indexer endpoint was enough to produce the second (finding 8); the hub's client now reads that answer as the endpoint failing.
 
 ## Assumptions
 
@@ -368,3 +360,6 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 1. **Failing Rust tests for the findings.** Findings 2, 6 and 8 have Rust tests, written with their fixes in #85; the part of finding 2 that #85 leaves has none. The other findings are shown on the model and matched to the code by reading. Finding 1 fits `batcher.rs`'s unit tests as 2 and 6 did. Finding 4 is impractical to reproduce.
 2. **Model-based testing with `quint-connect`.** Depends on 1, and needs driver code in Rust. The specification is shaped for it: every branch of a step is a named action with its choices as named picks; each step gives one input to one component function and applies one output; and those functions map onto the seams in the table under [System](#system).
 3. **`quint verify` with Apalache for a subset of the claims.** The compiled specification is too large for the Apalache server today. A subset small enough to pass would give bounded symbolic checking of the protocol guarantees, which are simulated only.
+
+[protocol-spec]: ./protocol.qnt
+[hub-spec]: ./hubMachine.qnt
