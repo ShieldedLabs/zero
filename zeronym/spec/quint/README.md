@@ -66,7 +66,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Observer.** Looks up txids it knows and submits payloads it has learned or the chain has published. It cannot read or forge frames, so it does not know a nonce and cannot answer the shim.
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** No reorg of an included transaction and no mempool eviction. The operator's indexer publishes nothing.
-- **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent.
+- **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `MAX_DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent.
 - **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither; see [Configurations][configurations] and findings 1, 2 and 4.
 - **Time.** There is no clock. A timeout may happen at any moment; the staleness window is counted in blocks.
 
