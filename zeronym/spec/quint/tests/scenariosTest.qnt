@@ -75,30 +75,30 @@ module scenariosTest {
       .expect(s.operator == Set(plain) and s.net == Set())
       .expect(vOperatorBlind and operatorBlind and vQueuedBytesConfidential and queuedBytesConfidential)
 
-  /// The accepted disclosure: a third party that knows a txid is told it
+  /// The accepted disclosure: an observer that knows a txid is told it
   /// is queued, and is not given the bytes.
-  run thirdPartyLearnsItIsQueuedTest =
+  run observerLearnsItIsQueuedTest =
     initBaseline
       .then(submitTo(0, early))
-      .then(thirdPartyLearnsTxidWith("early"))
-      .then(thirdPartyLookupWith("early"))
-      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", INotFound))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
+      .then(observerLearnsTxidWith("early"))
+      .then(observerLookupWith("early"))
+      .then(deliverLookupFrom(ObserverAddr, 0, "early", INotFound))
+      .expect(s.replies(ObserverAddr) == Set({ nonce: 0, reply: WFound({ body: None, height: AtZero }) }))
       .expect(wQueuedDisclosed)
       .expect(s.tpLearned() == Set() and queuedBytesConfidential)
 
-  /// Once `early` is published its txid is public, and a third party
+  /// Once `early` is published its txid is public, and an observer
   /// that asks is served its bytes from the indexer. G2 holds: they are
   /// public.
-  run thirdPartyIsServedPublishedBodyTest =
+  run observerIsServedPublishedBodyTest =
     initBaseline
       .then(submitTo(0, early))
       .then(flush([early], Accepted))
-      .then(thirdPartyLookupWith("early"))
-      .then(deliverLookupFrom(ThirdPartyAddr, 0, "early", chainAnswer(s.indexer, "early")))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
-      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
-      .expect(wThirdPartyServedBody and vQueuedBytesConfidential and queuedBytesConfidential)
+      .then(observerLookupWith("early"))
+      .then(deliverLookupFrom(ObserverAddr, 0, "early", chainAnswer(s.indexer, "early")))
+      .expect(s.replies(ObserverAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
+      .expect(s.repliedBodies(ObserverAddr) == Set(early) and s.operator == Set())
+      .expect(wObserverServedBody and vQueuedBytesConfidential and queuedBytesConfidential)
 
   /// A lookup that gets no reply in time fails closed, and G4 holds of it.
   run lookupTimesOutTest =
@@ -179,16 +179,16 @@ module scenariosTest {
       ])
       .expect(not(statusNeverRegresses) and lookupValidityPerHub)
 
-  /// K2c. The same, done by a third party: the bytes are public once
+  /// K2c. The same, done by an observer: the bytes are public once
   /// published, and submission is open to anyone.
-  run thirdPartyResubmitsPublishedTest =
+  run observerResubmitsPublishedTest =
     initBaseline
       .then(submitTo(0, early))
       .then(flush([early], Accepted))
       .then(lookUp(1, "early"))
       .expect(s.tpPayloads().contains(early))
-      .then(thirdPartySubmitWith(early))
-      .then(deliverSubmitFrom(ThirdPartyAddr, 0, early))
+      .then(observerSubmitWith(early))
+      .then(deliverSubmitFrom(ObserverAddr, 0, early))
       .then(lookUp(2, "early"))
       .expect(s.wallet.log.slice(1, 3) == [
         Got({ query: "early", obs: Tx({ payload: early, height: AtZero }), via: Some(1) }),

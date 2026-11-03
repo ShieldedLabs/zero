@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 
 /// The zeronym protocol as a state machine: a wallet, a shim, one hub, the
-/// chain behind the hub's indexer, an unreliable network between them, and a
-/// third party that can reach the hub.
+/// chain behind the hub's indexer, an unreliable network between them, and an
+/// observer that can reach the hub.
 ///
 /// The spec checks one hub; production runs one or more, replicated: every
 /// shim sends every submission to every hub, and each hub that receives a
@@ -17,7 +17,7 @@
 ///   in any other way.
 /// - Network. Frames may be lost, duplicated, delayed and reordered. They
 ///   cannot be forged or read in transit.
-/// - Third party. A client of the hub's public address. It looks up txids it
+/// - Observer. A client of the hub's public address. It looks up txids it
 ///   knows and submits payloads it has learned or the chain has published. It cannot read or
 ///   forge frames, so it does not know a nonce and cannot answer the shim.
 /// - Nonces are unique. A counter stands for an unguessable random value.
@@ -124,9 +124,9 @@ module protocol {
   /// how many requests of each kind it has made.
   type Wallet = { log: List[WalletEvent], sends: int, gets: int }
 
-  /// The third party: a client of the hub's public address that is not the
+  /// The observer: a client of the hub's public address that is not the
   /// shim. `txids` are the transaction ids it has learned out of band.
-  type ThirdParty = { txids: Set[TxId], nextNonce: Nonce, requests: int }
+  type Observer = { txids: Set[TxId], nextNonce: Nonce, requests: int }
 
   /// - `hub`: the hub as the protocol sees it (`abstractHub.qnt`).
   /// - `operator`: every transaction the shim has handed the operator's
@@ -138,7 +138,7 @@ module protocol {
     net: Net,
     wallet: Wallet,
     operator: Set[Payload],
-    thirdParty: ThirdParty,
+    observer: Observer,
   }
 
   /// The system at rest: the chain and the hub empty, nothing sent. The
@@ -150,10 +150,10 @@ module protocol {
     net: Set(),
     wallet: { log: [], sends: 0, gets: 0 },
     operator: Set(),
-    thirdParty: { txids: Set(), nextNonce: 0, requests: 0 },
+    observer: { txids: Set(), nextNonce: 0, requests: 0 },
   }
 
-  /// What an observer of the run has recorded. It is not protocol state: no
+  /// The audit record: what the checker records of the run. It is not protocol state: no
   /// component reads it, and it is derived at every step from the states
   /// before and after, never from what a component reports about itself.
   ///
@@ -219,23 +219,23 @@ module protocol {
   // What each party knows
   // ------------------------------------------------------------------------
 
-  /// The transaction ids the third party knows: those it learned out of band
+  /// The transaction ids the observer knows: those it learned out of band
   /// and everything the chain has made public.
   pure def tpTxids(s: System): Set[TxId] =
-    s.thirdParty.txids.union(s.indexer.txs.keys())
+    s.observer.txids.union(s.indexer.txs.keys())
 
-  /// The payloads the third party did not make and yet has: the bodies of
+  /// The payloads the observer did not make and yet has: the bodies of
   /// replies sent to it, and whatever reached the operator. The chain is left
   /// out on purpose: what is published is public. A Byzantine hub or indexer
   /// leaks through a lookup reply; there is no other disclosure.
   ///
-  /// This is derived from what the third party can observe. Nothing updates it
+  /// This is derived from what the observer sees. Nothing updates it
   /// when a transaction is published, so a property over it constrains what
   /// the hub puts in its replies.
   pure def tpLearned(s: System): Set[Payload] =
-    s.repliedBodies(ThirdPartyAddr).union(s.operator)
+    s.repliedBodies(ObserverAddr).union(s.operator)
 
-  /// Every payload the third party has: what it learned and what the chain
+  /// Every payload the observer has: what it learned and what the chain
   /// published.
   pure def tpPayloads(s: System): Set[Payload] =
     s.tpLearned().union(s.indexer.published())
@@ -318,14 +318,14 @@ module protocol {
   pure def countGet(s: System): System =
     { ...s, wallet: { ...s.wallet, gets: s.wallet.gets + 1 } }
 
-  /// The third party sends `msg` to the hub, under a nonce of its own.
-  pure def thirdPartySent(s: System, msg: Msg): System =
+  /// The observer sends `msg` to the hub, under a nonce of its own.
+  pure def observerSent(s: System, msg: Msg): System =
     { ...s,
-      thirdParty: { ...s.thirdParty,
-        nextNonce: s.thirdParty.nextNonce + 1,
-        requests: s.thirdParty.requests + 1,
+      observer: { ...s.observer,
+        nextNonce: s.observer.nextNonce + 1,
+        requests: s.observer.requests + 1,
       },
-    }.posted(Set({ src: ThirdPartyAddr, dst: HubAddr, msg: msg }))
+    }.posted(Set({ src: ObserverAddr, dst: HubAddr, msg: msg }))
 
   // ========================================================================
   // Properties
@@ -394,8 +394,8 @@ module protocol {
   pure def operatorBlindIn(s: System): bool =
     s.operator.forall(payload => not(treatAsMigration(payload)))
 
-  /// G2. A transaction's bytes do not reach a third party before the chain has
-  /// published them. Everything the third party has learned is on the chain,
+  /// G2. A transaction's bytes do not reach an observer before the chain has
+  /// published them. Everything the observer has learned is on the chain,
   /// or was a transaction the classifier passes and the operator was given.
   pure def queuedBytesConfidentialIn(s: System): bool =
     s.tpLearned().forall(payload =>
@@ -530,7 +530,7 @@ module protocol {
         | _ => false
       })
 
-  /// The accepted disclosure: a third party that knows a txid learns that
+  /// The accepted disclosure: an observer that knows a txid learns that
   /// it is queued at the hub. The hub withholds the bytes; it does not withhold
   /// the fact. The implementation leaves this open on purpose
   /// (`zeronym/hub/src/server.rs`, in `Hub::lookup`):
@@ -541,7 +541,7 @@ module protocol {
   /// > from "never seen". That is a product decision, not a code one, and it
   /// > is left open deliberately.
   pure def wQueuedDisclosedIn(s: System): bool =
-    tuples(s.lookups(ThirdPartyAddr), s.replies(ThirdPartyAddr)).exists(((lookup, reply)) =>
+    tuples(s.lookups(ObserverAddr), s.replies(ObserverAddr)).exists(((lookup, reply)) =>
       lookup.nonce == reply.nonce and reply.reply == WFound({ body: None, height: AtZero }))
 
   /// The hub holds a payload it cannot parse; the wallet that sent it asks
@@ -559,12 +559,12 @@ module protocol {
         | _ => false
       })
 
-  /// A third party is given a transaction's bytes in a lookup reply.
+  /// An observer is given a transaction's bytes in a lookup reply.
   /// With every component honest these are published bytes, served from the
   /// indexer: the branch of G2 that `vQueuedBytesConfidential` alone does not
   /// reach, since `plain` at the operator satisfies it.
-  pure def wThirdPartyServedBodyIn(s: System): bool =
-    s.repliedBodies(ThirdPartyAddr) != Set()
+  pure def wObserverServedBodyIn(s: System): bool =
+    s.repliedBodies(ObserverAddr) != Set()
 
   // ------------------------------------------------------------------------
   // Non-vacuity: the antecedent of each guarantee is reachable
@@ -612,7 +612,7 @@ module protocol {
   /// The transactions a wallet may send.
   def PAYLOADS = cfg.payloads
   /// The bound of the model: the wallet makes at most `MAX_REQUESTS` sends
-  /// and as many lookups, as does the third party.
+  /// and as many lookups, as does the observer.
   def MAX_REQUESTS = cfg.maxRequests
 
   def ROLES = cfg.roles
@@ -639,7 +639,7 @@ module protocol {
 
   /// The protocol state.
   var s: System
-  /// The observer's record of the run. No step reads it.
+  /// The audit record of the run. No step reads it.
   var audit: Audit
 
   /// The only writer of the variables after `initWith`.
@@ -908,60 +908,60 @@ module protocol {
   }
 
   // ------------------------------------------------------------------------
-  // Third party
+  // Observer
   // ------------------------------------------------------------------------
 
-  /// The txids of wallet transactions the third party has yet to learn.
+  /// The txids of wallet transactions the observer has yet to learn.
   def unknownTxids: Set[TxId] =
     txidsOf(PAYLOADS).exclude(s.tpTxids())
 
-  /// The third party learns a txid out of band, before the transaction is
+  /// The observer learns a txid out of band, before the transaction is
   /// published. An operator can recover one from a wallet's transparent-pool
   /// queries.
-  action thirdPartyLearnsTxidWith(txid: TxId): bool = all {
+  action observerLearnsTxidWith(txid: TxId): bool = all {
     unknownTxids.contains(txid),
-    commit({ ...s, thirdParty: { ...s.thirdParty, txids: s.thirdParty.txids.union(Set(txid)) } }),
+    commit({ ...s, observer: { ...s.observer, txids: s.observer.txids.union(Set(txid)) } }),
   }
 
-  action thirdPartyLearnsTxid = all {
+  action observerLearnsTxid = all {
     unknownTxids != Set(),
     {
       nondet txid = oneOf(unknownTxids)
-      thirdPartyLearnsTxidWith(txid)
+      observerLearnsTxidWith(txid)
     },
   }
 
-  /// The third party asks the hub about a txid it knows. The lookup is not
+  /// The observer asks the hub about a txid it knows. The lookup is not
   /// authenticated.
-  action thirdPartyLookupWith(txid: TxId): bool = all {
-    s.thirdParty.requests < MAX_REQUESTS,
+  action observerLookupWith(txid: TxId): bool = all {
+    s.observer.requests < MAX_REQUESTS,
     s.tpTxids().contains(txid),
-    commit(s.thirdPartySent(Lookup({ nonce: s.thirdParty.nextNonce, txid: txid }))),
+    commit(s.observerSent(Lookup({ nonce: s.observer.nextNonce, txid: txid }))),
   }
 
-  action thirdPartyLookup = all {
-    s.thirdParty.requests < MAX_REQUESTS,
+  action observerLookup = all {
+    s.observer.requests < MAX_REQUESTS,
     s.tpTxids() != Set(),
     {
       nondet txid = oneOf(s.tpTxids())
-      thirdPartyLookupWith(txid)
+      observerLookupWith(txid)
     },
   }
 
-  /// The third party submits a payload it has learned or the chain has
+  /// The observer submits a payload it has learned or the chain has
   /// published. Submission is not authenticated either.
-  action thirdPartySubmitWith(payload: Payload): bool = all {
-    s.thirdParty.requests < MAX_REQUESTS,
+  action observerSubmitWith(payload: Payload): bool = all {
+    s.observer.requests < MAX_REQUESTS,
     s.tpPayloads().contains(payload),
-    commit(s.thirdPartySent(Submit({ nonce: s.thirdParty.nextNonce, payload: payload }))),
+    commit(s.observerSent(Submit({ nonce: s.observer.nextNonce, payload: payload }))),
   }
 
-  action thirdPartySubmit = all {
-    s.thirdParty.requests < MAX_REQUESTS,
+  action observerSubmit = all {
+    s.observer.requests < MAX_REQUESTS,
     s.tpPayloads() != Set(),
     {
       nondet payload = oneOf(s.tpPayloads())
-      thirdPartySubmitWith(payload)
+      observerSubmitWith(payload)
     },
   }
 
@@ -974,9 +974,9 @@ module protocol {
     shimLookupTimeout, hubLose,
   }
 
-  /// A step by someone outside the protocol: the third party.
+  /// A step by someone outside the protocol: the observer.
   action outsiderStep = any {
-    thirdPartyLearnsTxid, thirdPartyLookup, thirdPartySubmit,
+    observerLearnsTxid, observerLookup, observerSubmit,
   }
 
   /// One step of the system.
@@ -1044,7 +1044,7 @@ module protocol {
   val wTxMined = wTxMinedIn(s)
   val wQueuedDisclosed = wQueuedDisclosedIn(s)
   val wUnparseableMissed = wUnparseableMissedIn(s)
-  val wThirdPartyServedBody = wThirdPartyServedBodyIn(s)
+  val wObserverServedBody = wObserverServedBodyIn(s)
 
   // Non-vacuity: the antecedent of each guarantee is reachable.
   val vOperatorBlind = vOperatorBlindIn(s)
@@ -1070,9 +1070,9 @@ module protocol {
   pure def lookupMail(nonce: Nonce, txid: TxId): Mail =
     { src: ShimAddr, dst: HubAddr, msg: Lookup({ nonce: nonce, txid: txid }) }
 
-  /// The same frame, sent by the third party instead.
-  pure def fromThirdParty(mail: Mail): Mail =
-    { ...mail, src: ThirdPartyAddr }
+  /// The same frame, sent by the observer instead.
+  pure def fromObserver(mail: Mail): Mail =
+    { ...mail, src: ObserverAddr }
 
   /// The hub's ack to the shim under `nonce`.
   pure def ackMail(nonce: Nonce, ack: WireAck): Mail =

@@ -161,9 +161,9 @@ module types {
   // Participants
   // ------------------------------------------------------------------------
 
-  /// A network address. The third party is any client of the hub's public,
+  /// A network address. The observer is any client of the hub's public,
   /// unauthenticated address other than the shim.
-  type Addr = ShimAddr | HubAddr | ThirdPartyAddr
+  type Addr = ShimAddr | HubAddr | ObserverAddr
 
   /// Whether a component follows the protocol. A Byzantine component is not
   /// marked in any message or state: it simply draws its transitions from a

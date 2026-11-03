@@ -23,22 +23,22 @@ module trustTest {
   // A Byzantine hub (`byzHub`)
   // ------------------------------------------------------------------------
 
-  /// G2 needs the hub. Asked by a third party about a queued txid, it answers
+  /// G2 needs the hub. Asked by an observer about a queued txid, it answers
   /// with the queued bytes.
   run hubServesQueuedBodyTest =
     initByzHub
       .then(submitTo(0, early))
-      .then(thirdPartyLearnsTxidWith("early"))
-      .then(thirdPartyLookupWith("early"))
+      .then(observerLearnsTxidWith("early"))
+      .then(observerLookupWith("early"))
       .expect(queuedBytesConfidential)
       .then(hubReceiveWith(
-        fromThirdParty(lookupMail(0, "early")), INotFound,
+        fromObserver(lookupMail(0, "early")), INotFound,
         { hub: s.hub, reply: AWire(render(FromIndexer(IFound({ body: Some(early), height: AtZero })))) },
       ))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
+      .expect(s.replies(ObserverAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
       // What it learned came in the body of a reply addressed to it.
-      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
+      .expect(s.repliedBodies(ObserverAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
   /// G4 needs the hub. It answers not found for a transaction it has queued.
@@ -122,16 +122,16 @@ module trustTest {
       .then(hubTake)
       .then(judge(early, Retryable))
       .expect(s.indexer.offered == Set(early) and s.onChain("early") == Absent)
-      .then(thirdPartyLearnsTxidWith("early"))
-      .then(thirdPartyLookupWith("early"))
+      .then(observerLearnsTxidWith("early"))
+      .then(observerLookupWith("early"))
       .expect(queuedBytesConfidential)
       .then(deliverLookupFrom(
-        ThirdPartyAddr, 0, "early", IFound({ body: Some(early), height: AtZero }),
+        ObserverAddr, 0, "early", IFound({ body: Some(early), height: AtZero }),
       ))
-      .expect(s.replies(ThirdPartyAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
+      .expect(s.replies(ObserverAddr) == Set({ nonce: 0, reply: WFound({ body: Some(early), height: AtZero }) }))
       .expect(s.tpLearned() == Set(early) and s.onChain("early") == Absent)
       // What it learned came in the body of a reply addressed to it.
-      .expect(s.repliedBodies(ThirdPartyAddr) == Set(early) and s.operator == Set())
+      .expect(s.repliedBodies(ObserverAddr) == Set(early) and s.operator == Set())
       .expect(not(queuedBytesConfidential))
 
   /// Finding 8, fixed by #85. For a transaction that exists nowhere the

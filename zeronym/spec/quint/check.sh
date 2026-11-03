@@ -319,11 +319,11 @@ echo "---- 3b witnesses ($SAMPLES traces, seed $SEED)"
 
 BASELINE_HOLDS="operatorBlind queuedBytesConfidential txidAuthenticity lookupValidityPerHub pendingOnlyFromQueue forwardedSpendsNoDiverted"
 
-# The accepted disclosure, a third party served a published body, and the
+# The accepted disclosure, an observer served a published body, and the
 # antecedents of G1, G2 and G9. The served body is G2's reply-body branch, which
 # `vQueuedBytesConfidential` does not reach on its own.
 job reaches baseline step 40 \
-  wQueuedDisclosed wThirdPartyServedBody \
+  wQueuedDisclosed wObserverServedBody \
   vOperatorBlind vQueuedBytesConfidential vForwardedSpendsNoDiverted \
   -- $BASELINE_HOLDS
 # G3's antecedent, and the wallet observations a quiet run reaches: pending,

@@ -11,7 +11,7 @@
 /// configuration, so "holds" here means exactly that.
 ///
 /// How it is built. The module holds no hub logic. Every step picks an input,
-/// hands it to `hub(state, input)` and records what an observer needs. A step
+/// hands it to `hub(state, input)` and records what the properties need. A step
 /// exists in two forms: `xWith(..)`, which takes every choice as a parameter
 /// and is what a scripted run is made of, and `x`, which picks the choices and
 /// is what `step` is made of.
@@ -20,7 +20,7 @@
 /// One named init per configuration (`initTimely`, ...) selects it, guarded by
 /// the assumptions that configuration is checked under.
 ///
-/// The observer's memory is four sets of payloads and one height. It is never
+/// The audit record is four sets of payloads and one height. It is never
 /// read by a step: only the properties read it.
 module hubMachine {
   import basicSpells.* from "./spells/basicSpells"
@@ -136,7 +136,7 @@ module hubMachine {
   /// The true height at which the flush in flight began; 0 while none is.
   var flightStart: Height
 
-  // The observer's memory.
+  // The audit record.
 
   /// The payloads that have entered this hub's queue since it last came up.
   var seen: Set[Payload]
