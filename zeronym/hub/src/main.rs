@@ -10,11 +10,13 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use zero_indexer_hub::admission;
 use zero_indexer_hub::batcher::{self, BatchParams, TipGuard, TipTracker};
 use zero_indexer_hub::chain::ChainClient;
 use zero_indexer_hub::config::{Config, Network};
 use zero_indexer_hub::queue::Queue;
 use zero_indexer_hub::server::{self, Hub};
+use zero_indexer_hub::spent;
 use zero_indexer_hub::tip_guard;
 use zero_indexer_hub::BoxError;
 
@@ -63,7 +65,8 @@ async fn main() -> Result<(), BoxError> {
         Network::Mainnet => TipGuard::Mainnet,
         Network::Testnet | Network::Regtest => TipGuard::Unguarded,
     };
-    let queue = Arc::new(Queue::new());
+    let revealed = Arc::new(spent::ChainNullifiers::new(chain.endpoint_count()));
+    let queue = Arc::new(Queue::watching(revealed.clone()));
     let tip = Arc::new(TipTracker::new(guard));
 
     tracing::info!(
@@ -88,6 +91,18 @@ async fn main() -> Result<(), BoxError> {
             "no tip at startup; refusing admissions until a node answers"
         ),
     }
+
+    // The Halo2 verifying key, built before any listener opens so no submission
+    // pays for it. Deterministic, under a second on the enclave's four cores.
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(|| {
+        std::sync::LazyLock::force(&admission::VERIFYING_KEY);
+    })
+    .await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "built the Halo2 verifying key"
+    );
 
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
 
@@ -115,6 +130,16 @@ async fn main() -> Result<(), BoxError> {
         });
     }
 
+    // The Orchard nullifiers the chain has revealed, read on the hub's own
+    // clock. Its first full read took about a minute on mainnet (2026-10-29),
+    // inside the tip warm-up; admission does not wait for it.
+    tokio::spawn(spent::run(
+        revealed,
+        chain.clone(),
+        tip.clone(),
+        config.network,
+    ));
+
     let cadence = tokio::spawn(batcher::run(
         queue.clone(),
         chain.clone(),
@@ -123,11 +148,14 @@ async fn main() -> Result<(), BoxError> {
         drained(drain_rx.clone()),
     ));
 
-    // Optionally also accept submissions over the Nym mixnet (M5), sharing the
-    // same queue, tip and chain as the clearnet serving path below, so the two
-    // ingress paths admit into one queue and cannot drift.
+    // One `Hub` for both ingress paths: they admit into one queue, and share
+    // one set of verification slots, so the CPU bound holds for the process.
+    let hub = Hub::new(queue.clone(), tip, params, chain);
+
+    // Optionally also accept submissions over the Nym mixnet (M5), through the
+    // same `Hub` as the clearnet serving path below.
     #[cfg(feature = "mixnet-driver")]
-    spawn_nym_listener(&config, &queue, &tip, params, &chain, &nym_address)?;
+    spawn_nym_listener(&config, &hub, &nym_address)?;
     #[cfg(not(feature = "mixnet-driver"))]
     if config.nym || config.nym_topology.is_some() {
         return Err(
@@ -151,12 +179,7 @@ async fn main() -> Result<(), BoxError> {
 
     let serving = server::serve(
         listener,
-        Hub {
-            queue: queue.clone(),
-            tip,
-            params,
-            chain,
-        },
+        hub,
         server::ServeOptions {
             nym_address,
             http_submit: config.http_submit,
@@ -217,10 +240,7 @@ async fn drained(mut rx: tokio::sync::watch::Receiver<bool>) {
 #[cfg(feature = "mixnet-driver")]
 fn spawn_nym_listener(
     config: &Config,
-    queue: &Arc<Queue>,
-    tip: &Arc<TipTracker>,
-    params: BatchParams,
-    chain: &Arc<ChainClient>,
+    hub: &Hub,
     nym_address: &server::NymAddress,
 ) -> Result<(), BoxError> {
     use tokio::sync::mpsc;
@@ -249,12 +269,7 @@ fn spawn_nym_listener(
         }
     };
 
-    let hub = Hub {
-        queue: queue.clone(),
-        tip: tip.clone(),
-        params,
-        chain: chain.clone(),
-    };
+    let hub = hub.clone();
     // The driver holds the opposite end of each channel: it sends inbound
     // requests and its address, and receives replies.
     let (in_tx, in_rx) = mpsc::channel(64);

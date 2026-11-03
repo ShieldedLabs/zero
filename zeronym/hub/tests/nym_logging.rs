@@ -66,12 +66,7 @@ async fn the_listener_logs_counts_and_reasons_but_never_a_txid_tag_or_nonce() {
     let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
     tip.observe(&[100]);
     let chain = Arc::new(ChainClient::new(vec!["127.0.0.1:1".parse().unwrap()], None).unwrap());
-    let hub = Hub {
-        queue,
-        tip,
-        params: BatchParams::default(),
-        chain,
-    };
+    let hub = Hub::new(queue, tip, BatchParams::default(), chain);
 
     // Distinctive byte patterns so their hex would be obvious in the log if it
     // ever leaked: the sender tag, the good frame's nonce, the bad frame's

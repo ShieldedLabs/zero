@@ -18,8 +18,9 @@
 //! [`crate::server::Hub::lookup`], the exact calls the HTTP serving path uses,
 //! so the two ingress paths cannot drift. Everything REVIEW.md binds on those
 //! calls binds here too: an unparseable transaction is queued and published,
-//! never refused (#5); only counts, reasons, and dispositions are logged, never
-//! a txid, a queried hash, or a body (#157).
+//! never refused (#5), while an Orchard one must carry proofs that verify; only
+//! counts, reasons, and dispositions are logged, never a txid, a queried hash,
+//! or a body (#157).
 //!
 //! Every [`Reply`] carries the instant its request was pulled off the inbound
 //! channel, and [`REPLY_DEADLINE`] says how long after that it is still worth
@@ -27,22 +28,24 @@
 //! emission rate, so under a burst the queue behind it can hold answers older
 //! than the shim's whole request budget; those are dropped rather than emitted.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
+use crate::queue::VERIFY_SLOTS;
 use crate::server::{Hub, LookupOutcome};
 use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 
 /// How many lookups may be in flight at once: dialling the operator's indexer,
 /// framing the reply, or waiting to hand it to the driver.
 ///
-/// Bounds the lookup arm and ONLY the lookup arm. Admission never waits on
-/// this: it does no I/O, so a ceiling on it would buy nothing and cost the one
-/// property this listener must hold, that a migration is admitted while
-/// lookups are stuck. Generous enough that honest polling never queues behind
-/// it, small enough that a flood cannot open unbounded connections or park an
+/// Bounds the lookup arm only. Admission never waits on this, which keeps the
+/// one property this listener must hold, that a migration is admitted while
+/// lookups are stuck; admission has its own bounds ([`MAX_CONCURRENT_ADMISSIONS`]).
+/// Generous enough that honest polling never queues behind it, small enough that a flood cannot open unbounded connections or park an
 /// unbounded pile of 64 KiB reply frames behind a slow driver.
 ///
 /// A slot is held from before the lookup's task is spawned until its reply has
@@ -52,6 +55,25 @@ use crate::wire::{self, AckKind, AckRefusal, LookupReply};
 /// on the driver, which is exactly the queue that then emitted dead answers
 /// for minutes while fresh lookups waited behind them.
 const MAX_CONCURRENT_LOOKUPS: usize = 64;
+
+/// How many admissions may be in flight at once, from the start of the
+/// admission until its ack is offered to the driver.
+///
+/// The queue verifies at most [`VERIFY_SLOTS`] at a time and refuses the rest,
+/// so more tasks than that would only hold frames. A submission that finds
+/// every slot busy waits its tag's turn in [`Turns`].
+const MAX_CONCURRENT_ADMISSIONS: usize = VERIFY_SLOTS;
+
+/// How many submissions one sender tag may have waiting for an admission slot.
+///
+/// One tag is a whole shim for a rotation period (D11), and the shim's submit
+/// returns once the mixnet takes the frame, so an honest shim with several
+/// wallets, or a gateway that delivers several messages at once, sends a burst
+/// on one tag. The burst waits here and is admitted in order.
+const MAX_WAITING_PER_TAG: usize = 8;
+
+/// How many submissions may wait across every tag: 64 frames of 64 KiB.
+const MAX_WAITING_ADMISSIONS: usize = 64;
 
 /// How long after a request is received its reply is still worth emitting.
 ///
@@ -77,7 +99,7 @@ pub const REPLY_DEADLINE: Duration = Duration::from_secs(60);
 /// The mixnet's anonymous sender tag, carried but never interpreted. Sized to the
 /// SDK's tag (16 bytes); the driver converts the SDK value to and from this so
 /// nothing here depends on the SDK.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SenderTag(pub [u8; 16]);
 
 /// One inbound request: the frame bytes and the tag to reply to.
@@ -119,18 +141,18 @@ impl Reply {
 
 /// Serve requests until the inbound channel closes.
 ///
-/// Admission is handled INLINE: [`build_ack`] is pure queue work with no I/O in
-/// it at all (it is not even `async`), so the loop admits a migration the
-/// moment it pulls the frame, and nothing a lookup does can delay that. The ack
-/// is then offered to the driver without waiting: if the driver's channel is
-/// full, the ack is dropped, because the migration is ALREADY admitted, the
-/// shim never awaits an ack (its submit path is dispatch-only), and an ack
-/// queued behind a full channel of 64 KiB lookup replies would emit minutes
-/// late to no one.
+/// Each admission runs on its own task. [`build_ack`] has no I/O in it, but it
+/// may verify Halo2 proofs, which takes milliseconds of CPU, so admitting
+/// inline would let one submission delay the next and every lookup behind it.
+/// At most [`MAX_CONCURRENT_ADMISSIONS`] tasks run, at most one per sender tag,
+/// so one sender cannot hold every slot. The rest wait in [`Turns`], and the
+/// tags take turns. The ack is then offered to the driver without waiting: if the driver's channel is full, the ack is dropped,
+/// because the migration is ALREADY admitted, the shim never awaits an ack (its
+/// submit path is dispatch-only), and an ack queued behind a full channel of
+/// 64 KiB lookup replies would emit minutes late to no one.
 ///
-/// A lookup is the arm that can afford to wait and the only one that must be
-/// bounded: it may dial the operator's indexer with a 10 s budget on each of
-/// connect, request and body, and its reply is a full 64 KiB frame that the
+/// A lookup is the arm that can afford to wait: it may dial the operator's
+/// indexer with a 10 s budget on each of connect, request and body, and its reply is a full 64 KiB frame that the
 /// driver emits at the mixnet's throttled rate. Each runs on its own task so a
 /// slow indexer cannot head-of-line block the next admission, and each takes a
 /// slot from [`MAX_CONCURRENT_LOOKUPS`] BEFORE it is spawned and holds it until
@@ -151,6 +173,12 @@ pub async fn run_listener(
     hub: Hub,
 ) {
     let lookups = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_LOOKUPS));
+    let admitter = Arc::new(Admitter {
+        hub: hub.clone(),
+        outgoing: outgoing.clone(),
+        slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ADMISSIONS)),
+        turns: Mutex::new(Turns::default()),
+    });
 
     while let Some(received) = incoming.recv().await {
         // Empty inbound messages are the SDK's SURB-replenishment artifacts, not
@@ -195,23 +223,165 @@ pub async fn run_listener(
                 // driver slow to drain is exactly the pressure the bound must feel.
                 drop(permit);
             });
-        } else if let Some(frame) = build_ack(&hub, &received.frame) {
-            let reply = Reply {
-                sender_tag: received.sender_tag,
-                frame: Zeroizing::new(frame),
-                received_at,
-            };
-            match outgoing.try_send(reply) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        "ack dropped: the driver's reply queue is full; the migration is admitted regardless"
-                    );
-                }
-                // The driver is gone; there is no one to carry the ack.
-                Err(mpsc::error::TrySendError::Closed(_)) => {}
+        } else {
+            let offered = admitter.turns().offer(received, received_at);
+            if offered.is_err() {
+                // Count only, no tag (#157). The frame is wiped on drop.
+                tracing::warn!(
+                    per_tag = MAX_WAITING_PER_TAG,
+                    total = MAX_WAITING_ADMISSIONS,
+                    "submission dropped: too many submissions waiting for admission"
+                );
             }
+            admitter.pump();
         }
+    }
+}
+
+/// Submissions waiting for an admission slot: one FIFO per sender tag, and the
+/// order in which the tags take their turns.
+///
+/// A tag has at most one admission in flight. When it finishes, the tag's next
+/// submission goes to the back of the line, behind every other tag waiting.
+#[derive(Default)]
+struct Turns {
+    /// Per tag, the submissions waiting, oldest first. A key is present only
+    /// while its queue is non-empty.
+    waiting: HashMap<SenderTag, VecDeque<(Received, Instant)>>,
+    /// Tags with a submission waiting and none in flight, in turn order.
+    ready: VecDeque<SenderTag>,
+    /// Tags with an admission in flight.
+    busy: HashSet<SenderTag>,
+    /// Submissions waiting, across every tag.
+    total: usize,
+}
+
+impl Turns {
+    /// Queue a submission, or hand it back when its tag or the listener is at
+    /// its cap.
+    fn offer(&mut self, received: Received, received_at: Instant) -> Result<(), Received> {
+        if self.total >= MAX_WAITING_ADMISSIONS {
+            return Err(received);
+        }
+        let tag = received.sender_tag;
+        let waiting = self.waiting.entry(tag).or_default();
+        if waiting.len() >= MAX_WAITING_PER_TAG {
+            return Err(received);
+        }
+        if waiting.is_empty() && !self.busy.contains(&tag) {
+            self.ready.push_back(tag);
+        }
+        waiting.push_back((received, received_at));
+        self.total += 1;
+        Ok(())
+    }
+
+    /// The submission whose turn it is. Its tag is busy until [`Self::done`].
+    fn next(&mut self) -> Option<(Received, Instant)> {
+        let tag = self.ready.pop_front()?;
+        let waiting = self.waiting.get_mut(&tag)?;
+        let next = waiting.pop_front()?;
+        if waiting.is_empty() {
+            self.waiting.remove(&tag);
+        }
+        self.total -= 1;
+        self.busy.insert(tag);
+        Some(next)
+    }
+
+    /// The admission in flight for `tag` finished.
+    fn done(&mut self, tag: SenderTag) {
+        self.busy.remove(&tag);
+        if self.waiting.contains_key(&tag) {
+            self.ready.push_back(tag);
+        }
+    }
+}
+
+/// Runs the waiting submissions through [`build_ack`], one slot each.
+struct Admitter {
+    hub: Hub,
+    outgoing: mpsc::Sender<Reply>,
+    slots: Arc<tokio::sync::Semaphore>,
+    turns: Mutex<Turns>,
+}
+
+impl Admitter {
+    fn turns(&self) -> MutexGuard<'_, Turns> {
+        // A poisoned lock means a task panicked holding it; the turns are
+        // still consistent between calls, so keep serving.
+        match self.turns.lock() {
+            Ok(turns) => turns,
+            Err(poison) => poison.into_inner(),
+        }
+    }
+
+    /// Start as many waiting submissions as there are free slots.
+    ///
+    /// A slot is taken only under the turns lock with a submission ready, and
+    /// that submission is taken in the same hold. Taken first and released on
+    /// an empty queue, a slot could make a concurrent offer's `pump` miss it
+    /// while this one missed the offer, stranding the submission.
+    fn pump(self: &Arc<Self>) {
+        loop {
+            let mut turns = self.turns();
+            if turns.ready.is_empty() {
+                return;
+            }
+            let Ok(slot) = self.slots.clone().try_acquire_owned() else {
+                return;
+            };
+            let Some((received, received_at)) = turns.next() else {
+                return;
+            };
+            drop(turns);
+            let turn = Turn {
+                admitter: self.clone(),
+                tag: received.sender_tag,
+                slot: Some(slot),
+            };
+            tokio::spawn(async move {
+                turn.admitter.admit(received, received_at).await;
+                drop(turn);
+            });
+        }
+    }
+
+    async fn admit(&self, received: Received, received_at: Instant) {
+        let Some(frame) = build_ack(&self.hub, &received.frame).await else {
+            return;
+        };
+        let reply = Reply {
+            sender_tag: received.sender_tag,
+            frame: Zeroizing::new(frame),
+            received_at,
+        };
+        match self.outgoing.try_send(reply) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "ack dropped: the driver's reply queue is full; the migration is admitted regardless"
+                );
+            }
+            // The driver is gone; there is no one to carry the ack.
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+/// One admission in flight. Dropping it, also on a panic, frees the slot, ends
+/// the tag's turn and starts the next submission.
+struct Turn {
+    admitter: Arc<Admitter>,
+    tag: SenderTag,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        drop(self.slot.take());
+        self.admitter.turns().done(self.tag);
+        self.admitter.pump();
     }
 }
 
@@ -310,15 +480,15 @@ async fn build_lookup_reply(
 /// is logged, and the shim falls back to its submit timeout. When the nonce IS
 /// recoverable (the frame was ours but its `tx_len` was wrong) a correlatable
 /// `bad_frame` ack goes back instead.
-fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
+async fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
     match wire::decode_submit(frame) {
         Ok((nonce, tx)) => {
             // A transaction that does not parse is NOT refused here: it is queued
             // and published like any other, because the shim diverted it for the
-            // same reason it could not read it, and the node is the only authority
-            // on validity (REVIEW #5). `admit` handles that; a refusal is only the
-            // typed admission reasons.
-            let kind = match hub.admit(&tx) {
+            // same reason it could not read it (REVIEW #5). `admit` handles that;
+            // a refusal is only the typed admission reasons, a failed proof
+            // among them.
+            let kind = match hub.admit(&tx).await {
                 Ok(_txid) => AckKind::Accepted,
                 Err(refusal) => AckKind::Refused(refusal.into()),
             };
@@ -338,6 +508,69 @@ fn build_ack(hub: &Hub, frame: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn submission(tag: u8, seed: u8) -> Received {
+        Received {
+            frame: Zeroizing::new(vec![seed; 8]),
+            sender_tag: SenderTag([tag; 16]),
+        }
+    }
+
+    fn take(turns: &mut Turns) -> Option<(u8, u8)> {
+        turns
+            .next()
+            .map(|(received, _)| (received.sender_tag.0[0], received.frame[0]))
+    }
+
+    #[test]
+    fn one_tag_waits_its_turn_behind_every_other_tag() {
+        let mut turns = Turns::default();
+        let now = Instant::now();
+        for seed in 1..=3 {
+            assert!(turns.offer(submission(0xa, seed), now).is_ok());
+        }
+        assert!(turns.offer(submission(0xb, 1), now).is_ok());
+
+        // A is busy after its first, so B goes next even though A queued first.
+        assert_eq!(take(&mut turns), Some((0xa, 1)));
+        assert_eq!(take(&mut turns), Some((0xb, 1)));
+        assert_eq!(take(&mut turns), None, "one admission per tag at a time");
+
+        // A's turn ends: its next goes to the back of the line, in order.
+        turns.done(SenderTag([0xa; 16]));
+        assert_eq!(take(&mut turns), Some((0xa, 2)));
+        turns.done(SenderTag([0xb; 16]));
+        turns.done(SenderTag([0xa; 16]));
+        assert_eq!(take(&mut turns), Some((0xa, 3)));
+        turns.done(SenderTag([0xa; 16]));
+        assert_eq!(take(&mut turns), None);
+        assert_eq!(turns.total, 0);
+        assert!(turns.waiting.is_empty() && turns.busy.is_empty());
+    }
+
+    #[test]
+    fn a_tag_and_the_listener_each_have_a_cap() {
+        let mut turns = Turns::default();
+        let now = Instant::now();
+        for seed in 0..MAX_WAITING_PER_TAG as u8 {
+            assert!(turns.offer(submission(0, seed), now).is_ok());
+        }
+        assert!(
+            turns.offer(submission(0, 0xff), now).is_err(),
+            "past the per-tag cap"
+        );
+
+        for tag in 1.. {
+            if turns.total == MAX_WAITING_ADMISSIONS {
+                break;
+            }
+            assert!(turns.offer(submission(tag, 0), now).is_ok());
+        }
+        assert!(
+            turns.offer(submission(0xfe, 0), now).is_err(),
+            "past the listener's cap, even for a new tag"
+        );
+    }
 
     fn reply_received(received_at: Instant) -> Reply {
         Reply {

@@ -88,11 +88,20 @@ startup assertion is what will say so.
 
 **Replaces.** "Hub decrypts in-enclave, re-parses with zebra-chain, re-runs the classifier, rejects malformed or already-expired transactions."
 
+**AMENDED 2026-10-28: a failed proof is a refusal.** An external report showed the cost of this rule: junk is free, so anyone could fill the queue's entry cap for a flush window, and forged parseable bytes did it as well as unparseable ones. The leak argument above assumed a shim that falls back to direct broadcast on a refusal; the shim now fails closed (#11), so a refusal now costs availability alone. Two changes, both in `src/admission.rs` and `src/queue.rs`:
+
+- A submission that touches Orchard must carry Orchard and Ironwood Halo2 proofs and signatures that verify under the NU6.3 key. A failure is the refusal `rejected`. One with transparent inputs goes to the unverified lane: its sighash commits to the prevouts, which only the chain knows, and without the signatures nothing binds the proofs to the transaction. The anchor, the nullifiers and every other check that needs chain state stay with the node, so a proof against the sender's own tree verifies here; it still costs the sender a proof, which is the point.
+- The entry cap splits into three lanes by what an entry costs to forge. Unparseable bytes are still queued, in a 16-entry lane of their own, beside anything else the hub cannot verify: a circuit era this build has no key for (which must degrade to queueing, because over the mixnet a refusal is silent) and a class no honest shim sends.
+
+The permitted refusals are now: AEAD or frame failure, byte budget or lane full, the expiry admission rule, a failed proof, a proof this hub already published to a verdict, and (added 2026-10-29) a transaction whose Orchard nullifier every indexer reports mined. That last check reads the indexers on the hub's own clock (`src/spent.rs`), never per submission, so it keeps the rule against `testmempoolaccept` below.
+
 ### 6. Delete the primary/standby asymmetry. Every shim submits every migration to ALL hubs. Combined with the unconditional deterministic cadence, both hubs hold the same queue and publish the same set at the same height, so a duplicate is a duplicate of the whole batch rather than an intersection of two disjoint ones. `ChainClient::broadcast` already classifies already-known as success (chain.rs:141, 196-217).
 
 **Why.** Preferring a primary "for batch density" is exactly what creates the isolation oracle: a brief, targeted outage of the primary during one migration's retry window pushes that migration onto a standby that is otherwise idle, and it publishes in a batch of one. Send-to-all gives every hub the full density, which is a better answer to the density argument than concentration, and removes failover as an observable event. Cost is 2x Nym bandwidth and 2 channels per shim, negligible at two hubs. Do not replace it with height-derived hub rotation: the schedule is public so it mitigates no DoS, it makes density hostage to config consistency across independently-run operators, and it manufactures straggler batches of one at every boundary.
 
 **Replaces.** "Shims prefer a primary hub for batch density and fail over to a standby only when primary is unreachable."
+
+**AMENDED 2026-11-02 (#104): the two hubs no longer hold identical queues.** Admission now reads per-hub state: the burn set (which each hub's own publish verdicts fill and each restart empties), the verification slots, and how full each lane is. Every shim still submits to every hub, so each hub still sees every migration and the reasoning above stands. The published sets can differ by the entries one hub refused, so a duplicate is no longer always a duplicate of the whole batch.
 
 ### 7. Add a hub-to-shim `Confirmed { request_nonce, txid, height }` message over the existing Nym tunnel. The shim must never issue a txid-specific query to its backing indexer for a diverted migration, and must additionally intercept `GetTransaction`, `GetTaddressTxids` and `GetMempoolTx(Exclude)` for diverted txids and serve them from the bytes it already holds, including after confirmation.
 

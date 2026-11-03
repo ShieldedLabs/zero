@@ -28,13 +28,16 @@
 //!   transactions out.
 //! * [`tls`] verifies that connection, which an enclave deployment requires.
 //! * [`config`] is the command-line and environment surface.
+//! * [`admission`] reads a submission: its lane, and whether its proofs verify.
 //! * [`queue`] holds admitted migrations, and decides what is admitted at all.
 //! * [`batcher`] drives the flush cadence and owns the hub's view of the tip.
 //! * [`tip_guard`] bounds which mainnet heights that view may adopt.
 //! * [`server`] is the inbound serving path: receive a migration, admit it.
+//! * [`spent`] holds the Orchard nullifiers the chain has revealed.
 
 #![forbid(unsafe_code)]
 
+pub mod admission;
 pub mod batcher;
 pub mod chain;
 pub mod config;
@@ -45,6 +48,7 @@ pub mod nym;
 pub mod nym_driver;
 pub mod queue;
 pub mod server;
+pub mod spent;
 pub mod tip_guard;
 pub mod tls;
 pub mod wire;

@@ -285,6 +285,9 @@ impl From<crate::queue::Refusal> for AckRefusal {
             // Deliberately NOT a new wire code: see `Refusal::Draining`. A shim
             // reacts to a draining hub exactly as it reacts to a full one.
             crate::queue::Refusal::Draining => AckRefusal::QueueFull,
+            // Likewise. Over the mixnet the shim no longer awaits the ack, and
+            // over HTTP the reason string says `rejected`.
+            crate::queue::Refusal::Rejected => AckRefusal::QueueFull,
         }
     }
 }

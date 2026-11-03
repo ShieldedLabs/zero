@@ -8,11 +8,12 @@
 //!
 //! Safety rails from `REVIEW.md` that bind on this path:
 //!
-//! * **Re-parse is telemetry, never a refusal (#5).** A transaction the hub
-//!   cannot parse is precisely one the shim deliberately diverted because it
-//!   could not read it either, so refusing it would invert the shim's fail-safe
-//!   into a leak. `sendrawtransaction` at the node is the only authority on
-//!   validity; the hub publishes what it is given.
+//! * **A parse failure is never a refusal (#5).** A transaction the hub cannot
+//!   parse is precisely one the shim deliberately diverted because it could not
+//!   read it either, so it is queued, in the small unverified lane. Amended
+//!   2026-10-28: a submission that touches Orchard must carry Halo2 proofs that
+//!   verify ([`crate::admission`]), so junk costs its sender a proof. Everything
+//!   that needs chain state stays with `sendrawtransaction` at the node.
 //! * **Never log a txid or a transaction body (#157).** In an enclave the log
 //!   reaches the parent host, and the txid is the one fact this system exists to
 //!   withhold. Only counts and dispositions are logged.
@@ -311,7 +312,20 @@ pub struct Hub {
     pub tip: Arc<TipTracker>,
     pub params: BatchParams,
     pub chain: Arc<ChainClient>,
+    /// HTTP submissions in flight, at most [`MAX_HTTP_ADMISSIONS`]. See
+    /// [`Hub::http_slot`].
+    http_slots: Arc<tokio::sync::Semaphore>,
 }
+
+/// How many HTTP submissions may be in flight at once, from the body read to
+/// the answer, each holding its body and possibly a blocking task.
+///
+/// An HTTP connection serves one request at a time, but connections are
+/// unbounded, so this caps what they can hold between them. Past it a
+/// submission is refused `Full` before its body is read, and the caller is
+/// still there to retry. The Nym listener bounds itself and never takes one of
+/// these, so HTTP load cannot refuse a mixnet submission.
+pub const MAX_HTTP_ADMISSIONS: usize = 64;
 
 /// The outcome of the transport-independent lookup core, rendered by each
 /// transport in its own wire shape (HTTP status plus header, or a
@@ -333,6 +347,21 @@ pub enum LookupOutcome {
 }
 
 impl Hub {
+    pub fn new(
+        queue: Arc<Queue>,
+        tip: Arc<TipTracker>,
+        params: BatchParams,
+        chain: Arc<ChainClient>,
+    ) -> Self {
+        Self {
+            queue,
+            tip,
+            params,
+            chain,
+            http_slots: Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_ADMISSIONS)),
+        }
+    }
+
     /// Admit one migration's bytes into the batch, or refuse it. This is the
     /// transport-independent core of the serving path: the stale-tip gate, the
     /// queue admission, and the counts-only logging, with no HTTP and no framing
@@ -342,9 +371,16 @@ impl Hub {
     /// `Ok(txid)` means the hub holds these bytes and will publish them; the txid
     /// is computed from the bytes and is `None` when they did not parse (queued
     /// and published regardless, REVIEW #5). `Err(refusal)` is a typed refusal
-    /// the caller renders in its own wire shape. It must never be answered by
-    /// handing the migration to the operator.
-    pub fn admit(&self, tx_bytes: &[u8]) -> Result<Option<String>, Refusal> {
+    /// the caller renders in its own wire shape, `Rejected` among them when a
+    /// proof fails. It must never be answered by handing the migration to the
+    /// operator.
+    /// One of [`MAX_HTTP_ADMISSIONS`], held by an HTTP submission until it is
+    /// answered, or `None` when every one is held.
+    pub fn http_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.http_slots.clone().try_acquire_owned().ok()
+    }
+
+    pub async fn admit(&self, tx_bytes: &[u8]) -> Result<Option<String>, Refusal> {
         // A stale tip means neither the flush schedule nor the expiry check can
         // be trusted, so admission stops. Fail-closed: the shim holds and
         // retries, or tries another hub.
@@ -352,12 +388,27 @@ impl Hub {
             return Err(Refusal::TipStale);
         }
 
-        match self.queue.admit(
-            tx_bytes,
-            self.tip.admission_height(),
-            self.params.flush_interval,
-            self.params.mining_margin,
-        ) {
+        // The queue may verify proofs, which blocks, so it runs on the blocking
+        // pool. The queue bounds how many verify at once ([`VERIFY_SLOTS`]).
+        let queue = self.queue.clone();
+        let bytes = Zeroizing::new(tx_bytes.to_vec());
+        let height = self.tip.admission_height();
+        let params = self.params;
+        let admitted = tokio::task::spawn_blocking(move || {
+            queue.admit(&bytes, height, params.flush_interval, params.mining_margin)
+        })
+        .await;
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            // Only a panic inside the check gets here. The entry is not held, so
+            // the honest answer is that this hub cannot take it.
+            Err(err) => {
+                tracing::error!(reason = %err, "admission task failed");
+                return Err(Refusal::Full);
+            }
+        };
+
+        match admitted {
             // Both are success: the hub holds these bytes and will publish them.
             // Duplicate is not an error, because honest resends and cross-hub
             // submission are the designed behaviour, and identical bytes collapse.
@@ -698,6 +749,16 @@ fn found(tx_bytes: &[u8], height: u64) -> Response<Full<Bytes>> {
 /// Admit one transaction into the batch. Never returns `Err`: a bad request is a
 /// response, not a connection fault.
 async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Held until this returns. Taken before the body is read, so a flood of
+    // connections holds at most `MAX_HTTP_ADMISSIONS` bodies.
+    let Some(_slot) = hub.http_slot() else {
+        tracing::warn!(
+            in_flight = MAX_HTTP_ADMISSIONS,
+            "submission refused at admission: every HTTP admission slot is held"
+        );
+        return Ok(refused(Refusal::Full));
+    };
+
     // Buffer the body under a hard cap, refused strictly before anything else.
     let read = Limited::new(req.into_body(), MAX_TX_BYTES).collect();
     let collected = match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
@@ -743,7 +804,7 @@ async fn submit(req: Request<Incoming>, hub: Hub) -> Result<Response<Full<Bytes>
     // The transport-independent core does the stale-tip gate, the queue
     // admission and the counts-only logging; this HTTP handler only shapes the
     // result as JSON. The mixnet listener admits through the same `Hub::admit`.
-    match hub.admit(tx_bytes.as_slice()) {
+    match hub.admit(tx_bytes.as_slice()).await {
         // `accepted` because the hub has taken responsibility for it, which is
         // what the shim needs in order to answer the wallet. The txid is computed
         // from the bytes, so it is correct now even though the transaction will
@@ -789,4 +850,29 @@ fn json(code: StatusCode, value: &serde_json::Value) -> Response<Full<Bytes>> {
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batcher::TipGuard;
+
+    #[tokio::test]
+    async fn http_slots_run_out_without_refusing_the_mixnet_path() {
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+        tip.observe(&[100]);
+        let chain = match ChainClient::new(vec!["127.0.0.1:1".parse().expect("addr")], None) {
+            Ok(chain) => Arc::new(chain),
+            Err(err) => panic!("chain client: {err}"),
+        };
+        let hub = Hub::new(Arc::new(Queue::new()), tip, BatchParams::default(), chain);
+        let held: Vec<_> = (0..MAX_HTTP_ADMISSIONS)
+            .map(|_| hub.http_slot().expect("a free slot"))
+            .collect();
+        assert!(hub.http_slot().is_none(), "past the cap HTTP is refused");
+        // The Nym listener admits through `admit` alone.
+        assert!(hub.admit(&[0; 64]).await.is_ok());
+        drop(held);
+        assert!(hub.http_slot().is_some());
+    }
 }
