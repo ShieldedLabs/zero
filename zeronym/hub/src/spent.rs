@@ -234,6 +234,18 @@ impl ChainNullifiers {
         })
     }
 
+    /// Every view, locked in endpoint order, for one decision. The guards stay
+    /// held together so a view cannot become full after it has been counted.
+    fn locked(&self) -> Vec<MutexGuard<'_, View>> {
+        self.views
+            .iter()
+            .map(|view| match view.lock() {
+                Ok(view) => view,
+                Err(poison) => poison.into_inner(),
+            })
+            .collect()
+    }
+
     /// Whether enough views that are not full report one of `nullifiers` as
     /// revealed and are current at `tip`.
     ///
@@ -244,14 +256,10 @@ impl ChainNullifiers {
         if self.views.is_empty() {
             return false;
         }
+        let views = self.locked();
         let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
         let mut voting = 0usize;
-        for endpoint in 0..self.views.len() {
-            // Freshness and membership under one hold of the view's lock, so a
-            // view marked stale between them cannot refuse.
-            let Some(view) = self.view(endpoint) else {
-                return false;
-            };
+        for view in &views {
             if view.full {
                 continue;
             }
@@ -264,7 +272,7 @@ impl ChainNullifiers {
                 return false;
             }
         }
-        voting >= voters_required(self.views.len())
+        voting >= voters_required(views.len())
     }
 
     /// On, or why it is off. A voting view that is not current is `Stale`.
@@ -273,11 +281,9 @@ impl ChainNullifiers {
         if self.views.is_empty() {
             return NullifierCheck::Quorum;
         }
+        let views = self.locked();
         let mut voting = 0usize;
-        for endpoint in 0..self.views.len() {
-            let Some(view) = self.view(endpoint) else {
-                return NullifierCheck::Quorum;
-            };
+        for view in &views {
             if view.full {
                 continue;
             }
@@ -286,7 +292,7 @@ impl ChainNullifiers {
             }
             voting += 1;
         }
-        if voting >= voters_required(self.views.len()) {
+        if voting >= voters_required(views.len()) {
             NullifierCheck::On
         } else {
             NullifierCheck::Quorum
@@ -296,11 +302,9 @@ impl ChainNullifiers {
     /// How many views are current at `tip`: within [`RESYNC_DEPTH`] of it,
     /// last read successfully, and not full.
     fn current(&self, tip: u32) -> usize {
-        (0..self.views.len())
-            .filter(|endpoint| {
-                self.view(*endpoint)
-                    .is_some_and(|view| view.is_current(tip))
-            })
+        self.locked()
+            .iter()
+            .filter(|view| view.is_current(tip))
             .count()
     }
 
