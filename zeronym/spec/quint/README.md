@@ -67,31 +67,18 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** No reorg of an included transaction and no mempool eviction. The operator's indexer publishes nothing.
 - **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `MAX_DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent.
-- **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither; see [Configurations][configurations] and findings 1, 2 and 4.
+- **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither (findings 1, 2 and 4).
 - **Time.** There is no clock. A timeout may happen at any moment; the staleness window is counted in blocks.
-
-Each configuration's assumptions are the guard of its named `init`. A guard that is false leaves no initial state, and the gate fails on that.
 
 ## Out of scope
 
 > What the specification deliberately does not cover, and why.
 
-### One hub
-
-The specification checks one hub; production runs one or more, replicated: every shim sends every submission to every hub, and each hub that receives a migration queues and broadcasts it (`zeronym/shim/src/nym.rs:602-647`). The single hub is a scope choice, not a claim about production.
-
-Not checked as a result: two hubs disagreeing about one transaction; duplicate publication, and a second enclave holding the plaintext, both accepted deliberately in production; told ok after a partial send, and its anonymity cost; a lookup moving to the next address on a timeout (finding 9); that one Byzantine replica is enough to break G2 and G4.
-
-Argued, not checked, on the assumption that hubs share nothing but the chain and the indexer:
-
-- **Compose per hub:** G1, G3, G4 (which is why its name says "per hub"), G6b, G9, and gap K5.
-- **Compose only if every hub is honest:** G2. One Byzantine replica holds the same bytes and can give them away.
-- **Do not compose:** K1 and K2 each gain a cause with a second hub.
-
 ### Not modelled
 
 | Item | Reason |
 |---|---|
+| Several hubs | Production replicates: every shim sends every submission to every hub (`zeronym/shim/src/nym.rs:602-647`). Not checked as a result: two hubs disagreeing about one transaction; duplicate publication and a second enclave holding the plaintext, both accepted in production; told ok after a partial send; a lookup moving to the next address on a timeout (finding 9); one Byzantine replica breaking G2 and G4 |
 | Attestation, PCRs, TLS, STEVE, keymaker quorum | No in-protocol messages exist. Represented by the roles |
 | Mixnet internals: SURBs, Sphinx, cover traffic, gateways, throttling; the shim's client rotation; both `nym_driver.rs` | Their protocol-visible effect is loss and delay |
 | The hub's lookup concurrency bound, reply deadline and dropped acks | Refinements of "the network lost the message" |
@@ -274,7 +261,7 @@ Quint 0.33.0 is pinned (`npx --yes @informalsystems/quint@0.33.0` by default; se
 
 ### Configurations
 
-A configuration is a value held in the state and selected by a named init.
+A configuration is a value held in the state and selected by a named init, whose guard is that configuration's assumptions. A false guard leaves no initial state, and the gate fails.
 
 #### Protocol specification
 
