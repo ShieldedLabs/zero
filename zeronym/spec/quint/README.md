@@ -1,28 +1,28 @@
 # The zeronym protocol, specified in Quint
 
-A [Quint](https://quint-lang.org) specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
+A [Quint][quint] specification of zeronym: the protocol between a wallet, the shim in front of an operator's indexer, the hub that batches diverted transactions, and the chain.
 
 > [!NOTE]
 > Checked against: `main` at `2bae0a6`, except the hub's tip rule, which is checked against the open #92 at `b767ac9`, and the shim's classifier, which is checked against the open #94 at `59b602a`. Citations marked "at #92" or "at #94" are line numbers there.
 
-- [System](#system)
-- [Assumptions](#assumptions)
-- [Out of scope](#out-of-scope)
-- [Threat model](#threat-model)
-- [Guarantees](#guarantees)
-- [Trust matrix](#trust-matrix)
-- [Known gaps](#known-gaps)
-- [Findings](#findings)
-- [How it is checked](#how-it-is-checked)
-- [Future work](#future-work)
+- [System][system]
+- [Assumptions][assumptions]
+- [Out of scope][out-of-scope]
+- [Threat model][threat-model]
+- [Guarantees][guarantees]
+- [Trust matrix][trust-matrix]
+- [Known gaps][known-gaps]
+- [Findings][findings]
+- [How it is checked][how-it-is-checked]
+- [Future work][future-work]
 
 ## System
 
 > Who the actors are, what each one does, and where each lives in the specification.
 
-The architecture diagram and the prose description of the deployment are in [`zeronym/README.md`](../../README.md).
+The architecture diagram and the prose description of the deployment are in [`zeronym/README.md`][zeronym-readme].
 
-Only the mixnet transport is modelled; the HTTP transport is out of scope (see [Out of scope](#out-of-scope)).
+Only the mixnet transport is modelled; the HTTP transport is out of scope (see [Out of scope][out-of-scope]).
 
 There are two specifications, sharing one hub function:
 
@@ -59,7 +59,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 
 > What must be true of the world for the claims to apply.
 
-- **Roles.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`), and no message or state field records which it took. The set holds protocol moves only, so a component that leaks what it sees (by logging it, or through extra bytes, sizes or timing) falls outside it; see [Out of scope](#out-of-scope). The shim and the hub both run attested. An honest shim or hub runs a binary built from the commit under *Checked against*, which reproduces to the hash in its `deploy/EXPECTED_SHA256` and passes the auditor procedure in `zeronym/README.md` (`caution verify` is its step 2). The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
+- **Roles.** An honest component takes exactly the transition its function gives. A Byzantine one takes any member of a finite set that contains the honest transition (`byzantineContainsHonestTest`), and no message or state field records which it took. The set holds protocol moves only, so a component that leaks what it sees (by logging it, or through extra bytes, sizes or timing) falls outside it; see [Out of scope][out-of-scope]. The shim and the hub both run attested. An honest shim or hub runs a binary built from the commit under *Checked against*, which reproduces to the hash in its `deploy/EXPECTED_SHA256` and passes the auditor procedure in `zeronym/README.md` (`caution verify` is its step 2). The shim is modelled as honest in every configuration: it sees every migration in plaintext and controls everything the wallet observes, so no wallet-facing guarantee could survive its compromise. The hub is modelled as honest or Byzantine to measure how much each guarantee depends on the hub's enclave. The indexer runs outside any enclave, so a Byzantine indexer is the realistic adversary. One component is Byzantine at a time.
 - **Byzantine hub** (protocol specification only). It admits or refuses a submission whatever the admission rules say, and may send any reply to a lookup. Its ack is modelled as truthful: a real one could ack anything, but nothing reads an ack. Every other move is the honest one: it cannot evict or withhold a queued entry, flush off schedule, or send a frame nobody asked for.
 - **Byzantine indexer.** Any verdict, with the transaction relayed or not. Any lookup answer built from a payload it was offered or one the chain published. In the hub specification it also reports any tip in the model's range. On mainnet #92 drops a tip outside a band or above the plausible climb rate (`tip_guard.rs`), so this over-approximates the guard.
 - **Network.** May lose, duplicate, delay and reorder frames. Cannot forge or read them.
@@ -67,7 +67,7 @@ A hub answers a lookup with one of three wire replies, and the shim turns that i
 - **Nonces** are unique. A counter stands for an unguessable value.
 - **Chain.** No reorg of an included transaction and no mempool eviction. The operator's indexer publishes nothing.
 - **Wallets.** A supported ("conforming") wallet sets an expiry at least `MIN_WALLET_EXPIRY` after the height it builds at, and its frame reaches the hub within `DELIVERY_LAG` blocks. A wallet asks only about transactions it has sent.
-- **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither; see [Configurations](#configurations) and findings 1, 2 and 4.
+- **Hub schedule** (hub specification only). How promptly the hub learns the tip depends on the configuration: at every block, up to the reorg allowance behind, or not at all for a while. Fewer blocks arrive while a flush is in flight than the mining margin reserves. The code enforces neither; see [Configurations][configurations] and findings 1, 2 and 4.
 - **Time.** There is no clock. A timeout may happen at any moment; the staleness window is counted in blocks.
 
 Each configuration's assumptions are the guard of its named `init`. A guard that is false leaves no initial state, and the gate fails on that.
@@ -119,7 +119,7 @@ Argued, not checked, on the assumption that hubs share nothing but the chain and
 
 > What the specification is afraid of, who could cause it, and whether a property answers it.
 
-The deployment targets the server-side and network-metadata adversaries of Taylor Hornby's [wallet app threat model](https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html); the Security section of [`zeronym/README.md`](../../README.md) says what is and is not protected. This specification covers the part of that which is a property of protocol runs. Which guarantee answers a threat is the "Answers" column under [Guarantees](#guarantees), and which gap records one that is not prevented is the "Threat" column under [Known gaps](#known-gaps).
+The deployment targets the server-side and network-metadata adversaries of Taylor Hornby's [wallet app threat model][wallet-threat-model]; the Security section of [`zeronym/README.md`][zeronym-readme] says what is and is not protected. This specification covers the part of that which is a property of protocol runs. Which guarantee answers a threat is the "Answers" column under [Guarantees][guarantees], and which gap records one that is not prevented is the "Threat" column under [Known gaps][known-gaps].
 
 | # | Threat | Adversary | Status |
 |---|---|---|---|
@@ -166,7 +166,7 @@ The deployment targets the server-side and network-metadata adversaries of Taylo
 
 An unchecked corollary of G6b: if fewer blocks arrive while a flush is in flight than the mining margin reserves, a node that judges a supported wallet's first offer finds it unexpired. Nothing in the code bounds a flight in blocks (finding 4).
 
-A2 and A3 constrain a single hub step, not a state; the rest are state invariants. What each entry under "Checked by" is worth is under [How it is checked](#how-it-is-checked).
+A2 and A3 constrain a single hub step, not a state; the rest are state invariants. What each entry under "Checked by" is worth is under [How it is checked][how-it-is-checked].
 
 Each pure function also has exhaustive tests over small inputs, in `tests/*Test.qnt`.
 
@@ -174,7 +174,7 @@ Each pure function also has exhaustive tests over small inputs, in `tests/*Test.
 
 > For each guarantee, whose honesty it depends on.
 
-Single-fault. "holds" is a checked row on the named [configuration](#configurations). "required" is a scripted run in which the component is Byzantine and the guarantee fails; the run asserts the guarantee in the state just before the Byzantine step, so the lie is what breaks it.
+Single-fault. "holds" is a checked row on the named [configuration][configurations]. "required" is a scripted run in which the component is Byzantine and the guarantee fails; the run asserts the guarantee in the state just before the Byzantine step, so the lie is what breaks it.
 
 | | All honest | Byzantine hub | Byzantine indexer |
 |---|---|---|---|
@@ -198,7 +198,7 @@ Single-fault. "holds" is a checked row on the named [configuration](#configurati
 
 > Things you might expect to hold that don't, each with a concrete example run. Every component is honest in all of them.
 
-"By design" means the implementation says so itself. "Found here" means this specification showed it and nobody has yet decided whether it is acceptable. "Where" names a [configuration](#configurations).
+"By design" means the implementation says so itself. "Found here" means this specification showed it and nobody has yet decided whether it is acceptable. "Where" names a [configuration][configurations].
 
 | Id | Threat | What is lost | Status | Where | Checked by | Scripted run |
 |---|---|---|---|---|---|---|
@@ -233,7 +233,7 @@ Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by
 | 1 | **A short tip silence costs a supported wallet its mining margin.** The cadence follows the last tip seen, so a silence across a flush boundary delays the flush until the hub goes stale. The staleness window is 12 blocks and the slack is 10, so on the shipped constants the first offer is at `created + 37` against an expiry of `created + 40`: three blocks of margin where four are reserved. It needs the hub not to hear the tip while a broadcast would still succeed, and the tip not to return before the hub goes stale; the tip and the broadcast use the same endpoints, so an unreachable indexer delays both | Latent: a real gap between the constants, in a narrow environment | K4, `silenceAcrossBoundaryMissesMarginTest`; TLC on `staleLag` | Code read: `batcher.rs:40-71`, `:233-237`, `:274-287`. The one-block shortfall reads 15 minutes as exactly 12 blocks |
 | 2 | **An early free-running flush spends the next epoch.** A stale hub's clock runs ahead, flushes an empty queue and records that epoch. When the tip returns, admission counts on a flush that has already happened, and the transaction waits a full interval. A wider expiry floor does not fix it. The supported-wallet witness also needs a second, shorter silence | Code bug (MEDIUM), partly fixed by #85; one root cause with finding 6: the loop records the epoch from the cadence height, and admission estimates the next flush from the observed height | K9, `earlyFlushSpendsTheNextEpochTest`; TLC on `staleLagWithSlack` | Code read: `batcher.rs:276-287`, `:355-374`. The comment there calls a clock that runs ahead "the safe direction" |
 | 3 | **The reorg slack holds by coincidence of constants.** The expiry floor minus the three-term budget (flush interval, mining margin, delivery lag) is 10 blocks, exactly the reorg allowance, and startup validation checks only the three-term sum. Without the slack a supported wallet's transaction misses its margin | Latent: no failure on the shipped constants | K3', `conformingMissesMarginWithoutSlackTest`; TLC on `flakyTipNoSlack` | Code read: `batcher.rs:40-59`, `:101-113` |
-| 4 | **A flush's flight is bounded in time, not in blocks.** The budget leaves exactly the mining margin at the offer, so blocks that arrive while the batch is in flight come out of it. Each call is bounded at 10 s with 64 in flight, about 160 s at the 1,024-entry cap, which is about two nominal blocks against a margin of four. Block arrival is not bounded by the clock, and requeue does not enforce the entry cap | Bounded in time, not in blocks; reachable only with a slow or selectively hanging indexer | Not a checked property: the corollary of G6b under [Guarantees](#guarantees) assumes it away | Code read: `chain.rs:49`, `:59`. Estimate, not measured: with exponential block times at a 75 s mean, a flight of that length sees four or more blocks about one time in six |
+| 4 | **A flush's flight is bounded in time, not in blocks.** The budget leaves exactly the mining margin at the offer, so blocks that arrive while the batch is in flight come out of it. Each call is bounded at 10 s with 64 in flight, about 160 s at the 1,024-entry cap, which is about two nominal blocks against a margin of four. Block arrival is not bounded by the clock, and requeue does not enforce the entry cap | Bounded in time, not in blocks; reachable only with a slow or selectively hanging indexer | Not a checked property: the corollary of G6b under [Guarantees][guarantees] assumes it away | Code read: `chain.rs:49`, `:59`. Estimate, not measured: with exponential block times at a 75 s mean, a flight of that length sees four or more blocks about one time in six |
 | 5 | **An acknowledged payload can be lost three ways with every component honest:** a crash; a draining hub's final flush that finds the indexer unreachable; a requeue that gives the entry up as expired. On the shipped constants a requeue keeps an entry only if it was created at most 16 blocks before the flush (`40 - 20 - 4`). For wallets at the 40-block floor, one unjudged flush therefore drops between 20% and 50% of a batch, depending on delivery lag, each entry with 14 to 23 blocks of life left | By design; the magnitude is not triaged | K5 and its three runs; TLC on `timely` | Code read: the loss is logged at error level (`batcher.rs:382-392`, `:513-524`) and unit-tested (`queue.rs`, `a_requeue_gives_up_on_an_entry_that_can_no_longer_be_mined`); the rule is `queue.rs:509-522`. The percentages are arithmetic on the constants, assuming arrivals uniform over the interval |
 | 6 | **An entry admitted while the tip is reported below a boundary already flushed waits a full interval.** Before #85 admission counted on the flush at that boundary, which will not happen again. Any late arrival met it, and one that expired before that next flush was first offered after its expiry; the supported-wallet case was a resend after a crash, which a restarted hub offered with less than the mining margin. Since #85 admission counts on the next unspent flush, and that resend is refused | Code bug (MEDIUM), fixed by #85; one root cause with finding 2 | G8 on `flakyTip`; `crashThenLateDuplicateTest` | Code read before #85, at `ee910d6`: `batcher.rs:177-186`, `:316-327`; `queue.rs:294`, `:507-520` |
 | 7 | **On a stale hub a requeued entry is offered again past its expiry, and only the attempt bound stops it.** Each requeue judges the entry against the same stale observed tip, so the expiry rule never gives it up. A supported wallet's transaction is offered a third time after its expiry, and is finally dropped as exhausted. The late offers normally reach no node: a stale hub whose flushes come back unjudged almost always has an unreachable indexer | Real behaviour that contradicts a comment; low harm | K6, `requeuedPastExpiryTest`; TLC on `staleLag`; `expiringEntryDroppedAsExhaustedTest` | Code read: `batcher.rs:463-468`; `queue.rs:197` says "Only reachable for a payload with no expiry". The shipped bound is 8 requeues |
@@ -242,7 +242,7 @@ Findings 6 and 8 are fixed by #85, and finding 2 in part. Finding 11 is fixed by
 | 10 | **Anyone can make the hub answer "pending" for a published transaction, and pad its batch-size signal.** The queue deduplicates against resident entries only, so published bytes are admitted again if resubmitted, and a lookup answers from the queue first. The wallet reads "pending" for a transaction it has already been served, until the next flush. The flush also counts an already-known verdict toward the achieved batch size, which the code calls "the honest measure of the privacy", so free, public bytes can raise that figure and suppress the warning for a batch of one | Code bug (LOW): the comment on `Hub::lookup` calls a resubmit harmless. The batch-size figure is logged and returned but drives no decision | K2, `observerResubmitsPublishedTest`, `walletResendsPublishedTest` | Code read: `queue.rs:310-312`, `:360-361`; `Hub::lookup` in `server.rs`; `batcher.rs:397`, `:434`, `:526`. Not checked: that a node answers already-known for a transaction that is already mined |
 | 11 | **One high tip report pinned the hub's tip.** Before #92, `observe` adopted any higher height and ignored a later drop larger than the reorg allowance. So one endpoint reporting a height P made every real height look like an oversized regression until the chain reached P minus the allowance, which for a large P is until restart. The epoch jumped, so the hub flushed once off cadence; after that admission refused every expiring transaction, because the observed height was P. The same rule could freeze the cadence: every step up refreshed liveness, so a tip that oscillated inside the allowance never went stale. #92 judges each answer before the maximum: on mainnet it drops a height outside a band around a compiled anchor, which also refuses a height near `u32::MAX`, and a new high faster than the chain can climb. Only a new high refreshes liveness, reorg depth is measured from the best height seen, and the free-running clock starts from that height | Code bug (HIGH), fixed by #92. On mainnet the guard bounds the lie: inside the band and rate one endpoint can still shift flush timing, hold a lead of about 16 blocks, or choose the boot height. Testnet and regtest are unguarded | `observeTip` follows #92: `tipRuleTest`, `staleCadenceTest`, `tipNearBestTest`. The Byzantine indexer still reports any tip in a bounded range, which over-approximates the guard. The freeze was invisible to the model before #92: staleness here is counted from the chain height alone, and the one configuration that goes stale reports the true height, which only climbs. `tipAheadOfChainFlushesEarlyTest` shows the one early flush | Code read at #92: `batcher.rs:19-45`, `:164-202`, `:240-349`, `:416-431`; `tip_guard.rs:40-65`; `chain.rs:176-208`. Before #92, at `2bae0a6`: `batcher.rs:19-22`, `:177-209`, `:355-374`; `chain.rs:176-201` |
 | 12 | **The second leg of a TEX payment named a diverted transaction.** A ZIP 320 (TEX) payment from shielded funds is two transactions, and the second spends the first's single-use transparent output. When the first touched Orchard, the shim diverted it. The second has transparent parts only, so the shim forwarded it, and its one prevout handed the operator the txid the hub held, on the wallet's connection. An external report found it; this specification missed it. A payload carried a class label and nothing about its inputs, so G1 held by construction and every property read one send at a time. A payload now carries the txids it spends and its pool shape, the shim applies #94's rule to them, and G9 states the link | Code bug (privacy), fixed by #94. The severity scale grades batching and availability harms, so this row is ungraded | G9, `texSecondLegIsDivertedTest`; K10 for what #94 leaves. A one-off mutation run with the transparent-only arm removed: the `baseline` simulation violates G9, and `texSecondLegIsDivertedTest` fails at its second send | Code read at #94: `classify.rs:274-295`, `:333-338` |
-| 13 | **A free burst of junk shuts admission for a flush window, and before #100 for nine.** Unparseable bytes are admitted with no expiry, and 1,024 entries fill the cap, so 64 KiB of junk refuses every later submission `Full` until the next flush. Forged parseable bytes fill it as well, because the node is the only judge of validity. Over the mixnet each refusal is K1: the wallet was already told ok, and the SDK keeps a ZIP 318 migration's notes locked until its expiry, 30 to 60 days out. Before #100 a node's parse-failure answer (`-22`) came back retryable through lightwalletd and zaino both, so the flush requeued every junk entry up to the attempt bound: one burst held the cap for 8 more flushes and reached every indexer 9 times. An external report found it; this specification could not, since it has no capacity and its observer submits only what it has learned | Code bug (HIGH), fixed in part by #100: the requeue loop is gone. The fill for one window remains, documented as a known gap in the hub's `OPERATORS.md` (#102) | Not modelled: capacity and payloads of the observer's own making, under [Not modelled](#not-modelled). Rust tests in #100: `tests/junk_flood.rs` fails on `main` with every junk entry held | Code read at #100: `queue.rs:83`, `:283-291`, `:324`; `chain.rs`, `classify_send_response` and `classify_publish_failure`. zaino's relay: `zaino-source-zebra-rpc/src/adapter.rs`, `submission_rejection` |
+| 13 | **A free burst of junk shuts admission for a flush window, and before #100 for nine.** Unparseable bytes are admitted with no expiry, and 1,024 entries fill the cap, so 64 KiB of junk refuses every later submission `Full` until the next flush. Forged parseable bytes fill it as well, because the node is the only judge of validity. Over the mixnet each refusal is K1: the wallet was already told ok, and the SDK keeps a ZIP 318 migration's notes locked until its expiry, 30 to 60 days out. Before #100 a node's parse-failure answer (`-22`) came back retryable through lightwalletd and zaino both, so the flush requeued every junk entry up to the attempt bound: one burst held the cap for 8 more flushes and reached every indexer 9 times. An external report found it; this specification could not, since it has no capacity and its observer submits only what it has learned | Code bug (HIGH), fixed in part by #100: the requeue loop is gone. The fill for one window remains, documented as a known gap in the hub's `OPERATORS.md` (#102) | Not modelled: capacity and payloads of the observer's own making, under [Not modelled][not-modelled]. Rust tests in #100: `tests/junk_flood.rs` fails on `main` with every junk entry held | Code read at #100: `queue.rs:83`, `:283-291`, `:324`; `chain.rs`, `classify_send_response` and `classify_publish_failure`. zaino's relay: `zaino-source-zebra-rpc/src/adapter.rs`, `submission_rejection` |
 
 On finding 2, the model lets the free-running clock be at most one flush interval ahead, so it can spend one epoch. `cadence_height` has no such cap. Reading that code, a clock further ahead would skip more than one boundary; the model does not exhibit that.
 
@@ -358,8 +358,23 @@ Only `protocol.qnt` and `hubMachine.qnt` declare variables, and no module declar
 > What would make these results bind the code.
 
 1. **Failing Rust tests for the findings.** Findings 2, 6 and 8 have Rust tests, written with their fixes in #85; the part of finding 2 that #85 leaves has none. The other findings are shown on the model and matched to the code by reading. Finding 1 fits `batcher.rs`'s unit tests as 2 and 6 did. Finding 4 is impractical to reproduce.
-2. **Model-based testing with `quint-connect`.** Depends on 1, and needs driver code in Rust. The specification is shaped for it: every branch of a step is a named action with its choices as named picks; each step gives one input to one component function and applies one output; and those functions map onto the seams in the table under [System](#system).
+2. **Model-based testing with `quint-connect`.** Depends on 1, and needs driver code in Rust. The specification is shaped for it: every branch of a step is a named action with its choices as named picks; each step gives one input to one component function and applies one output; and those functions map onto the seams in the table under [System][system].
 3. **`quint verify` with Apalache for a subset of the claims.** The compiled specification is too large for the Apalache server today. A subset small enough to pass would give bounded symbolic checking of the protocol guarantees, which are simulated only.
 
 [protocol-spec]: ./protocol.qnt
 [hub-spec]: ./hubMachine.qnt
+[quint]: https://quint-lang.org
+[system]: #system
+[assumptions]: #assumptions
+[out-of-scope]: #out-of-scope
+[threat-model]: #threat-model
+[guarantees]: #guarantees
+[trust-matrix]: #trust-matrix
+[known-gaps]: #known-gaps
+[findings]: #findings
+[how-it-is-checked]: #how-it-is-checked
+[future-work]: #future-work
+[zeronym-readme]: ../../README.md
+[configurations]: #configurations
+[wallet-threat-model]: https://zcash.readthedocs.io/en/latest/rtd_pages/wallet_threat_model.html
+[not-modelled]: #not-modelled
