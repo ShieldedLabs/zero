@@ -24,11 +24,13 @@ module hubTest {
   pure val pA = orchard("a", Some(9))
   pure val pB = orchard("b", Some(9))
   pure val pC = orchard("c", None)
+  /// A second signing of `pC`: different bytes, the same txid.
+  pure val pCSigned = { ...pC, id: "c-signed" }
   pure val pTight = orchard("tight", Some(6))
   pure val pJunk = { id: "junk", txid: None, created: 1, expiry: None, class: Unparseable, spends: Set(), oversize: false }
 
   pure val PAYLOADS = Set(pA, pB, pC, pTight, pJunk)
-  pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)
+  pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight, SpentProof)
 
   /// The state after `input`.
   pure def after(state: HubState, input: HubInput): HubState =
@@ -45,7 +47,11 @@ module hubTest {
     }
 
   pure def submit(payload: Payload): HubInput =
-    SubmitHInput({ nonce: 0, payload: payload })
+    SubmitHInput({ nonce: 0, payload: payload, revealed: false })
+
+  /// A submission whose nullifiers every current view reports mined.
+  pure def submitRevealed(payload: Payload): HubInput =
+    SubmitHInput({ nonce: 0, payload: payload, revealed: true })
 
   pure def verdict(payload: Payload, given: Verdict): HubInput =
     VerdictHInput({ payload: payload, verdict: given })
@@ -63,11 +69,19 @@ module hubTest {
   pure val stopped = draining.after(FlushDueHInput).after(verdict(pA, Accepted))
     .after(verdict(pJunk, Rejected)).after(FlushDoneHInput)
 
+  /// `pC`, which never expires, out with a flush at tip 6, and resent while
+  /// it is out.
+  pure val flushingC = running(5).after(submit(pC)).after(TipHInput(6)).after(FlushDueHInput)
+  pure val resent = flushingC.after(submit(pC))
+  /// After a node rejected `pC`: its proofs are burned.
+  pure val burnedC = flushingC.after(verdict(pC, Rejected))
+
   pure val STATES = Set(down, starting, running(2), running(5), holding, flushing, stale, draining, stopped,
-    stale.after(DrainHInput), flushing.after(verdict(pA, Retryable)))
+    stale.after(DrainHInput), flushing.after(verdict(pA, Retryable)), burnedC)
 
   pure val INPUTS: Set[HubInput] =
     PAYLOADS.map(payload => submit(payload))
+      .union(PAYLOADS.map(payload => submitRevealed(payload)))
       .union(Set(
         LookupHInput({ nonce: 1, txid: "a", answer: INotFound }),
         LookupHInput({ nonce: 1, txid: "zz", answer: IFound({ body: Some(pB), height: AtMined }) }),
@@ -75,7 +89,7 @@ module hubTest {
         StaleHInput(4), StaleHInput(8), StaleHInput(9),
         FlushDueHInput, FlushDoneHInput, DrainHInput, CrashHInput, RestartHInput,
       ))
-      .union(tuples(Set(pA, pB, pJunk), Set(Accepted, AlreadyKnown, Rejected, Retryable))
+      .union(tuples(Set(pA, pB, pJunk), Set(Accepted, AlreadyKnown, AlreadyMined, Rejected, Retryable))
         .map(((payload, given)) => verdict(payload, given)))
 
   // ------------------------------------------------------------------------
@@ -110,21 +124,31 @@ module hubTest {
   /// Each refusal, and the order the checks are made in.
   run admissionDecisionTableTest = all {
     // No tip yet, or a stale one: nothing else is looked at.
-    assert(PAYLOADS.forall(payload => admission(starting, payload) == Refused(TipStale))),
-    assert(PAYLOADS.forall(payload => admission(stale, payload) == Refused(TipStale))),
-    assert(PAYLOADS.forall(payload => admission(stale.after(DrainHInput), payload) == Refused(TipStale))),
+    assert(PAYLOADS.forall(payload => admission(starting, payload, false) == Refused(TipStale))),
+    assert(PAYLOADS.forall(payload => admission(stale, payload, false) == Refused(TipStale))),
+    assert(PAYLOADS.forall(payload => admission(stale.after(DrainHInput), payload, false) == Refused(TipStale))),
     // Draining comes before anything about the payload.
-    assert(PAYLOADS.forall(payload => admission(draining, payload) == Refused(HubDraining))),
+    assert(PAYLOADS.forall(payload => admission(draining, payload, false) == Refused(HubDraining))),
     // Expiry before the queue is looked at. At tip 5 the next flush is at 6.
-    assert(admission(running(5), pTight) == Refused(ExpiryTooTight)),
-    assert(admission(holding, pTight) == Refused(ExpiryTooTight)),
-    assert(admission(running(2), pTight) == Admitted),
+    assert(admission(running(5), pTight, false) == Refused(ExpiryTooTight)),
+    assert(admission(holding, pTight, false) == Refused(ExpiryTooTight)),
+    assert(admission(running(2), pTight, false) == Admitted),
     // A duplicate is recognised; anything else that passes is admitted.
-    assert(admission(holding, pA) == Duplicate),
-    assert(admission(holding, pB) == Admitted),
-    assert(admission(running(5), pA) == Admitted),
+    assert(admission(holding, pA, false) == Duplicate),
+    assert(admission(holding, pB, false) == Admitted),
+    assert(admission(running(5), pA, false) == Admitted),
     // An unparseable payload has no expiry and is admitted like any other.
-    assert(admission(running(5), pJunk) == Admitted),
+    assert(admission(running(5), pJunk, false) == Admitted),
+    // Mined nullifiers refuse a payload with proofs, after expiry and before
+    // the queue; a payload with no proofs to read is not refused for them.
+    assert(admission(holding, pA, true) == Refused(SpentProof)),
+    assert(admission(holding, pTight, true) == Refused(ExpiryTooTight)),
+    assert(admission(running(5), pJunk, true) == Admitted),
+    // Burned proofs are refused after the duplicate check, including a second
+    // signing of the same txid.
+    assert(admission(burnedC, pC, false) == Refused(SpentProof)),
+    assert(admission(burnedC, pCSigned, false) == Refused(SpentProof)),
+    assert(admission(burnedC, pJunk, false) == Admitted),
     // Every refusal is produced, and a refusal changes nothing.
     assert(REFUSALS.forall(refusal =>
       tuples(STATES, PAYLOADS).exists(((state, payload)) =>
@@ -166,7 +190,7 @@ module hubTest {
   run trailingBytesAreQueuedAndHitTest =
     val queued = running(5).after(submit(pTrailing))
     all {
-      assert(admission(running(5), pTrailing) == Admitted),
+      assert(admission(running(5), pTrailing, false) == Admitted),
       assert(queued.isQueuedTxid("tt")),
       assert(outputOf(queued, LookupHInput({ nonce: 7, txid: "tt", answer: INotFound }))
         == LookupReplyOutput({ nonce: 7, outcome: QueueHit })),
@@ -228,8 +252,8 @@ module hubTest {
     // The whole queue moves out at once.
     assert(outputOf(holding.after(TipHInput(6)), FlushDueHInput) == BroadcastOutput(Set(pA, pJunk))),
     assert(flushing.queue == Map() and flushing.inFlight() == Set(pA, pJunk)),
-    // Published, already known and rejected entries leave.
-    assert(Set(Accepted, AlreadyKnown, Rejected).forall(given =>
+    // Published, already known, mined and rejected entries leave.
+    assert(Set(Accepted, AlreadyKnown, AlreadyMined, Rejected).forall(given =>
       flushing.after(verdict(pA, given)).inFlight() == Set(pJunk))),
     // A retryable entry stays out until the flush ends.
     assert(flushing.after(verdict(pA, Retryable)).inFlight() == Set(pA, pJunk)),
@@ -239,6 +263,22 @@ module hubTest {
     // The flush cannot end while a verdict is outstanding.
     assert(isError(outputOf(flushing, FlushDoneHInput))),
     assert(isError(outputOf(holding, FlushDoneHInput))),
+    // A rejected or mined entry with proofs burns its txid, and every queued
+    // entry with that txid leaves with it: the same bytes, or a second
+    // signing. Without proofs nothing is burned.
+    assert(Set(Rejected, AlreadyMined).forall(given =>
+      val judged = resent.after(verdict(pC, given))
+      val signed = flushingC.after(submit(pCSigned)).after(verdict(pC, given))
+      and {
+        judged.burned == Set("c") and judged.queue == Map(),
+        signed.burned == Set("c") and signed.queue == Map(),
+      })),
+    assert(Set(Accepted, AlreadyKnown).forall(given =>
+      val judged = resent.after(verdict(pC, given))
+      judged.burned == Set() and judged.queued() == Set(pC))),
+    assert(flushing.after(verdict(pJunk, Rejected)).burned == Set()),
+    // A restart forgets the burn set with the queue.
+    assert(burnedC.after(CrashHInput) == down),
     // An empty queue is still a flush event: the epoch is recorded.
     assert(running(5).after(TipHInput(6)).after(FlushDueHInput).lastEpoch == Some(2)),
     assert(outputOf(running(5).after(TipHInput(6)), FlushDueHInput) == NoHubOutput),
@@ -335,12 +375,13 @@ module hubTest {
   pure val REACH_PAYLOADS = Set(pA, pJunk)
   pure val REACH_INPUTS: Set[HubInput] =
     REACH_PAYLOADS.map(payload => submit(payload))
+      .union(REACH_PAYLOADS.map(payload => submitRevealed(payload)))
       .union(Set(
         TipHInput(0), TipHInput(4), TipHInput(5), TipHInput(6), TipHInput(9),
         StaleHInput(4), StaleHInput(8), StaleHInput(9),
         FlushDueHInput, FlushDoneHInput, DrainHInput, CrashHInput, RestartHInput,
       ))
-      .union(tuples(REACH_PAYLOADS, Set(Accepted, AlreadyKnown, Rejected, Retryable))
+      .union(tuples(REACH_PAYLOADS, Set(Accepted, AlreadyKnown, AlreadyMined, Rejected, Retryable))
         .map(((payload, given)) => verdict(payload, given)))
 
   pure def successors(state: HubState): Set[HubState] =
@@ -356,13 +397,15 @@ module hubTest {
   /// `REACH` is a fixpoint: no input leaves it.
   run reachTest = assert(REACH.forall(state => successors(state).subseteq(REACH)))
 
-  /// A2. An entry leaves the queue only into a flush, or because the hub went
-  /// down or exited after its final flush. Nothing evicts it.
+  /// A2. An entry leaves the queue only into a flush, because a node judged an
+  /// entry with its txid and the hub burned that txid, or because the hub went
+  /// down or exited after its final flush.
   run neverEvictTest =
     assert(REACH.forall(state =>
       successors(state).forall(stepped =>
         stepped.phase == Down or stepped.phase == Stopped
-          or state.queued().subseteq(stepped.queued().union(stepped.inFlight())))))
+          or state.queued().subseteq(stepped.queued().union(stepped.inFlight()).union(
+            state.queued().filter(payload => isBurned(stepped.burned, payload)))))))
 
   /// A3. A draining hub admits nothing: its queue gains only what a flush
   /// hands back.
@@ -448,6 +491,10 @@ module hubTest {
     assert(realises(holding.after(TipHInput(6)), FlushDueHInput, holding.project().take(), None)),
     assert(realises(flushing, verdict(pA, Accepted), flushing.project().settle(pA), None)),
     assert(realises(flushing, verdict(pA, Retryable), flushing.project(), None)),
+    // settle with the copy resent meanwhile, and with a second signing of it
+    assert(realises(resent, verdict(pC, Rejected), resent.project().settleWithCopy(pC), None)),
+    val signed = flushingC.after(submit(pCSigned))
+    assert(realises(signed, verdict(pC, Rejected), signed.project().settleWithCopy(pC), None)),
     // give back what is kept: `pJunk` is held, `pA` was settled
     val ending = flushing.after(verdict(pA, Accepted)).after(verdict(pJunk, Retryable))
     assert(realises(ending, FlushDoneHInput, ending.project().giveBack(Set(pJunk)), None)),

@@ -243,7 +243,7 @@ module hubMachine {
 
   /// The verdicts on `payload`, each with whether the network took it.
   def verdictsOn(payload: Payload): Set[(Verdict, bool)] =
-    tuples(Set(Accepted, AlreadyKnown, Rejected, Retryable), Set(true, false)).filter(((given, relayed)) =>
+    tuples(Set(Accepted, AlreadyKnown, AlreadyMined, Rejected, Retryable), Set(true, false)).filter(((given, relayed)) =>
       broadcastResults(payload).contains(broadcastResult(payload, given, relayed)))
 
   /// The heights a stale hub's free-running clock may read now: not behind
@@ -254,9 +254,16 @@ module hubMachine {
   def freeRunEstimates: Set[Height] =
     CLOCK_HEIGHTS.filter(estimate => height <= estimate and estimate <= height + cfg.params.flushInterval)
 
-  /// The transition the hub takes on a submission of `payload`.
+  /// What the hub's nullifier views may report for `payload` now.
+  def revealedOn(payload: Payload): Set[bool] =
+    match cfg.indexerRole {
+      | Honest => honestRevealed(chain, payload)
+      | Byzantine => byzRevealed
+    }
+
+  /// The transitions the hub may take on a submission of `payload`.
   def submitResults(payload: Payload): Set[HubResult] =
-    Set(hub(h, SubmitHInput({ nonce: 0, payload: payload })))
+    revealedOn(payload).map(revealed => hub(h, SubmitHInput({ nonce: 0, payload: payload, revealed: revealed })))
 
   // ------------------------------------------------------------------------
   // Frames

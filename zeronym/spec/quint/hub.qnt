@@ -64,6 +64,11 @@ module hub {
   ///   number of requeues it has had.
   /// - `lastEpoch`: the flush epoch last acted on, absent until adopted. A
   ///   flush records it when it begins.
+  /// - `burned`: the txids whose proofs this hub published to a rejection or a
+  ///   mined verdict. Admission refuses a payload carrying one, and the burn
+  ///   drops every queued entry carrying it. It lives in memory, like the
+  ///   queue. The code keys this on bundle keys; the txid is what a re-signing
+  ///   keeps.
   type HubState = {
     params: HubParams,
     phase: Phase,
@@ -73,6 +78,7 @@ module hub {
     queue: Payload -> int,
     flush: Flush,
     lastEpoch: Option[int],
+    burned: Set[TxId],
   }
 
   /// A hub that is not running. It holds nothing: the queue lives in memory.
@@ -85,6 +91,7 @@ module hub {
     queue: Map(),
     flush: Idle,
     lastEpoch: None,
+    burned: Set(),
   }
 
   /// A hub that has just started and has not yet seen a tip.
@@ -96,7 +103,9 @@ module hub {
   // ------------------------------------------------------------------------
 
   type HubInput =
-    | SubmitHInput({ nonce: Nonce, payload: Payload })
+    // A submission, together with whether every indexer's current nullifier
+    // view reports its Orchard nullifiers mined (`ChainNullifiers::any_revealed`).
+    | SubmitHInput({ nonce: Nonce, payload: Payload, revealed: bool })
     // A lookup, together with what the hub's indexer would answer, as its
     // client returns it (`hubReads`). The answer is used only when the queue
     // misses.
@@ -174,6 +183,17 @@ module hub {
   pure def queued(state: HubState): Set[Payload] =
     state.queue.keys()
 
+  /// Whether `payload`'s txid is in `burned`. A payload with no txid is not.
+  pure def isBurned(burned: Set[TxId], payload: Payload): bool =
+    match payload.txid {
+      | Some(txid) => burned.contains(txid)
+      | None => false
+    }
+
+  /// The queue without every entry that carries `txid`.
+  pure def dropTxid(entries: Payload -> int, txid: TxId): Payload -> int =
+    entries.keys().filter(payload => payload.txid != Some(txid)).mapBy(payload => entries.get(payload))
+
   /// The payloads out with a flush: awaiting a verdict, or awaiting requeue.
   pure def inFlight(state: HubState): Set[Payload] =
     match state.flush {
@@ -231,18 +251,23 @@ module hub {
       | Some(height) => height >= nextFlushHeight(tip, flushInterval) + miningMargin
     }
 
-  /// The hub's decision on a submission, in the order the checks are made. No
-  /// check asks a node anything: admission must not leak a transaction's
-  /// arrival.
-  pure def admission(state: HubState, payload: Payload): AckKind =
+  /// The hub's decision on a submission, in the order the checks are made.
+  /// `revealed` is the nullifier views' answer, which the hub reads on its own
+  /// clock. No check asks a node anything: admission must not leak a
+  /// transaction's arrival.
+  pure def admission(state: HubState, payload: Payload, revealed: bool): AckKind =
     if (state.isTipStale())
       Refused(TipStale)
     else if (state.phase == Draining)
       Refused(HubDraining)
     else if (not(survivesNextFlush(payload.expiry, state.admissionHeight(), state.params.flushInterval, state.params.miningMargin)))
       Refused(ExpiryTooTight)
+    else if (revealed and hasProof(payload))
+      Refused(SpentProof)
     else if (state.queued().contains(payload))
       Duplicate
+    else if (isBurned(state.burned, payload))
+      Refused(SpentProof)
     else
       Admitted
 
@@ -322,9 +347,11 @@ module hub {
         lastEpoch: if (state.phase == Draining) state.lastEpoch else Some(state.cadenceEpoch()),
       }.toBroadcastOutput(state.queued())
 
-  /// The indexer's verdict on one entry. Accepted and already-known entries
-  /// are published and leave; a rejected entry is dropped; a retryable one is
-  /// set aside for requeue.
+  /// The indexer's verdict on one entry. Accepted, already-known and mined
+  /// entries are published and leave; a rejected entry is dropped; a retryable
+  /// one is set aside for requeue. A rejected or mined entry's proofs are
+  /// burned, and every queued entry with its txid is dropped with them
+  /// (`Queue::burn`).
   pure def takeVerdict(state: HubState, payload: Payload, verdict: Verdict): HubResult =
     match state.flush {
       | Idle => state.toHubErrorOutput("no flush is in flight")
@@ -333,7 +360,19 @@ module hub {
           state.toHubErrorOutput("the payload is not awaiting a verdict")
         else
           val attempts = flush.batch.get(payload)
-          { ...state,
+          val burns = (verdict == Rejected or verdict == AlreadyMined) and hasProof(payload)
+          val base =
+            if (burns)
+              match payload.txid {
+                | Some(txid) =>
+                  { ...state,
+                    queue: dropTxid(state.queue, txid),
+                    burned: state.burned.union(Set(txid)),
+                  }
+                | None => state
+              }
+            else state
+          { ...base,
             flush: Broadcasting({ ...flush,
               batch: flush.batch.mapRemove(payload),
               unplaced: if (verdict == Retryable) flush.unplaced.put(payload, attempts) else flush.unplaced,
@@ -345,7 +384,8 @@ module hub {
   /// decided on its own.
   ///
   /// - The same bytes already resident (resubmitted during the flush) win, and
-  ///   the returning copy is dropped without being counted.
+  ///   the returning copy is dropped without being counted. So is one whose
+  ///   txid was burned.
   /// - An entry that no longer survives the next flush, judged at the observed
   ///   tip, is dropped as expired. Admission judges at `admissionHeight`,
   ///   which can be higher; requeue does not, so as not to drop an
@@ -363,7 +403,8 @@ module hub {
           state.toHubErrorOutput("entries are still awaiting a verdict")
         else
           val params = state.params
-          val returning = flush.unplaced.keys().exclude(state.queued())
+          val returning = flush.unplaced.keys().exclude(state.queued()).filter(payload =>
+            not(isBurned(state.burned, payload)))
           val expired = returning.filter(payload =>
             not(survivesNextFlush(payload.expiry, state.observedTip(), params.flushInterval, params.miningMargin)))
           val exhausted = returning.exclude(expired).filter(payload =>
@@ -387,7 +428,7 @@ module hub {
         if (not(state.isServing()))
           state.toHubErrorOutput("the hub is not serving")
         else
-          val kind = admission(state, submit.payload)
+          val kind = admission(state, submit.payload, submit.revealed)
           // The entry is resident before the ack exists: an accepted ack is a
           // promise that the hub holds the bytes.
           val admitted =

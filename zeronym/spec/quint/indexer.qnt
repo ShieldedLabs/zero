@@ -67,6 +67,18 @@ module indexer {
       | None => false
     }
 
+  /// Whether the chain has a transaction with `payload`'s txid in a block.
+  pure def isMined(state: IndexerState, payload: Payload): bool =
+    match payload.txid {
+      | Some(txid) => state.inclusion(txid) == Mined
+      | None => false
+    }
+
+  /// What the hub's nullifier views may report for `payload`: mined only if
+  /// it is, and nothing while a view is not current.
+  pure def honestRevealed(state: IndexerState, payload: Payload): Set[bool] =
+    Set(false).union(if (state.isMined(payload)) Set(true) else Set())
+
   /// Whether a node would take `payload` into its mempool now: it parses, it
   /// can still be mined in the next block, and it is not there already.
   pure def isAcceptable(state: IndexerState, payload: Payload): bool =
@@ -114,7 +126,7 @@ module indexer {
   /// - Broadcast: `Rejected` and `Retryable` are always possible (the node has
   ///   reasons this model does not see, and the indexer may be unreachable);
   ///   `Accepted` only for a transaction a node would take; `AlreadyKnown`
-  ///   only for one the chain has.
+  ///   only for one the chain has; `AlreadyMined` only for one in a block.
   /// - Lookup: the chain's answer, or unavailable.
   pure def honestIndexerOutputs(state: IndexerState, input: IndexerInput): Set[IndexerOutput] =
     match input {
@@ -122,6 +134,7 @@ module indexer {
         Set(Rejected, Retryable)
           .union(if (state.isAcceptable(payload)) Set(Accepted) else Set())
           .union(if (state.isKnown(payload)) Set(AlreadyKnown) else Set())
+          .union(if (state.isMined(payload)) Set(AlreadyMined) else Set())
           .map(verdict => VerdictOutput(verdict))
       | LookupIInput(txid) =>
         if (state.txs.keys().contains(txid))
@@ -185,7 +198,7 @@ module indexer {
   pure def byzIndexerOutputs(state: IndexerState, input: IndexerInput, universe: Set[Payload]): Set[IndexerOutput] =
     match input {
       | BroadcastIInput(_) =>
-        Set(Accepted, AlreadyKnown, Rejected, Retryable).map(verdict => VerdictOutput(verdict))
+        Set(Accepted, AlreadyKnown, AlreadyMined, Rejected, Retryable).map(verdict => VerdictOutput(verdict))
       | LookupIInput(_) =>
         val bodies = Set(None).union(state.servable(universe).map(payload => Some(payload)))
         tuples(bodies, WIRE_HEIGHTS)
@@ -211,6 +224,9 @@ module indexer {
         tuples(effects, outputs).map(((effect, output)) => { state: effect, out: output })
       | _ => outputs.map(output => { state: indexerApply(state, input, output), out: output })
     }
+
+  /// What a Byzantine indexer's nullifier view may report: anything.
+  pure val byzRevealed: Set[bool] = Set(false, true)
 
   /// The tips a Byzantine indexer may report: any height there is.
   pure def byzTips(heights: Set[Height]): Set[Height] =

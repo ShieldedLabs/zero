@@ -844,12 +844,18 @@ module protocol {
   /// The indexer returns its verdict on one entry out with a flush. `result`
   /// is the indexer's transition: the verdict, and what became of the
   /// transaction. A node's verdict settles the entry; a retryable one leaves it
-  /// out with the flush.
+  /// out with the flush. A rejected or mined verdict burns its proofs, and
+  /// every queued entry with its txid goes with them.
   action indexerVerdictWith(payload: Payload, result: IndexerResult): bool = all {
     s.hub.held.contains(payload),
     indexerResults(s.indexer, BroadcastIInput(payload)).contains(result),
     result.out == VerdictOutput(verdictIn(result.out)),
-    val hub = if (verdictIn(result.out) == Retryable) s.hub else s.hub.settle(payload)
+    val verdict = verdictIn(result.out)
+    val burns = (verdict == Rejected or verdict == AlreadyMined) and hasProof(payload)
+    val hub =
+      if (verdict == Retryable) s.hub
+      else if (burns) s.hub.settleWithCopy(payload)
+      else s.hub.settle(payload)
     commit({ ...s, indexer: result.state, hub: hub }),
   }
 

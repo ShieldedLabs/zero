@@ -60,16 +60,21 @@ module abstractHub {
     }
 
   /// The moves no client asks for: the queue goes out with a flush; an entry
-  /// out with it is settled; what is kept comes back; everything is lost.
+  /// out with it is settled, with every queued entry of its txid; what is
+  /// kept comes back; everything is lost.
   pure def take(h: AHub): AHub = { queue: Set(), held: h.held.union(h.queue) }
   pure def settle(h: AHub, payload: Payload): AHub = { ...h, held: h.held.exclude(Set(payload)) }
+  pure def settleWithCopy(h: AHub, payload: Payload): AHub = {
+    queue: h.queue.filter(other => not(sharesTxid(payload, other))),
+    held: h.held.exclude(Set(payload)),
+  }
   pure def giveBack(h: AHub, kept: Set[Payload]): AHub = { queue: h.queue.union(kept), held: Set() }
 
   pure def isInternal(h: AHub, after: AHub): bool =
     or {
       after == h,
       after == h.take(),
-      h.held.exists(payload => after == h.settle(payload)),
+      h.held.exists(payload => after == h.settle(payload) or after == h.settleWithCopy(payload)),
       after.held == Set() and after.queue.subseteq(h.queue.union(h.held)) and h.queue.subseteq(after.queue),
       after == emptyAHub,
     }

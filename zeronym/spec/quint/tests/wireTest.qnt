@@ -41,7 +41,7 @@ module wireTest {
     tuples(BODIES, HEIGHTS).map(((body, height)) => WFound({ body: body, height: height }))
       .union(Set(WNotFound, WError))
 
-  pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight)
+  pure val REFUSALS = Set(TipStale, HubDraining, ExpiryTooTight, SpentProof)
 
   /// Rendering an honest outcome and reading it back gives what the
   /// outcome means.
@@ -96,14 +96,17 @@ module wireTest {
   run errorIsNeverNotFoundTest =
     assert(QUERIES.forall(query => interpretReply(WError, query) == Unavailable))
 
-  /// A draining hub refuses under the queue-full code; a fresh admission
-  /// and a duplicate are one acceptance. Every refusal has its own code.
+  /// A draining hub and a spent proof refuse under the queue-full code; a
+  /// fresh admission and a duplicate are one acceptance. Every other refusal
+  /// has its own code.
   run ackRenderingTest = all {
     assert(renderAck(Refused(HubDraining)) == WRefused(WQueueFull)),
+    assert(renderAck(Refused(SpentProof)) == WRefused(WQueueFull)),
     assert(renderAck(Admitted) == WAccepted),
     assert(renderAck(Duplicate) == WAccepted),
     assert(REFUSALS.forall(refusal => renderAck(Refused(refusal)) != WAccepted)),
     assert(tuples(REFUSALS, REFUSALS).forall(((left, right)) =>
-      renderAck(Refused(left)) == renderAck(Refused(right)) implies left == right)),
+      and { renderAck(Refused(left)) == renderAck(Refused(right)), renderAck(Refused(left)) != WRefused(WQueueFull) }
+        implies left == right)),
   }
 }

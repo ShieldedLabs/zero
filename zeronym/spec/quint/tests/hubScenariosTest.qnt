@@ -26,11 +26,11 @@ module hubScenariosTest {
 
   /// What an honest hub does with a submission of `payload` now.
   def honestly(payload: Payload): HubResult =
-    hub(h, SubmitHInput({ nonce: 0, payload: payload }))
+    hub(h, SubmitHInput({ nonce: 0, payload: payload, revealed: false }))
 
   /// The decision an honest hub would give `payload` now.
   def decision(payload: Payload): AckKind =
-    admission(h, payload)
+    admission(h, payload, false)
 
   /// A submission of `payload` reaches the hub, which acts as it should.
   action deliver(payload: Payload): bool =

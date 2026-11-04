@@ -66,10 +66,23 @@ module types {
       | Some(expiry) => expiry >= payload.created + minWalletExpiry
     }
 
+  /// Whether the hub can read Orchard proofs in `payload`, and so can burn
+  /// them: it parses and touches Orchard. Only such a payload has bundle keys.
+  pure def hasProof(payload: Payload): bool =
+    payload.class == OrchardTouching and isSome(payload.txid)
+
   /// Whether two payloads are different bytes with the same transaction id.
   pure def areTwins(left: Payload, right: Payload): bool =
     and {
       left.id != right.id,
+      isSome(left.txid),
+      left.txid == right.txid,
+    }
+
+  /// Whether both payloads carry one txid. A payload with none shares nothing,
+  /// so a burn has no key to spread to it. A re-signing keeps the txid.
+  pure def sharesTxid(left: Payload, right: Payload): bool =
+    and {
       isSome(left.txid),
       left.txid == right.txid,
     }
@@ -131,16 +144,19 @@ module types {
       | _ => answer
     }
 
-  /// An indexer's verdict on one broadcast transaction. `Retryable` means
-  /// nothing judged it: the indexer could not be reached or could not be read.
-  type Verdict = Accepted | AlreadyKnown | Rejected | Retryable
+  /// An indexer's verdict on one broadcast transaction. `AlreadyKnown` is a
+  /// mempool's, `AlreadyMined` names a block. `Retryable` means nothing judged
+  /// it: the indexer could not be reached or could not be read.
+  type Verdict = Accepted | AlreadyKnown | AlreadyMined | Rejected | Retryable
 
   // ------------------------------------------------------------------------
   // Hub
   // ------------------------------------------------------------------------
 
   /// Why a hub refuses a submission, in the order admission checks them.
-  type Refusal = TipStale | HubDraining | ExpiryTooTight
+  /// `SpentProof`: the payload's proofs are mined, or this hub published them
+  /// to a rejection or a mined verdict (`Refusal::Rejected`).
+  type Refusal = TipStale | HubDraining | ExpiryTooTight | SpentProof
 
   /// A hub's decision on a submission. `Duplicate` is a success: the bytes are
   /// already queued here.
