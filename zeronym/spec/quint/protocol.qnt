@@ -827,9 +827,11 @@ module protocol {
     },
   }
 
-  /// A flush begins: the whole queue goes out at once. A Byzantine hub keeps
+  /// A flush begins: the whole queue goes out at once, once the last flush has
+  /// ended, as the real hub's `flush == Idle` requires. A Byzantine hub keeps
   /// the schedule, so these steps are the same whatever its role.
   action hubTake = all {
+    s.hub.held == Set(),
     s.hub.queue != Set(),
     commit({ ...s, hub: s.hub.take() }),
   }

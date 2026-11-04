@@ -51,8 +51,8 @@ failures=0
 # Rows run JOBS at a time, each writing its result lines to a file of its own
 # and, once it has run to the end, its exit status to a second file; `finish`
 # prints them in the order the rows were written and counts the failures. A
-# row with no status was killed before it finished, and is a failure whatever
-# it printed.
+# row with no status was killed before it finished, and one with a nonzero
+# status failed; either is a failure whatever it printed.
 results=$(mktemp -d)
 trap 'rm -rf "$results"' EXIT
 queued=0
@@ -78,6 +78,9 @@ finish() {
     failures=$((failures + $(grep -c '^FAIL' "$file")))
     if [ ! -s "$file.status" ]; then
       echo "FAIL  row $(basename "$file"): killed before it finished"
+      failures=$((failures + 1))
+    elif [ "$(cat "$file.status")" != 0 ]; then
+      echo "FAIL  row $(basename "$file"): exited $(cat "$file.status")"
       failures=$((failures + 1))
     fi
     rm -f "$file" "$file.status"
