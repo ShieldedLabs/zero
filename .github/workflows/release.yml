@@ -95,14 +95,14 @@ jobs:
           fail=0
           if (( zcashd_halt - tip < min_runway )); then
             echo "::error::zcashd halts at ${zcashd_halt}, under 4 weeks past the estimated mainnet" \
-              "tip (${tip}). Bump APPROX_RELEASE_HEIGHT in ${zcashd_h} (MAINTENANCE.md," \
+              "tip (${tip}). Bump APPROX_RELEASE_HEIGHT in ${zcashd_h} (RELEASING.md," \
               "Pre-release checklist), push, then re-dispatch."
             fail=1
           fi
           if (( zebra_halt - tip < min_runway )); then
             echo "::error::zebra halts at ${zebra_halt}, under 4 weeks past the estimated mainnet" \
               "tip (${tip}). Re-set ESTIMATED_RELEASE_HEIGHT in ${zebra_rs} to the newest" \
-              "upstream zebra release's value, or pull that tag (MAINTENANCE.md," \
+              "upstream zebra release's value, or pull that tag (RELEASING.md," \
               "Pre-release checklist), push, then re-dispatch."
             fail=1
           fi

@@ -180,37 +180,9 @@ zebra's own crates. Upstream zebra does not enforce its store in CI, so expect
 it stale on pulls; zallet and librustzcash enforce theirs (`audits.yml`) and
 should arrive green.
 
-## Release changelog
+## Releasing
 
-`CHANGELOG.md` at the repo root carries one `## vN` section per release:
-grouped one-liners (Security / Fixed / Performance / Deploy / Testing / CI /
-Docs as applicable), succinct and complete, with commit SHAs. `release.yml`
-refuses to release unless a non-empty section for the version exists, and
-embeds it in the GitHub release body. Stage entries under `## Unreleased` as
-work lands; cutting a release means retitling that section to
-`## vN - YYYY-MM-DD`, pushing, then dispatching the workflow.
-
-## Pre-release checklist
-
-Both node forks halt on mainnet at a hardcoded height that only moves when
-someone edits it: v20 through v27 all shipped v20's zcashd value and shared one
-halt block (3,471,448, ~2026-09-04), noticed two days ahead. Before retitling
-the changelog:
-
-1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to
-   the current mainnet height plus a ship-day buffer (about 1,150 blocks per
-   day). The halt is 7 weeks of blocks (56,448) later; put that height and its
-   approximate date in the changelog entry, as v28 does. The same constant
-   seeds the default `signrawtransaction` branch id, so never set it past a
-   pending upgrade's activation height.
-2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER`
-   days of blocks in `zebra/zebrad/src/components/sync/end_of_support.rs`.
-   Zero carries that height as a `[zero]` line pinned to the newest upstream
-   zebra release's value: re-set it (or pull that tag), then verify the
-   resulting halt is comfortably after the next planned release.
-3. `release.yml` refuses to dispatch when either halt is under 4 weeks past
-   the mainnet tip (estimated from a fixed block anchor and the wall clock,
-   no network access). That is a floor, not a substitute for steps 1 and 2.
+The release changelog and the pre-release checklist live in [RELEASING.md](RELEASING.md).
 
 ## Upstreaming (upstream flow)
 
