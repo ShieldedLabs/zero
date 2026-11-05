@@ -33,7 +33,9 @@
 //! * **One entry per proof, and one publish per proof.** Entries are keyed on
 //!   their payload hash AND on their bundle keys, so re-signing one proof
 //!   collapses into the held entry. A bundle key is burned on a unanimous
-//!   `AlreadyMined` or `Rejected`. A split answer is put back.
+//!   `AlreadyMined` or `Rejected`, or on a later unanimous `Anchor` once the
+//!   tip is fresh and the observed height is above the mark. A keyless
+//!   `Anchor` on that path burns the payload hash.
 //! * **Bytes are the budget, not entries.** Real Orchard migrations are 2 to
 //!   16 KB, so fixed-size slots would waste most of the budget and hand an
 //!   attacker a cheaper occupancy attack than the memory attack.
@@ -109,9 +111,9 @@ pub const TRANSPARENT_LANE_ENTRIES: usize = 112;
 /// traffic here is close to zero while hub and shim share one parser.
 pub const UNVERIFIED_LANE_ENTRIES: usize = 16;
 
-/// How many bundle keys the hub remembers having published to a verdict.
+/// Cap for the burn set and for the anchor-mark set.
 ///
-/// Oldest first out, about 100 MB at the cap, and lost on restart.
+/// Each is oldest first out, about 100 MB at the cap, and lost on restart.
 pub const MAX_BURNED_KEYS: usize = 1 << 20;
 
 /// How many admissions may verify proofs at once.
@@ -144,8 +146,10 @@ fn lane_index(lane: Lane) -> usize {
 
 /// How many flushes may put one entry back before it is given up on.
 ///
-/// A unanimous `AlreadyMined` or `Rejected` is a burn. A split answer is put
-/// back, and this counts those flushes on the entry. A resend starts at zero.
+/// A unanimous `AlreadyMined` or `Rejected` is a burn, and so is a later
+/// unanimous `Anchor` once the tip is fresh and the observed height is above
+/// the mark. A split answer and an `Anchor` that is not due are put back, and
+/// this counts those flushes on the entry. A resend starts at zero.
 /// Eight flushes is a few hours at the production cadence.
 pub const MAX_REQUEUE_ATTEMPTS: u32 = 8;
 
@@ -259,6 +263,20 @@ struct Inner {
     /// Bundle key to the payload hash of the entry that holds it.
     bundle_keys: HashMap<[u8; 32], [u8; 32]>,
     burned: Burned,
+    /// Keys seen in a unanimous `Anchor`, with the observed height of that
+    /// flush. A later unanimous `Anchor` burns when the tip is fresh and the
+    /// observed height is above the mark. A later `Accepted` does not remove a
+    /// key. A burn does.
+    anchored: AnchorMarks,
+}
+
+/// Keys an anchor mark tracks. A keyless entry uses the hash of its bytes.
+fn anchor_keys(entry: &Entry) -> Vec<[u8; 32]> {
+    if entry.bundle_keys.is_empty() {
+        vec![entry.key]
+    } else {
+        entry.bundle_keys.clone()
+    }
 }
 
 /// Whether `spends` is a TEX second leg of `parent_txid`: exactly one input,
@@ -312,6 +330,21 @@ impl Inner {
             self.bundle_keys.remove(bundle_key);
         }
         Some(entry)
+    }
+
+    fn forget_anchor(&mut self, entry: &Entry) {
+        for key in anchor_keys(entry) {
+            self.anchored.forget(&key);
+        }
+    }
+
+    fn remember_burn(&mut self, key: [u8; 32]) {
+        self.burned.insert(key);
+        if let Some(resident) = self.bundle_keys.get(&key).copied() {
+            self.remove(&resident);
+        } else if self.entries.contains_key(&key) {
+            self.remove(&key);
+        }
     }
 
     /// Whether any of these bundle keys is already held.
@@ -371,11 +404,15 @@ impl Inner {
                 txid: self.entries.get(held).and_then(|entry| entry.txid.clone()),
             });
         }
-        if inspected
-            .bundle_keys
-            .iter()
-            .any(|bundle_key| self.burned.contains(bundle_key))
-        {
+        let burned = if inspected.bundle_keys.is_empty() {
+            self.burned.contains(key)
+        } else {
+            inspected
+                .bundle_keys
+                .iter()
+                .any(|bundle_key| self.burned.contains(bundle_key))
+        };
+        if burned {
             return Err(Admission::Refused(Refusal::Rejected));
         }
 
@@ -404,7 +441,11 @@ impl Inner {
     }
 }
 
-/// Bundle keys this hub has published to a verdict, oldest first out.
+/// Oldest first out, capped at [`MAX_BURNED_KEYS`].
+///
+/// The burn set holds bundle keys from a unanimous `AlreadyMined` or
+/// `Rejected`, and the keys of an `Anchor` that burns. A keyless `Anchor`
+/// burn stores the payload hash.
 #[derive(Default)]
 struct Burned {
     keys: HashSet<[u8; 32]>,
@@ -425,6 +466,39 @@ impl Burned {
                 self.keys.remove(&oldest);
             }
         }
+    }
+}
+
+/// Anchor marks. Same FIFO and cap as [`Burned`]. An existing key keeps the
+/// height it was first recorded at.
+#[derive(Default)]
+struct AnchorMarks {
+    height: HashMap<[u8; 32], u32>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl AnchorMarks {
+    fn height(&self, key: &[u8; 32]) -> Option<u32> {
+        self.height.get(key).copied()
+    }
+
+    fn insert(&mut self, key: [u8; 32], at: u32) {
+        if self.height.contains_key(&key) {
+            return;
+        }
+        self.height.insert(key, at);
+        self.order.push_back(key);
+        if self.order.len() > MAX_BURNED_KEYS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.height.remove(&oldest);
+            }
+        }
+    }
+
+    /// Drop `key` from the map. A consumed key may stay in `order` until it
+    /// reaches the front, and its eviction drops a later mark for the same key.
+    fn forget(&mut self, key: &[u8; 32]) {
+        self.height.remove(key);
     }
 }
 
@@ -484,6 +558,7 @@ impl Queue {
                 lanes: [0; 3],
                 bundle_keys: HashMap::new(),
                 burned: Burned::default(),
+                anchored: AnchorMarks::default(),
             }),
             max_bytes,
             draining: std::sync::atomic::AtomicBool::new(false),
@@ -665,7 +740,8 @@ impl Queue {
 
     /// Burn bundle keys from a unanimous `AlreadyMined` or `Rejected`.
     ///
-    /// A split `Rejected` is put back, so it is not passed here. An accepted or
+    /// The anchor mark for each entry is removed. A keyless entry has no bundle
+    /// key, so this does not store its payload hash. An accepted or
     /// already-known entry is not passed here.
     ///
     /// A resend admitted while the batch was out holds the same proofs, and the
@@ -673,11 +749,50 @@ impl Queue {
     pub fn burn<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>) {
         let mut inner = self.lock();
         for entry in entries {
+            inner.forget_anchor(entry);
             for bundle_key in &entry.bundle_keys {
-                inner.burned.insert(*bundle_key);
-                if let Some(resident) = inner.bundle_keys.get(bundle_key).copied() {
-                    inner.remove(&resident);
-                }
+                inner.remember_burn(*bundle_key);
+            }
+        }
+    }
+
+    /// Burn a unanimous `Anchor` that is due. A keyless entry is stored by its
+    /// payload hash. The anchor mark for each entry is removed.
+    pub fn burn_anchor<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>) {
+        let mut inner = self.lock();
+        for entry in entries {
+            inner.forget_anchor(entry);
+            for key in anchor_keys(entry) {
+                inner.remember_burn(key);
+            }
+        }
+    }
+
+    /// Whether a unanimous `Anchor` for `entry` is a burn at `height`.
+    ///
+    /// The tip must be fresh, and `height` must be above the observed height
+    /// stored with a marked key. Any one such key is enough.
+    pub fn anchor_due(&self, entry: &Entry, height: u32, fresh: bool) -> bool {
+        if !fresh {
+            return false;
+        }
+        let inner = self.lock();
+        anchor_keys(entry).iter().any(|key| {
+            inner
+                .anchored
+                .height(key)
+                .is_some_and(|marked| height > marked)
+        })
+    }
+
+    /// Record a unanimous `Anchor` at `height`. Called before [`Self::requeue`],
+    /// so a returning copy dropped because a resend is already resident still
+    /// leaves its keys here. A key already recorded keeps its height.
+    pub fn note_anchor<'a>(&self, entries: impl IntoIterator<Item = &'a Entry>, height: u32) {
+        let mut inner = self.lock();
+        for entry in entries {
+            for key in anchor_keys(entry) {
+                inner.anchored.insert(key, height);
             }
         }
     }
@@ -713,10 +828,9 @@ impl Queue {
             }
             // Burned while this entry was out, through another signing judged
             // in the same window: the burn set refuses these proofs.
-            if entry
-                .bundle_keys
+            if anchor_keys(&entry)
                 .iter()
-                .any(|bundle_key| inner.burned.contains(bundle_key))
+                .any(|key| inner.burned.contains(key))
             {
                 continue;
             }
@@ -739,7 +853,10 @@ impl Queue {
             }
             if entry.attempts > MAX_REQUEUE_ATTEMPTS {
                 // Dropped, never burned. A burn is a unanimous AlreadyMined or
-                // Rejected. A split Rejected is put back. A resend starts clean.
+                // Rejected, or a later unanimous Anchor once the tip is fresh
+                // and the observed height is above the mark. A split Rejected
+                // is put back, and so is an Anchor that is not yet due. A
+                // resend starts clean.
                 out.dropped_exhausted += 1;
                 continue;
             }
@@ -1109,6 +1226,86 @@ mod tests {
             );
         }
         assert!(admitted(q.admit(PROVEN_B, 100, N, MARGIN)));
+    }
+
+    #[test]
+    fn any_one_marked_bundle_key_is_the_anchor_repeat() {
+        let q = Queue::new();
+        let marked = [1u8; 32];
+        let fresh = [2u8; 32];
+        let entry = Entry {
+            key: [3u8; 32],
+            txid: None,
+            expiry: None,
+            tx_bytes: Zeroizing::new(vec![1]),
+            attempts: 0,
+            received_height: 100,
+            lane: Lane::Proven,
+            bundle_keys: vec![marked],
+            transparent_outputs: 0,
+            has_child: false,
+            spends: Vec::new(),
+        };
+        q.note_anchor([&entry], 100);
+        let beside = Entry {
+            key: [4u8; 32],
+            bundle_keys: vec![marked, fresh],
+            tx_bytes: Zeroizing::new(vec![2]),
+            ..entry
+        };
+        assert!(q.anchor_due(&beside, 101, true));
+        let only_fresh = Entry {
+            key: [5u8; 32],
+            bundle_keys: vec![fresh],
+            ..beside
+        };
+        assert!(!q.anchor_due(&only_fresh, 101, true));
+    }
+
+    #[test]
+    fn an_anchor_mark_burns_only_after_the_height_rises_on_a_fresh_tip() {
+        let q = Queue::new();
+        let entry = Entry {
+            key: [7u8; 32],
+            txid: None,
+            expiry: None,
+            tx_bytes: Zeroizing::new(vec![1]),
+            attempts: 0,
+            received_height: 100,
+            lane: Lane::Proven,
+            bundle_keys: vec![[8u8; 32]],
+            transparent_outputs: 0,
+            has_child: false,
+            spends: Vec::new(),
+        };
+        q.note_anchor([&entry], 100);
+        assert!(!q.anchor_due(&entry, 100, true));
+        assert!(!q.anchor_due(&entry, 101, false));
+        assert!(q.anchor_due(&entry, 101, true));
+        q.note_anchor([&entry], 105);
+        assert!(q.anchor_due(&entry, 101, true));
+    }
+
+    #[test]
+    fn a_burn_removes_the_anchor_mark_and_a_keyless_rejection_does_not_store_the_hash() {
+        let q = Queue::new();
+        let payload = vec![9u8; 64];
+        assert!(admitted(q.admit(&payload, 100, N, MARGIN)));
+        let held = q.drain_shuffled();
+        q.note_anchor(&held, 100);
+        assert!(q.anchor_due(&held[0], 101, true));
+        q.burn(&held);
+        assert!(!q.anchor_due(&held[0], 101, true));
+        assert!(admitted(q.admit(&payload, 100, N, MARGIN)));
+
+        let held = q.drain_shuffled();
+        q.note_anchor(&held, 100);
+        q.burn_anchor(&held);
+        assert!(!q.anchor_due(&held[0], 101, true));
+        assert_eq!(
+            q.admit(&payload, 100, N, MARGIN),
+            Admission::Refused(Refusal::Rejected)
+        );
     }
 
     #[test]
