@@ -59,9 +59,9 @@ wrong shape, not merely an unbuilt one.
   (`GetBlockRangeNullifiers`): about a minute from cold on mainnet (measured
   2026-10-29), then every 30 seconds. Admission does not wait for it. The check
   is on when at least two views are current and not full, or the single view
-  is, when only one indexer is configured. A full view abstains. The log says
-  `nullifier set synced` when it is on, and `nullifier check is off` with
-  `reason=stale` or `reason=quorum` when copies pass.
+  is, when only one indexer is configured. A full view and a view that is not
+  current abstain. The log says `nullifier set synced` when it is on, and
+  `nullifier check is off` with `reason=quorum` when copies pass.
 - **Flushes** the batch on a cadence, broadcasting every member to **every**
   configured indexer — a migration that entered only one mempool is one outage
   away from never being mined.
