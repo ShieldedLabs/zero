@@ -900,9 +900,11 @@ fn classify_publish_error(message: &str) -> Publish {
         // Zebra's spelling of a spent note (`orchard double-spend: duplicate
         // nullifier: ...`), which lacks the `bad txns` prefix and would
         // otherwise match the already-known pattern "duplicate". Spent in a
-        // block, or twice in these bytes: permanent. A conflict with a
-        // mempool transaction (`in finalized state: false`) can clear, and a
-        // missing prevout (`possible double-spend`) stays retryable.
+        // block, or twice in these bytes: permanent. `in finalized state:
+        // false` is the non-finalized best chain, so that string falls through
+        // to `AlreadyKnown`. A mempool-versus-mempool conflict does not contain
+        // `duplicate`. A missing prevout (`possible double-spend`) stays
+        // retryable.
         Publish::Rejected {
             reason: message.to_string(),
         }
@@ -1092,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn zebras_double_spend_is_a_rejection_not_already_known() {
+    fn zebras_double_spend_is_a_rejection_except_on_the_non_finalized_chain() {
         // zebra-consensus's spellings, bare and as the mempool wraps them.
         for message in [
             "orchard double-spend: duplicate nullifier: Nullifier(..)",
@@ -1104,17 +1106,20 @@ mod tests {
                 "{message:?}"
             );
         }
-        // A conflict with a mempool transaction can clear, and a missing
-        // prevout is a parent that has not arrived yet.
-        for message in [
-            "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: false",
-            "missing transparent output: possible double-spend of OutPoint(..)",
-        ] {
-            assert!(
-                !matches!(classify_publish_error(message), Publish::Rejected { .. }),
-                "{message:?}"
-            );
-        }
+        // `in finalized state: false` is the non-finalized best chain. The arm
+        // still returns AlreadyKnown. A missing prevout stays retryable.
+        assert_eq!(
+            classify_publish_error(
+                "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: false"
+            ),
+            Publish::AlreadyKnown
+        );
+        assert!(matches!(
+            classify_publish_error(
+                "missing transparent output: possible double-spend of OutPoint(..)"
+            ),
+            Publish::Retryable { .. }
+        ));
     }
 
     #[test]
