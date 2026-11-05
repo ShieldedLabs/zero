@@ -133,25 +133,30 @@ impl std::error::Error for GrpcStatusError {}
 /// re-submissions are a fresh timing signal tied to one transaction.
 ///
 /// `Rejected` and `Retryable` are both failures, and the split between them is
-/// what the batcher acts on. `Rejected` is a VERDICT: the indexer took the
-/// request and said the transaction is not acceptable, so offering it again
-/// would only buy the same answer. `Retryable` means nothing judged the
-/// transaction at all: the connection was refused or reset, TLS or the gRPC
-/// call timed out, the endpoint said it was unavailable or overloaded, or it
-/// answered something this client could not read. Those are the failures a
-/// later flush can recover from, and the batcher holds the entry for one.
+/// what the batcher acts on. `Rejected` is a verdict: the indexer read the
+/// transaction and refused it. `Retryable` means this endpoint did not deliver
+/// one: the connection was refused or reset, TLS or the gRPC call timed out,
+/// the endpoint said it was unavailable or overloaded, or it answered something
+/// this client could not read. `Anchor` is an unknown anchor.
 ///
-/// `AlreadyMined` is the reply that names a block: the batcher burns its
-/// proofs, so a copy of a mined transaction buys one window. `AlreadyKnown` is
-/// every other already-known reply, a mempool among them, and leaves the
-/// proofs unburned so a resend can follow an eviction.
+/// `AlreadyMined` names a block. `AlreadyKnown` is every other already-known
+/// reply, a mempool among them, and leaves the proofs unburned so a resend can
+/// follow an eviction. A unanimous `Anchor` is not yet a burn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Publish {
-    Accepted { txid: String },
+    Accepted {
+        txid: String,
+    },
     AlreadyKnown,
     AlreadyMined,
-    Rejected { reason: String },
-    Retryable { reason: String },
+    Rejected {
+        reason: String,
+    },
+    /// A unanimous unknown anchor. Not yet a burn.
+    Anchor,
+    Retryable {
+        reason: String,
+    },
 }
 
 /// gRPC INVALID_ARGUMENT and FAILED_PRECONDITION: the two statuses under which
@@ -681,38 +686,75 @@ fn classify_send_response(resp: &SendResponse) -> Publish {
     classify_publish_error(&resp.error_message)
 }
 
-/// Fold one verdict per endpoint into the verdict for the transaction.
+/// Reason on a split [`Publish::Retryable`] that had no transport reason.
+pub(crate) const SPLIT_VERDICT: &str = "split verdict";
+
+/// Reason on a [`Publish::Retryable`] for a node message this client does not
+/// read. A [`Publish::Retryable`] reason is logged, so it is a fixed string or a
+/// gRPC status code, and never text a node or an indexer sent.
+const UNRECOGNISED_NODE_RESPONSE: &str = "unrecognised node response";
+
+/// Fold one verdict per configured endpoint into the verdict for the transaction.
 ///
-/// Any acceptance wins: one endpoint taking it is enough for the transaction to
-/// reach the network. Already-known beats everything else: the network has it.
-/// Already-mined ranks below every other already-known reply, so the batcher
-/// burns on it only when every endpoint that answered says mined or rejected:
-/// one endpoint cannot burn a transaction another just took into its mempool.
-/// An endpoint that did not answer has no vote.
-/// A rejection beats a transport failure, and that ordering is deliberate
-/// rather than a tie-break. The batcher holds a `Retryable` entry for the next
-/// flush, so if an unreachable endpoint could outvote a live one's verdict, a
-/// single dead endpoint in the list would keep every doomed transaction resident
-/// until it expired, and an unparseable payload never expires (queue.rs, REVIEW
-/// #5): junk plus one dead endpoint would fill the byte budget for everyone. A
-/// verdict from any endpoint that answered is final, exactly as it is today
-/// with one endpoint.
+/// `broadcast` passes one verdict per endpoint. A failed call is [`Publish::Retryable`].
+/// There is no absent slot.
+///
+/// Any [`Publish::Accepted`] wins. Otherwise any [`Publish::AlreadyKnown`] wins.
+/// Otherwise a burn is every verdict [`Publish::AlreadyMined`] or
+/// [`Publish::Rejected`]: [`Publish::AlreadyMined`] if any of them is, otherwise
+/// one [`Publish::Rejected`]. Otherwise a unanimous [`Publish::Anchor`] stays
+/// [`Publish::Anchor`]. Anything else is [`Publish::Retryable`]. An empty vec is
+/// [`Publish::Rejected`] with reason `no endpoints configured`. A split
+/// [`Publish::Retryable`] keeps a transport reason when an endpoint returned
+/// one, and never a [`Publish::Rejected`] reason.
 fn best_of(outcomes: Vec<Publish>) -> Publish {
-    fn rank(outcome: &Publish) -> u8 {
-        match outcome {
-            Publish::Accepted { .. } => 4,
-            Publish::AlreadyKnown => 3,
-            Publish::AlreadyMined => 2,
-            Publish::Rejected { .. } => 1,
-            Publish::Retryable { .. } => 0,
-        }
-    }
-    outcomes
-        .into_iter()
-        .max_by_key(rank)
-        .unwrap_or(Publish::Rejected {
+    if outcomes.is_empty() {
+        return Publish::Rejected {
             reason: "no endpoints configured".into(),
-        })
+        };
+    }
+    if let Some(accepted) = outcomes
+        .iter()
+        .find(|outcome| matches!(outcome, Publish::Accepted { .. }))
+    {
+        return accepted.clone();
+    }
+    if outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, Publish::AlreadyKnown))
+    {
+        return Publish::AlreadyKnown;
+    }
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, Publish::AlreadyMined | Publish::Rejected { .. }))
+    {
+        let mut rejected = None;
+        for outcome in outcomes {
+            if matches!(outcome, Publish::AlreadyMined) {
+                return Publish::AlreadyMined;
+            }
+            if rejected.is_none() {
+                rejected = Some(outcome);
+            }
+        }
+        return rejected.unwrap_or(Publish::AlreadyMined);
+    }
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, Publish::Anchor))
+    {
+        return Publish::Anchor;
+    }
+    Publish::Retryable {
+        reason: outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                Publish::Retryable { reason } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| SPLIT_VERDICT.into()),
+    }
 }
 
 /// Map a failed `SendTransaction` call (no `SendResponse` came back) onto
@@ -755,9 +797,14 @@ fn classify_publish_failure(err: &BoxError) -> Publish {
             .and_then(|message| message.split_once(ZAINO_REJECTED))
         {
             Some((_, node_says)) => classify_publish_error(node_says.trim()),
-            None => Publish::Retryable { reason },
+            None => Publish::Retryable {
+                reason: format!("grpc-status {}", status.code),
+            },
         },
-        _ => Publish::Retryable { reason },
+        Some(status) => Publish::Retryable {
+            reason: format!("grpc-status {}", status.code),
+        },
+        None => Publish::Retryable { reason },
     }
 }
 
@@ -798,17 +845,27 @@ const PERMANENT_REJECTIONS: &[&str] = &[
     // The inputs are gone. A retry re-offers bytes that can never be valid.
     "conflict",
     "already spent",
-    // An unknown anchor: zebra's spelling, which lacks the `bad txns` prefix
-    // zcashd's `bad-txns-orchard-unknown-anchor` carries. The one entry here a
-    // waiting node could change, for a recent root at a node behind the tip.
-    // Listed on purpose: admission leaves the anchor unchecked, so a proof
-    // against an anchor the chain never had fails the same way at every node,
-    // and retried it would hold a proven slot for every attempt.
-    "unknown sprout anchor",
-    "unknown sapling anchor",
-    "unknown orchard anchor",
-    "unknown ironwood anchor",
 ];
+
+/// Both word orders, for each pool. Matched before [`PERMANENT_REJECTIONS`]:
+/// zcashd's `bad-txns-orchard-unknown-anchor` folds to a string that contains
+/// `orchard unknown anchor` and also `bad txns`.
+const UNKNOWN_ANCHORS: &[&str] = &[
+    "unknown sprout anchor",
+    "sprout unknown anchor",
+    "unknown sapling anchor",
+    "sapling unknown anchor",
+    "unknown orchard anchor",
+    "orchard unknown anchor",
+    "unknown ironwood anchor",
+    "ironwood unknown anchor",
+];
+
+fn is_unknown_anchor(message: &str) -> bool {
+    UNKNOWN_ANCHORS
+        .iter()
+        .any(|pattern| message.contains(pattern))
+}
 
 fn classify_publish_error(message: &str) -> Publish {
     // Hyphens folded to spaces before matching. Bitcoin-derived nodes report
@@ -819,6 +876,10 @@ fn classify_publish_error(message: &str) -> Publish {
     // would be a fresh timing signal tied to one transaction, which is exactly
     // what this component exists to avoid emitting.
     let m = message.to_ascii_lowercase().replace('-', " ");
+
+    if is_unknown_anchor(&m) {
+        return Publish::Anchor;
+    }
 
     // A NAMED CONSENSUS FAILURE IS CHECKED FIRST, and the order is load-bearing.
     // `bad-txns-inputs-duplicate` is a consensus rejection that happens to
@@ -839,9 +900,11 @@ fn classify_publish_error(message: &str) -> Publish {
         // Zebra's spelling of a spent note (`orchard double-spend: duplicate
         // nullifier: ...`), which lacks the `bad txns` prefix and would
         // otherwise match the already-known pattern "duplicate". Spent in a
-        // block, or twice in these bytes: permanent. A conflict with a
-        // mempool transaction (`in finalized state: false`) can clear, and a
-        // missing prevout (`possible double-spend`) stays retryable.
+        // block, or twice in these bytes: permanent. `in finalized state:
+        // false` is the non-finalized best chain, so that string falls through
+        // to `AlreadyKnown`. A mempool-versus-mempool conflict does not contain
+        // `duplicate`. A missing prevout (`possible double-spend`) stays
+        // retryable.
         Publish::Rejected {
             reason: message.to_string(),
         }
@@ -894,7 +957,7 @@ fn classify_publish_error(message: &str) -> Publish {
         // retry, and bounding the retry at the queue, removes the need to tell
         // the two apart at all.
         Publish::Retryable {
-            reason: message.to_string(),
+            reason: UNRECOGNISED_NODE_RESPONSE.into(),
         }
     }
 }
@@ -942,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn mined_burns_only_when_every_answering_endpoint_says_mined_or_rejected() {
+    fn mined_burns_only_when_every_endpoint_says_mined_or_rejected() {
         let mined = || Publish::AlreadyMined;
         let mempool = || Publish::AlreadyKnown;
         let down = || Publish::Retryable {
@@ -957,10 +1020,42 @@ mod tests {
             best_of(vec![mined(), Publish::Accepted { txid: "t".into() }]),
             Publish::Accepted { .. }
         ));
-        // An endpoint that did not answer has no vote.
-        assert_eq!(best_of(vec![mined(), down()]), Publish::AlreadyMined);
+        // A split is not a burn.
+        assert!(matches!(
+            best_of(vec![mined(), down()]),
+            Publish::Retryable { .. }
+        ));
+        assert!(matches!(
+            best_of(vec![rejected(), down()]),
+            Publish::Retryable { .. }
+        ));
         // Mined and rejected agree: the bytes cannot be accepted.
         assert_eq!(best_of(vec![mined(), rejected()]), Publish::AlreadyMined);
+        assert_eq!(
+            best_of(vec![Publish::AlreadyMined, Publish::AlreadyMined]),
+            Publish::AlreadyMined
+        );
+        assert_eq!(
+            best_of(vec![
+                Publish::Rejected {
+                    reason: "bad-txns".into(),
+                },
+                Publish::Rejected {
+                    reason: "other".into(),
+                },
+            ]),
+            Publish::Rejected {
+                reason: "bad-txns".into(),
+            }
+        );
+        assert!(matches!(
+            best_of(vec![]),
+            Publish::Rejected { reason } if reason == "no endpoints configured"
+        ));
+        assert!(matches!(
+            best_of(vec![down(), down()]),
+            Publish::Retryable { .. }
+        ));
     }
 
     #[test]
@@ -999,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn zebras_double_spend_is_a_rejection_not_already_known() {
+    fn zebras_double_spend_is_a_rejection_except_on_the_non_finalized_chain() {
         // zebra-consensus's spellings, bare and as the mempool wraps them.
         for message in [
             "orchard double-spend: duplicate nullifier: Nullifier(..)",
@@ -1011,17 +1106,14 @@ mod tests {
                 "{message:?}"
             );
         }
-        // A conflict with a mempool transaction can clear, and a missing
-        // prevout is a parent that has not arrived yet.
-        for message in [
-            "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: false",
-            "missing transparent output: possible double-spend of OutPoint(..)",
-        ] {
-            assert!(
-                !matches!(classify_publish_error(message), Publish::Rejected { .. }),
-                "{message:?}"
-            );
-        }
+        // `in finalized state: false` is the non-finalized best chain. The arm
+        // still returns AlreadyKnown. A missing prevout stays retryable.
+        assert_eq!(
+            classify_publish_error(
+                "orchard double-spend: duplicate nullifier: Nullifier(..), in finalized state: false"
+            ),
+            Publish::AlreadyKnown
+        );
         assert!(matches!(
             classify_publish_error(
                 "missing transparent output: possible double-spend of OutPoint(..)"
@@ -1087,18 +1179,60 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_anchor_is_a_rejection_in_both_vocabularies() {
+    fn an_unknown_anchor_is_its_own_verdict_in_both_word_orders() {
         for message in [
             "16: bad-txns-orchard-unknown-anchor",
+            "16: bad-txns-sprout-unknown-anchor",
+            "16: bad-txns-sapling-unknown-anchor",
+            "16: bad-txns-ironwood-unknown-anchor",
             "unknown Orchard anchor: Root(..)",
             "consensus validation: unknown Orchard anchor: Root(..)",
             "unknown Ironwood anchor: Root(..)",
+            "unknown sprout anchor",
+            "unknown sapling anchor",
+            "orchard unknown anchor",
+            "sapling unknown anchor",
         ] {
-            assert!(
-                matches!(classify_publish_error(message), Publish::Rejected { .. }),
+            assert_eq!(
+                classify_publish_error(message),
+                Publish::Anchor,
                 "{message:?}"
             );
         }
+        assert!(matches!(
+            classify_publish_error("16: bad-txns-orchard-duplicate-nullifier"),
+            Publish::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn an_anchor_beside_a_burn_verdict_is_retried() {
+        let anchor = || Publish::Anchor;
+        let rejected = || Publish::Rejected {
+            reason: "bad-txns".into(),
+        };
+        assert!(matches!(
+            best_of(vec![anchor(), rejected()]),
+            Publish::Retryable { .. }
+        ));
+        assert!(matches!(
+            best_of(vec![anchor(), Publish::AlreadyMined]),
+            Publish::Retryable { .. }
+        ));
+        assert!(matches!(
+            best_of(vec![
+                anchor(),
+                Publish::Retryable {
+                    reason: "down".into()
+                }
+            ]),
+            Publish::Retryable { .. }
+        ));
+        assert_eq!(best_of(vec![anchor(), anchor()]), Publish::Anchor);
+        assert_eq!(
+            best_of(vec![anchor(), Publish::AlreadyKnown]),
+            Publish::AlreadyKnown
+        );
     }
 
     #[test]
@@ -1248,6 +1382,42 @@ mod tests {
     }
 
     #[test]
+    fn a_retryable_reason_is_a_fixed_string_or_a_status_code() {
+        let text = "orchard verifier said: Nullifier(0123456789abcdef)";
+        assert_eq!(
+            classify_publish_error(text),
+            Publish::Retryable {
+                reason: UNRECOGNISED_NODE_RESPONSE.into(),
+            }
+        );
+        for message in [
+            format!("rejected by validator: {text}"),
+            format!("validator unreachable: {text}"),
+        ] {
+            let status: BoxError = Box::new(GrpcStatusError {
+                code: GRPC_INTERNAL.into(),
+                message: Some(message.clone()),
+            });
+            match classify_publish_failure(&status) {
+                Publish::Retryable { reason } => {
+                    assert!(!reason.contains("0123456789abcdef"), "{reason:?}")
+                }
+                other => panic!("{message:?} gave {other:?}"),
+            }
+        }
+        let status: BoxError = Box::new(GrpcStatusError {
+            code: "14".into(),
+            message: Some(text.into()),
+        });
+        assert_eq!(
+            classify_publish_failure(&status),
+            Publish::Retryable {
+                reason: "grpc-status 14".into(),
+            }
+        );
+    }
+
+    #[test]
     fn a_failure_to_reach_a_verdict_is_retryable() {
         // The shapes `unary` produces when nothing judged the transaction: the
         // three timeouts and a raw I/O error carry no gRPC status at all, and
@@ -1284,9 +1454,33 @@ mod tests {
     }
 
     #[test]
-    fn a_verdict_from_one_endpoint_beats_a_transport_failure_from_another() {
-        // Otherwise one dead endpoint would keep every doomed transaction
-        // resident until expiry, and unparseable ones forever.
+    fn a_rejection_beside_a_transport_failure_is_retried() {
+        // A burn is unanimous.
+        let node = "orchard double-spend: duplicate nullifier: Nullifier(deadbeef)";
+        assert_eq!(
+            best_of(vec![
+                Publish::Rejected {
+                    reason: node.into(),
+                },
+                Publish::Retryable {
+                    reason: "connection refused".into(),
+                },
+            ]),
+            Publish::Retryable {
+                reason: "connection refused".into(),
+            }
+        );
+        assert_eq!(
+            best_of(vec![
+                Publish::Anchor,
+                Publish::Rejected {
+                    reason: node.into(),
+                },
+            ]),
+            Publish::Retryable {
+                reason: SPLIT_VERDICT.into(),
+            }
+        );
         let outcomes = vec![
             Publish::Retryable {
                 reason: "connection refused".into(),
@@ -1295,7 +1489,12 @@ mod tests {
                 reason: "bad-txns".into(),
             },
         ];
-        assert!(matches!(best_of(outcomes), Publish::Rejected { .. }));
+        assert_eq!(
+            best_of(outcomes),
+            Publish::Retryable {
+                reason: "connection refused".into(),
+            }
+        );
 
         // And any success beats both.
         let outcomes = vec![

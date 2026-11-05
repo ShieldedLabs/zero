@@ -9493,6 +9493,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "hashlink",
  "hex",
  "http-body-util",
  "hyper 1.11.0",

@@ -23,14 +23,14 @@
 //! [`RESYNC_DEPTH`].
 //!
 //! Admission does not wait for the first read. The check is on when at least
-//! `min(2, configured endpoints)` views are not full and every such view is
-//! current. A full view abstains. The hub logs which state it is in on each
+//! `min(2, configured endpoints)` views are current. A full view and a view
+//! that is not current abstain. The hub logs which state it is in on each
 //! change.
 //!
 //! **Unanimity.** A nullifier refuses admission only when at least
-//! `min(2, configured endpoints)` views are not full, every one of those views
-//! is current, and every one of them reports it. A full view abstains. Fewer
-//! non-full views, a view that is not current, or no views, refuses nothing.
+//! `min(2, configured endpoints)` views are current and every one of them
+//! reports it. A full view and a view that is not current abstain. Fewer
+//! current views, or no views, refuses nothing.
 //! One indexer sees every transaction this hub publishes, so a single view
 //! does not refuse when another endpoint is configured.
 
@@ -196,9 +196,7 @@ impl View {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NullifierCheck {
     On,
-    /// A view that is not full is also not current.
-    Stale,
-    /// Fewer than `min(2, configured endpoints)` views are voting.
+    /// Fewer than `min(2, configured endpoints)` views are current.
     Quorum,
 }
 
@@ -206,7 +204,6 @@ impl NullifierCheck {
     fn reason(self) -> Option<&'static str> {
         match self {
             Self::On => None,
-            Self::Stale => Some("stale"),
             Self::Quorum => Some("quorum"),
         }
     }
@@ -246,12 +243,12 @@ impl ChainNullifiers {
             .collect()
     }
 
-    /// Whether enough views that are not full report one of `nullifiers` as
-    /// revealed and are current at `tip`.
+    /// Whether enough current views report one of `nullifiers` as revealed.
     ///
-    /// A full view abstains. At least `min(2, configured endpoints)` views
-    /// must be voting. Every voting view must be current and must contain the
-    /// candidate. Fewer voting views, or no views, returns false.
+    /// A view that is not current at `tip` abstains, and so does a full view.
+    /// At least `min(2, configured endpoints)` views must be voting, and every
+    /// voting view must contain the candidate. Fewer voting views, or no views,
+    /// returns false.
     pub fn any_revealed(&self, nullifiers: &[[u8; 32]], tip: u32) -> bool {
         if self.views.is_empty() {
             return false;
@@ -260,13 +257,10 @@ impl ChainNullifiers {
         let mut candidates: Vec<Held> = nullifiers.iter().map(held).collect();
         let mut voting = 0usize;
         for view in &views {
-            if view.full {
+            if !view.is_current(tip) {
                 continue;
             }
             voting += 1;
-            if !view.is_current(tip) {
-                return false;
-            }
             candidates.retain(|nullifier| view.nullifiers.contains(nullifier));
             if candidates.is_empty() {
                 return false;
@@ -275,24 +269,13 @@ impl ChainNullifiers {
         voting >= voters_required(views.len())
     }
 
-    /// On, or why it is off. A voting view that is not current is `Stale`.
-    /// Fewer than `min(2, configured endpoints)` voting views is `Quorum`.
+    /// On, or `Quorum` when fewer than `min(2, configured endpoints)` views
+    /// are current.
     fn nullifier_check(&self, tip: u32) -> NullifierCheck {
         if self.views.is_empty() {
             return NullifierCheck::Quorum;
         }
-        let views = self.locked();
-        let mut voting = 0usize;
-        for view in &views {
-            if view.full {
-                continue;
-            }
-            if !view.is_current(tip) {
-                return NullifierCheck::Stale;
-            }
-            voting += 1;
-        }
-        if voting >= voters_required(views.len()) {
+        if self.current(tip) >= voters_required(self.views.len()) {
             NullifierCheck::On
         } else {
             NullifierCheck::Quorum
@@ -743,6 +726,24 @@ mod tests {
         stale.mark_stale(1);
         assert!(!stale.any_revealed(&[nf(1)], 101));
 
+        let one_stale = ChainNullifiers::new(3);
+        one_stale.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        one_stale.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        one_stale.record(2, 100, 101, vec![(101, vec![nf(1)])]);
+        one_stale.mark_stale(0);
+        assert!(
+            one_stale.any_revealed(&[nf(1)], 101),
+            "one stale view plus two current views that hold the candidate"
+        );
+        assert_eq!(one_stale.nullifier_check(101), NullifierCheck::On);
+
+        let stale_and_missing = ChainNullifiers::new(3);
+        stale_and_missing.record(0, 100, 101, vec![(101, vec![nf(1)])]);
+        stale_and_missing.record(1, 100, 101, vec![(101, vec![nf(1)])]);
+        stale_and_missing.record(2, 100, 101, vec![(101, vec![nf(2)])]);
+        stale_and_missing.mark_stale(0);
+        assert!(!stale_and_missing.any_revealed(&[nf(1)], 101));
+
         let lone = ChainNullifiers::new(1);
         lone.record(0, 100, 101, vec![(101, vec![nf(1)])]);
         lone.view(0).unwrap().full = true;
@@ -764,7 +765,7 @@ mod tests {
     #[test]
     fn nullifier_check_follows_the_quorum() {
         let unread = ChainNullifiers::new(3);
-        assert_eq!(unread.nullifier_check(101), NullifierCheck::Stale);
+        assert_eq!(unread.nullifier_check(101), NullifierCheck::Quorum);
 
         let set = ChainNullifiers::new(3);
         set.record(0, 100, 101, vec![]);
@@ -780,7 +781,7 @@ mod tests {
         stale.record(0, 100, 101, vec![]);
         stale.record(1, 100, 101, vec![]);
         stale.mark_stale(1);
-        assert_eq!(stale.nullifier_check(101), NullifierCheck::Stale);
+        assert_eq!(stale.nullifier_check(101), NullifierCheck::Quorum);
 
         let only = ChainNullifiers::new(1);
         only.record(0, 100, 101, vec![]);

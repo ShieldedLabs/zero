@@ -53,7 +53,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::admission::Lane;
-use crate::chain::{ChainClient, Publish};
+use crate::chain::{ChainClient, Publish, SPLIT_VERDICT};
 use crate::queue::Queue;
 use crate::tip_guard;
 use crate::BoxError;
@@ -543,9 +543,10 @@ async fn run_with_poll_interval(
 /// Publish everything held, all at once, in an unpredictable order.
 ///
 /// Returns the achieved batch size, which is the honest measure of the privacy
-/// the flush actually delivered. Entries the indexer could not be reached for
-/// are back in the queue when this returns; entries the indexer refused are
-/// gone. Public so the cadence is not the only thing that can exercise it: a
+/// the flush actually delivered. A unanimous `AlreadyMined` or `Rejected`, and
+/// a unanimous `Anchor` once the tip is fresh and the observed height is above
+/// the mark, are gone. Anything else is back in the queue.
+/// Public so the cadence is not the only thing that can exercise it: a
 /// flush is the security-critical operation here and it must be testable
 /// directly.
 pub async fn flush(
@@ -577,10 +578,16 @@ pub async fn flush(
     let mut rejected = 0usize;
     let mut sample_failure: Option<String> = None;
     let mut unplaced = Vec::new();
-    // Rejected or mined entries, whose proofs this hub will refuse from now
-    // on. See `Queue::burn` for why an accepted or already-known entry stays
-    // unburned.
+    // A burn is a unanimous AlreadyMined or Rejected, or a later unanimous
+    // Anchor once the tip is fresh and the observed height is above the mark.
+    // An accepted or already-known entry stays unburned.
     let mut judged = Vec::new();
+    let mut anchor_burns = Vec::new();
+    let mut anchors = Vec::new();
+    // The verdict is judged against the height the hub held when it asked.
+    // That is the conservative choice.
+    let marked_at = tip.observed_height();
+    let fresh = !tip.is_stale();
     let proven = batch.iter().filter(|e| e.lane == Lane::Proven).count();
     let transparent = batch.iter().filter(|e| e.lane == Lane::Transparent).count();
     for (i, entry) in batch.into_iter().enumerate() {
@@ -594,8 +601,18 @@ pub async fn flush(
                 rejected += 1;
                 judged.push(entry);
             }
+            Some(Publish::Anchor) => {
+                if queue.anchor_due(&entry, marked_at, fresh) {
+                    rejected += 1;
+                    anchor_burns.push(entry);
+                } else {
+                    anchors.push(entry);
+                }
+            }
             Some(Publish::Retryable { reason }) => {
-                sample_failure.get_or_insert_with(|| reason.clone());
+                if reason != SPLIT_VERDICT {
+                    sample_failure.get_or_insert_with(|| reason.clone());
+                }
                 unplaced.push(entry);
             }
             // No verdict at all for this position cannot happen (join_all is
@@ -605,34 +622,42 @@ pub async fn flush(
         }
     }
     queue.burn(&judged);
+    queue.burn_anchor(&anchor_burns);
+    // Before requeue: a resend already resident makes requeue drop the
+    // returning copy, and the mark has to outlive that skip.
+    queue.note_anchor(&anchors, marked_at);
 
-    // A transport failure goes back into the queue for the next cadence. This is
-    // the only place such a failure can be recovered: the shim answered the
-    // wallet error_code 0 the moment the frame reached the mixnet and keeps no
-    // record, so once the entry left this queue there is no other copy anywhere
-    // that anyone will retry. Dropping it because the indexer restarted during
-    // the flush window would lose the migration outright while the wallet
-    // believes it was sent. The entry keeps its original expiry; when the
-    // indexer answers again a stale one gets the node's verdict and leaves. A
-    // Rejected verdict is not put back: the node said no, and re-offering the
-    // same bytes buys the same answer every flush until expiry.
+    // A Retryable goes back into the queue for the next cadence. This is the
+    // only place such a failure can be recovered: the shim answered the wallet
+    // error_code 0 the moment the frame reached the mixnet and keeps no record,
+    // so once the entry left this queue there is no other copy anywhere that
+    // anyone will retry. Dropping it because the indexer restarted during the
+    // flush window would lose the migration outright while the wallet believes
+    // it was sent. The entry keeps its original expiry; when the indexer
+    // answers again a stale one gets the node's verdict and leaves. A burn is
+    // a unanimous AlreadyMined or Rejected. A split Rejected is put back. A
+    // unanimous Anchor is put back. A later one burns when the tip is fresh
+    // and the observed height is above the mark.
     //
     // `observed_height`, not `admission_height`. On a stale hub the recorded
     // boundary follows the free-running estimate, which runs ahead of a stalled
     // chain. Judging a new arrival on that clock only refuses it, and the
     // wallet can rebuild; judging an acknowledged entry on it would drop one
-    // that may still be mined.
+    // that may still be mined. Read the height again: publishing can take the
+    // whole call budget, and expiry is judged on the height after it.
+    let height = tip.observed_height();
     let requeued = queue.requeue(
         unplaced,
-        tip.observed_height(),
+        height,
         params.flush_interval,
         params.mining_margin,
     );
+    let anchored = queue.requeue(anchors, height, params.flush_interval, params.mining_margin);
 
     // Aggregates only. Never a txid, never a body, never a per-entry
     // identifier: in a Nitro enclave the tracing output reaches the parent host,
     // which is exactly who this system withholds the txid from. The sample
-    // reason names an endpoint and an error, not an entry.
+    // reason is a transport failure. A split fold is not sampled.
     tracing::info!(
         flush_size = size,
         proven,
@@ -641,17 +666,26 @@ pub async fn flush(
         achieved_batch_size = achieved,
         rejected,
         requeued = requeued.held,
+        anchor_requeued = anchored.held,
         dropped_expired = requeued.dropped_expired,
         dropped_exhausted = requeued.dropped_exhausted,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "flush published"
     );
-    if requeued.held > 0 {
-        tracing::warn!(
-            requeued = requeued.held,
-            reason = sample_failure.as_deref().unwrap_or("no verdict"),
-            "indexer could not be reached for part of the batch; held for the next flush"
+    if anchored.held > 0 {
+        tracing::info!(
+            anchor_requeued = anchored.held,
+            "unknown anchor held for the next flush"
         );
+    }
+    if requeued.held > 0 {
+        if let Some(reason) = sample_failure.as_deref() {
+            tracing::warn!(
+                requeued = requeued.held,
+                reason,
+                "indexer could not be reached for part of the batch; held for the next flush"
+            );
+        }
     }
     // A SHAPE WITH NO BENIGN EXPLANATION, when there is only one endpoint.
     //
@@ -683,8 +717,15 @@ pub async fn flush(
         tracing::error!(
             dropped_expired = requeued.dropped_expired,
             dropped_exhausted = requeued.dropped_exhausted,
-            reason = sample_failure.as_deref().unwrap_or("no verdict"),
+            reason = sample_failure.as_deref().unwrap_or(SPLIT_VERDICT),
             "gave up on migrations that could not be placed; they exist nowhere else"
+        );
+    }
+    if anchored.dropped_expired > 0 || anchored.dropped_exhausted > 0 {
+        tracing::error!(
+            dropped_expired = anchored.dropped_expired,
+            dropped_exhausted = anchored.dropped_exhausted,
+            "gave up on an unknown anchor; it exists nowhere else"
         );
     }
 
@@ -1356,10 +1397,10 @@ mod tests {
                 Answer::Send(-26, "16: bad-txns-orchard-binding-signature-invalid"),
                 true,
             ),
-            // The hub leaves anchors unchecked, so an unknown anchor burns too.
+            // A first unanimous unknown anchor is put back, not burned.
             (
                 Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor"),
-                true,
+                false,
             ),
             // Mined: a copy off the chain buys one window.
             (
@@ -1390,6 +1431,277 @@ mod tests {
                 "after this verdict the proofs are burned: {burned}, got {again:?}"
             );
         }
+    }
+
+    fn refused_rejected(admission: crate::queue::Admission) -> bool {
+        matches!(
+            admission,
+            crate::queue::Admission::Refused(crate::queue::Refusal::Rejected)
+        )
+    }
+
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn error_log(max: tracing::Level) -> (tracing::subscriber::DefaultGuard, Arc<Mutex<Vec<u8>>>) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(max)
+            .with_ansi(false)
+            .with_writer(move || LogBuf(writer.clone()))
+            .finish();
+        (tracing::subscriber::set_default(subscriber), buf)
+    }
+
+    #[tokio::test]
+    async fn a_split_burn_verdict_requeues_and_a_resend_is_not_rejected() {
+        const PROVEN: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
+        for answer in [
+            Answer::Send(-27, "transaction already in block chain"),
+            Answer::Send(-26, "16: bad-txns-orchard-binding-signature-invalid"),
+        ] {
+            let live = spawn_mock_indexer(vec![answer], Duration::ZERO).await;
+            let chain = Arc::new(
+                ChainClient::new(vec![live.addr, unreachable_addr().await], None).unwrap(),
+            );
+            let queue = queue_holding(&[PROVEN.to_vec()]);
+            let _ = flush(&queue, &chain, &test_tip(), BatchParams::default()).await;
+            assert_eq!(queue.len(), 1);
+            assert!(!refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_split_rejection_does_not_log_the_node_text() {
+        const MARK: &str = "Nullifier(deadbeef)";
+        let live = spawn_mock_indexer(
+            vec![Answer::Send(
+                -26,
+                "orchard double-spend: duplicate nullifier: Nullifier(deadbeef)",
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let chain =
+            Arc::new(ChainClient::new(vec![live.addr, unreachable_addr().await], None).unwrap());
+        let queue = queue_holding(&[junk(4)]);
+        let (_guard, buf) = error_log(tracing::Level::WARN);
+        let _ = flush(&queue, &chain, &test_tip(), BatchParams::default()).await;
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(!text.contains(MARK), "{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_split_verdict_is_not_logged_as_unreachable() {
+        let anchor = spawn_mock_indexer(
+            vec![Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor")],
+            Duration::ZERO,
+        )
+        .await;
+        let rejected = spawn_mock_indexer(
+            vec![Answer::Send(
+                -26,
+                "16: bad-txns-orchard-binding-signature-invalid",
+            )],
+            Duration::ZERO,
+        )
+        .await;
+        let chain = Arc::new(ChainClient::new(vec![anchor.addr, rejected.addr], None).unwrap());
+        let queue = queue_holding(&[junk(5)]);
+        let (_guard, buf) = error_log(tracing::Level::WARN);
+        let _ = flush(&queue, &chain, &test_tip(), BatchParams::default()).await;
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(!text.contains("could not be reached"), "{text}");
+        assert!(!text.contains("binding-signature"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_anchor_requeues_until_the_height_rises_then_burns() {
+        const PROVEN: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
+        let anchor = Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor");
+        let queue = queue_holding(&[PROVEN.to_vec()]);
+
+        let one = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let split =
+            Arc::new(ChainClient::new(vec![one.addr, unreachable_addr().await], None).unwrap());
+        let _ = flush(&queue, &split, &test_tip(), BatchParams::default()).await;
+        assert_eq!(queue.len(), 1, "a mixed anchor poll does not record");
+        assert!(!refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+
+        let record = |a, b| async move { Arc::new(ChainClient::new(vec![a, b], None).unwrap()) };
+        let tip = test_tip();
+        let left = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let right = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let _ = flush(
+            &queue,
+            &record(left.addr, right.addr).await,
+            &tip,
+            BatchParams::default(),
+        )
+        .await;
+        assert_eq!(queue.len(), 1, "the first unanimous anchor requeues");
+        assert!(!refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+
+        let left = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let right = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let _ = flush(
+            &queue,
+            &record(left.addr, right.addr).await,
+            &tip,
+            BatchParams::default(),
+        )
+        .await;
+        assert_eq!(queue.len(), 1, "the same observed height does not burn");
+
+        tip.observe(&[TIP + 1]);
+        let left = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let right = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let _ = flush(
+            &queue,
+            &record(left.addr, right.addr).await,
+            &tip,
+            BatchParams::default(),
+        )
+        .await;
+        assert!(
+            queue.is_empty(),
+            "the unanimous anchor burns once the height has risen"
+        );
+        assert!(refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+    }
+
+    #[tokio::test]
+    async fn a_resend_during_the_recording_flush_does_not_clear_the_mark() {
+        const PROVEN: &[u8] = include_bytes!("../tests/fixtures/v6_proven_a.bin");
+        let anchor = Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor");
+        let queue = queue_holding(&[PROVEN.to_vec()]);
+
+        let one = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let split =
+            Arc::new(ChainClient::new(vec![one.addr, unreachable_addr().await], None).unwrap());
+        let _ = flush(&queue, &split, &test_tip(), BatchParams::default()).await;
+
+        let left = spawn_mock_indexer(vec![anchor], Duration::from_secs(3)).await;
+        let right = spawn_mock_indexer(vec![anchor], Duration::from_secs(3)).await;
+        let both = Arc::new(ChainClient::new(vec![left.addr, right.addr], None).unwrap());
+        let tip = test_tip();
+        let wait = left.on_send.notified();
+        tokio::pin!(wait);
+        let flushing = flush(&queue, &both, &tip, BatchParams::default());
+        tokio::pin!(flushing);
+        tokio::select! {
+            () = &mut wait => {}
+            _ = &mut flushing => panic!("the flush returned before the indexer was asked"),
+        }
+        assert!(matches!(
+            queue.admit(PROVEN, TIP, N, MARGIN),
+            crate::queue::Admission::Admitted { .. }
+        ));
+        flushing.await;
+        assert_eq!(queue.len(), 1);
+
+        tip.observe(&[TIP + 1]);
+        let left = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let right = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let both = Arc::new(ChainClient::new(vec![left.addr, right.addr], None).unwrap());
+        let _ = flush(&queue, &both, &tip, BatchParams::default()).await;
+        assert!(queue.is_empty());
+        assert!(refused_rejected(queue.admit(PROVEN, TIP, N, MARGIN)));
+    }
+
+    #[tokio::test]
+    async fn a_keyless_unknown_anchor_requeues_once_then_burns() {
+        let payload = junk(7);
+        let queue = queue_holding(std::slice::from_ref(&payload));
+        let anchor = Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor");
+        let mock = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let chain = client(mock.addr);
+        let tip = test_tip();
+        let _ = flush(&queue, &chain, &tip, BatchParams::default()).await;
+        assert_eq!(queue.len(), 1);
+        assert!(!refused_rejected(queue.admit(&payload, TIP, N, MARGIN)));
+        tip.observe(&[TIP + 1]);
+        let _ = flush(&queue, &chain, &tip, BatchParams::default()).await;
+        assert!(queue.is_empty());
+        assert!(refused_rejected(queue.admit(&payload, TIP, N, MARGIN)));
+    }
+
+    #[tokio::test]
+    async fn a_stale_tip_does_not_burn_an_anchor_mark() {
+        let payload = junk(8);
+        let queue = queue_holding(std::slice::from_ref(&payload));
+        let anchor = Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor");
+        let mock = spawn_mock_indexer(vec![anchor], Duration::ZERO).await;
+        let tip = test_tip();
+        let _ = flush(&queue, &client(mock.addr), &tip, BatchParams::default()).await;
+        tip.observe(&[TIP + 1]);
+        tip.age_last_advance_for_test(TIP_STALE_AFTER + Duration::from_secs(1));
+        let _ = flush(&queue, &client(mock.addr), &tip, BatchParams::default()).await;
+        assert!(tip.is_stale());
+        assert_eq!(queue.len(), 1);
+        assert!(!refused_rejected(queue.admit(&payload, TIP, N, MARGIN)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_anchor_requeue_beside_an_acceptance_is_not_a_selective_hold_back() {
+        let mock = spawn_mock_indexer(
+            vec![
+                Answer::Send(0, "txid"),
+                Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor"),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        let queue = queue_holding(&[junk(1), junk(2)]);
+        let (_guard, buf) = error_log(tracing::Level::ERROR);
+        let _ = flush(
+            &queue,
+            &client(mock.addr),
+            &test_tip(),
+            BatchParams::default(),
+        )
+        .await;
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(!text.contains("SELECTIVE HOLD-BACK"), "{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_anchor_that_expires_logs_the_anchor_give_up() {
+        let tx = fixture_expiring_at(1024);
+        let queue = Arc::new(Queue::new());
+        let tip = Arc::new(TipTracker::new(TipGuard::Unguarded));
+        tip.observe(&[1000]);
+        assert!(matches!(
+            queue.admit(&tx, 1000, N, MARGIN),
+            crate::queue::Admission::Admitted { .. }
+        ));
+        tip.observe(&[1020]);
+        let mock = spawn_mock_indexer(
+            vec![Answer::Send(-26, "16: bad-txns-orchard-unknown-anchor")],
+            Duration::ZERO,
+        )
+        .await;
+        let (guard, buf) = error_log(tracing::Level::ERROR);
+        let _ = flush(&queue, &client(mock.addr), &tip, BatchParams::default()).await;
+        drop(guard);
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(queue.is_empty());
+        assert!(!text.contains("no verdict"), "{text}");
+        assert!(text.contains("unknown anchor"), "{text}");
     }
 
     #[tokio::test]
