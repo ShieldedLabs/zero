@@ -57,6 +57,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use hashlink::LinkedHashMap;
 use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -473,8 +474,7 @@ impl Burned {
 /// height it was first recorded at.
 #[derive(Default)]
 struct AnchorMarks {
-    height: HashMap<[u8; 32], u32>,
-    order: VecDeque<[u8; 32]>,
+    height: LinkedHashMap<[u8; 32], u32>,
 }
 
 impl AnchorMarks {
@@ -487,16 +487,12 @@ impl AnchorMarks {
             return;
         }
         self.height.insert(key, at);
-        self.order.push_back(key);
-        if self.order.len() > MAX_BURNED_KEYS {
-            if let Some(oldest) = self.order.pop_front() {
-                self.height.remove(&oldest);
-            }
+        if self.height.len() > MAX_BURNED_KEYS {
+            self.height.pop_front();
         }
     }
 
-    /// Drop `key` from the map. A consumed key may stay in `order` until it
-    /// reaches the front, and its eviction drops a later mark for the same key.
+    /// Remove the mark for `key`, from the map and from the FIFO order.
     fn forget(&mut self, key: &[u8; 32]) {
         self.height.remove(key);
     }
@@ -1284,6 +1280,24 @@ mod tests {
         assert!(q.anchor_due(&entry, 101, true));
         q.note_anchor([&entry], 105);
         assert!(q.anchor_due(&entry, 101, true));
+    }
+
+    #[test]
+    fn a_forgotten_mark_leaves_the_fifo_order() {
+        let mut marks = AnchorMarks::default();
+        let key = [7u8; 32];
+        marks.insert(key, 100);
+        marks.forget(&key);
+        marks.insert(key, 200);
+        for n in 0..MAX_BURNED_KEYS - 1 {
+            let mut other = [0u8; 32];
+            other[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            other[31] = 1;
+            marks.insert(other, 300);
+        }
+        assert_eq!(marks.height(&key), Some(200));
+        marks.insert([9u8; 32], 300);
+        assert_eq!(marks.height(&key), None);
     }
 
     #[test]

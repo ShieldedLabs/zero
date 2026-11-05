@@ -82,6 +82,9 @@ hex = "0.4"
 # An indexer's grpc-message trailer is percent-encoded; the publish classifier
 # reads it decoded. Already in the tree through hyper's stack.
 percent-encoding = "2"
+# Insertion-ordered map with O(1) removal of any key, for the anchor marks'
+# FIFO cap. Already in the tree through sqlx's stack.
+hashlink = "0.10"
 
 # Chain connection out (JSON-RPC to zebrad/zcashd) and the inbound serving path
 # in. hyper rather than a JSON-RPC or web framework because the surface is tiny
