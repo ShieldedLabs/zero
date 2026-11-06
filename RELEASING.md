@@ -50,7 +50,7 @@ A red reproduce run blocks nothing on its own, so check both builds for the rele
 - A green `push` run on that commit counts.
 - A green `workflow_dispatch` run on `$SHA` also counts. Use it when the push run was cancelled by a later push.
 
-```sh
+```bash
 check() {
   wf=$1; shift
   c=$(git log -1 --format=%H "$SHA" -- "$@")
@@ -94,7 +94,7 @@ Run `images.yml` on the new tag. The `tag` input makes it push `:vN` beside `:la
 ```sh
 start=$(date -u +%FT%TZ)
 gh workflow run images.yml --ref vN -f tag=vN
-until id=$(gh run list --workflow images.yml --branch vN --event workflow_dispatch --created ">=$start" \
+until id=$(gh run list --workflow images.yml --commit "$SHA" --event workflow_dispatch --created ">=$start" \
              --limit 1 --json databaseId --jq '.[0].databaseId // empty') && [ -n "$id" ]; do sleep 5; done
 gh run watch "$id" --exit-status
 ```
