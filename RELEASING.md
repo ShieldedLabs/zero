@@ -44,41 +44,57 @@ Run these checks before you retitle the changelog.
 
 ## 2. GitHub
 
+### Pin the release commit
+
+The release is exactly the prep commit. `main` takes direct pushes, so record that commit and push a branch that points at it. Every dispatch below runs on that branch. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
+
+```sh
+git fetch origin
+SHA=$(git rev-parse origin/main)   # must be your prep commit
+git log -1 --oneline "$SHA"
+git push origin "$SHA:refs/heads/release-vN"
+```
+
+Delete `release-vN` after the release is out.
+
 ### Check the zeronym builds
 
 Do this only when the release range touches `zeronym/` or the vendored inputs of the reproduce workflows. This command lists those changes since the last release.
 
 ```sh
 prev=$(gh release view --json tagName --jq .tagName)
-git diff --name-only "$prev"..origin/main -- zeronym \
+git diff --name-only "$prev".."$SHA" -- zeronym \
   zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test \
   zaino/Cargo.toml zaino/packages/zaino-proto
 ```
 
-If it prints anything, dispatch both reproduce workflows on `main` after the prep commit lands. Each one runs two cold builds and can take up to 90 minutes.
+If it prints anything, dispatch both reproduce workflows on `release-vN`. Each one runs two cold builds and can take up to 90 minutes.
 
 ```sh
-gh workflow run zeronym-hub-reproduce.yml --ref main
-gh workflow run zeronym-shim-reproduce.yml --ref main
+gh workflow run zeronym-hub-reproduce.yml --ref release-vN
+gh workflow run zeronym-shim-reproduce.yml --ref release-vN
 gh run watch
 ```
 
-Both runs must pass, and each run's `headSha` must equal the commit you will tag.
+Both runs must pass, and each run's `headSha` must equal `$SHA`. Stop if either one differs.
 
 ```sh
-git rev-parse origin/main
+echo "$SHA"
 gh run list --workflow zeronym-hub-reproduce.yml --limit 1 --json headSha,conclusion
 gh run list --workflow zeronym-shim-reproduce.yml --limit 1 --json headSha,conclusion
 ```
 
 ### Cut the release
 
-Dispatch `release.yml` from `main` and watch it. It picks the next version itself. It runs the gates above and a full `z3-smoke` run, then creates the tag and the release.
+Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It runs the gates above and a full `z3-smoke` run, then creates the tag and the release.
 
 ```sh
-gh workflow run release.yml --ref main
+gh workflow run release.yml --ref release-vN
 gh run watch
+gh run list --workflow release.yml --limit 1 --json headSha,conclusion
 ```
+
+The release run's `headSha` must equal `$SHA` too. `release.yml` tags the commit it ran on. Stop if it differs.
 
 ### Publish the images
 
