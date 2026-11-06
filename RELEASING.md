@@ -17,10 +17,6 @@ zcashd and zebra halt on mainnet at a hardcoded height. The height moves only wh
 
 1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to the current mainnet height plus a ship-day buffer. Allow about 1,150 blocks per day. The halt comes 7 weeks of blocks (56,448) later. Put that height and its approximate date in the changelog entry, as v28 does. The same constant seeds the default `signrawtransaction` branch id, so keep it at or below the activation height of any pending upgrade.
 2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER` days of blocks, both in `zebra/zebrad/src/components/sync/end_of_support.rs`. Zero carries that height as a `[zero]` line pinned to the value from the newest upstream zebra release. Re-set it or pull that tag. Then check that the halt lands well after the next planned release.
-3. **Preflight.** Run the same gates `release.yml` runs. It checks that zebra is a final version and that both halts sit at least 4 weeks past the mainnet tip.
-   ```sh
-   .github/scripts/release-preflight.sh
-   ```
 
 ### Cut the changelog
 
@@ -78,7 +74,7 @@ The paths must match `on.push.paths` in each workflow. Update this block when th
 
 ### Cut the release
 
-Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It runs the preflight and a full `z3-smoke` run, then creates the tag and the release.
+Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It refuses a pre-release zebra and any halt under 4 weeks past the mainnet tip. Then it runs a full `z3-smoke` run, then creates the tag and the release.
 
 ```sh
 gh workflow run release.yml --ref release-vN
