@@ -11,14 +11,6 @@ The release owner is the maintainer who lands the changelog retitle and dispatch
 
 Work through the pre-release checklist below and commit the height edits. Then land one commit that cuts the changelog. You can push it to `main` directly or open a `release-prep-vN` PR.
 
-Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before you push.
-
-```sh
-git switch main && git pull
-.github/scripts/cut-changelog.sh vN
-git push
-```
-
 ### Pre-release checklist
 
 zcashd and zebra halt on mainnet at a hardcoded height. The height moves only when someone edits it. Set both before you retitle the changelog.
@@ -29,6 +21,16 @@ zcashd and zebra halt on mainnet at a hardcoded height. The height moves only wh
    ```sh
    .github/scripts/release-preflight.sh
    ```
+
+### Cut the changelog
+
+Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before you push.
+
+```sh
+git switch main && git pull
+.github/scripts/cut-changelog.sh vN
+git push
+```
 
 ## 2. GitHub
 
@@ -44,6 +46,35 @@ git push origin "$SHA:refs/heads/release-vN"
 ```
 
 Delete `release-vN` after the release is out.
+
+### Check the zeronym builds
+
+A red reproduce run blocks nothing on its own, so check both builds for the release commit. For each workflow, the script finds the last commit at or before `$SHA` that touches the workflow's push paths. It then looks for a green run that proves that commit.
+
+- A green `push` run on that commit counts.
+- A green `workflow_dispatch` run on `$SHA` also counts. Use it when the push run was cancelled by a later push.
+
+```sh
+check() {
+  wf=$1; shift
+  c=$(git log -1 --format=%H "$SHA" -- "$@")
+  ok=$( { gh run list --workflow "$wf" --commit "$c" --event push --status success --json databaseId --jq length
+          gh run list --workflow "$wf" --commit "$SHA" --event workflow_dispatch --status success --json databaseId --jq length; } \
+        | awk '{ n += $1 } END { print n }')
+  if [ "$ok" -gt 0 ]; then echo "$wf ok (${c:0:10})"; else echo "$wf STOP (${c:0:10})"; fi
+}
+deps="zeronym/vendor zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test zaino/Cargo.toml zaino/packages/zaino-proto"
+check zeronym-hub-reproduce.yml  .github/workflows/zeronym-hub-reproduce.yml  zeronym/hub  $deps
+check zeronym-shim-reproduce.yml .github/workflows/zeronym-shim-reproduce.yml zeronym/shim $deps
+```
+
+Both lines must say `ok`. On `STOP`, dispatch that workflow on `release-vN` and run the check again once it passes.
+
+```sh
+gh workflow run zeronym-hub-reproduce.yml --ref release-vN   # or the shim one
+```
+
+The paths must match `on.push.paths` in each workflow. Update this block when those lists change.
 
 ### Cut the release
 
