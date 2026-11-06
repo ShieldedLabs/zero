@@ -78,8 +78,10 @@ Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` inpu
 
 ```sh
 gh workflow run release.yml --ref release-vN
-gh run watch
-gh run list --workflow release.yml --limit 1 --json headSha,conclusion
+sleep 10   # let the dispatched run show up
+id=$(gh run list --workflow release.yml --branch release-vN --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$id" --exit-status
+gh run view "$id" --json headSha,conclusion
 ```
 
 The release run's `headSha` must equal `$SHA` too. `release.yml` tags the commit it ran on. Stop if it differs.
@@ -90,7 +92,9 @@ Run `images.yml` on the new tag. The `tag` input makes it push `:vN` beside `:la
 
 ```sh
 gh workflow run images.yml --ref vN -f tag=vN
-gh run watch
+sleep 10   # let the dispatched run show up
+id=$(gh run list --workflow images.yml --branch vN --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$id" --exit-status
 ```
 
 ### Verify the release
@@ -109,9 +113,11 @@ Each image on GHCR should carry the `:vN` tag.
 
 ```sh
 for img in zero-zebra zero-zcashd zero-zaino zero-zallet zero-lightwalletd; do
-  docker manifest inspect "ghcr.io/shieldedlabs/$img:vN" >/dev/null && echo "$img ok"
+  if docker manifest inspect "ghcr.io/shieldedlabs/$img:vN" >/dev/null; then echo "$img ok"; else echo "$img MISSING"; fi
 done
 ```
+
+Every image must print `ok`.
 
 ### Add the zeronym pins
 
@@ -122,6 +128,7 @@ The release lists the reproducible-build pins from the two `EXPECTED_SHA256` fil
 `gh release edit --notes-file` replaces the whole body. So fetch the current body first, append the block, and write the result back.
 
 ```sh
+git fetch -q origin tag vN
 sha=$(git rev-parse 'vN^{commit}')
 hub=$(git show "$sha:zeronym/hub/deploy/EXPECTED_SHA256")
 shim=$(git show "$sha:zeronym/shim/deploy/EXPECTED_SHA256")

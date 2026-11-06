@@ -15,7 +15,7 @@ if [ -n "$(git status --porcelain --untracked-files=no -- . ':!CHANGELOG.md')" ]
   exit 1
 fi
 grep -q '^## Unreleased$' CHANGELOG.md || { echo "error: no '## Unreleased' in CHANGELOG.md" >&2; exit 1; }
-grep -q "^## $tag " CHANGELOG.md && { echo "error: '## $tag' already exists" >&2; exit 1; }
+grep -Eq "^## $tag( |$)" CHANGELOG.md && { echo "error: '## $tag' already exists" >&2; exit 1; }
 
 heading="## $tag - $(date -u +%F)"
 awk -v h="$heading" '!done && $0 == "## Unreleased" { print; print ""; print h; done = 1; next } { print }' \
