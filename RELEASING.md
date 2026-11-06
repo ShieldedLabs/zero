@@ -63,9 +63,9 @@ check() {
         | awk '{ n += $1 } END { print n }')
   if [ "$ok" -gt 0 ]; then echo "$wf ok (${c:0:10})"; else echo "$wf STOP (${c:0:10})"; fi
 }
-deps="zeronym/vendor zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test zaino/Cargo.toml zaino/packages/zaino-proto"
-check zeronym-hub-reproduce.yml  .github/workflows/zeronym-hub-reproduce.yml  zeronym/hub  $deps
-check zeronym-shim-reproduce.yml .github/workflows/zeronym-shim-reproduce.yml zeronym/shim $deps
+deps=(zeronym/vendor zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test zaino/Cargo.toml zaino/packages/zaino-proto)
+check zeronym-hub-reproduce.yml  .github/workflows/zeronym-hub-reproduce.yml  zeronym/hub  "${deps[@]}"
+check zeronym-shim-reproduce.yml .github/workflows/zeronym-shim-reproduce.yml zeronym/shim "${deps[@]}"
 ```
 
 Both lines must say `ok`. On `STOP`, dispatch that workflow on `release-vN` and run the check again once it passes.
