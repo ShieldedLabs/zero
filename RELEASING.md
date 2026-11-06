@@ -77,9 +77,10 @@ The paths must match `on.push.paths` in each workflow. Update this block when th
 Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It refuses a pre-release zebra and any halt under 4 weeks past the mainnet tip. Then it runs a full `z3-smoke` run, then creates the tag and the release.
 
 ```sh
+start=$(date -u +%FT%TZ)
 gh workflow run release.yml --ref release-vN
-sleep 10   # let the dispatched run show up
-id=$(gh run list --workflow release.yml --branch release-vN --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+until id=$(gh run list --workflow release.yml --branch release-vN --event workflow_dispatch --created ">=$start" \
+             --limit 1 --json databaseId --jq '.[0].databaseId // empty') && [ -n "$id" ]; do sleep 5; done
 gh run watch "$id" --exit-status
 gh run view "$id" --json headSha,conclusion
 ```
@@ -91,9 +92,10 @@ The release run's `headSha` must equal `$SHA` too. `release.yml` tags the commit
 Run `images.yml` on the new tag. The `tag` input makes it push `:vN` beside `:latest`.
 
 ```sh
+start=$(date -u +%FT%TZ)
 gh workflow run images.yml --ref vN -f tag=vN
-sleep 10   # let the dispatched run show up
-id=$(gh run list --workflow images.yml --branch vN --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+until id=$(gh run list --workflow images.yml --branch vN --event workflow_dispatch --created ">=$start" \
+             --limit 1 --json databaseId --jq '.[0].databaseId // empty') && [ -n "$id" ]; do sleep 5; done
 gh run watch "$id" --exit-status
 ```
 
