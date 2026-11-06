@@ -2,45 +2,33 @@
 
 This is the playbook for cutting a Zero release. The release owner runs the five steps below on cut day, in order. A zeronym rollout follows them on its own schedule.
 
-Versions are plain integers. One `vN` tag covers the whole source tree. In every command below, replace `vN` with the new version (for example `v30`).
+> [!IMPORTANT]
+> Versions are plain integers. One `vN` tag covers the whole source tree. In every command below, replace `vN` with the new version (for example `v30`).
 
-The release owner is the person who lands the changelog retitle and dispatches `release.yml`. That is Mark, until a prep PR names someone else.
+The release owner is the maintainer who lands the changelog retitle and dispatches `release.yml`.
 
 ## 1. Prep
 
 Work through the pre-release checklist below. Then land one commit that cuts the changelog. You can push it to `main` directly or open a `release-prep-vN` PR.
 
-The commit does two things in `CHANGELOG.md`.
-
-1. It renames `## Unreleased` to `## vN - YYYY-MM-DD`.
-2. It adds a new empty `## Unreleased` section above it.
+Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. Read the notes before you push.
 
 ```sh
 git switch main && git pull
-$EDITOR CHANGELOG.md
-git commit -am "doc(changelog): vN release notes"
+.github/scripts/cut-changelog.sh vN
 git push
 ```
 
-### Release changelog
-
-`CHANGELOG.md` at the repo root holds one `## vN` section per release. Each section groups short one-liners under headings such as Security, Fixed, Performance, Deploy, Testing, CI and Docs. Keep them succinct and complete, with commit SHAs. Stage new entries under `## Unreleased` as work lands.
-
-`release.yml` refuses to release unless a non-empty section for the version exists. It copies that section into the GitHub release body.
-
 ### Pre-release checklist
 
-Both node forks halt on mainnet at a hardcoded height. The height moves only when someone edits it. v20 through v27 all shipped the zcashd value from v20 and shared one halt block (3,471,448, around 2026-09-04). We noticed it two days ahead.
-
-Run these checks before you retitle the changelog.
+zcashd and zebra halt on mainnet at a hardcoded height. The height moves only when someone edits it. Set both before you retitle the changelog.
 
 1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to the current mainnet height plus a ship-day buffer. Allow about 1,150 blocks per day. The halt comes 7 weeks of blocks (56,448) later. Put that height and its approximate date in the changelog entry, as v28 does. The same constant seeds the default `signrawtransaction` branch id, so keep it at or below the activation height of any pending upgrade.
 2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER` days of blocks, both in `zebra/zebrad/src/components/sync/end_of_support.rs`. Zero carries that height as a `[zero]` line pinned to the value from the newest upstream zebra release. Re-set it or pull that tag. Then check that the halt lands well after the next planned release.
-3. **zebra version.** The `version` in `zebra/zebrad/Cargo.toml` must be a final release. A final version has no `-` in it. `release.yml` refuses a pre-release version.
+3. **Preflight.** Run the same gates `release.yml` runs. It checks that zebra is a final version and that both halts sit at least 4 weeks past the mainnet tip.
    ```sh
-   grep -m1 '^version' zebra/zebrad/Cargo.toml
+   .github/scripts/release-preflight.sh
    ```
-4. **Halt floor.** `release.yml` refuses to run when either halt sits under 4 weeks past the mainnet tip. It estimates the tip offline from a fixed block anchor and the wall clock. This gate is a floor. Steps 1 and 2 still apply.
 
 ## 2. GitHub
 
@@ -57,36 +45,9 @@ git push origin "$SHA:refs/heads/release-vN"
 
 Delete `release-vN` after the release is out.
 
-### Check the zeronym builds
-
-Do this only when the release range touches `zeronym/` or the vendored inputs of the reproduce workflows. This command lists those changes since the last release.
-
-```sh
-prev=$(gh release view --json tagName --jq .tagName)
-git diff --name-only "$prev".."$SHA" -- zeronym \
-  zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test \
-  zaino/Cargo.toml zaino/packages/zaino-proto
-```
-
-If it prints anything, dispatch both reproduce workflows on `release-vN`. Each one runs two cold builds and can take up to 90 minutes.
-
-```sh
-gh workflow run zeronym-hub-reproduce.yml --ref release-vN
-gh workflow run zeronym-shim-reproduce.yml --ref release-vN
-gh run watch
-```
-
-Both runs must pass, and each run's `headSha` must equal `$SHA`. Stop if either one differs.
-
-```sh
-echo "$SHA"
-gh run list --workflow zeronym-hub-reproduce.yml --limit 1 --json headSha,conclusion
-gh run list --workflow zeronym-shim-reproduce.yml --limit 1 --json headSha,conclusion
-```
-
 ### Cut the release
 
-Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It runs the gates above and a full `z3-smoke` run, then creates the tag and the release.
+Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It runs the preflight and a full `z3-smoke` run, then creates the tag and the release.
 
 ```sh
 gh workflow run release.yml --ref release-vN
@@ -127,9 +88,9 @@ done
 
 ### Add the zeronym pins
 
-Do this when the release carries zeronym changes, and finish it before step 3.
+Do this when the release carries zeronym changes.
 
-The two `EXPECTED_SHA256` files are the reproducible-build pins for the hub and the shim. A live enclave runs the hash in the `PROVENANCE` file on its `deploy-<app-id>` tag. That hash can differ from the pin at `vN`, so the block says which is which.
+The release lists the reproducible-build pins from the two `EXPECTED_SHA256` files, and a live enclave's hash lives in `PROVENANCE` on its `deploy-<app-id>` tag.
 
 `gh release edit --notes-file` replaces the whole body. So fetch the current body first, append the block, and write the result back.
 
@@ -165,7 +126,7 @@ Post a new thread for each release on the [Zcash Community Forum](https://forum.
 2. Any action an operator must take.
 3. The link to the release page.
 
-Mark posts on X from the Shielded Labs account. Write two lines and add the release link.
+We post on X from the Shielded Labs account. Write two lines and add the release link.
 
 For a release with zeronym changes, add one sentence on rollout order and any new required flags. For v30 the clearnet shims with the strict lookup `404` deploy before the hub that closes `POST /transaction`, and the hub requires `--network` or `ZIH_NETWORK`. Point readers at the [hub operator guide](zeronym/hub/deploy/caution/OPERATORS.md) and the [shim operator guide](zeronym/shim/deploy/caution/OPERATORS.md).
 
@@ -175,13 +136,13 @@ Post a short version of the forum text to the operator Signal groups. The releas
 
 ## 5. Blog and dashboard
 
-**Blog.** This step is optional. Mark writes a post on [shieldedlabs.net](https://shieldedlabs.net) when a release changes what operators or users do.
+**Blog.** This step is optional. A maintainer writes a post on [shieldedlabs.net](https://shieldedlabs.net) when a release changes what operators or users do.
 
-**Dashboard.** For a release with zeronym changes, ask Mark for the contact who runs the indexer dashboard. Send them the tag, the commit and both `EXPECTED_SHA256` values at that commit. Steps 3 and 4 go out on cut day even if that contact is still unknown.
+**Dashboard.** For a release with zeronym changes, ask the maintainers for the contact who runs the indexer dashboard. Send them the tag, the commit and both `EXPECTED_SHA256` values at that commit. Steps 3 and 4 go out on cut day even if that contact is still unknown.
 
 ## Rolling out zeronym (zero-indexer) enclaves
 
-This process is new and starts with v30. It runs after the five steps above and holds none of them. Mark owns the list of endpoints that Shielded Labs runs, and that list lives outside the repo.
+This process is new and starts with v30. It runs after the five steps above and holds none of them. The maintainers keep the list of endpoints that Shielded Labs runs outside the repo.
 
 1. Read the `## vN` section of `CHANGELOG.md` for the rollout order.
 2. Redeploy each Shielded Labs endpoint in that order with `zeronym/deploy.sh` from the tag commit.
