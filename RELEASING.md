@@ -1,24 +1,24 @@
 # Releasing Zero
 
-This is the playbook for cutting a Zero release. We run the five steps below on cut day, in order. A zeronym rollout follows them on its own schedule.
+This is the playbook for cutting a Zero release. Run the five steps below on cut day, in order.
 
 > [!IMPORTANT]
 > Versions are plain integers. One `vN` tag covers the whole source tree. In every command below, replace `vN` with the new version (for example `v30`).
 
 ## 1. Prep
 
-Work through the pre-release checklist below and commit the height edits. Then land one commit that cuts the changelog. You can push it to `main` directly or open a `release-prep-vN` PR.
+Work through the pre-release checklist below and commit the height edits. Then land one commit that cuts the changelog and push it to `main` directly.
 
 ### Pre-release checklist
 
-zcashd and zebra halt on mainnet at a hardcoded height. The height moves only when someone edits it. Set both before you retitle the changelog.
+zcashd and zebra halt on mainnet at a hardcoded height. The height moves only when someone edits it. Set both before the changelog cut.
 
 1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to the current mainnet height plus a ship-day buffer. Allow about 1,150 blocks per day. The halt comes 7 weeks of blocks (56,448) later. Put that height and its approximate date in the changelog entry, as v28 does. The same constant seeds the default `signrawtransaction` branch id, so keep it at or below the activation height of any pending upgrade.
 2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER` days of blocks, both in `zebra/zebrad/src/components/sync/end_of_support.rs`. Zero carries that height as a `[zero]` line pinned to the value from the newest upstream zebra release. Re-set it or pull that tag. Then check that the halt lands well after the next planned release.
 
 ### Cut the changelog
 
-Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before you push.
+Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before pushing.
 
 ```sh
 git switch main && git pull
@@ -30,11 +30,11 @@ git push
 
 ### Pin the release commit
 
-The release is exactly the prep commit. `main` takes direct pushes, so record that commit and push a branch that points at it. Every dispatch below runs on that branch. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
+The release is exactly the prep commit. Push a `release-vN` branch at it. Every dispatch below runs on that branch. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
 
 ```sh
 git fetch origin
-SHA=$(git rev-parse origin/main)   # must be your prep commit
+SHA=$(git rev-parse origin/main)   # must be the prep commit
 git log -1 --oneline "$SHA"
 git push origin "$SHA:refs/heads/release-vN"
 ```
@@ -133,39 +133,19 @@ gh release edit vN --notes-file notes.md
 
 ## 3. Forum and X
 
-Post a new thread for each release on the [Zcash Community Forum](https://forum.zcashcommunity.com/). Use this shape.
+Post a new thread for each release on the [Zcash Community Forum](https://forum.zcashcommunity.com/).
 
-1. One paragraph that sums up the release.
-2. Any action an operator must take.
-3. The link to the release page.
+Post two lines and the release link on X from the Shielded Labs account.
 
-We post on X from the Shielded Labs account. Write two lines and add the release link.
-
-For a release with zeronym changes, add one sentence on rollout order and any new required flags. For v30 the clearnet shims with the strict lookup `404` deploy before the hub that closes `POST /transaction`, and the hub requires `--network` or `ZIH_NETWORK`. Point readers at the [hub operator guide](zeronym/hub/deploy/caution/OPERATORS.md) and the [shim operator guide](zeronym/shim/deploy/caution/OPERATORS.md).
+For a release with zeronym changes, add one sentence on rollout order and any new required flags. Point readers at the [hub operator guide](zeronym/hub/deploy/caution/OPERATORS.md) and the [shim operator guide](zeronym/shim/deploy/caution/OPERATORS.md).
 
 ## 4. Signal
 
-Post a short version of the forum text to the operator Signal groups. We keep the list of group names outside the repo. The security disclosure waiting room is for reports only, so use the operator groups.
+Post a short version of the forum text to the operator Signal group.
 
 ## 5. Blog and dashboard
 
-**Blog.** This step is optional. A maintainer writes a post on [shieldedlabs.net](https://shieldedlabs.net) when a release changes what operators or users do.
+**Blog.** This step is optional. Write a post on [shieldedlabs.net](https://shieldedlabs.net) when a release changes what operators or users do.
 
-**Dashboard.** For a release with zeronym changes, ask the maintainers for the contact who runs the indexer dashboard. Send them the tag, the commit and both `EXPECTED_SHA256` values at that commit. Steps 3 and 4 go out on cut day even if that contact is still unknown.
+**Dashboard.** For a release with zeronym changes, notify the [indexer dashboard](https://zecblock.com/network/attestations) maintainers and send them the tag, the commit and both `EXPECTED_SHA256` values at that commit.
 
-## Rolling out zeronym (zero-indexer) enclaves
-
-This process is new and starts with v30. It runs after the five steps above and holds none of them. The maintainers keep the list of endpoints that Shielded Labs runs outside the repo.
-
-1. Read the `## vN` section of `CHANGELOG.md` for the rollout order.
-2. Redeploy each Shielded Labs endpoint in that order with `zeronym/deploy.sh` from the tag commit.
-   ```sh
-   git switch --detach vN
-   ./zeronym/deploy.sh <endpoint>.env
-   ```
-3. A hub redeploy gives the hub a new Nym address, and every Nym shim must re-assemble. Follow the recovery steps in "If the hub goes down" in the [hub operator guide](zeronym/hub/deploy/caution/OPERATORS.md). Budget well over an hour from start to end.
-   1. Wait for `mixnet_connected: true` on `/nym-status`.
-   2. Read the new address from `/nym-address`.
-   3. Send it to every shim operator.
-4. Run `caution verify` on each redeployed endpoint. Confirm that the source commit in its `PROVENANCE` is the tag commit.
-5. Point third-party operators at the forum post and the two operator guides. We keep their contacts outside the repo.
