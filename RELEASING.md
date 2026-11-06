@@ -30,7 +30,7 @@ git push
 
 ### Pin the release commit
 
-The release is exactly the prep commit. Push a `release-vN` branch at it. Every dispatch below runs on that branch. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
+The release is exactly the prep commit. Push a `release-vN` branch at it. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
 
 ```sh
 git fetch origin
