@@ -9,9 +9,9 @@ The release owner is the maintainer who lands the changelog retitle and dispatch
 
 ## 1. Prep
 
-Work through the pre-release checklist below. Then land one commit that cuts the changelog. You can push it to `main` directly or open a `release-prep-vN` PR.
+Work through the pre-release checklist below and commit the height edits. Then land one commit that cuts the changelog. You can push it to `main` directly or open a `release-prep-vN` PR.
 
-Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. Read the notes before you push.
+Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before you push.
 
 ```sh
 git switch main && git pull
