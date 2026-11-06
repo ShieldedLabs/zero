@@ -1,11 +1,9 @@
 # Releasing Zero
 
-This is the playbook for cutting a Zero release. The release owner runs the five steps below on cut day, in order. A zeronym rollout follows them on its own schedule.
+This is the playbook for cutting a Zero release. We run the five steps below on cut day, in order. A zeronym rollout follows them on its own schedule.
 
 > [!IMPORTANT]
 > Versions are plain integers. One `vN` tag covers the whole source tree. In every command below, replace `vN` with the new version (for example `v30`).
-
-The release owner is the maintainer who lands the changelog retitle and dispatches `release.yml`.
 
 ## 1. Prep
 
@@ -168,7 +166,7 @@ For a release with zeronym changes, add one sentence on rollout order and any ne
 
 ## 4. Signal
 
-Post a short version of the forum text to the operator Signal groups. The release owner keeps the list of group names outside the repo. The security disclosure waiting room is for reports only, so use the operator groups.
+Post a short version of the forum text to the operator Signal groups. We keep the list of group names outside the repo. The security disclosure waiting room is for reports only, so use the operator groups.
 
 ## 5. Blog and dashboard
 
@@ -191,4 +189,4 @@ This process is new and starts with v30. It runs after the five steps above and 
    2. Read the new address from `/nym-address`.
    3. Send it to every shim operator.
 4. Run `caution verify` on each redeployed endpoint. Confirm that the source commit in its `PROVENANCE` is the tag commit.
-5. Point third-party operators at the forum post and the two operator guides. The release owner keeps their contacts outside the repo.
+5. Point third-party operators at the forum post and the two operator guides. We keep their contacts outside the repo.
