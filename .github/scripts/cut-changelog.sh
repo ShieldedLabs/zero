@@ -18,7 +18,9 @@ grep -q '^## Unreleased$' CHANGELOG.md || { echo "error: no '## Unreleased' in C
 grep -Eq "^## $tag( |$)" CHANGELOG.md && { echo "error: '## $tag' already exists" >&2; exit 1; }
 
 heading="## $tag - $(date -u +%F)"
-awk -v h="$heading" '!done && $0 == "## Unreleased" { print; print ""; print h; done = 1; next } { print }' \
+# Replace the first "## Unreleased" with an empty "## Unreleased" followed by
+# the version heading. The notes that followed it now sit under the version.
+awk -v h="$heading" '!done && $0 == "## Unreleased" { print "## Unreleased"; print ""; print h; done = 1; next } { print }' \
   CHANGELOG.md > CHANGELOG.md.tmp
 mv CHANGELOG.md.tmp CHANGELOG.md
 
