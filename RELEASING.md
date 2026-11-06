@@ -43,58 +43,37 @@ Delete `release-vN` after the release is out.
 
 ### Check the zeronym builds
 
-A red reproduce run blocks nothing on its own, so check both builds for the release commit. For each workflow, the script finds the last commit at or before `$SHA` that touches the workflow's push paths. It then looks for a green run that proves that commit.
+A red reproduce run blocks nothing on its own, so check both builds for the release commit. For each workflow, the script reads the push paths from the workflow file at `$SHA` and finds the last commit at or before `$SHA` that touches them. It then looks for a green run that proves that commit.
 
 - A green `push` run on that commit counts.
 - A green `workflow_dispatch` run on `$SHA` also counts. Use it when the push run was cancelled by a later push.
 
-```bash
-check() {
-  wf=$1; shift
-  c=$(git log -1 --format=%H "$SHA" -- "$@")
-  ok=$( { gh run list --workflow "$wf" --commit "$c" --event push --status success --json databaseId --jq length
-          gh run list --workflow "$wf" --commit "$SHA" --event workflow_dispatch --status success --json databaseId --jq length; } \
-        | awk '{ n += $1 } END { print n }')
-  if [ "$ok" -gt 0 ]; then echo "$wf ok (${c:0:10})"; else echo "$wf STOP (${c:0:10})"; fi
-}
-deps=(zeronym/vendor zebra/Cargo.toml zebra/zebra-chain zebra/zebra-test zaino/Cargo.toml zaino/packages/zaino-proto)
-check zeronym-hub-reproduce.yml  .github/workflows/zeronym-hub-reproduce.yml  zeronym/hub  "${deps[@]}"
-check zeronym-shim-reproduce.yml .github/workflows/zeronym-shim-reproduce.yml zeronym/shim "${deps[@]}"
+```sh
+.github/scripts/release.sh check-reproduce "$SHA"
 ```
 
 Both lines must say `ok`. On `STOP`, dispatch that workflow on `release-vN` and run the check again once it passes.
 
 ```sh
-gh workflow run zeronym-hub-reproduce.yml --ref release-vN   # or the shim one
+.github/scripts/release.sh dispatch zeronym-hub-reproduce.yml release-vN   # or the shim one
 ```
-
-The paths must match `on.push.paths` in each workflow. Update this block when those lists change.
 
 ### Cut the release
 
 Dispatch `release.yml` on `release-vN` and watch it. With a blank `version` input it releases the highest `v<integer>` tag plus one. So the `## vN` heading must use that integer. It refuses a pre-release zebra and any halt under 4 weeks past the mainnet tip. Then it runs a full `z3-smoke` run, then creates the tag and the release.
 
 ```sh
-start=$(date -u +%FT%TZ)
-gh workflow run release.yml --ref release-vN
-until id=$(gh run list --workflow release.yml --branch release-vN --event workflow_dispatch --created ">=$start" \
-             --limit 1 --json databaseId --jq '.[0].databaseId // empty') && [ -n "$id" ]; do sleep 5; done
-gh run watch "$id" --exit-status
-gh run view "$id" --json headSha,conclusion
+.github/scripts/release.sh dispatch release.yml release-vN
 ```
 
-The release run's `headSha` must equal `$SHA` too. `release.yml` tags the commit it ran on. Stop if it differs.
+The script waits for the run this dispatch created, watches it, and prints its `headSha`. It must equal `$SHA`. `release.yml` tags the commit it ran on. Stop if it differs.
 
 ### Publish the images
 
 Run `images.yml` on the new tag. The `tag` input makes it push `:vN` beside `:latest`.
 
 ```sh
-start=$(date -u +%FT%TZ)
-gh workflow run images.yml --ref vN -f tag=vN
-until id=$(gh run list --workflow images.yml --commit "$SHA" --event workflow_dispatch --created ">=$start" \
-             --limit 1 --json databaseId --jq '.[0].databaseId // empty') && [ -n "$id" ]; do sleep 5; done
-gh run watch "$id" --exit-status
+.github/scripts/release.sh dispatch images.yml vN -f tag=vN
 ```
 
 ### Verify the release
