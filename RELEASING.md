@@ -7,7 +7,12 @@ This is the playbook for cutting a Zero release. Run the five steps below on cut
 
 ## 1. Prep
 
-Work through the pre-release checklist below and commit the height edits. Then land one commit that cuts the changelog and push it to `main` directly.
+Do the prep on a `release-prep-vN` branch and land it through one PR. The PR holds the height edits from the checklist below and the changelog cut.
+
+```sh
+git switch main && git pull
+git switch -c release-prep-vN
+```
 
 ### Pre-release checklist
 
@@ -21,20 +26,20 @@ zcashd and zebra halt on mainnet at a hardcoded height. The height moves only wh
 Notes collect under `## Unreleased` in `CHANGELOG.md` until this commit retitles them. The script renames `## Unreleased` to `## vN - YYYY-MM-DD`, adds a new empty `## Unreleased` above it, and commits. It stops while other tracked files are dirty. It prints the new section, so read it before pushing.
 
 ```sh
-git switch main && git pull
 .github/scripts/cut-changelog.sh vN
-git push
+git push -u origin HEAD
+gh pr create --base main --title "release-prep-vN" --fill
 ```
 
 ## 2. GitHub
 
 ### Pin the release commit
 
-The release is exactly the prep commit. Push a `release-vN` branch at it. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
+The release is exactly the commit the prep PR landed on `main`. Merge the PR first, then push a `release-vN` branch at it. GitHub dispatches a workflow on a branch or tag name, so the branch carries the SHA.
 
 ```sh
 git fetch origin
-SHA=$(git rev-parse origin/main)   # must be the prep commit
+SHA=$(git rev-parse origin/main)   # must be the commit the prep PR landed
 git log -1 --oneline "$SHA"
 git push origin "$SHA:refs/heads/release-vN"
 ```
