@@ -125,6 +125,10 @@ date) before dispatching the release.
 
 ### Changed
 
+- zcashd: keeps the v29 halt height. `zcashd-v30.zip` and `zero-zcashd:v30`
+  still ship, and a mainnet node built from them shuts down at height
+  3,527,448, also at startup once the chain is past it. Mainnet mined that
+  block on 2026-10-23. Run zebra.
 - lightwalletd: `google.golang.org/grpc` 1.82.1 to 1.83.1 (`1cb42c5166`), and
   the image now builds in a stage and ships on `debian:13-slim`
   (`0e398d79cf`).
