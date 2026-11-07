@@ -16,10 +16,9 @@ git switch -c release-prep-vN
 
 ### Pre-release checklist
 
-zcashd and zebra halt on mainnet at a hardcoded height. The height moves only when someone edits it. Set both before the changelog cut.
+zebra halts on mainnet at a hardcoded height. The height moves only when someone edits it. Set it before the changelog cut.
 
-1. **zcashd.** Set `APPROX_RELEASE_HEIGHT` in `zcashd/src/deprecation.h` to the current mainnet height plus a ship-day buffer. Allow about 1,150 blocks per day. The halt comes 7 weeks of blocks (56,448) later. Put that height and its approximate date in the changelog entry, as v28 does. The same constant seeds the default `signrawtransaction` branch id, so keep it at or below the activation height of any pending upgrade.
-2. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER` days of blocks, both in `zebra/zebrad/src/components/sync/end_of_support.rs`. Zero carries that height as a `[zero]` line pinned to the value from the newest upstream zebra release. Re-set it or pull that tag. Then check that the halt lands well after the next planned release.
+1. **zebra.** The halt is `ESTIMATED_RELEASE_HEIGHT` plus `EOS_PANIC_AFTER` days of blocks, both in `zebra/zebrad/src/components/sync/end_of_support.rs`. Zero carries that height as a `[zero]` line pinned to the value from the newest upstream zebra release. Re-set it or pull that tag. Then check that the halt lands well after the next planned release.
 
 ### Cut the changelog
 
@@ -85,7 +84,7 @@ Run `images.yml` on the new tag. The `tag` input makes it push `:vN` beside `:la
 
 The release page should show the changelog section as its body, plus these assets.
 
-- Seven source ZIPs, one per component (`zcashd-vN.zip` and so on)
+- Seven source ZIPs, one per component (`zebra-vN.zip` and so on)
 - `zebrad-vN-linux-x86_64` and its `.sha256`
 - The smoke-test image exports `zero-zebra.tzst`, `zero-zaino.tzst`, `zero-zallet.tzst` and four `ShieldedLabs.zero.*.dockerbuild` files
 
