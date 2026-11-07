@@ -46,7 +46,8 @@ end-of-life date.
 > is the Zebra, Zaino, and Zallet (Z3) stack.
 
 See [SUBTREES.md](SUBTREES.md) for the vendoring mechanics and
-[MAINTENANCE.md](MAINTENANCE.md) for how we make and track changes.
+[MAINTENANCE.md](MAINTENANCE.md) for how we make and track changes. See
+[RELEASING.md](RELEASING.md) for how we cut a release.
 
 ## Install
 
@@ -111,6 +112,7 @@ Please do not open public issues for security-sensitive reports.
 Zero vendors seven upstreams, so the central discipline is keeping our divergence
 small, explicit, and classified. Read [MAINTENANCE.md](MAINTENANCE.md) for the
 full policy; the commit convention is the part you touch every day.
+Follow [RELEASING.md](RELEASING.md) to cut a release.
 
 One question decides how to tag a commit: **does it touch a vendored repo?**
 
